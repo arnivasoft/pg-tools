@@ -10,7 +10,8 @@
 .PARAMETER Version
   PostgreSQL ana sürümü (varsayılan: 16).
 .PARAMETER KeepContainer
-  Testten sonra sunucu kapsayıcılarını silme (hata ayıklama için). Geçici dizin yine silinir.
+  Testten sonra sunucu kapsayıcılarını silme (hata ayıklama için). Kapsayıcılarda sunucu özel anahtarları ve
+  parola (POSTGRES_PASSWORD) kalır; işiniz bitince docker rm -f ile silin. Geçici dizin (CA'lar, anahtarlar) yine silinir.
 #>
 param(
     [string]$Version = "16",

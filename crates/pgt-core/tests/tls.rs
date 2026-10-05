@@ -54,9 +54,17 @@ async fn connect(env: &Env, url: &str, mode: SslMode, root_cert: Option<&str>) -
     ConnectionManager::test(&config(url, mode, root_cert), Some(&env.password)).await.map(|i| i.version_num)
 }
 
-fn assert_tls_error(result: pgt_core::Result<u32>) {
+/// `kind = Tls` bekler; `expect` verilirse iletinin o parçayı içerdiğini de doğrular. Yalnızca kararlı
+/// olan durumda verilir: açık kök sertifikayla rustls/webpki zincir hatası `UnknownIssuer` olarak görünür;
+/// Windows deposu (rustls-platform-verifier) ve ad uyuşmazlığı iletileri sürüme/platforma göre değişebilir.
+fn assert_tls_error(result: pgt_core::Result<u32>, expect: Option<&str>) {
     match result {
-        Err(Error::Connect { kind: ConnectErrorKind::Tls, message, .. }) => eprintln!("beklenen TLS hatası: {message}"),
+        Err(Error::Connect { kind: ConnectErrorKind::Tls, message, .. }) => {
+            eprintln!("beklenen TLS hatası: {message}");
+            if let Some(part) = expect {
+                assert!(message.contains(part), "TLS iletisinde {part:?} bekleniyordu: {message}");
+            }
+        }
         other => panic!("TLS hatası bekleniyordu: {other:?}"),
     }
 }
@@ -95,21 +103,21 @@ async fn verify_ca_with_right_ca_ignores_host_name() {
 #[tokio::test]
 async fn verify_ca_with_other_ca_is_tls_error() {
     let Some(env) = env() else { return };
-    assert_tls_error(connect(&env, &env.url, SslMode::VerifyCa, Some(&env.other_ca)).await);
+    assert_tls_error(connect(&env, &env.url, SslMode::VerifyCa, Some(&env.other_ca)).await, Some("UnknownIssuer"));
 }
 
 #[tokio::test]
 async fn verify_ca_with_windows_store_is_tls_error() {
     let Some(env) = env() else { return };
     // Kök sertifika yok: sistem deposu (rustls-platform-verifier) kullanılır; özel test CA'sı orada değildir.
-    assert_tls_error(connect(&env, &env.url, SslMode::VerifyCa, None).await);
+    assert_tls_error(connect(&env, &env.url, SslMode::VerifyCa, None).await, None);
 }
 
 #[tokio::test]
 async fn verify_full_with_right_ca_rejects_name_mismatch() {
     let Some(env) = env() else { return };
     // Zincir geçerli ama 127.0.0.1 sertifikanın SAN'ında yok.
-    assert_tls_error(connect(&env, &env.url, SslMode::VerifyFull, Some(&env.ca)).await);
+    assert_tls_error(connect(&env, &env.url, SslMode::VerifyFull, Some(&env.ca)).await, None);
 }
 
 #[tokio::test]
@@ -118,7 +126,7 @@ async fn verify_full_with_right_ca_and_ip_san_succeeds() {
     // Olumlu verify-full: ikinci sunucunun sertifikası IP:127.0.0.1 SAN'ı taşır; zincir ve ad doğrulanır.
     connect(&env, &env.ip_url, SslMode::VerifyFull, Some(&env.ca)).await.unwrap();
     // Aynı sunucu ilgisiz CA ile reddedilir: başarı ad eşleşmesinden değil, zincir doğrulamasından da geçer.
-    assert_tls_error(connect(&env, &env.ip_url, SslMode::VerifyFull, Some(&env.other_ca)).await);
+    assert_tls_error(connect(&env, &env.ip_url, SslMode::VerifyFull, Some(&env.other_ca)).await, Some("UnknownIssuer"));
 }
 
 // `verify-full` + `host=pgt-tls.test` satırı (hosts girdisi olmadan) burada yoktur: bu, adın TCP için

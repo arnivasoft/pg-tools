@@ -87,8 +87,11 @@ CA üretir; sertifikaları geçici bir dizine alır ve yalnızca `hostssl all al
 
 Ardından `cargo test -p pgt-core --test tls` şu ortam değişkenleriyle çalışır: `PGT_TLS_URL` / `PGT_TLS_IP_URL`
 (`host=127.0.0.1 port=… user=postgres`; parola içermez), `PGT_TLS_PASSWORD` (her çalıştırmada rastgele),
-`PGT_TLS_CA`, `PGT_TLS_OTHER_CA`. Değişkenler yoksa testler atlanır. Kapsayıcılar ve geçici dizin (özel anahtarlar
-dahil) hata olsa da silinir; anahtarlar depoya hiç girmez. Bağlantı her zaman `127.0.0.1` iledir:
+`PGT_TLS_CA`, `PGT_TLS_OTHER_CA`. Değişkenler yoksa testler atlanır. Kapsayıcılar ve geçici dizin (CA'lar ve özel
+anahtarlar dahil) hata olsa da silinir; anahtarlar depoya hiç girmez. `-KeepContainer` ile yalnızca geçici dizin
+silinir: sunucu kapsayıcıları kalır ve içlerinde sunucu özel anahtarları ile o çalıştırmanın parolası (kapsayıcı
+ortamında `POSTGRES_PASSWORD`) durur; işiniz bitince `docker rm -f pgt-tls-a pgt-tls-b` ile silin. Bağlantı her
+zaman `127.0.0.1` iledir:
 
 | mod | sunucu | root_cert | beklenen |
 |---|---|---|---|
