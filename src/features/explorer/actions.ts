@@ -12,7 +12,7 @@ export type ActionId =
 
 export interface ActionDeps {
   state: () => TreeState;
-  controller: Pick<ExplorerController, "refresh" | "ensureConnected" | "expand" | "disconnect" | "serverRemoved" | "sessionLost">;
+  controller: Pick<ExplorerController, "refresh" | "ensureConnected" | "expand" | "disconnect" | "serverRemoved" | "sessionLost" | "nodeGone">;
   api: Pick<Api, "quoteIdentifiers" | "getDdl" | "deleteServer">;
   copy(text: string): Promise<void>;
   notify(text: string, kind: ToastKind): void;
@@ -143,7 +143,9 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
     }
   } catch (e) {
     const payload = toPayload(e);
-    deps.controller.sessionLost(id, payload);
+    if (!deps.controller.sessionLost(id, payload)) deps.controller.nodeGone(id, payload);
     deps.notify(payload.message, "error");
+    // Silme yarıda kalmış olabilir (ör. kayıt silindi ama parola silinemedi): ağaç gerçek kaydı göstersin.
+    if (action === "deleteServer") await deps.controller.serverRemoved().catch(() => {});
   }
 }

@@ -454,3 +454,44 @@ describe("ExplorerController retry / nodeGone", () => {
     expect(get().children.get("b")).toEqual(["b1"]);
   });
 });
+
+describe("ExplorerController reload after an in-flight load", () => {
+  it("serverRemoved does not reuse a ROOT load that started before the delete", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let rootNodes = [n("s1", { kind: "server", serverId: "u1" }), n("s2", { kind: "server", serverId: "u2" })];
+    const listChildren = vi.fn(async (id: string) => {
+      const snapshot = id === ROOT ? rootNodes : [];
+      if (listChildren.mock.calls.length === 1) await gate; // ilk ROOT yüklemesi silmeden önce başladı
+      return snapshot;
+    });
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(), disconnectServer: vi.fn() } });
+    const stale = c.load(ROOT);
+    rootNodes = [rootNodes[1]]; // s1 silindi
+    const removed = c.serverRemoved();
+    release();
+    await Promise.all([stale, removed]);
+    expect(listChildren).toHaveBeenCalledTimes(2);
+    expect(get().children.get(ROOT)).toEqual(["s2"]);
+  });
+
+  it("reloadAll waits for a pending load and reads the list again", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let version = 1;
+    const listChildren = vi.fn(async (id: string) => {
+      const v = version;
+      if (listChildren.mock.calls.length === 2) await gate;
+      return id === ROOT ? [n(`a${v}`, { hasChildren: false })] : [];
+    });
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(), disconnectServer: vi.fn() } });
+    await c.load(ROOT);
+    const pending = c.load(ROOT);
+    version = 2;
+    const all = c.reloadAll();
+    release();
+    await Promise.all([pending, all]);
+    expect(listChildren).toHaveBeenCalledTimes(3);
+    expect(get().children.get(ROOT)).toEqual(["a2"]);
+  });
+});

@@ -65,6 +65,12 @@ export class ExplorerController {
     return p;
   }
 
+  /** Süren bir yüklemeyi bekler ve listeyi yeniden okur (süren yükleme değişiklikten önce başlamış olabilir). */
+  async reload(id: string): Promise<void> {
+    await this.loads.get(id)?.catch(() => {});
+    return this.load(id);
+  }
+
   private async doLoad(id: string): Promise<void> {
     this.update((s) => startLoading(s, id));
     try {
@@ -176,7 +182,7 @@ export class ExplorerController {
           const server = serverOf(this.get(), id);
           if (server && !server.flags.connected) continue;
         }
-        if (this.get().children.has(id)) await this.load(id);
+        if (this.get().children.has(id)) await this.reload(id);
       } catch (e) {
         console.error("reloadAll failed for", id, e);
       }
@@ -217,11 +223,11 @@ export class ExplorerController {
   }
 
   async reloadServers(): Promise<void> {
-    await this.load(ROOT);
+    await this.reload(ROOT);
     const groups = (this.get().children.get(ROOT) ?? []).filter(
       (gid) => this.get().nodes.get(gid)?.kind === "serverGroup" && this.get().children.has(gid),
     );
-    for (const gid of groups) await this.load(gid);
+    for (const gid of groups) await this.reload(gid);
   }
 
   handleKey(key: string): boolean {

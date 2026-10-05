@@ -193,8 +193,11 @@ export function flatten(s: TreeState): VisibleRow[] {
   return out;
 }
 
+/** Büyük/küçük harf katlama; "İ".toLowerCase() = "i" + U+0307 olduğundan birleşik nokta atılır. */
+const fold = (text: string): string => text.toLowerCase().replace(/̇/g, "");
+
 export function filterRows(s: TreeState, query: string): VisibleRow[] {
-  const q = query.trim().toLowerCase();
+  const q = fold(query.trim());
   if (q === "") return [];
   const walk = (parentId: string, depth: number): VisibleRow[] => {
     const ids = s.children.get(parentId);
@@ -204,7 +207,7 @@ export function filterRows(s: TreeState, query: string): VisibleRow[] {
       const node = s.nodes.get(id);
       if (!node) continue;
       const sub = walk(id, depth + 1);
-      if (sub.length > 0 || node.label.toLowerCase().includes(q)) kept.push({ id, node, sub });
+      if (sub.length > 0 || fold(node.label).includes(q)) kept.push({ id, node, sub });
     }
     const out: VisibleRow[] = [];
     kept.forEach(({ id, node, sub }, index) => {

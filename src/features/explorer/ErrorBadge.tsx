@@ -6,11 +6,15 @@ import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 
 export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; onRefreshParent?: () => void; onSelect?: () => void }) {
   const gone = () => props.error.code === "not_found";
+  let trigger: HTMLElement | undefined;
+  // Düğme odağı tutarsa ağacın klavye işleyicisi (e.target === currentTarget) tuşları yok sayar.
+  const focusTree = () => trigger?.closest<HTMLElement>('[role="tree"]')?.focus();
   return (
     <HoverCard openDelay={150} closeDelay={100} placement="bottom-end">
       <HoverCard.Trigger
         as="button"
         type="button"
+        ref={(el: HTMLButtonElement) => { trigger = el; }}
         aria-label={t.error.badge}
         class="ml-auto shrink-0 rounded text-danger outline-none focus-visible:ring-1 focus-visible:ring-accent"
         onClick={(e: MouseEvent) => {
@@ -18,6 +22,7 @@ export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; on
           props.onSelect?.();
           if (gone()) props.onRefreshParent?.();
           else props.onRetry();
+          focusTree();
         }}
         onDblClick={(e: MouseEvent) => e.stopPropagation()}
       >
@@ -35,7 +40,11 @@ export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; on
           <button
             type="button"
             class="mt-2 rounded border border-border px-2 py-0.5 hover:bg-hover"
-            onClick={() => (gone() ? props.onRefreshParent?.() : props.onRetry())}
+            onClick={() => {
+              if (gone()) props.onRefreshParent?.();
+              else props.onRetry();
+              focusTree();
+            }}
           >
             {gone() ? t.error.refreshParent : t.error.retry}
           </button>

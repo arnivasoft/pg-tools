@@ -49,6 +49,7 @@ function deps(state: TreeState) {
       disconnect: vi.fn(),
       serverRemoved: vi.fn(async () => {}),
       sessionLost: vi.fn(() => false),
+      nodeGone: vi.fn(() => false),
     },
     api: { quoteIdentifiers: vi.fn(), getDdl: vi.fn(), deleteServer: vi.fn() },
     copy: vi.fn(async () => {}),
@@ -126,12 +127,21 @@ describe("executeAction", () => {
     expect(d.notify).toHaveBeenCalledWith(t.menu.deleted("up"), "success");
   });
 
-  it("deleteServer failure keeps the tree and reports an error toast", async () => {
+  it("deleteServer failure reports an error toast and reloads the server list", async () => {
     const d = deps(sampleTree());
     d.api.deleteServer.mockRejectedValue(new IpcError({ code: "config", message: "kayıt salt-okunur", detail: null, hint: null }));
     await executeAction(asDeps(d), "deleteServer", "srv-up");
     expect(d.notify).toHaveBeenCalledWith("kayıt salt-okunur", "error");
-    expect(d.controller.serverRemoved).not.toHaveBeenCalled();
+    expect(d.controller.serverRemoved).toHaveBeenCalledTimes(1);
+  });
+
+  it("backend not_found from a menu action marks the node gone", async () => {
+    const d = deps(sampleTree());
+    const gone = { code: "not_found", message: "yok", detail: null, hint: null };
+    d.api.getDdl.mockRejectedValue(new IpcError(gone));
+    await executeAction(asDeps(d), "copyDdl", "tbl-orders");
+    expect(d.controller.nodeGone).toHaveBeenCalledWith("tbl-orders", expect.objectContaining({ code: "not_found" }));
+    expect(d.notify).toHaveBeenCalledWith("yok", "error");
   });
 
   it("connect expands only after a successful connection", async () => {

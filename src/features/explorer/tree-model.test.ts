@@ -241,6 +241,13 @@ describe("filterRows", () => {
   it("is case-insensitive", () => {
     expect(flatten(withFilter(tree(["Orders"]), "oRDERS")).map((r) => r.node.label)).toContain("Orders");
   });
+  it("matches Turkish dotted capital İ against plain i", () => {
+    const s = tree(["invoice", "İstanbul", "kitap"]);
+    const labels = (q: string) => flatten(withFilter(s, q)).filter((r) => r.node.kind === "table").map((r) => r.node.label);
+    expect(labels("İnv")).toEqual(["invoice"]);
+    expect(labels("ist")).toEqual(["İstanbul"]);
+    expect(labels("KİTAP")).toEqual(["kitap"]);
+  });
   it("treats the query as a plain substring", () => {
     const s = tree(["a.b", "axb", "100%", "c(d)", "back\\slash", "ÇOK", "İstanbul"]);
     for (const [q, expected] of [["a.b", ["a.b"]], [".*", []], ["100%", ["100%"]], ["(d)", ["c(d)"]], ["\\", ["back\\slash"]], ["çok", ["ÇOK"]], ["İst", ["İstanbul"]]] as const) {
