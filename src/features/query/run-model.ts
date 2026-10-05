@@ -34,6 +34,8 @@ export type RunEvent =
   | { type: "event"; runId: number; event: QueryEvent }
   /** `qt_run` hiç olay göndermeden reddedildi (`busy`, `confirmation_required`, `session_reset`, `locked` …). */
   | { type: "runRejected"; runId: number; error: ErrorPayload }
+  /** Çalıştırma hiç başlamadan bitti (onay reddi, kilit, boş betik): durum boşa döner, sonuç boş kalır. */
+  | { type: "runAborted"; runId: number }
   | { type: "cancelRequested" }
   | { type: "txChanged"; tx: TxView }
   | { type: "sessionLost" }
@@ -65,6 +67,7 @@ export function runReduce(state: RunState, ev: RunEvent): RunState {
       if (result === state.result && !ended) return state;
       return { ...state, result, status: ended ? "idle" : state.status };
     }
+    case "runAborted":
     case "runRejected":
       if (ev.runId !== state.runId || !isRunning(state.status)) return state;
       return { ...state, status: "idle" };

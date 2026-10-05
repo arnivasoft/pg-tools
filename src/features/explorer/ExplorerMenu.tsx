@@ -54,6 +54,7 @@ export function ExplorerMenu(props: { explorer: Explorer; deps: ActionDeps; tree
             props.treeRef?.(el);
           }}
           onCopyName={(id) => void executeAction(props.deps, "copyName", id)}
+          onOpenQuery={(id) => void executeAction(props.deps, "openQueryTool", id)}
         />
       </ContextMenu.Trigger>
       <ContextMenu.Portal>
@@ -80,6 +81,9 @@ export function ExplorerMenu(props: { explorer: Explorer; deps: ActionDeps; tree
                   }}
                 >
                   {label(action)}
+                  <Show when={action === "openQueryTool"}>
+                    <span class="ml-auto pl-6 text-xs text-muted">{t.menu.openQueryToolShortcut}</span>
+                  </Show>
                 </ContextMenu.Item>
               </>
             )}

@@ -44,6 +44,8 @@ export interface QueryEditor {
   getSnapshot(kind: RunKind): { text: string; scope: Scope };
   /** İlk/yedek içerik: geri alma geçmişine girmez. Sekme geçişi için `getState`/`setState` kullanın. */
   setDoc(text: string): void;
+  /** Aynı uzantı dizisiyle yeni bir sekme durumu (sekme başına bir durum; ham `EditorState.create` kullanmayın). */
+  createState(doc: string, opts?: { readOnly?: boolean }): EditorState;
   /** Sekmeye özgü tüm durum (metin, geri alma geçmişi, seçim). Kaydırma konumu DOM'da olduğundan dışarıda tutulur. */
   getState(): EditorState;
   /** Başka sekmenin durumunu yükler; `onChange` çağrılmaz. */
@@ -115,58 +117,56 @@ export function createQueryEditor(parent: HTMLElement, doc: string, handlers: Qu
     handlers.onRun(kind);
     return true;
   };
-  const view = new EditorView({
-    parent,
-    state: EditorState.create({
-      doc,
-      extensions: [
-        Prec.highest(
-          keymap.of([
-            { key: "Mod-Enter", run: run("stmt"), preventDefault: true },
-            { key: "F5", run: run("all"), preventDefault: true }, // WebView yeniden yüklemesin
-            {
-              key: "Ctrl-.",
-              run: () => {
-                handlers.onCancel();
-                return true;
-              },
-              preventDefault: true,
-            },
-            { key: "Mod-/", run: toggleComment, preventDefault: true },
-          ]),
-        ),
-        lineNumbers(),
-        errorGutter,
-        history(),
-        drawSelection(),
-        EditorState.allowMultipleSelections.of(true),
-        indentOnInput(),
-        bracketMatching(),
-        closeBrackets(),
-        autocompletion({ override: [handlers.complete], icons: false }),
-        keymap.of([
-          ...closeBracketsKeymap,
-          ...defaultKeymap,
-          ...historyKeymap,
-          ...completionKeymap,
-          indentWithTab,
-          // Tab tuzağından çıkış: Escape sonra Tab (2 sn) ya da Ctrl+M.
-          { key: "Escape", run: temporarilySetTabFocusMode },
-        ]),
-        sqlLookExtensions(),
-        errorField,
-        queryTheme,
-        EditorView.updateListener.of((u) => {
-          if (u.docChanged && !u.transactions.some((t) => t.annotation(programmatic))) {
-            handlers.onChange(u.state.doc.toString());
-          }
-        }),
-      ],
+  const extensions = [
+    Prec.highest(
+      keymap.of([
+        { key: "Mod-Enter", run: run("stmt"), preventDefault: true },
+        { key: "F5", run: run("all"), preventDefault: true }, // WebView yeniden yüklemesin
+        {
+          key: "Ctrl-.",
+          run: () => {
+            handlers.onCancel();
+            return true;
+          },
+          preventDefault: true,
+        },
+        { key: "Mod-/", run: toggleComment, preventDefault: true },
+      ]),
+    ),
+    lineNumbers(),
+    errorGutter,
+    history(),
+    drawSelection(),
+    EditorState.allowMultipleSelections.of(true),
+    indentOnInput(),
+    bracketMatching(),
+    closeBrackets(),
+    autocompletion({ override: [handlers.complete], icons: false }),
+    keymap.of([
+      ...closeBracketsKeymap,
+      ...defaultKeymap,
+      ...historyKeymap,
+      ...completionKeymap,
+      indentWithTab,
+      // Tab tuzağından çıkış: Escape sonra Tab (2 sn) ya da Ctrl+M.
+      { key: "Escape", run: temporarilySetTabFocusMode },
+    ]),
+    sqlLookExtensions(),
+    errorField,
+    queryTheme,
+    EditorView.updateListener.of((u) => {
+      if (u.docChanged && !u.transactions.some((t) => t.annotation(programmatic))) {
+        handlers.onChange(u.state.doc.toString());
+      }
     }),
-  });
+  ];
+  const createState = (text: string, opts: { readOnly?: boolean } = {}) =>
+    EditorState.create({ doc: text, extensions: opts.readOnly ? [extensions, EditorState.readOnly.of(true)] : extensions });
+  const view = new EditorView({ parent, state: createState(doc) });
 
   return {
     view,
+    createState,
     setErrorMark(range) {
       const r = range ? normalizeRange(range, view.state.doc.length) : null;
       view.dispatch({ effects: setError.of(r) });

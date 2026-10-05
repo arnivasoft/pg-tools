@@ -22,6 +22,8 @@ export function ServerDialog(props: {
   groups: string[];
   onClose: () => void;
   onSaved: (config: ServerConfig) => void;
+  /** Kayıttan önce (ör. açık transaction uyarısı); `false` kaydı durdurur. */
+  beforeSave?: (prev: ServerConfig | null, next: ServerConfig) => Promise<boolean>;
 }) {
   const [form, setForm] = createSignal<ServerForm>(emptyForm());
   const [tab, setTab] = createSignal<FormTab>("general");
@@ -87,6 +89,8 @@ export function ServerDialog(props: {
     const gen = generation;
     setBusy(true);
     try {
+      if (props.beforeSave && !(await props.beforeSave(props.editing, r.config))) return;
+      if (gen !== generation) return;
       const saved = await commands.saveServer(r.config, r.password);
       if (gen === generation) {
         setForm(emptyForm());

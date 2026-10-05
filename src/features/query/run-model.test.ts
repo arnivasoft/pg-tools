@@ -64,6 +64,14 @@ describe("runReduce", () => {
     expect(s.status).toBe("idle");
   });
 
+  it("runAborted (onay reddi / kilit / boş) idle'a döner; eski çalıştırmanınki yok sayılır", () => {
+    const s = reduce([{ type: "runStart", runId: 1 }, { type: "runAborted", runId: 1 }], ready());
+    expect(s.status).toBe("idle");
+    expect(s.result?.stmts).toEqual([]);
+    const r = reduce([{ type: "runStart", runId: 2 }], ready());
+    expect(runReduce(r, { type: "runAborted", runId: 1 })).toBe(r);
+  });
+
   it("iptal: running → cancelling → (failed + scriptDone) → idle", () => {
     let s = reduce([{ type: "runStart", runId: 1 }, { type: "cancelRequested" }], ready());
     expect(s.status).toBe("cancelling");

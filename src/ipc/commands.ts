@@ -9,6 +9,7 @@ import type { ExportSummary } from "./bindings/ExportSummary";
 import type { HistoryEntry } from "./bindings/HistoryEntry";
 import type { ImportItem } from "./bindings/ImportItem";
 import type { PropertySection } from "./bindings/PropertySection";
+import type { QueryTarget } from "./bindings/QueryTarget";
 import type { QueryEvent } from "./bindings/QueryEvent";
 import type { Scope } from "./bindings/Scope";
 import type { ServerConfig } from "./bindings/ServerConfig";
@@ -53,6 +54,8 @@ export const commands = {
 
   // Sorgu Aracı. Hata `code`ları: confirmation_required | locked | busy | tx_failed | open_transaction | session_reset
   // (bkz. bindings/QueryErrorCode), gerisi genel kodlar. Olaylar Channel ile akar; komut tamamlanınca söz çözülür.
+  // "Query Tool'da aç": düğümün sunucusu ve veritabanı OID'i (düğüm kimliği arayüzde ayrıştırılmaz).
+  qtTargetOf: (nodeId: string) => call<QueryTarget>("qt_target_of", { nodeId }),
   qtOpen: (serverId: string, databaseOid: number | null, options: SessionOptions) =>
     call<string>("qt_open", { serverId, databaseOid, options }),
   qtAnalyze: (session: string, sql: string, scope: Scope) => call<StmtPlan[]>("qt_analyze", { session, sql, scope }),

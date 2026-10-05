@@ -5,7 +5,7 @@ import type { Explorer } from "./explorer-store";
 import { ROW_HEIGHT, TreeRow, rowDomId } from "./TreeRow";
 import { ROOT } from "./tree-model";
 
-export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement) => void; onCopyName?: (id: string) => void }) {
+export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement) => void; onCopyName?: (id: string) => void; onOpenQuery?: (id: string) => void }) {
   const ex = props.explorer;
   let scrollEl!: HTMLDivElement;
   const virtualizer = createVirtualizer({
@@ -56,6 +56,12 @@ export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement
         if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c" && sel !== null && (window.getSelection()?.toString() ?? "") === "") {
           e.preventDefault();
           props.onCopyName?.(sel);
+          return;
+        }
+        // Ctrl+Alt+Q: seçili düğümü Query Tool'da aç (Türkçe Q klavyede AltGr+Q = "@", bu yüzden yalnızca ağaçta).
+        if (e.ctrlKey && e.altKey && !e.shiftKey && (e.key.toLowerCase() === "q" || e.code === "KeyQ") && sel !== null) {
+          e.preventDefault();
+          props.onOpenQuery?.(sel);
           return;
         }
         if (ex.controller.handleKey(e.key)) e.preventDefault();

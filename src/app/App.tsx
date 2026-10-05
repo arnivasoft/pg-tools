@@ -1,4 +1,4 @@
-import { FileInput, Pencil, Plus } from "lucide-solid";
+import { FileInput, Pencil, Plus, SquareTerminal } from "lucide-solid";
 import { createEffect, createSignal, lazy, onCleanup, onMount, Show, Suspense } from "solid-js";
 import { createExplorer } from "../features/explorer/explorer-store";
 import type { ActionDeps } from "../features/explorer/actions";
@@ -9,6 +9,9 @@ import { Inspector } from "../features/inspector/Inspector";
 import { ROOT } from "../features/explorer/tree-model";
 import { createPasswordPrompt } from "../features/servers/PasswordPrompt";
 import { groupsOf } from "../features/servers/server-form";
+import { createQueryController } from "../features/query/query-controller";
+import { QueryTabs } from "../features/query/QueryTabs";
+import { newQueryNode, saveClosesSessions } from "../features/query/workspace-model";
 import type { ServerConfig } from "../ipc/bindings/ServerConfig";
 import { commands } from "../ipc/commands";
 import { toPayload } from "../ipc/errors";
@@ -30,6 +33,16 @@ const SHOW_SYSTEM_KEY = "pgt.showSystem";
 export default function App() {
   const prompt = createPasswordPrompt();
   const explorer = createExplorer({ api: commands, requestPassword: prompt.ask });
+  const query = createQueryController({
+    api: commands,
+    notify: toast.show,
+    tree: explorer.state,
+    connect: async (serverId) => {
+      const node = [...explorer.state().nodes.values()].find((n) => n.kind === "server" && n.serverId === serverId);
+      return node ? explorer.controller.ensureConnected(node.id) : false;
+    },
+    serversChanged: () => void explorer.controller.reloadServers().catch(() => {}),
+  });
   const [themePref, setThemePref] = createSignal(loadThemePreference());
   const [dialogOpen, setDialogOpen] = createSignal(false);
   const [editing, setEditing] = createSignal<ServerConfig | null>(null);
@@ -62,13 +75,21 @@ export default function App() {
     notify: toast.show,
     editServer: (serverId) => void openDialog(serverId),
     confirmDelete: deleteConfirm.ask,
+    openQueryTool: (id) => void query.openFromNode(id),
+    beforeServerChange: query.confirmServerChange,
+    afterServerChange: (serverId, gone) => {
+      query.serverSessionsClosed(serverId, gone);
+      if (gone) void query.refreshServers();
+    },
   };
+  const newQueryTarget = () => newQueryNode(explorer.state(), explorer.state().selected);
   const selectedServerId = () => {
     const node = explorer.selectedNode();
     return node?.kind === "server" ? node.serverId : null;
   };
 
   onMount(async () => {
+    void query.restore();
     await commands.setShowSystem(showSystem()).catch(() => {
       // Arka uç varsayılanı kapalıdır: anahtar ve kayıtlı tercih buna uysun.
       setShowSystem(false);
@@ -156,6 +177,17 @@ export default function App() {
           </Button>
           <Button
             variant="ghost"
+            disabled={newQueryTarget() === null}
+            title={t.toolbar.newQueryHint}
+            onClick={() => {
+              const id = newQueryTarget();
+              if (id !== null) void query.openFromNode(id, { draft: false });
+            }}
+          >
+            <SquareTerminal size={14} /> {t.toolbar.newQuery}
+          </Button>
+          <Button
+            variant="ghost"
             disabled={selectedServerId() === null}
             title={t.toolbar.editServer}
             aria-label={t.toolbar.editServer}
@@ -167,7 +199,7 @@ export default function App() {
       </header>
       <SplitPane
         left={<ExplorerMenu explorer={explorer} deps={actionDeps} treeRef={setTreeEl} />}
-        right={<Inspector explorer={explorer} />}
+        right={<QueryTabs ctl={query} inspector={<Inspector explorer={explorer} />} />}
       />
       <footer class="flex h-6 shrink-0 items-center border-t border-border bg-panel px-2 text-xs text-muted">
         <StatusBar explorer={explorer} />
@@ -182,6 +214,7 @@ export default function App() {
             onClose={() => setImportOpen(false)}
             onImported={() => {
               explorer.controller.reloadServers().catch(() => {});
+              void query.refreshServers();
             }}
           />
         </Suspense>
@@ -193,7 +226,10 @@ export default function App() {
             editing={editing()}
             groups={groups()}
             onClose={() => setDialogOpen(false)}
-            onSaved={() => {
+            beforeSave={async (prev, next) => !prev || !saveClosesSessions(prev, next) || query.confirmServerChange(prev.id, prev.name)}
+            onSaved={(saved) => {
+              if (saveClosesSessions(editing(), saved)) query.serverSessionsClosed(saved.id, false);
+              void query.refreshServers();
               setDialogOpen(false);
               explorer.controller.reloadServers().catch(() => {});
             }}
