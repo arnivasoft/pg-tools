@@ -1,5 +1,5 @@
 import { FileInput, Pencil, Plus } from "lucide-solid";
-import { createSignal, onCleanup, onMount } from "solid-js";
+import { createEffect, createSignal, lazy, onCleanup, onMount, Show, Suspense } from "solid-js";
 import { createExplorer } from "../features/explorer/explorer-store";
 import type { ActionDeps } from "../features/explorer/actions";
 import { ExplorerMenu } from "../features/explorer/ExplorerMenu";
@@ -8,8 +8,6 @@ import { copyText } from "./clipboard";
 import { Inspector } from "../features/inspector/Inspector";
 import { ROOT } from "../features/explorer/tree-model";
 import { createPasswordPrompt } from "../features/servers/PasswordPrompt";
-import { ImportDialog } from "../features/servers/ImportDialog";
-import { ServerDialog } from "../features/servers/ServerDialog";
 import { groupsOf } from "../features/servers/server-form";
 import type { ServerConfig } from "../ipc/bindings/ServerConfig";
 import { commands } from "../ipc/commands";
@@ -24,6 +22,9 @@ import { Toolbar } from "./Toolbar";
 import { readStorage, writeStorage } from "./storage";
 import { applyTheme, loadThemePreference, nextPreference, saveThemePreference, watchSystemTheme } from "./theme";
 
+const ServerDialog = lazy(() => import("../features/servers/ServerDialog").then((m) => ({ default: m.ServerDialog })));
+const ImportDialog = lazy(() => import("../features/servers/ImportDialog").then((m) => ({ default: m.ImportDialog })));
+
 const SHOW_SYSTEM_KEY = "pgt.showSystem";
 
 export default function App() {
@@ -34,6 +35,10 @@ export default function App() {
   const [editing, setEditing] = createSignal<ServerConfig | null>(null);
   const [importOpen, setImportOpen] = createSignal(false);
   const [showSystem, setShowSystem] = createSignal(readStorage(SHOW_SYSTEM_KEY) === "1");
+  const [serverEverOpened, setServerEverOpened] = createSignal(false);
+  const [importEverOpened, setImportEverOpened] = createSignal(false);
+  createEffect(() => dialogOpen() && setServerEverOpened(true));
+  createEffect(() => importOpen() && setImportEverOpened(true));
   const [groups, setGroups] = createSignal<string[]>([]);
 
   const openDialog = async (serverId: string | null) => {
@@ -164,23 +169,31 @@ export default function App() {
       <prompt.View />
       <deleteConfirm.View />
       <Toaster />
-      <ImportDialog
-        open={importOpen()}
-        onClose={() => setImportOpen(false)}
-        onImported={() => {
-          explorer.controller.reloadServers().catch(() => {});
-        }}
-      />
-      <ServerDialog
-        open={dialogOpen()}
-        editing={editing()}
-        groups={groups()}
-        onClose={() => setDialogOpen(false)}
-        onSaved={() => {
-          setDialogOpen(false);
-          explorer.controller.reloadServers().catch(() => {});
-        }}
-      />
+      <Show when={importEverOpened()}>
+        <Suspense>
+          <ImportDialog
+            open={importOpen()}
+            onClose={() => setImportOpen(false)}
+            onImported={() => {
+              explorer.controller.reloadServers().catch(() => {});
+            }}
+          />
+        </Suspense>
+      </Show>
+      <Show when={serverEverOpened()}>
+        <Suspense>
+          <ServerDialog
+            open={dialogOpen()}
+            editing={editing()}
+            groups={groups()}
+            onClose={() => setDialogOpen(false)}
+            onSaved={() => {
+              setDialogOpen(false);
+              explorer.controller.reloadServers().catch(() => {});
+            }}
+          />
+        </Suspense>
+      </Show>
     </div>
   );
 }

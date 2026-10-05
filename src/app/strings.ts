@@ -77,6 +77,7 @@ export const t = {
   },
   status: {
     ready: "Hazır",
+    engine: "PostgreSQL",
     connected: "bağlı",
     notConnected: "bağlı değil",
   },
