@@ -133,7 +133,7 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
                   </span>
                 </Show>
                 <Show when={config()?.readOnlyLock}>
-                  <Lock size={11} class="shrink-0" aria-label={t.query.ctx.locked} />
+                  <Lock size={11} class="shrink-0" role="img" aria-label={t.query.ctx.locked} />
                 </Show>
                 <span class="truncate" classList={{ "line-through opacity-70": !!m()?.serverGone }}>
                   {tab.title}
@@ -148,7 +148,7 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
                   </span>
                 </Show>
                 <Show when={busy()}>
-                  <span class="shrink-0 text-muted" aria-label={t.query.ctx.running}>…</span>
+                  <span class="shrink-0 text-muted" role="img" aria-label={t.query.ctx.running}>…</span>
                 </Show>
                 <button
                   type="button"

@@ -34,8 +34,10 @@ fn apply_saved_password(creds: &Credentials, prev: Option<&ServerConfig>, saved:
     let forget = should_forget_stored(prev, saved, password.as_deref());
     match (password, saved.save_password) {
         (Some(p), true) => creds.remember(saved.id, &p, true),
+        // Kaydetme kapalı ama parola yazıldı: yalnızca oturumda tutulur (kalıcı kayıt silinir); hemen yeniden sorulmaz.
+        (Some(p), false) => creds.remember(saved.id, &p, false),
         (None, false) if !forget => creds.forget_stored(saved.id),
-        (_, false) => creds.forget(saved.id),
+        (None, false) => creds.forget(saved.id),
         (None, true) if forget => creds.forget(saved.id),
         (None, true) => Ok(()),
     }
@@ -550,9 +552,10 @@ mod tests {
         assert_eq!(store.get(&password_key(id)).unwrap().as_deref(), Some("yeni"));
         apply_saved_password(&c, Some(&keep), &keep, None).unwrap();
         assert_eq!(c.password(id).unwrap().as_deref(), Some("yeni"));
-        // save_password kapalı + yazılmış parola: önceki davranış (hepsi unutulur).
+        // save_password kapalı + yazılmış parola: oturumda tutulur, kalıcı depoya yazılmaz (eskisi silinir).
         apply_saved_password(&c, Some(&keep), &prev, Some("x".into())).unwrap();
-        assert_eq!(c.password(id).unwrap(), None);
+        assert_eq!(c.password(id).unwrap().as_deref(), Some("x"));
+        assert_eq!(store.get(&password_key(id)).unwrap(), None);
     }
 
     #[test]

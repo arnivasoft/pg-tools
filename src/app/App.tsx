@@ -124,6 +124,8 @@ export default function App() {
       e.preventDefault();
       // Kalıcı diyalog açıkken arkadaki filtre kutusuna odak taşınmaz.
       if (document.querySelector('[role="dialog"]')) return;
+      // Sağ paneldeyken (editör, ızgara) odağı ağaç filtresine çalmaz.
+      if (e.target instanceof Element && e.target.closest("[data-query-panel]")) return;
       filterEl.focus();
       filterEl.select();
     }

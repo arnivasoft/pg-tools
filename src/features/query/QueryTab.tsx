@@ -447,6 +447,8 @@ export default function QueryTab(props: { ctl: QueryController }) {
     <button
       type="button"
       role="tab"
+      id={`qt-pane-tab-${p}`}
+      aria-controls="qt-pane-panel"
       aria-selected={pane() === p}
       class="border-b-2 border-transparent px-2 py-1.5 text-[12px] text-muted aria-selected:border-accent aria-selected:text-fg"
       onClick={() => setPane(p)}
@@ -489,7 +491,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
       />
       <div class="flex min-h-0 flex-1 flex-col">
         <div class="flex shrink-0 items-center gap-1 border-b border-border bg-panel px-2">
-          <div role="tablist" class="flex gap-1">
+          <div role="tablist" aria-label={r.panesAria} class="flex gap-1">
             {paneButton("result", () => r.result)}
             {paneButton("messages", () => (messageCount() > 0 ? `${r.messages} (${messageCount()})` : r.messages))}
             {paneButton("history", () => r.history)}
@@ -509,7 +511,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
             <Download size={13} /> {t.query.export.button}
           </Button>
         </div>
-        <div class="min-h-0 flex-1">
+        <div class="min-h-0 flex-1" role="tabpanel" id="qt-pane-panel" aria-labelledby={`qt-pane-tab-${pane()}`}>
           <Switch>
             <Match when={pane() === "result"}>
               <div class="flex h-full min-h-0 flex-col">

@@ -165,6 +165,7 @@ export const t = {
       ariaLabel: "Sorgu bağlamı",
     },
     results: {
+      panesAria: "Sonuç bölmeleri",
       result: "Sonuç",
       messages: "Mesajlar",
       history: "Geçmiş",

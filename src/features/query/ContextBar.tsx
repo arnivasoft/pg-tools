@@ -85,7 +85,7 @@ export function ContextBar(props: {
           {m().database}
         </span>
         <Show when={props.config?.readOnlyLock}>
-          <Lock size={12} class="shrink-0 text-muted" aria-label={c.locked} />
+          <Lock size={12} class="shrink-0 text-muted" role="img" aria-label={c.locked} />
         </Show>
         <div class="mx-1 h-5 w-px bg-border" aria-hidden="true" />
         <select

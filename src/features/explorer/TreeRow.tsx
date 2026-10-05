@@ -61,7 +61,7 @@ export function TreeRow(props: {
         {(color) => <span class="h-2 w-2 shrink-0 rounded-full" style={{ background: `var(--srv-${color()})` }} aria-hidden="true" />}
       </Show>
       <Show when={r().node.kind === "server" && r().node.flags.locked}>
-        <Lock size={11} class="shrink-0 text-muted" aria-label={t.server.lockedTitle} />
+        <Lock size={11} class="shrink-0 text-muted" role="img" aria-label={t.server.lockedTitle} />
       </Show>
       <Show when={r().node.detail}>
         <span class="truncate text-xs text-muted">{r().node.detail}</span>
