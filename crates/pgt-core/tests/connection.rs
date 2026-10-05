@@ -432,3 +432,25 @@ async fn dropping_dedicated_client_closes_backend_and_driver() {
         assert!(!alive, "sunucu oturumu kapanmadı");
     }
 }
+
+/// Silinen veritabanında sorgu oturumu 3D000 ile başarısız olur ve ad önbelleği düşer: sonraki deneme adı
+/// yeniden çözer ve `NotFound` döner. Sunucu oturumu bağlı kalır.
+#[tokio::test]
+async fn dedicated_session_on_dropped_database_re_resolves_name() {
+    for ts in servers() {
+        let db = format!("pgt_qdrop_{}", std::process::id());
+        let admin = admin_client(&ts, &ts.config.maintenance_db).await;
+        drop_database(&admin, &db).await;
+        admin.batch_execute(&format!("CREATE DATABASE {db} TEMPLATE template0 ENCODING 'UTF8'")).await.unwrap();
+        let oid: u32 = admin.query_one("SELECT oid FROM pg_database WHERE datname = $1", &[&db]).await.unwrap().get(0);
+        let mgr = ConnectionManager::new();
+        mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+        drop(mgr.open_dedicated(ts.config.id, Target::Database(oid), QUERY_RW).await.unwrap());
+        drop_database(&admin, &db).await;
+        let err = mgr.open_dedicated(ts.config.id, Target::Database(oid), QUERY_RW).await.unwrap_err();
+        assert!(matches!(&err, Error::Connect { sqlstate: Some(c), .. } if c == "3D000"), "{err:?}");
+        let again = mgr.open_dedicated(ts.config.id, Target::Database(oid), QUERY_RW).await.unwrap_err();
+        assert!(matches!(again, Error::NotFound(_)), "{again:?}");
+        assert!(mgr.is_connected(ts.config.id));
+    }
+}

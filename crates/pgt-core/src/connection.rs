@@ -33,13 +33,18 @@ const SESSION_OPTIONS: &str = "-c default_transaction_read_only=on -c statement_
 /// bağlantı kurulduktan hemen sonra `SET` ile uygulanır. `SESSION_OPTIONS` ile aynı değerleri taşımalıdır.
 const SESSION_SETS: [&str; 3] =
     ["SET default_transaction_read_only = on", "SET statement_timeout = 30000", "SET search_path = pg_catalog"];
+/// `statement_timeout`'un PostgreSQL'deki üst sınırı (ms, `INT_MAX`); fazlası oturum açılışında reddedilir.
+pub const MAX_STATEMENT_TIMEOUT_MS: u32 = 2_147_483_647;
 /// Sorgu oturumlarının `application_name`'i: `pg_stat_activity`'de katalog oturumlarından ayırt edilsin.
 const QUERY_APPLICATION_NAME: &str = "pg-tools query";
 
 /// Oturum ayarları profili.
 /// - `Catalog`: havuzdaki salt okunur katalog oturumu (`SESSION_OPTIONS`/`SESSION_SETS`, 30 sn, `search_path=pg_catalog`).
 /// - `Query`: kullanıcının SQL'ini çalıştıran ayrı (havuzsuz) oturum. `search_path` **verilmez**: kullanıcının
-///   rol/veritabanı düzeyindeki yolu geçerli kalır. `statement_timeout_ms = 0` sınırsız demektir.
+///   rol/veritabanı düzeyindeki yolu geçerli kalır. `statement_timeout_ms = 0` sınırsız demektir; en fazla
+///   `MAX_STATEMENT_TIMEOUT_MS` (PostgreSQL üst sınırı). `read_only` yalnızca oturum varsayılanıdır
+///   (`default_transaction_read_only`), bir güvenlik sınırı değildir: kullanıcı SQL'i onu `SET` ya da
+///   `BEGIN READ WRITE` ile değiştirebilir. Gerçek salt okunurluk rol yetkileriyle sağlanır.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionProfile {
     Catalog,
@@ -323,6 +328,7 @@ impl ConnectionManager {
     /// (bilinmeyen oid → `NotFound`). Oturum kilidi yalnızca ad çözümü boyunca tutulur; yavaş bağlantı
     /// kilitsiz kurulur, havuzdaki `run`'ları bekletmez. Havuz (`conns`) değişmez.
     pub async fn open_dedicated(&self, server: Uuid, target: Target, profile: SessionProfile) -> Result<DedicatedConn> {
+        validate_profile(profile)?;
         let session = self.session(server)?;
         let (config, password, dbname) = {
             let mut s = session.state.lock().await;
@@ -333,8 +339,11 @@ impl ConnectionManager {
             (s.config.clone(), s.password.clone(), dbname)
         };
         let result = open_dedicated_conn(&config, &dbname, password.as_deref(), profile).await;
-        if let (Err(_), Target::Database(oid)) = (&result, target) {
-            // Veritabanı silinmiş ya da yeniden adlandırılmış olabilir: ad bir sonraki denemede yeniden çözülsün.
+        if let (Err(e), Target::Database(oid)) = (&result, target)
+            && is_missing_database(e)
+        {
+            // Veritabanı silinmiş ya da yeniden adlandırılmış: ad bir sonraki denemede yeniden çözülsün. Sunucu
+            // düzeyindeki hatalarda (ağ, kimlik, TLS) ad geçerlidir, önbellek korunur.
             session.state.lock().await.db_names.remove(&oid);
         }
         result
@@ -370,6 +379,21 @@ fn drops_session(target: Target, err: &Error) -> bool {
                     ..
                 }
         )
+}
+
+/// Profil değerleri sunucunun kabul edeceği aralıkta mı? (Aşım, açılışta anlaşılmaz bir bağlantı hatası verirdi.)
+fn validate_profile(profile: SessionProfile) -> Result<()> {
+    match profile {
+        SessionProfile::Query { statement_timeout_ms, .. } if statement_timeout_ms > MAX_STATEMENT_TIMEOUT_MS => {
+            Err(Error::Invalid("statement_timeout en fazla 2147483647 ms olabilir.".into()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Bağlantı hatası, hedef veritabanının artık olmadığını mı söylüyor? (3D000 invalid_catalog_name)
+fn is_missing_database(err: &Error) -> bool {
+    matches!(err, Error::Connect { sqlstate: Some(code), .. } if code == "3D000")
 }
 
 /// `map[key]` tam olarak `expected` ise (aynı `Arc`) kaldırır.
@@ -480,7 +504,7 @@ async fn open_dedicated_conn(
     profile: SessionProfile,
 ) -> Result<DedicatedConn> {
     let result =
-        with_options_fallback(|with_options| connect_dedicated_once(config, dbname, password, profile, with_options)).await;
+        with_options_fallback(|with_options| dedicated_once(config, dbname, password, profile, with_options)).await;
     if let Err(e) = &result {
         tracing::warn!(server = %config.id, db = dbname, error = %e, "sorgu bağlantısı açılamadı");
     }
@@ -647,9 +671,21 @@ pub async fn connect_once(config: &ServerConfig, dbname: &str, password: Option<
     Ok(PgConn { client, info, last_used: StdMutex::new(Instant::now()) })
 }
 
-/// Tek bir havuz dışı bağlantı denemesi (`options` yedek yolu olmadan; bkz. `connect_with`).
+/// Test girişi: tek bir havuz dışı bağlantı denemesi (`options` yedek yolu olmadan).
+#[cfg(any(test, feature = "testing"))]
 #[doc(hidden)]
 pub async fn connect_dedicated_once(
+    config: &ServerConfig,
+    dbname: &str,
+    password: Option<&str>,
+    profile: SessionProfile,
+    with_options: bool,
+) -> Result<DedicatedConn> {
+    dedicated_once(config, dbname, password, profile, with_options).await
+}
+
+/// Tek bir havuz dışı bağlantı denemesi (`options` yedek yolu olmadan; bkz. `connect_with`).
+async fn dedicated_once(
     config: &ServerConfig,
     dbname: &str,
     password: Option<&str>,
@@ -928,6 +964,34 @@ mod tests {
         let err = open_dedicated_conn(&config, "postgres", Some("x"), Q_RW).await.unwrap_err();
         assert!(matches!(&err, Error::Connect { sqlstate: Some(c), .. } if c == "08P01"), "{err:?}");
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2, "tek bir yeniden deneme bekleniyordu");
+    }
+
+    /// Aralık dışı süre, bağlantı denenmeden (oturum aranmadan bile) `Invalid` döner.
+    #[tokio::test]
+    async fn open_dedicated_rejects_out_of_range_statement_timeout() {
+        let mgr = ConnectionManager::new();
+        let too_long = SessionProfile::Query { read_only: false, statement_timeout_ms: MAX_STATEMENT_TIMEOUT_MS + 1 };
+        let err = mgr.open_dedicated(Uuid::new_v4(), Target::Maintenance, too_long).await.unwrap_err();
+        assert!(matches!(&err, Error::Invalid(m) if m.contains("2147483647")), "{err:?}");
+        let max = SessionProfile::Query { read_only: false, statement_timeout_ms: MAX_STATEMENT_TIMEOUT_MS };
+        assert!(validate_profile(max).is_ok());
+        assert!(validate_profile(SessionProfile::Catalog).is_ok());
+        assert_eq!(profile_session_options(max), "-c default_transaction_read_only=off -c statement_timeout=2147483647");
+    }
+
+    #[test]
+    fn only_missing_database_evicts_the_cached_name() {
+        let missing = Error::Connect { kind: ConnectErrorKind::Other, sqlstate: Some("3D000".into()), message: "yok".into() };
+        assert!(is_missing_database(&missing));
+        for err in [
+            connect_err(ConnectErrorKind::Network),
+            connect_err(ConnectErrorKind::Auth),
+            connect_err(ConnectErrorKind::Tls),
+            Error::Connect { kind: ConnectErrorKind::Other, sqlstate: Some("28000".into()), message: "x".into() },
+            Error::NotFound("db".into()),
+        ] {
+            assert!(!is_missing_database(&err), "{err:?}");
+        }
     }
 
     #[tokio::test]
