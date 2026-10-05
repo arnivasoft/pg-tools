@@ -38,6 +38,9 @@ pub struct Analysis {
     pub returns_rows_hint: bool,
     /// Oturumu salt okunur kipten çıkarabilecek ifade.
     pub changes_read_only: bool,
+    /// `SELECT` ile oturum durumu oluşturan çağrı: `set_config` ya da oturum düzeyi advisory kilit
+    /// (`_xact_` varyantları transaction ile biter, sayılmaz). Muhafazakârdır: yalnızca Word belirteçlerine bakar.
+    pub creates_session_state: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -112,6 +115,9 @@ impl<'a> Scan<'a> {
     }
 }
 
+const SESSION_STATE_FUNCS: [&str; 5] =
+    ["set_config", "pg_advisory_lock", "pg_try_advisory_lock", "pg_advisory_lock_shared", "pg_try_advisory_lock_shared"];
+
 const DML: [&str; 4] = ["insert", "update", "delete", "merge"];
 
 pub fn analyze(stmt_sql: &str) -> Analysis {
@@ -163,7 +169,9 @@ pub fn analyze(stmt_sql: &str) -> Analysis {
         _ => false,
     };
 
-    Analysis { kind, danger, sensitive, returns_rows_hint, changes_read_only: changes_read_only(&s) }
+    Analysis { kind, danger, sensitive, returns_rows_hint, changes_read_only: changes_read_only(&s),
+        creates_session_state: s.has_any(&SESSION_STATE_FUNCS),
+    }
 }
 
 /// Kendi parantez kapsamında `WHERE` bulunmayan UPDATE/DELETE var mı (CTE içi dahil).
@@ -387,6 +395,20 @@ mod tests {
             ("select 'read'", false), ("begin read only", false), ("select 1", false),
         ] {
             assert_eq!(analyze(sql).changes_read_only, want, "{sql}");
+        }
+    }
+
+    #[test]
+    fn detects_session_state_creating_calls() {
+        for (sql, want) in [
+            ("select pg_advisory_lock(1)", true), ("SELECT pg_try_advisory_lock(1)", true),
+            ("select pg_advisory_lock_shared(1)", true), ("select pg_try_advisory_lock_shared(1, 2)", true),
+            ("select set_config('search_path', 'x', false)", true), ("select /* c */ SET_CONFIG('a','b',true)", true),
+            ("select pg_advisory_xact_lock(1)", false), ("select pg_try_advisory_xact_lock(1)", false),
+            ("select pg_advisory_xact_lock_shared(1)", false), ("select 1", false),
+            ("select 'pg_advisory_lock set_config'", false),
+        ] {
+            assert_eq!(analyze(sql).creates_session_state, want, "{sql}");
         }
     }
 

@@ -29,12 +29,14 @@ sınırlar. Ayrıntılar için ilgili kod yorumlarına bakın.
 Tam liste (`QUERY_ERROR_CODES` / `QueryErrorCode.ts`): `confirmation_required`, `locked`, `busy`, `tx_failed`,
 `open_transaction`, `session_reset` (tür şu an kullanılmıyor -> Plan 6'da tür koruyucusu ekleyin). Diğer hatalar genel
 kodlarla gelir (`query`, `not_found`, `not_connected`, `unknown_server`, `invalid`, ...).
-- `qt_complete` hata vermez: 5 sn'lik zaman aşımı, sorgu hatası, meşgul ya da uyuyan oturum **boş liste** döner.
+- `qt_complete` bağlantı/sorgu sorunlarında hata vermez: 5 sn'lik zaman aşımı, sorgu hatası, meşgul ya da uyuyan oturum
+  **boş liste** döner; ama bilinmeyen/kapatılmış oturum yine `not_found` döner.
 - `qt_open`: bağlanırken sunucunun kilidi / üretim etiketi değiştiyse `invalid` ("… bağlanırken değişti; sekmeyi
   yeniden açın."), sunucu silindiyse `unknown_server`; bağlantı bırakılır, oturum açılmaz.
 - `session_reset`: durumlu bir oturumun (bkz. Oturum yaşam döngüsü) bağlantısı koptu ve yeniden kuruldu; `SET`
   ayarları, geçici tablolar, advisory kilitler kaybolmuş olabilir. Yalnızca bir kez döner, hiçbir ifade çalışmamıştır;
   yeni bağlantı hazırdır, kullanıcı sorguyu tekrar çalıştırabilir.
+  `qt_run` dışında `qt_export_csv` de (kendi oturum bağlantısını uyandırdığında) `session_reset` döndürebilir.
 
 ## Onay akışı
 - Onay arka uçta zorunludur: `qt_run` `confirmed=false` ile tehlikeli/üretim-yazan betikte `confirmation_required`
@@ -75,8 +77,10 @@ kodlarla gelir (`query`, `not_found`, `not_connected`, `unknown_server`, `invali
   N x ~10 sn). Meşgul oturumda `Commit` `busy`, `Refuse` açık transaction varsa `open_transaction` döner.
 - Çıkışta `close_all` (oturumlar paralel; `main.rs` en çok 7 sn bekler, kalan bağlantılar süreçle kapanır). `main.rs` boşta oturumları 30 dk sonra uyutur (`reap_idle`);
   sonraki ifade oturumu sessizce yeniden açar.
-- **Durumlu (dirty) oturum**: `Select` dışında herhangi bir ifade (SET, geçici tablo, advisory kilit, DO/CALL,
-  DDL, transaction komutu…) başarıyla bitince oturum durumlu sayılır. Durumlu oturum boşta **uyutulmaz**; bağlantısı
+- **Durumlu (dirty) oturum**: `Select` dışında herhangi bir ifade (SET, geçici tablo, DO/CALL,
+  DDL, transaction komutu…) ve oturum durumu oluşturan `SELECT` çağrıları (oturum düzeyi `pg_advisory_lock`,
+  `pg_try_advisory_lock`, `_shared` varyantları ve `set_config`; `pg_advisory_xact_lock` gibi `_xact_` varyantları
+  transaction ile biter, gerekmez) başarıyla bitince oturum durumlu sayılır. Durumlu oturum boşta **uyutulmaz**; bağlantısı
   koparsa (sunucu yeniden başladı, ağ, `pg_terminate_backend`) ilk çalıştırma bir kez `session_reset` döner ve yeni
   bağlantı hazır bekler. Durumsuz oturum sessizce yeniden bağlanır. Açık transaction kaybolduysa `query` kodlu
   "bağlantı koptu; açık transaction geri alındı" hatası döner.
