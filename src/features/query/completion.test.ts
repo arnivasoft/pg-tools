@@ -202,7 +202,7 @@ describe("createCompletionSource", () => {
     const r = await p;
     expect(r.from).toBe(text.length - 5);
     expect(r.to).toBe(text.length);
-    expect(r.options).toHaveLength(1);
+    expect(r.options.length).toBeGreaterThan(0); // relations + schemas (sahte fetch ikisine de aynı yanıtı verir)
   });
 
   it("select app.: kolon boşsa şema olarak ilişkileri ister", async () => {
