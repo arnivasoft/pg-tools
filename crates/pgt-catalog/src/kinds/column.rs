@@ -50,3 +50,14 @@ pub(crate) async fn properties(cat: &Catalog, server: Uuid, db: u32, table: u32,
             .row_opt("Collation", text("collation")),
     ])
 }
+
+pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: u32, table: u32, attnum: i16) -> Result<String> {
+    use crate::ddl::{ColumnDef, column_line, comment, header, join_blocks};
+    let h = super::table::head(cat, server, db, table).await?;
+    let row = crate::db::query_one(&cat.mgr, server, Target::Database(db), &super::table::COLUMNS, p![table, Some(attnum)], "kolon").await?;
+    let c = ColumnDef::from_row(&row);
+    let target = format!("{}.{}", h.qname, c.name);
+    let add = format!("ALTER TABLE IF EXISTS {}\n    ADD COLUMN {};\n", h.qname, column_line(&c));
+    Ok(header("Column", &target, &format!("ALTER TABLE IF EXISTS {} DROP COLUMN IF EXISTS {};", h.qname, c.name))
+        + &join_blocks(vec![add, comment("COLUMN", &target, c.comment.as_deref())]))
+}

@@ -1,0 +1,13 @@
+---
+source: crates/pgt-catalog/tests/ddl.rs
+expression: fx.normalize(& column)
+---
+-- Column: app.customers.email
+
+-- ALTER TABLE IF EXISTS app.customers DROP COLUMN IF EXISTS email;
+
+ALTER TABLE IF EXISTS app.customers
+    ADD COLUMN email text NOT NULL;
+
+COMMENT ON COLUMN app.customers.email
+    IS 'E-posta';

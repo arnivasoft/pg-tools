@@ -37,3 +37,16 @@ pub(crate) async fn properties(cat: &Catalog, server: Uuid, db: u32, schema: u32
         PropertySection::new("Güvenlik").row_opt("Yetkiler", r.get::<_, Option<String>>("acl")),
     ])
 }
+
+static DDL: VersionedSql = VersionedSql(&[(10, include_str!("../sql/schema_ddl.sql"))]);
+static ACL: VersionedSql = VersionedSql(&[(10, include_str!("../sql/acl_namespace.sql"))]);
+
+pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: u32, schema: u32) -> Result<String> {
+    use crate::ddl::{comment, grants, header, join_blocks};
+    let r = crate::db::query_one(&cat.mgr, server, Target::Database(db), &DDL, p![schema], "şema").await?;
+    let q: String = r.get("qname");
+    let create = format!("CREATE SCHEMA IF NOT EXISTS {q}\n    AUTHORIZATION {};\n", r.get::<_, String>("owner"));
+    let acl = super::acl(cat, server, Target::Database(db), &ACL, schema).await?;
+    Ok(header("SCHEMA", &q, &format!("DROP SCHEMA IF EXISTS {q} ;"))
+        + &join_blocks(vec![create, comment("SCHEMA", &q, r.get::<_, Option<String>>("comment").as_deref()), grants("SCHEMA", &q, &acl)]))
+}

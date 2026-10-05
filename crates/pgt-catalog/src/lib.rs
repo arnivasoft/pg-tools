@@ -1,4 +1,5 @@
 mod db;
+mod ddl;
 mod kinds;
 pub mod node;
 pub mod props;
@@ -34,6 +35,10 @@ impl Catalog {
 
     pub async fn properties(&self, id: &NodeId) -> Result<Vec<props::PropertySection>> {
         kinds::properties(self, id).await
+    }
+
+    pub async fn ddl(&self, id: &NodeId) -> Result<String> {
+        kinds::ddl(self, id).await
     }
 
     pub async fn list_children(&self, id: &NodeId) -> Result<Vec<TreeNode>> {

@@ -64,3 +64,29 @@ pub(crate) async fn properties(cat: &Catalog, id: &NodeId) -> Result<Vec<crate::
         _ => Err(invalid(id)),
     }
 }
+
+pub(crate) async fn ddl(cat: &Catalog, id: &NodeId) -> Result<String> {
+    let (server, path) = match id {
+        NodeId::Root | NodeId::Group(_) => return Ok(String::new()),
+        NodeId::Node { server, path } => (*server, path.as_slice()),
+    };
+    if path.is_empty() || matches!(path.last(), Some(Seg::Coll(_))) {
+        return Ok(String::new());
+    }
+    if !cat.mgr.is_connected(server) {
+        return Err(Error::NotConnected);
+    }
+    match path {
+        [Seg::Db(db)] => database::ddl(cat, server, *db).await,
+        [Seg::Db(db), Seg::Schema(sch)] => schema::ddl(cat, server, *db, *sch).await,
+        [Seg::Db(db), Seg::Schema(_), Seg::Table(tbl)] => table::ddl(cat, server, *db, *tbl).await,
+        [Seg::Db(db), Seg::Schema(_), Seg::Table(tbl), Seg::Column(col)] => column::ddl(cat, server, *db, *tbl, *col).await,
+        _ => Err(invalid(id)),
+    }
+}
+
+/// Bir nesnenin ACL satırlarını okur (`acl_*.sql`).
+pub(crate) async fn acl(cat: &Catalog, server: uuid::Uuid, target: pgt_core::connection::Target, sql: &'static crate::version::VersionedSql, oid: u32) -> Result<Vec<crate::ddl::AclEntry>> {
+    let rows = crate::db::query(&cat.mgr, server, target, sql, crate::db::p![oid]).await?;
+    Ok(rows.iter().map(crate::ddl::AclEntry::from_row).collect())
+}

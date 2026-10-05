@@ -1,0 +1,30 @@
+---
+source: crates/pgt-catalog/tests/ddl.rs
+expression: fx.normalize(& ddl)
+---
+-- Table: app.customers
+
+-- DROP TABLE IF EXISTS app.customers;
+
+CREATE TABLE IF NOT EXISTS app.customers
+(
+    id bigint NOT NULL GENERATED ALWAYS AS IDENTITY,
+    email text NOT NULL,
+    name character varying(100) COLLATE pg_catalog."C",
+    created_at timestamp with time zone NOT NULL DEFAULT now(),
+    CONSTRAINT customers_pkey PRIMARY KEY (id),
+    CONSTRAINT customers_email_key UNIQUE (email),
+    CONSTRAINT customers_email_check CHECK (POSITION(('@'::text) IN (email)) > 1)
+);
+
+ALTER TABLE IF EXISTS app.customers
+    OWNER TO <owner>;
+
+COMMENT ON TABLE app.customers
+    IS 'Müşteriler';
+
+COMMENT ON COLUMN app.customers.email
+    IS 'E-posta';
+
+GRANT SELECT, INSERT ON TABLE app.customers TO pgt_reader;
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN ON TABLE app.customers TO <owner>;

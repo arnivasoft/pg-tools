@@ -1,0 +1,16 @@
+---
+source: crates/pgt-catalog/tests/ddl.rs
+expression: fx.normalize(& schema)
+---
+-- SCHEMA: app
+
+-- DROP SCHEMA IF EXISTS app ;
+
+CREATE SCHEMA IF NOT EXISTS app
+    AUTHORIZATION <owner>;
+
+COMMENT ON SCHEMA app
+    IS 'Uygulama şeması';
+
+GRANT USAGE ON SCHEMA app TO pgt_reader;
+GRANT USAGE, CREATE ON SCHEMA app TO <owner>;
