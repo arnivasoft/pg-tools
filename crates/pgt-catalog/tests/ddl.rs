@@ -73,6 +73,21 @@ async fn customers_ddl_has_rls_policies_indexes_triggers_and_column_grants() {
     }
 }
 
+/// Gidiş-dönüş testinde bulundu: Table DDL'i index ve trigger yorumlarını yazmıyordu.
+#[tokio::test]
+async fn table_ddl_keeps_index_and_trigger_comments() {
+    for fx in fixtures().await {
+        let customers = fx.catalog.ddl(&fx.table("app", "customers").await).await.unwrap();
+        let trigger_comment = "COMMENT ON TRIGGER customers_touch ON app.customers
+    IS 'Dokunma';";
+        assert!(customers.contains(trigger_comment), "{customers}");
+        let orders = fx.catalog.ddl(&fx.table("app", "orders").await).await.unwrap();
+        let index_comment = "COMMENT ON INDEX app.orders_customer_idx
+    IS 'Müşteri dizini';";
+        assert!(orders.contains(index_comment), "{orders}");
+    }
+}
+
 #[tokio::test]
 async fn inherited_table_lists_only_local_columns() {
     for fx in fixtures().await {

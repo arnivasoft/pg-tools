@@ -51,3 +51,5 @@ CREATE POLICY customers_select
 CREATE UNIQUE INDEX customers_lower_name_idx ON app.customers USING btree (lower((name)::text));
 
 CREATE TRIGGER customers_touch BEFORE UPDATE ON app.customers FOR EACH ROW WHEN (old.email IS DISTINCT FROM new.email) EXECUTE FUNCTION app.touch_row();
+COMMENT ON TRIGGER customers_touch ON app.customers
+    IS 'Dokunma';

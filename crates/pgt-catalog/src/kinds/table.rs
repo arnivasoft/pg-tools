@@ -165,15 +165,25 @@ pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: u32, table: u32) -> Res
         blocks.push(format!("ALTER TABLE IF EXISTS {} FORCE ROW LEVEL SECURITY;\n", h.qname));
     }
     blocks.extend(policies.iter().map(|r| format!("{}\n", r.get::<_, String>("def"))));
-    blocks.push(indexes.iter().map(|r| format!("{}\n", r.get::<_, String>("def"))).collect());
+    blocks.push(
+        indexes
+            .iter()
+            .map(|r| {
+                let note = comment("INDEX", &r.get::<_, String>("qname"), r.get::<_, Option<String>>("comment").as_deref());
+                format!("{}\n{note}", r.get::<_, String>("def"))
+            })
+            .collect(),
+    );
     blocks.push(
         triggers
             .iter()
             .map(|r| {
+                let name: String = r.get("name");
                 let mut s = format!("{}\n", r.get::<_, String>("def"));
                 if let Some(state) = r.get::<_, Option<String>>("state") {
-                    s.push_str(&format!("ALTER TABLE IF EXISTS {} {state} TRIGGER {};\n", h.qname, r.get::<_, String>("name")));
+                    s.push_str(&format!("ALTER TABLE IF EXISTS {} {state} TRIGGER {name};\n", h.qname));
                 }
+                s.push_str(&comment("TRIGGER", &format!("{name} ON {}", h.qname), r.get::<_, Option<String>>("comment").as_deref()));
                 s
             })
             .collect(),
