@@ -12,7 +12,17 @@ use uuid::Uuid;
 use crate::config::ServerConfig;
 use crate::{ConnectErrorKind, Error, Result, tls};
 
+/// Bağlantı kurma (TCP + TLS + kimlik doğrulama + sürüm sorgusu) için üst sınır.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Her `run` kapanışı için istemci tarafı süre sınırı. Sunucudaki `statement_timeout`'tan (30 sn)
+/// biraz uzundur: bu süre dolduysa sorgu yavaş değil, bağlantı askıda demektir (ör. ağ sessizce
+/// koptu). Dolunca bağlantı kopmuş sayılır ve bir kez yeniden bağlanılıp denenir.
+pub const QUERY_DEADLINE: Duration = Duration::from_secs(35);
+/// TCP keepalive: 30 sn boşta kalınca yoklamaya başla, 10 sn arayla 3 deneme; ölü bağlantı
+/// yaklaşık bir dakikada fark edilir (NAT/güvenlik duvarı boşta bağlantıları sessizce düşürür).
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+const KEEPALIVE_RETRIES: u32 = 3;
 const SESSION_OPTIONS: &str = "-c default_transaction_read_only=on -c statement_timeout=30000";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -165,15 +175,27 @@ impl ConnectionManager {
     {
         let session = self.session(server)?;
         let conn = self.acquire(server, &session, target).await?;
-        match f(conn.clone()).await {
-            Ok(v) => Ok(v),
-            Err(e) if is_disconnect(&e) || !conn.usable() => {
-                tracing::warn!(%server, ?target, error = %e, "bağlantı kopmuş, yeniden bağlanılıyor");
+        let cause = match with_deadline(QUERY_DEADLINE, f(conn.clone())).await {
+            Some(Ok(v)) => return Ok(v),
+            Some(Err(e)) if is_disconnect(&e) || !conn.usable() => e.to_string(),
+            Some(Err(e)) => return Err(Error::from_query(e)),
+            None => format!("{} sn içinde yanıt yok", QUERY_DEADLINE.as_secs()),
+        };
+        tracing::warn!(%server, ?target, %cause, "bağlantı kopmuş ya da yanıt vermiyor, yeniden bağlanılıyor");
+        Self::evict(&session, target, &conn).await;
+        let conn = self.acquire(server, &session, target).await?;
+        match with_deadline(QUERY_DEADLINE, f(conn.clone())).await {
+            Some(result) => result.map_err(Error::from_query),
+            None => {
+                tracing::warn!(%server, ?target, "yeniden bağlandıktan sonra da yanıt yok");
                 Self::evict(&session, target, &conn).await;
-                let conn = self.acquire(server, &session, target).await?;
-                f(conn).await.map_err(Error::from_query)
+                Err(Error::Query {
+                    sqlstate: None,
+                    message: format!("Sunucu {} sn içinde yanıt vermedi (iki deneme).", QUERY_DEADLINE.as_secs()),
+                    detail: None,
+                    hint: Some("Ağ bağlantısını ve sunucunun yükünü kontrol edin.".into()),
+                })
             }
-            Err(e) => Err(Error::from_query(e)),
         }
     }
 
@@ -209,6 +231,11 @@ fn remove_if_same<K: Eq + Hash, V>(map: &mut HashMap<K, Arc<V>>, key: &K, expect
     } else {
         false
     }
+}
+
+/// `fut`'u en fazla `limit` kadar bekler; süre dolarsa `None` (gelecek iptal edilir).
+async fn with_deadline<F: Future>(limit: Duration, fut: F) -> Option<F::Output> {
+    tokio::time::timeout(limit, fut).await.ok()
 }
 
 fn is_disconnect(e: &tokio_postgres::Error) -> bool {
@@ -253,6 +280,14 @@ async fn conn_locked(s: &mut Session, target: Target) -> Result<Arc<PgConn>> {
 }
 
 async fn open(config: &ServerConfig, dbname: &str, password: Option<&str>) -> Result<PgConn> {
+    let result = open_inner(config, dbname, password).await;
+    if let Err(e) = &result {
+        tracing::warn!(server = %config.id, db = dbname, error = %e, "bağlantı açılamadı");
+    }
+    result
+}
+
+async fn open_inner(config: &ServerConfig, dbname: &str, password: Option<&str>) -> Result<PgConn> {
     let mut pg = tokio_postgres::Config::new();
     pg.host(&config.host)
         .port(config.port)
@@ -262,26 +297,35 @@ async fn open(config: &ServerConfig, dbname: &str, password: Option<&str>) -> Re
         .options(SESSION_OPTIONS)
         .ssl_mode(tls::pg_ssl_mode(config.ssl.mode))
         .connect_timeout(CONNECT_TIMEOUT)
-        .keepalives(true);
+        .keepalives(true)
+        .keepalives_idle(KEEPALIVE_IDLE)
+        .keepalives_interval(KEEPALIVE_INTERVAL)
+        .keepalives_retries(KEEPALIVE_RETRIES);
     if let Some(p) = password {
         pg.password(p);
     }
     let connector = tls::make_connector(&config.ssl)?;
-    let (client, connection) = match tokio::time::timeout(CONNECT_TIMEOUT + Duration::from_secs(1), pg.connect(connector)).await {
-        Ok(result) => result.map_err(Error::from_connect)?,
-        Err(_) => {
+    // Sürüm sorgusu da aynı zaman penceresinde: kimlik doğrulamadan sonra askıda kalan bir
+    // sunucu bağlantıyı sonsuza dek bekletmesin.
+    let establish = async {
+        let (client, connection) = pg.connect(connector).await.map_err(Error::from_connect)?;
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                tracing::debug!(error = %e, "PostgreSQL bağlantısı kapandı");
+            }
+        });
+        let row = client
+            .query_one("SELECT current_setting('server_version_num')::int4, current_setting('server_version')", &[])
+            .await
+            .map_err(Error::from_query)?;
+        Ok::<_, Error>((client, row))
+    };
+    let (client, row) = match with_deadline(CONNECT_TIMEOUT + Duration::from_secs(1), establish).await {
+        Some(result) => result?,
+        None => {
             return Err(Error::Connect { kind: ConnectErrorKind::Timeout, sqlstate: None, message: "zaman aşımı".into() });
         }
     };
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::debug!(error = %e, "PostgreSQL bağlantısı kapandı");
-        }
-    });
-    let row = client
-        .query_one("SELECT current_setting('server_version_num')::int4, current_setting('server_version')", &[])
-        .await
-        .map_err(Error::from_query)?;
     let num: i32 = row.get(0);
     let full: String = row.get(1);
     let version = full.split_whitespace().next().unwrap_or(&full).to_string();
@@ -294,6 +338,26 @@ mod tests {
 
     fn connect_err(kind: ConnectErrorKind) -> Error {
         Error::Connect { kind, sqlstate: None, message: "x".into() }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn with_deadline_cuts_off_a_hung_future() {
+        let hung = with_deadline(QUERY_DEADLINE, async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            1
+        });
+        assert_eq!(hung.await, None);
+        let quick = with_deadline(QUERY_DEADLINE, async {
+            tokio::time::sleep(QUERY_DEADLINE - Duration::from_secs(1)).await;
+            2
+        });
+        assert_eq!(quick.await, Some(2));
+    }
+
+    #[test]
+    fn deadline_is_longer_than_server_statement_timeout() {
+        assert!(SESSION_OPTIONS.contains("statement_timeout=30000"));
+        assert!(QUERY_DEADLINE > Duration::from_secs(30));
     }
 
     #[test]
