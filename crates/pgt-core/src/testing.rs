@@ -43,18 +43,6 @@ fn parse(index: usize, url: &str) -> TestServer {
     TestServer { config, password }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn parse_failure_does_not_leak_the_url() {
-        let secret = "postgres://u:cok-gizli-parola@h:notaport/db";
-        let Err(panic) = std::panic::catch_unwind(|| super::parse(1, secret)) else { panic!("ayrıştırma başarısız olmalıydı") };
-        let msg = panic.downcast_ref::<String>().cloned().unwrap_or_default();
-        assert!(msg.contains("2. adres"), "{msg}");
-        assert!(!msg.contains("cok-gizli-parola"), "{msg}");
-    }
-}
-
 /// Fixture kurulumu için yazılabilir (read-only olmayan) bağlantı.
 pub async fn admin_client(server: &TestServer, dbname: &str) -> tokio_postgres::Client {
     let mut pg = tokio_postgres::Config::new();
@@ -73,4 +61,16 @@ pub async fn admin_client(server: &TestServer, dbname: &str) -> tokio_postgres::
         let _ = connection.await;
     });
     client
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parse_failure_does_not_leak_the_url() {
+        let secret = "postgres://u:cok-gizli-parola@h:notaport/db";
+        let Err(panic) = std::panic::catch_unwind(|| super::parse(1, secret)) else { panic!("ayrıştırma başarısız olmalıydı") };
+        let msg = panic.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(msg.contains("2. adres"), "{msg}");
+        assert!(!msg.contains("cok-gizli-parola"), "{msg}");
+    }
 }
