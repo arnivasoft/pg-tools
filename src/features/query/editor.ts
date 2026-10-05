@@ -8,21 +8,21 @@
  * `setDoc` programatik bir değişikliktir: `onChange` çağrılmaz (sekme geçişi "kirli" işaretlemesin).
  */
 import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap, type CompletionSource } from "@codemirror/autocomplete";
-import { defaultKeymap, history, historyKeymap, toggleComment } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab, temporarilySetTabFocusMode, toggleComment } from "@codemirror/commands";
 import { bracketMatching, indentOnInput } from "@codemirror/language";
-import { Annotation, EditorState, Prec, RangeSet, StateEffect, StateField } from "@codemirror/state";
+import { Annotation, EditorState, Prec, RangeSet, StateEffect, StateField, Transaction } from "@codemirror/state";
 import {
   Decoration,
   EditorView,
   GutterMarker,
   drawSelection,
   gutter,
-  highlightActiveLine,
   keymap,
   lineNumbers,
   type DecorationSet,
 } from "@codemirror/view";
 import type { Scope } from "../../ipc/bindings/Scope";
+import { t } from "../../app/strings";
 import { sqlLookExtensions } from "../inspector/codemirror-setup";
 import { scopeFromEditor } from "./offsets";
 
@@ -42,7 +42,12 @@ export interface QueryEditor {
   setErrorMark(range: ErrorRange | null): void;
   /** Çalıştırma anındaki metin ve kapsam (ofsetler Unicode scalar). */
   getSnapshot(kind: RunKind): { text: string; scope: Scope };
+  /** İlk/yedek içerik: geri alma geçmişine girmez. Sekme geçişi için `getState`/`setState` kullanın. */
   setDoc(text: string): void;
+  /** Sekmeye özgü tüm durum (metin, geri alma geçmişi, seçim). Kaydırma konumu DOM'da olduğundan dışarıda tutulur. */
+  getState(): EditorState;
+  /** Başka sekmenin durumunu yükler; `onChange` çağrılmaz. */
+  setState(state: EditorState): void;
   focus(): void;
   destroy(): void;
 }
@@ -67,7 +72,7 @@ class ErrorGutterMarker extends GutterMarker {
   override toDOM(): Node {
     const el = document.createElement("span");
     el.textContent = "●";
-    el.title = "Hata";
+    el.title = t.query.errorMark;
     return el;
   }
 }
@@ -85,7 +90,6 @@ const errorGutter = gutter({
 const queryTheme = EditorView.theme({
   ".cm-error-mark": { textDecoration: "underline wavy var(--danger)", textDecorationSkipInk: "none" },
   ".cm-error-gutter": { width: "14px", color: "var(--danger)" },
-  ".cm-activeLine": { backgroundColor: "transparent" },
   ".cm-tooltip": {
     backgroundColor: "var(--panel)",
     color: "var(--fg)",
@@ -135,13 +139,20 @@ export function createQueryEditor(parent: HTMLElement, doc: string, handlers: Qu
         errorGutter,
         history(),
         drawSelection(),
-        highlightActiveLine(),
         EditorState.allowMultipleSelections.of(true),
         indentOnInput(),
         bracketMatching(),
         closeBrackets(),
         autocompletion({ override: [handlers.complete], icons: false }),
-        keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, ...completionKeymap]),
+        keymap.of([
+          ...closeBracketsKeymap,
+          ...defaultKeymap,
+          ...historyKeymap,
+          ...completionKeymap,
+          indentWithTab,
+          // Tab tuzağından çıkış: Escape sonra Tab (2 sn) ya da Ctrl+M.
+          { key: "Escape", run: temporarilySetTabFocusMode },
+        ]),
         sqlLookExtensions(),
         errorField,
         queryTheme,
@@ -169,9 +180,11 @@ export function createQueryEditor(parent: HTMLElement, doc: string, handlers: Qu
       view.dispatch({
         changes: { from: 0, to: view.state.doc.length, insert: text },
         selection: { anchor: 0 },
-        annotations: programmatic.of(true),
+        annotations: [programmatic.of(true), Transaction.addToHistory.of(false)],
       });
     },
+    getState: () => view.state,
+    setState: (state) => view.setState(state),
     focus: () => view.focus(),
     destroy: () => view.destroy(),
   };

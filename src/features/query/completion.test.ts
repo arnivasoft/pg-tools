@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createCompletionSource, contextAt, type CompletionCtxLike } from "./completion";
+import { createCompletionSource, contextAt, matchItems, replaceRange, type CompletionCtxLike } from "./completion";
 import type { CompletionItem } from "../../ipc/bindings/CompletionItem";
 
 describe("contextAt", () => {
@@ -35,10 +35,33 @@ describe("contextAt", () => {
     ["select * from İstanbul.sipariş.", { kind: "relationMember", relation: "sipariş", schema: "İstanbul" }],
     ['select * from "Ünite', { kind: "relation" }],
     ["select $1 from ", { kind: "relation" }],
+    ["select * from a, ", { kind: "relation" }],
+    ["select * from a x, b y, ", { kind: "relation" }],
+    ["select * from a, app.", { kind: "schemaMember", schema: "app" }],
+    ["select * from a where b, ", { kind: "keyword" }],
+    ["select a, ", { kind: "keyword" }],
+    ["truncate ", { kind: "relation" }],
+    ["truncate app.", { kind: "schemaMember", schema: "app" }],
+    ["alter table ", { kind: "relation" }],
+    ["drop table app.", { kind: "schemaMember", schema: "app" }],
   ];
   for (const [input, expected] of cases) {
     it(JSON.stringify(input), () => expect(contextAt(input)).toEqual(expected));
   }
+});
+
+describe("replaceRange / matchItems", () => {
+  it("açık tırnakla başlayan kısmi ad, imleçten sonraki otomatik kapanış tırnağını kapsar", () => {
+    expect(replaceRange(10, '"Ord', '"')).toEqual({ from: 6, to: 11 });
+    expect(replaceRange(10, '"Ord', "")).toEqual({ from: 6, to: 10 });
+    expect(replaceRange(10, "ord", '"')).toEqual({ from: 7, to: 10 });
+  });
+  it('`"ord` tırnaksız etiketle (orders) ve tırnaklı adla eşleşir; önek önce gelir', () => {
+    const mk = (label: string, quoted = label): CompletionItem => ({ label, quoted, kind: "table", detail: null });
+    const items = [mk("my_order"), mk("orders"), mk("Order Items", '"Order Items"'), mk("zzz")];
+    expect(matchItems(items, '"ord').map((i) => i.label)).toEqual(["orders", "Order Items", "my_order"]);
+    expect(matchItems(items, "")).toHaveLength(4);
+  });
 });
 
 function ctx(text: string): CompletionCtxLike & { abort(): void } {
@@ -166,5 +189,42 @@ describe("createCompletionSource", () => {
     expect(await run(src, ctx("-- from x."))).toBeNull();
     expect(await run(src, ctx("select "))).toEqual(KW());
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("kaynak: kabul aralığı kapanış tırnağını kapsar, süzme etikete göre", async () => {
+    const fetch = vi.fn(async () => [{ label: "orders", quoted: "orders", kind: "table" as const, detail: null }]);
+    const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
+    const text = 'select * from "ord"';
+    const c = ctx(text);
+    (c as { pos: number }).pos = text.length - 1;
+    const p = src(c as never) as Promise<{ from: number; to: number; options: unknown[] }>;
+    await vi.advanceTimersByTimeAsync(150);
+    const r = await p;
+    expect(r.from).toBe(text.length - 5);
+    expect(r.to).toBe(text.length);
+    expect(r.options).toHaveLength(1);
+  });
+
+  it("select app.: kolon boşsa şema olarak ilişkileri ister", async () => {
+    const fetch = vi.fn(async (req: { type: string }) => (req.type === "columns" ? [] : [item("orders")]));
+    const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
+    const p = run(src, ctx("select app."));
+    await vi.advanceTimersByTimeAsync(150);
+    const r = await p;
+    expect(fetch).toHaveBeenNthCalledWith(2, { type: "relations", schema: "app" });
+    expect(r!.options).toHaveLength(1);
+  });
+
+  it("ilişki bağlamı: istekler art arda; ilk istekten sonra iptal edilirse ikincisi atılmaz", async () => {
+    const c = ctx("select * from ");
+    const fetch = vi.fn(async () => {
+      c.abort();
+      return [item("orders")];
+    });
+    const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
+    const p = run(src, c);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(await p).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

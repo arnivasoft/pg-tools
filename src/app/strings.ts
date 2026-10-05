@@ -121,6 +121,7 @@ export const t = {
   toast: { dismiss: "Kapat" },
   query: {
     objectTab: "Nesne",
+    errorMark: "Hata",
     hint: {
       autocommit: "Bu ifade transaction bloğunda çalışamaz; sekmeyi autocommit kipine alın.",
       rollback: "Transaction hata durumunda; yalnızca ROLLBACK yapılabilir.",

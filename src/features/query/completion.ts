@@ -25,7 +25,12 @@ export type CompletionContextKind =
 
 type Tok = { t: "word" | "ident" | "dot" | "punct"; v: string };
 
-const REL_KEYWORDS = new Set(["from", "join", "update", "into"]);
+const REL_KEYWORDS = new Set(["from", "join", "update", "into", "truncate", "table"]);
+/** Virgülle sürdürülen FROM listesini bitiren sözcükler. */
+const LIST_STOP = new Set([
+  "select", "where", "on", "group", "order", "having", "limit", "offset", "set", "values",
+  "union", "intersect", "except", "returning", "using", "fetch", "when", "then", "and", "or",
+]);
 const WORD_CH = /[\p{L}\p{N}_$]/u;
 const DOLLAR_TAG = /^\$(?:[\p{L}_][\p{L}\p{N}_]*)?\$/u;
 
@@ -133,6 +138,22 @@ export function analyzeBefore(text: string): { context: CompletionContextKind; p
 }
 
 const isKw = (t: Tok | undefined): boolean => t?.t === "word" && REL_KEYWORDS.has(t.v.toLowerCase());
+
+/** `toks[idx]` bir ilişki adı konumundan hemen önce mi (FROM/JOIN/... ya da `from a, b,` virgülü)? */
+function relPos(toks: Tok[], idx: number): boolean {
+  const t = toks[idx];
+  if (isKw(t)) return true;
+  if (t?.t !== "punct" || t.v !== ",") return false;
+  for (let k = idx - 1; k >= 0; k--) {
+    const u = toks[k]!;
+    if (u.t === "word") {
+      const w = u.v.toLowerCase();
+      if (w === "from" || w === "join") return true;
+      if (LIST_STOP.has(w)) return false;
+    } else if (u.t === "punct" && u.v !== ",") return false;
+  }
+  return false;
+}
 const isName = (t: Tok | undefined): t is Tok => t !== undefined && (t.t === "word" || t.t === "ident");
 
 function classify(toks: Tok[]): CompletionContextKind {
@@ -145,10 +166,10 @@ function classify(toks: Tok[]): CompletionContextKind {
       const s = toks[toks.length - 4];
       if (isName(s)) return { kind: "relationMember", relation: a.v, schema: s.v };
     }
-    if (isKw(before)) return { kind: "schemaMember", schema: a.v };
+    if (before && relPos(toks, toks.length - 3)) return { kind: "schemaMember", schema: a.v };
     return { kind: "relationMember", relation: a.v };
   }
-  if (isKw(last)) return { kind: "relation" };
+  if (last && relPos(toks, toks.length - 1)) return { kind: "relation" };
   return { kind: "keyword" };
 }
 
@@ -182,6 +203,29 @@ const TYPE_OF: Record<CompletionKind, string> = {
   function: "function",
 };
 
+/**
+ * Değiştirilecek aralık: yazılmış kısmi ad `"` ile başlıyorsa ve imleçten hemen sonra `closeBrackets`in
+ * eklediği kapanış `"` varsa onu da kapsar (yoksa kabul sonrası `""` kalır).
+ */
+export function replaceRange(pos: number, partial: string, nextChar: string): { from: number; to: number } {
+  const to = partial.startsWith('"') && nextChar === '"' ? pos + 1 : pos;
+  return { from: pos - partial.length, to };
+}
+
+/** Yazılan kısmi adı (başındaki `"` atılır) ham etikete göre süzer: önce önek, sonra içerme. */
+export function matchItems(items: CompletionItem[], partial: string): CompletionItem[] {
+  const bare = partial.replace(/^"/, "").toLowerCase();
+  if (bare === "") return items;
+  const prefix: CompletionItem[] = [];
+  const rest: CompletionItem[] = [];
+  for (const it of items) {
+    const l = it.label.toLowerCase();
+    if (l.startsWith(bare)) prefix.push(it);
+    else if (l.includes(bare)) rest.push(it);
+  }
+  return [...prefix, ...rest];
+}
+
 export function createCompletionSource(deps: CompletionSourceDeps): CompletionSource {
   const keywords = deps.keywords ?? keywordCompletionSource(PostgreSQL, true);
   const debounceMs = deps.debounceMs ?? 150;
@@ -190,7 +234,6 @@ export function createCompletionSource(deps: CompletionSourceDeps): CompletionSo
     const text = c.state.doc.sliceString(0, c.pos);
     const { context, partial } = analyzeBefore(text);
     if (context.kind === "none") return null;
-    const from = c.pos - partial.length;
     const kwFallback = (): CompletionResult | null | Promise<CompletionResult | null> =>
       context.kind === "schemaMember" || context.kind === "relationMember" ? null : keywords(ctx);
 
@@ -207,35 +250,49 @@ export function createCompletionSource(deps: CompletionSourceDeps): CompletionSo
 
     let items: CompletionItem[];
     try {
-      items = await requestItems(deps.fetch, context);
+      items = await requestItems(deps, context, () => aborted || c.aborted);
     } catch {
       items = [];
     }
     if (aborted || c.aborted) return null;
+    items = matchItems(items, partial);
     if (items.length === 0) return kwFallback();
     const options: Completion[] = items.map((it) => ({
       label: it.quoted,
       detail: it.detail ?? undefined,
       type: TYPE_OF[it.kind],
     }));
-    return { from, options };
+    const next = c.state.doc.sliceString(c.pos, c.pos + 1);
+    const { from, to } = replaceRange(c.pos, partial, next);
+    // filter:false -> süzme/sıralama yukarıda ham etikete göre yapıldı (`"ord` -> `orders` eşleşir).
+    return { from, to, options, filter: false };
   };
 }
 
+/**
+ * Her istek arka uçta oturum kilidini (en çok 5 sn) tutar: istekler art arda yapılır, aralarda
+ * iptal/meşgul denetlenir (paralel istek kilit penceresini ikiye katlar).
+ */
 async function requestItems(
-  fetch: CompletionSourceDeps["fetch"],
+  deps: CompletionSourceDeps,
   ctx: Exclude<CompletionContextKind, { kind: "keyword" | "none" }>,
+  isAborted: () => boolean,
 ): Promise<CompletionItem[]> {
+  const { fetch } = deps;
   switch (ctx.kind) {
     case "schemaMember":
       return fetch({ type: "relations", schema: ctx.schema });
-    case "relationMember":
-      return fetch({ type: "columns", schema: ctx.schema ?? null, relation: ctx.relation });
+    case "relationMember": {
+      const cols = await fetch({ type: "columns", schema: ctx.schema ?? null, relation: ctx.relation });
+      if (cols.length > 0 || ctx.schema !== undefined) return cols;
+      // `select app.`: `app` aslında şema olabilir.
+      if (isAborted() || deps.isBusy()) return [];
+      return fetch({ type: "relations", schema: ctx.relation });
+    }
     case "relation": {
-      const [rels, schemas] = await Promise.all([
-        fetch({ type: "relations", schema: null }),
-        fetch({ type: "schemas", includeSystem: false }),
-      ]);
+      const rels = await fetch({ type: "relations", schema: null });
+      if (isAborted() || deps.isBusy()) return rels;
+      const schemas = await fetch({ type: "schemas", includeSystem: false });
       return [...rels, ...schemas];
     }
   }
