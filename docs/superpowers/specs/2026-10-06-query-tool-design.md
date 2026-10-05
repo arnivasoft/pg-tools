@@ -112,7 +112,7 @@ Bir ifade için:
 
 - **Autocommit** (varsayılan): her ifade kendi transaction'ında; yukarıdaki imleç için geçici `BEGIN` ifade bitince `COMMIT` ile kapatılır (okuma) — yazma ifadelerinde sarmalama yapılmaz.
 - **Manuel:** ilk ifadede otomatik `BEGIN`; arayüzde **Commit**/**Rollback** düğmeleri ve "açık transaction" rozeti (süre sayacı). Sekme/uygulama kapanırken açık transaction varsa onay sorulur (kaydet = COMMIT, atma = ROLLBACK, vazgeç). Hatada transaction `aborted` durumuna düşer; arayüz uyarır ve yalnızca Rollback'e izin verir.
-- Kullanıcı elle `BEGIN`/`COMMIT` yazarsa durum, sunucudan dönen `ReadyForQuery` işaretinden (idle/in-transaction/failed) okunur ve rozet buna göre güncellenir (tokio-postgres bu bilgiyi vermiyorsa her ifade sonrası `SELECT txid_current_if_assigned() IS NOT NULL` yerine `pg_current_xact_id_if_assigned` kullanılmaz; durum, istemci tarafı ifade sınıflandırmasından türetilir — bkz. §10 risk 2).
+- Kullanıcı elle `BEGIN`/`COMMIT` yazarsa durum **ifade sınıflandırmasından** türetilir (tokio-postgres 0.7.18 `ReadyForQuery` durumunu dışarı vermez; kaynak doğrulandı). Durum makinesi `Idle`/`InTransaction`/`Failed`; her `Tx` sınıfı ifade ve her hata sonrası tek bir yeniden eşitleme sorgusu (`SELECT statement_timestamp() <> transaction_timestamp()`; `25P02` ise `Failed`) çalışır ve çelişkide **sunucudan gelen cevap kazanır**. Sınır: fonksiyon/`DO` içi dinamik `COMMIT` sınıflandırmada görünmez; bir sonraki `Tx`/hata eşitlemesine kadar durum eskimiş olabilir.
 
 ---
 
@@ -181,7 +181,7 @@ Açık sekmelerin taslakları (metin, sunucu/veritabanı kimliği, mod ayarları
 ## 10. Açık riskler
 
 1. **İmleç ile metin sonuçları:** `DECLARE … CURSOR` + `simple_query` her ifade türünde çalışmaz (`INSERT … RETURNING`, `EXPLAIN`, `SHOW`); doğrudan yoldaki sonuç tümü gelip bellekte kesildiği için dev bir `INSERT … RETURNING` bellek şişirebilir — sınır olarak sunucu tarafı `RETURNING` boyutu kullanıcı sorumluluğundadır (belgelenir).
-2. **Transaction durumu:** tokio-postgres `ReadyForQuery` işaretini dışarı vermez; kullanıcı elle `BEGIN` yazarsa durum yalnızca sözlüksel sınıflandırmadan türetilir (kaçak olasılığı: fonksiyon içinde dinamik `COMMIT`/`BEGIN`). Gerekirse çözüm: her ifade sonrası ucuz `SHOW transaction_isolation` yerine bağlantıda `txid_current_if_assigned()` kontrolü (PG 13+: `pg_current_xact_id_if_assigned()`); karar planlama aşamasında deneyle verilir.
+2. **Transaction durumu:** tokio-postgres durumu vermediği için sınıflandırma tabanlı durum makinesi + hedefli yeniden eşitleme kullanılır (§4.5); karar Plan 5'te verildi. Kalan risk: dinamik `COMMIT`/`ROLLBACK` içeren fonksiyonlar.
 3. **Tehlikeli ifade sınıflandırması sözlüksel:** parser değildir; atlatma mümkündür. Kilit ve etiket mekanizmaları asıl güvence, onay ikincil güvencedir.
 4. **Tam yazma varsayılan:** üretim sunucusuna yanlış sekmeden yazma riski yüksek; rengi/etiket/kilit/manuel mod varsayılanları bu nedenle üretim etiketinde sıkıdır. Etiket atanmamış sunucular korunmasızdır — ilk Query Tool açılışında "bu sunucunun ortamını seçin" istemi (Üretim/Test/Geliştirme/Atla) gösterilir.
 5. **Bellek:** CodeMirror + ızgara + çoklu sekme boşta bellek hedefini etkilemez ama açıkken artar; ölçüt 250 MB (§1.3) planda ölçülür, aşılırsa sekme başına yüklenmiş satır sınırı düşürülür.
