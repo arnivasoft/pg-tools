@@ -102,7 +102,7 @@ const COLOR_RGB: [(u8, u8, u8); 8] = [
 /// `#rrggbb` değerine RGB uzaklığı en küçük ön ayar rengi; geçersizse `None`.
 pub fn nearest_color(hex: &str) -> Option<&'static str> {
     let h = hex.trim().strip_prefix('#')?;
-    if h.len() != 6 || !h.is_ascii() {
+    if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let ch = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok().map(i32::from);
@@ -341,7 +341,7 @@ mod tests {
         assert_eq!(nearest_color("#ff0000"), Some("red"));
         assert_eq!(nearest_color("#0000ff"), Some("blue"));
         assert_eq!(nearest_color("#808080"), Some("gray"));
-        for bad in ["red", "", "#12", "#gggggg", "#ççç"] {
+        for bad in ["red", "", "#12", "#gggggg", "#ççç", "#+f+f+f"] {
             assert_eq!(nearest_color(bad), None, "{bad}");
         }
     }

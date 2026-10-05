@@ -126,7 +126,18 @@ impl ServerConfig {
     /// Etiket üretim ortamını işaret ediyorsa `true` (büyük/küçük harf duyarsız).
     pub fn is_production(&self) -> bool {
         self.label.as_deref().is_some_and(|l| {
-            matches!(l.trim().to_lowercase().as_str(), "üretim" | "uretim" | "production" | "prod")
+            // Türkçe büyük İ / küçük ı ve birleşik nokta (U+0307) ASCII "i"ye indirgenir.
+            let folded: String = l
+                .trim()
+                .chars()
+                .filter(|&ch| ch != '\u{307}')
+                .map(|ch| if ch == 'İ' || ch == 'ı' { 'i' } else { ch })
+                .collect::<String>()
+                .to_lowercase()
+                .chars()
+                .filter(|&ch| ch != '\u{307}')
+                .collect();
+            matches!(folded.as_str(), "üretim" | "uretim" | "production" | "prod")
         })
     }
 
@@ -209,8 +220,18 @@ mod tests {
     }
 
     #[test]
+    fn registry_rejects_invalid_color_on_upsert() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = crate::registry::Registry::load(dir.path().join("servers.json")).unwrap().registry;
+        let mut c = ServerConfig::new("p", "h", 5432, "u");
+        c.color = Some("magenta".into());
+        assert!(matches!(reg.upsert(c), Err(Error::Invalid(m)) if m.contains("renk")));
+        assert!(reg.servers().is_empty());
+    }
+
+    #[test]
     fn production_label_detection() {
-        for (label, expected) in [("Üretim", true), ("uretim", true), ("PRODUCTION", true), ("prod", true), ("Test", false), ("preprod", false)] {
+        for (label, expected) in [("Üretim", true), ("ÜRETİM", true), ("üretİm", true), ("URETIM", true), ("uretım", true), ("PRODUCTİON", true), ("uretim", true), ("PRODUCTION", true), ("prod", true), ("Test", false), ("preprod", false)] {
             let mut c = ServerConfig::new("p", "h", 5432, "u");
             c.label = Some(label.into());
             assert_eq!(c.is_production(), expected, "{label}");
