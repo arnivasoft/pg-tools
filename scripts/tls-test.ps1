@@ -93,17 +93,33 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "$($s.Name) başlatılamadı" }
     }
 
+    # Kapsayıcının son günlük satırları (PostgreSQL günlüğü; parola içermez). Yerel komutun stderr'i
+    # PS 5.1'de ErrorActionPreference=Stop iken hata sayılmasın diye geçici olarak Continue.
+    function Get-LogTail([string]$name) {
+        $old = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try { ((docker logs --tail 20 $name 2>&1) | ForEach-Object { "$_" }) -join "`n" } finally { $ErrorActionPreference = $old }
+    }
+    function Test-Running([string]$name) {
+        $old = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try { "$(docker inspect -f '{{.State.Running}}' $name 2>$null)".Trim() -eq "true" } finally { $ErrorActionPreference = $old }
+    }
+
     foreach ($s in $servers) {
         $ready = $false
         for ($i = 0; $i -lt 90; $i++) {
+            # Erken çöken kapsayıcı için 90 sn bekleme: çalışmıyorsa hemen günlükle birlikte dur.
+            if (-not (Test-Running $s.Name)) {
+                throw "$($s.Name) çalışmıyor (erken çıktı). Son günlük satırları:`n$(Get-LogTail $s.Name)"
+            }
             # 127.0.0.1 üzerinden: ilk başlatmadaki geçici (yalnızca soket) sunucu değil, kalıcı sunucu beklenir.
             docker exec $s.Name pg_isready -U postgres -h 127.0.0.1 *> $null
             if ($LASTEXITCODE -eq 0) { $ready = $true; break }
             Start-Sleep -Seconds 1
         }
         if (-not $ready) {
-            docker logs $s.Name
-            throw "$($s.Name) hazır olmadı"
+            throw "$($s.Name) hazır olmadı. Son günlük satırları:`n$(Get-LogTail $s.Name)"
         }
     }
 
