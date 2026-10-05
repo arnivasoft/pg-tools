@@ -216,3 +216,5 @@ PG 18 (Docker, 127.0.0.1), **debug** test derlemesi, `PGT_QUERY_BIG=1 cargo test
 
 Süreler tek çalıştırmadır, assert edilmez; CSV hızı debug derlemede ve yerel Docker'da ölçüldü (yayın derlemesinde
 daha yüksek olması beklenir).
+
+Sınır: akış sayaçları yalnızca **satır** sayısını sınırlar; hücre başına bayt sınırı yoktur (1 GB'lık tek bir `bytea`/`text` hücresi bütün olarak bellekte tutulur ve gönderilir). Geniş satırlarda tepe bellek `satır x genişlik` ile büyür; ölçümlerdeki 1M satır dar (tek `int`) satırlardır.

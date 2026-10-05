@@ -18,9 +18,9 @@ sınırlar. Ayrıntılar için ilgili kod yorumlarına bakın.
   `charOffset + position - 1`.
 
 ## Hata kodları (`ErrorPayload.code`; metinle eşleştirmeyin)
-`confirmation_required`, `locked`, `busy`, `tx_failed`, `open_transaction` (`QueryErrorCode.ts`; şu an kullanılmıyor
--> Plan 6'da tür koruyucusu ekleyin). Diğer hatalar genel kodlarla gelir (`query`, `not_found`, `not_connected`,
-`invalid`, ...). `qt_complete` zaman aşımı `invalid` olarak görünür.
+Tam liste (`QUERY_ERROR_CODES` / `QueryErrorCode.ts`): `confirmation_required`, `locked`, `busy`, `tx_failed`,
+`open_transaction` (tür şu an kullanılmıyor -> Plan 6'da tür koruyucusu ekleyin). Diğer hatalar genel kodlarla gelir (`query`, `not_found`, `not_connected`,
+`invalid`, ...). `qt_complete` 5 sn'lik zaman aşımına uğrarsa `invalid` kodu ile görünür.
 
 ## Onay akışı
 - Onay arka uçta zorunludur: `qt_run` `confirmed=false` ile tehlikeli/üretim-yazan betikte `confirmation_required`
@@ -43,7 +43,7 @@ sınırlar. Ayrıntılar için ilgili kod yorumlarına bakın.
   yarış penceresi taşır.
 - Meşgul oturumu `close(Rollback)` zorla kapatır; sink'e "kullanıcı iptal etti" iletisi gider (`connection_lost`
   ayrımı yok). `close_sessions_of` oturumları sırayla kapatır (en kötü N x 5 sn).
-- Çıkışta `close_all` (<= 7 sn).
+- Çıkışta `close_all` (<= 7 sn). `main.rs` boşta oturumları 30 dk sonra uyutur (`reap_idle`); sonraki ifade oturumu yeniden açar.
 
 ## Diğer
 - Tamamlama oturum meşgulken ya da uyurken (idle reap) **boş liste** döner; beklemez.
@@ -54,3 +54,6 @@ sınırlar. Ayrıntılar için ilgili kod yorumlarına bakın.
   kodu taşır; ayrım iletidendir (ayrı kod yok) — gerekirse Plan 6'da ayrı kod eklenebilir.
 - `smoke-release.ps1` `qt_*` komutlarını çağırmaz (yalnızca açılış); Plan 6 arayüzü gelince uçtan uca duman testi eklenmeli.
 - NOTICE'lar ifade başına en çok 100 adet / 2.000 karakterle sınırlanır.
+- **Hücre başına bayt sınırı yok**: bellek yalnızca satır sayısıyla sınırlıdır (limit/parça). 1 GB'lık bir `bytea`/`text`
+  hücresi bütün olarak bellekte tutulur ve `Rows` olayıyla gönderilir. Plan 6 arayüzü hücre gösterimini kırpmalı;
+  hücre/parça başına bayt sınırı olası bir izleme işidir.

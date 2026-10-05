@@ -90,13 +90,19 @@ Tüm sürümler için `scripts/test-matrix.ps1` (yukarıda) `pgt-query` testleri
 `idle in transaction` kalmaması) yine de çalışır. Süre assert edilmez; ölçümler `docs/performance.md`'dedir.
 
 ### Query Tool güvenlik ve durum sınırları
-- **Salt okunur kilit bir güvenlik sınırı DEĞİLDİR.** Güçlü bir korumadır (oturum `default_transaction_read_only=on`,
-  istemci tarafında yazma ifadesi sınıflandırması, kilitli oturumda `SET default_transaction_read_only`/`transaction_read_only`,
-  `READ WRITE` ve `set_config(` çağrılarının reddi) ama kararlı bir kullanıcı aşabilir. Bilinen atlatmalar:
-  `DO` blokları ve `EXECUTE` ile dinamik SQL (içeride `SET`/`set_config`/DML), hesaplanmış adlı `set_config`
-  (yalnızca **sabit** `set_config(...)` çağrıları engellenir), yazan fonksiyonlar (sunucu `read only` transaction'ı
-  yine de çoğunu reddeder, ama transaction ayarı fonksiyon içinden değiştirilebilir). **Kesin garanti için sunucuda
-  salt okunur bir veritabanı rolü kullanın.**
+- **Salt okunur kilit bir güvenlik sınırı DEĞİLDİR.** Güçlü bir korumadır; kesin garanti için sunucuda **salt okunur
+  bir veritabanı rolü kullanın.** Kilitli oturumda istemci şunları reddeder (`classify.rs` `changes_read_only`,
+  testler `classify.rs` ve `session.rs`): `Write`/`Ddl` sınıfı ifadeler; `transaction_read_only` /
+  `default_transaction_read_only` içeren `SET`/`RESET`/`DISCARD`/`set_config`; `SET SESSION CHARACTERISTICS`;
+  `BEGIN`/`START TRANSACTION`/`SET TRANSACTION ... READ WRITE`; `RESET ALL` ve `DISCARD ALL`; ve **her**
+  `set_config` sözcüğü (hesaplanmış ad dahil, `DO` gövdesindeki dolar tırnaklı metin dahil; yanlış pozitif kabul
+  edilir). Oturum varsayılanı `default_transaction_read_only=on`'dır, ama bu yalnızca bir **varsayılandır**
+  (kullanıcı `SET`/`BEGIN READ WRITE` ile değiştirebilir; istemci bunları yakalar, sunucu yakalamaz).
+  Hâlâ atlatabilecekler (**ilkesel olarak; bir testle doğrulanmadı**): `DO`/fonksiyon içinde `EXECUTE` ile
+  ayar adını dize parçalarından kurmak (`'SET default_transaction_' || 'read_only = off'`: metinsel tarama
+  parçalanmış adı görmez); gövdesinde ayarı değiştiren veya yazan, `SELECT fonksiyon()` ile çağrılan fonksiyonlar
+  (özellikle `SECURITY DEFINER`; sınıflandırıcı yalnızca çağrı ifadesini görür, `set_config` sözcüğü fonksiyonun
+  içinde kalır); sınıflandırıcının tanımadığı yazan ifade biçimleri.
 - **Onay kapısı arka uçta zorunludur**: tehlikeli ifadeler (`DROP`, `TRUNCATE`, `WHERE`'siz `UPDATE`/`DELETE` vb.)
   ve üretim etiketli sunucuda yazan ifadeler `confirmed = true` olmadan `qt_run` tarafından reddedilir
   (`confirmation_required`); arayüz yalnızca onay diyaloğunu gösterir, kuralı uygulamaz.
@@ -110,6 +116,9 @@ Tüm sürümler için `scripts/test-matrix.ps1` (yukarıda) `pgt-query` testleri
   transaction açık kalır (`idle in transaction`); imleç tükenince, yeni ifadede, `close`'ta ya da **5 dakika** boşta
   kalınca (`DEFAULT_CURSOR_IDLE`) kapatılır. Sunucuda `idle_in_transaction_session_timeout` 5 dakikadan kısaysa
   sunucu önce bağlantıyı keser. CSV dışa aktarma ayrı bir imleç kullanır (ızgara imlecini etkilemez).
+- **Bellek sözleşmesi yalnızca satır sayısını sınırlar**: hücre/satır başına bayt sınırı yoktur. 1 GB'lık bir
+  `bytea`/`text` hücresi bellekte tutulur ve olayla bütün olarak gönderilir; `memory.rs` yalnızca satır sayaçlarını
+  doğrular. Plan 6 arayüzü gösterimi kırpmalı; hücre/parça başına bayt sınırı olası bir izleme işidir.
 
 ## pgbouncer ve `options` yedek yolu
 Oturumun salt okunur/zaman aşımı/`search_path` ayarları normalde `options` başlangıç parametresiyle gönderilir.
