@@ -105,7 +105,7 @@ async fn partitions_use_partition_of_and_skip_inherited_indexes() {
         let part = NodeId::parse(&parts[0].id).unwrap();
         let ddl = fx.catalog.ddl(&part).await.unwrap();
         assert!(
-            ddl.contains("CREATE TABLE IF NOT EXISTS app.events_2026 PARTITION OF app.events\n    FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');"),
+            ddl.contains("CREATE TABLE IF NOT EXISTS app.events_2026 PARTITION OF app.events (\n    CONSTRAINT events_2026_day_check CHECK (happened_on > '2025-12-31'::date)\n)\n    FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');"),
             "{ddl}"
         );
         assert!(!ddl.contains("CREATE INDEX"), "üst tablodan gelen index'ler yazılmamalı:\n{ddl}");

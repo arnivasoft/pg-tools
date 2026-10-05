@@ -121,7 +121,14 @@ pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: u32, table: u32) -> Res
     let unlogged = if h.unlogged { "UNLOGGED " } else { "" };
     let mut create = match (&h.partition_of, &h.partition_bound) {
         (Some(parent), Some(bound)) => {
-            format!("CREATE {unlogged}TABLE IF NOT EXISTS {} PARTITION OF {parent}\n    {bound}", h.qname)
+            let local = if constraints.is_empty() {
+                String::new()
+            } else {
+                let lines: Vec<String> =
+                    constraints.iter().map(|k| format!("    CONSTRAINT {} {}", k.get::<_, String>("name"), k.get::<_, String>("def"))).collect();
+                format!(" (\n{}\n)", lines.join(",\n"))
+            };
+            format!("CREATE {unlogged}TABLE IF NOT EXISTS {} PARTITION OF {parent}{local}\n    {bound}", h.qname)
         }
         _ => {
             let mut lines: Vec<String> = cols.iter().map(column_line).collect();
