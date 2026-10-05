@@ -1,8 +1,11 @@
 use pgt_catalog::node::{NodeId, TreeNode};
 use pgt_catalog::props::PropertySection;
+use std::sync::RwLock;
+
 use pgt_core::config::ServerConfig;
 use pgt_core::credentials::Credentials;
 use pgt_core::connection::{ConnectionManager, ServerInfo};
+use pgt_core::registry::Registry;
 use pgt_core::{Error, ErrorPayload};
 use tauri::State;
 use uuid::Uuid;
@@ -72,14 +75,27 @@ pub async fn connect_server(state: State<'_, AppState>, server_id: Uuid, passwor
     };
     let info = state.manager.connect(config.clone(), effective).await?;
     if let Some(p) = password {
-        if remember && !config.save_password {
-            let mut updated = config.clone();
-            updated.save_password = true;
-            state.registry.write().unwrap().upsert(updated)?;
-        }
-        state.credentials.remember(server_id, &p, remember || config.save_password)?;
+        remember_after_connect(&state.registry, &state.credentials, &config, &p, remember);
     }
     Ok(info)
+}
+
+/// Başarılı bir bağlantıdan sonra yazılan parolayı saklar. Bağlantı zaten kuruldu: kalıcı kayıt
+/// (servers.json ya da Kimlik Bilgisi Yöneticisi) başarısız olursa yalnızca uyarı günlüklenir;
+/// parola her durumda oturum belleğinde kalır (Credentials::remember önce oturumu günceller).
+fn remember_after_connect(registry: &RwLock<Registry>, creds: &Credentials, config: &ServerConfig, password: &str, remember: bool) {
+    let mut persist = config.save_password;
+    if remember && !config.save_password {
+        let mut updated = config.clone();
+        updated.save_password = true;
+        match registry.write().unwrap().upsert(updated) {
+            Ok(_) => persist = true,
+            Err(e) => tracing::warn!(server = %config.id, error = %e, "\"parolayı kaydet\" tercihi kaydedilemedi"),
+        }
+    }
+    if let Err(e) = creds.remember(config.id, password, persist) {
+        tracing::warn!(server = %config.id, error = %e, "parola kalıcı depoya yazılamadı; yalnızca bu oturumda kullanılacak");
+    }
 }
 
 #[tauri::command]
@@ -115,6 +131,67 @@ mod tests {
 
     fn creds() -> Credentials {
         Credentials::new(Arc::new(MemorySecretStore::default()))
+    }
+
+    struct FailingStore;
+    impl pgt_core::credentials::SecretStore for FailingStore {
+        fn get(&self, _: &str) -> pgt_core::Result<Option<String>> {
+            Ok(None)
+        }
+        fn set(&self, _: &str, _: &str) -> pgt_core::Result<()> {
+            Err(Error::Credential("depo kilitli".into()))
+        }
+        fn delete(&self, _: &str) -> pgt_core::Result<()> {
+            Err(Error::Credential("depo kilitli".into()))
+        }
+    }
+
+    fn registry_with(dir: &std::path::Path, config: &ServerConfig) -> RwLock<Registry> {
+        let mut r = Registry::load(dir.join("servers.json")).unwrap().registry;
+        r.upsert(config.clone()).unwrap();
+        RwLock::new(r)
+    }
+
+    #[test]
+    fn credential_store_failure_keeps_the_session_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = cfg(Uuid::new_v4());
+        config.save_password = false;
+        let registry = registry_with(dir.path(), &config);
+        let c = Credentials::new(Arc::new(FailingStore));
+        remember_after_connect(&registry, &c, &config, "typed", true);
+        assert_eq!(c.password(config.id).unwrap().as_deref(), Some("typed"));
+        assert!(registry.read().unwrap().get(config.id).unwrap().save_password);
+    }
+
+    #[test]
+    fn registry_save_failure_keeps_the_session_password_and_does_not_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = cfg(Uuid::new_v4());
+        config.save_password = false;
+        let registry = registry_with(dir.path(), &config);
+        // servers.json'ın yerine bir dizin koy: sonraki kayıt (rename) başarısız olur.
+        std::fs::remove_file(dir.path().join("servers.json")).unwrap();
+        std::fs::create_dir(dir.path().join("servers.json")).unwrap();
+        let store = Arc::new(MemorySecretStore::default());
+        let c = Credentials::new(store.clone());
+        remember_after_connect(&registry, &c, &config, "typed", true);
+        assert_eq!(c.password(config.id).unwrap().as_deref(), Some("typed"));
+        use pgt_core::credentials::{SecretStore, password_key};
+        assert_eq!(store.get(&password_key(config.id)).unwrap(), None, "tercih kaydedilemediyse kalıcı depoya yazılmamalı");
+    }
+
+    #[test]
+    fn remember_persists_when_preference_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = cfg(Uuid::new_v4());
+        config.save_password = false;
+        let registry = registry_with(dir.path(), &config);
+        let store = Arc::new(MemorySecretStore::default());
+        let c = Credentials::new(store.clone());
+        remember_after_connect(&registry, &c, &config, "typed", true);
+        use pgt_core::credentials::{SecretStore, password_key};
+        assert_eq!(store.get(&password_key(config.id)).unwrap().as_deref(), Some("typed"));
     }
 
     fn cfg(id: Uuid) -> ServerConfig {
