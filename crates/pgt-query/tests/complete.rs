@@ -139,7 +139,6 @@ async fn completes_schemas_relations_and_columns_independent_of_search_path() {
 
         // Arama yolunu kullanan istek (schema yok): yol bozukken boş, düzelince tablolar.
         assert!(fx.complete(id, CompletionRequest::Relations { schema: None }).await.is_empty());
-        fx.qm.invalidate_completion_cache(id);
         fx.run(id, "set search_path = qc_app").await;
         assert!(labels(&fx.complete(id, CompletionRequest::Relations { schema: None }).await).contains(&"orders"));
         let cols = fx.complete(id, CompletionRequest::Columns { schema: None, relation: "orders".into() }).await;
@@ -234,5 +233,45 @@ async fn complete_inside_transactions() {
         // Geri alınan DDL önbellekten de silinmiştir.
         let items = fx.complete(id, rel("qc_app")).await;
         assert!(!labels(&items).contains(&"in_tx"), "{items:?}");
+    }
+}
+
+#[tokio::test]
+async fn complete_does_not_wake_a_sleeping_session() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup(FIXTURE).await;
+        let id = fx.open(TxMode::Autocommit).await;
+        fx.qm.reap_idle(Duration::ZERO);
+        assert!(fx.qm.is_asleep(id).unwrap());
+        assert!(fx.complete(id, rel("qc_app")).await.is_empty());
+        assert!(fx.qm.is_asleep(id).unwrap(), "tamamlama oturumu uyandırmamalı");
+        // Sonraki `run` yeniden bağlanır; sonra tamamlama çalışır.
+        fx.run(id, "select 1").await;
+        assert_eq!(fx.complete(id, rel("qc_app")).await.len(), 4);
+    }
+}
+
+#[tokio::test]
+async fn complete_keeps_the_grid_cursor_and_search_path_changes_invalidate() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup(FIXTURE).await;
+        let id = fx.open(TxMode::Autocommit).await;
+        let mut sink = VecSink::default();
+        fx.qm.run(id, "select g from generate_series(1, 100) g", Scope::All, 10, true, &mut sink).await.unwrap();
+        assert_eq!(labels(&fx.complete(id, rel("qc_app")).await).len(), 4);
+        let mut more = VecSink::default();
+        fx.qm.more(id, 0, &mut more).await.unwrap();
+        assert!(!more.0.iter().any(|e| matches!(e, QueryEvent::Failed { .. })), "{:?}", more.0);
+
+        // SET (Other sınıfı) arama yoluna bağlı önbelleği boşaltır: elle geçersiz kılmadan.
+        fx.run(id, "set search_path = nowhere").await;
+        assert!(fx.complete(id, CompletionRequest::Relations { schema: None }).await.is_empty());
+        fx.run(id, "set search_path = qc_app").await;
+        let items = fx.complete(id, CompletionRequest::Relations { schema: None }).await;
+        assert!(labels(&items).contains(&"orders"), "{items:?}");
     }
 }

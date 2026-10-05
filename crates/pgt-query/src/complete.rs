@@ -50,7 +50,7 @@ pub struct CompletionItem {
 
 const SCHEMAS_SQL: &str = "SELECT n.nspname::pg_catalog.text, pg_catalog.quote_ident(n.nspname)::pg_catalog.text \
      FROM pg_catalog.pg_namespace n \
-     WHERE $1::pg_catalog.bool OR (n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema') \
+     WHERE $1::pg_catalog.bool OR (pg_catalog.substr(n.nspname::pg_catalog.text, 1, 3) <> 'pg_' AND n.nspname <> 'information_schema') \
      ORDER BY n.nspname LIMIT 500";
 
 const RELATIONS_SQL: &str = "SELECT c.relname::pg_catalog.text, pg_catalog.quote_ident(c.relname)::pg_catalog.text, \
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn catalog_names_are_all_qualified() {
         for sql in [SCHEMAS_SQL, RELATIONS_SQL, COLUMNS_SQL] {
-            for bad in [" pg_namespace", " pg_class", " pg_attribute", " quote_ident", " format_type", " current_schemas"] {
+            for bad in [" substr(", " pg_namespace", " pg_class", " pg_attribute", " quote_ident", " format_type", " current_schemas"] {
                 assert!(!sql.contains(bad), "{bad}");
             }
         }

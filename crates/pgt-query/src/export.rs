@@ -119,9 +119,13 @@ fn io_error(what: &str, path: &Path, e: &std::io::Error) -> Error {
     Error::Config(format!("{what}: {} ({})", path.display(), e.kind()))
 }
 
+/// Benzersiz geçici dosya adı (`<hedef>.<pid>-<n>.tmp`): kullanıcının `<hedef>.tmp` dosyasına ve eşzamanlı
+/// dışa aktarmalara çarpmaz.
 pub(crate) fn tmp_path(path: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut s = path.as_os_str().to_os_string();
-    s.push(".tmp");
+    s.push(format!(".{}-{n}.tmp", std::process::id()));
     PathBuf::from(s)
 }
 
@@ -143,7 +147,7 @@ pub(crate) fn check_target(path: &Path) -> Result<()> {
 impl CsvFile {
     pub(crate) fn create(path: &Path, opts: &CsvOptions, columns: &[String]) -> Result<Self> {
         let tmp = tmp_path(path);
-        let file = std::fs::File::create(&tmp).map_err(|e| io_error("Dosya oluşturulamadı", &tmp, &e))?;
+        let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e| io_error("Dosya oluşturulamadı", &tmp, &e))?;
         let mut f = CsvFile {
             out: Some(std::io::BufWriter::new(file)),
             tmp,
@@ -220,6 +224,10 @@ impl Drop for CsvFile {
 mod tests {
     use super::*;
 
+    fn no_tmp_files(dir: &Path) -> bool {
+        std::fs::read_dir(dir).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+    }
+
     fn field(v: Option<&str>, d: u8) -> String {
         let mut out = Vec::new();
         let n = write_field(&mut out, v, d).unwrap();
@@ -269,7 +277,7 @@ mod tests {
         let got = std::fs::read(&path).unwrap();
         assert_eq!(got, b"\xEF\xBB\xBFid;\"n;ame\"\r\n1;\r\n");
         assert_eq!(bytes as usize, got.len());
-        assert!(!tmp_path(&path).exists());
+        assert!(no_tmp_files(dir.path()));
     }
 
     #[test]
@@ -279,7 +287,7 @@ mod tests {
         std::fs::write(&path, "old").unwrap();
         let opts = CsvOptions { header: false, bom: false, ..CsvOptions::default() };
         drop(CsvFile::create(&path, &opts, &[]).unwrap());
-        assert!(!tmp_path(&path).exists());
+        assert!(no_tmp_files(dir.path()));
         assert_eq!(std::fs::read(&path).unwrap(), b"old");
     }
 

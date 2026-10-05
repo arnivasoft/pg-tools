@@ -72,10 +72,13 @@ fn no_bom() -> CsvOptions {
     CsvOptions { bom: false, ..CsvOptions::default() }
 }
 
-fn tmp_of(path: &Path) -> std::path::PathBuf {
-    let mut s = path.as_os_str().to_os_string();
-    s.push(".tmp");
-    s.into()
+/// `<hedef>.<…>.tmp` biçiminde artık geçici dosya var mı (kullanıcının kendi `<hedef>.tmp`'si sayılmaz).
+fn has_tmp(path: &Path) -> bool {
+    let name = path.file_name().unwrap().to_string_lossy().to_string();
+    std::fs::read_dir(path.parent().unwrap()).unwrap().any(|e| {
+        let f = e.unwrap().file_name().to_string_lossy().to_string();
+        f.starts_with(&name) && f.ends_with(".tmp") && f != format!("{name}.tmp")
+    })
 }
 
 #[tokio::test]
@@ -104,7 +107,7 @@ async fn export_streams_without_buffering() {
         assert_eq!(seen.last(), Some(&200_000));
         let peak = fx.qm.peak_buffered_rows(id).unwrap();
         assert!(peak <= EXPORT_CHUNK as usize, "bellekteki en çok satır: {peak}");
-        assert!(!tmp_of(&path).exists());
+        assert!(!has_tmp(&path));
         // Oturum temiz: açık transaction ya da imleç kalmadı.
         assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::Idle);
         fx.run(id, "select 1").await;
@@ -154,14 +157,14 @@ async fn export_cancel_leaves_no_file() {
             .await;
         let Err(Error::Query { message, .. }) = r else { panic!("iptal bekleniyordu: {r:?}") };
         assert_eq!(message, CANCELLED_MESSAGE);
-        assert!(!path.exists() && !tmp_of(&path).exists());
+        assert!(!path.exists() && !has_tmp(&path));
 
         // Önceki içerik durur.
         std::fs::write(&path, "previous").unwrap();
         let r = fx.qm.export_csv(id, sql, &path, no_bom(), &mut |_| false).await;
         assert!(r.is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous");
-        assert!(!tmp_of(&path).exists());
+        assert!(!has_tmp(&path));
 
         // Oturum iptali (cancel) sürmekte olan dışa aktarmayı durdurur.
         let qm = fx.qm.clone();
@@ -177,7 +180,7 @@ async fn export_cancel_leaves_no_file() {
         let r = tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
         let Err(Error::Query { message, .. }) = r else { panic!("iptal bekleniyordu: {r:?}") };
         assert_eq!(message, CANCELLED_MESSAGE);
-        assert!(!slow.exists() && !tmp_of(&slow).exists());
+        assert!(!slow.exists() && !has_tmp(&slow));
         assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::Idle);
         fx.run(id, "select 1").await;
     }
@@ -202,7 +205,7 @@ async fn export_marks_session_busy() {
         assert!(matches!(r, Err(Error::Invalid(_))));
         fx.qm.cancel(id);
         assert!(task.await.unwrap().is_err());
-        assert!(!path.exists() && !tmp_of(&path).exists());
+        assert!(!path.exists() && !has_tmp(&path));
     }
 }
 
@@ -274,7 +277,7 @@ async fn export_rejects_non_row_statements_and_failed_transactions() {
             let r = fx.qm.export_csv(id, sql, &path, no_bom(), &mut ok).await;
             assert!(matches!(r, Err(Error::Invalid(_))), "{sql}: {r:?}");
         }
-        assert!(!path.exists() && !tmp_of(&path).exists());
+        assert!(!path.exists() && !has_tmp(&path));
         let count: i64 = admin_client(&ts, &ts.config.maintenance_db)
             .await
             .query_one("select count(*) from qe_rej", &[])
@@ -287,10 +290,10 @@ async fn export_rejects_non_row_statements_and_failed_transactions() {
         let mut ok = |_| true;
         let r = fx.qm.export_csv(id, "select * from yok_boyle_tablo", &path, no_bom(), &mut ok).await;
         assert!(matches!(r, Err(Error::Query { .. })), "{r:?}");
-        assert!(!path.exists() && !tmp_of(&path).exists());
+        assert!(!path.exists() && !has_tmp(&path));
         let r = fx.qm.export_csv(id, "select 1/(g-5) from generate_series(1,10) g", &path, no_bom(), &mut ok).await;
         assert!(matches!(r, Err(Error::Query { .. })), "{r:?}");
-        assert!(!path.exists() && !tmp_of(&path).exists());
+        assert!(!path.exists() && !has_tmp(&path));
         assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::Idle);
 
         // Hata durumundaki transaction'da dışa aktarma reddedilir.
@@ -322,17 +325,106 @@ async fn export_target_errors_are_config_errors_without_secrets() {
         let r = fx.qm.export_csv(id, "select 1", &dir_target, no_bom(), &mut ok).await;
         assert!(matches!(r, Err(Error::Config(_))), "{r:?}");
 
-        // `.tmp` yolu bir dizinse dosya oluşturulamaz.
-        let blocked = fx.path("b.csv");
-        std::fs::create_dir(tmp_of(&blocked)).unwrap();
-        let r = fx.qm.export_csv(id, "select 1", &blocked, no_bom(), &mut ok).await;
-        let Err(Error::Config(msg)) = r else { panic!("Config bekleniyordu: {r:?}") };
-        assert!(msg.contains("b.csv"), "{msg}");
         if let Some(p) = ts.password.as_deref() {
             assert!(!msg.contains(p));
         }
+        // Kullanıcının `<hedef>.tmp` dosyası ezilmez/silinmez; başarılı ve iptal edilen dışa aktarmada da.
+        let target = fx.path("b.csv");
+        let user_tmp = fx.path("b.csv.tmp");
+        std::fs::write(&user_tmp, "user data").unwrap();
+        fx.qm.export_csv(id, "select 1", &target, no_bom(), &mut ok).await.unwrap();
+        assert!(fx.qm.export_csv(id, "select 1", &target, no_bom(), &mut |_| false).await.is_err());
+        assert_eq!(std::fs::read_to_string(&user_tmp).unwrap(), "user data");
+        assert!(target.exists() && !has_tmp(&target));
         // Oturum bozulmadı.
         assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::Idle);
         fx.run(id, "select 1").await;
+    }
+}
+
+fn more_ok(events: &[QueryEvent]) -> usize {
+    assert!(!events.iter().any(|e| matches!(e, QueryEvent::Failed { .. })), "{events:?}");
+    events
+        .iter()
+        .map(|e| match e {
+            QueryEvent::Rows { rows, .. } => rows.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+#[tokio::test]
+async fn export_keeps_the_grids_open_cursor() {
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        for mode in [TxMode::Autocommit, TxMode::Manual] {
+            let id = fx.open(mode).await;
+            let mut sink = VecSink::default();
+            fx.qm.run(id, "select g from generate_series(1, 3000) g", Scope::All, 1000, true, &mut sink).await.unwrap();
+            assert_eq!(more_ok(&sink.0), 1000);
+            let state = fx.qm.tx_state(id).unwrap();
+
+            let path = fx.path(&format!("grid-{mode:?}.csv"));
+            let mut ok = |_| true;
+            let s = fx.qm.export_csv(id, "select g from generate_series(1, 7000) g", &path, no_bom(), &mut ok).await.unwrap();
+            assert_eq!(s.rows, 7000);
+            // SQL hatası ve iptal de ızgara imlecini bozmaz.
+            let mut ok = |_| true;
+            let r = fx.qm.export_csv(id, "select 1/(g-5) from generate_series(1,10) g", &fx.path("e.csv"), no_bom(), &mut ok).await;
+            assert!(matches!(r, Err(Error::Query { .. })), "{r:?}");
+            assert!(fx.qm.export_csv(id, "select 1", &fx.path("e.csv"), no_bom(), &mut |_| false).await.is_err());
+            assert_eq!(fx.qm.tx_state(id).unwrap(), state);
+
+            let mut more = VecSink::default();
+            fx.qm.more(id, 0, &mut more).await.unwrap();
+            assert_eq!(more_ok(&more.0), 1000, "{mode:?}");
+            let mut more = VecSink::default();
+            fx.qm.more(id, 0, &mut more).await.unwrap();
+            assert_eq!(more_ok(&more.0), 1000);
+            fx.qm.close(id, pgt_query::session::ClosePolicy::Rollback).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_or_cancelled_export_keeps_the_manual_transaction() {
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup("drop table if exists qe_sp; create table qe_sp(i int);").await;
+        let id = fx.open(TxMode::Manual).await;
+        fx.run(id, "insert into qe_sp values (1)").await;
+
+        // SQL hatası (üçüncü parçada değil, ilk FETCH'te).
+        let mut ok = |_| true;
+        let r = fx.qm.export_csv(id, "select 1/(g-5) from generate_series(1,10) g", &fx.path("a.csv"), no_bom(), &mut ok).await;
+        assert!(matches!(r, Err(Error::Query { .. })), "{r:?}");
+        assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::InTransaction);
+        fx.run(id, "insert into qe_sp values (2)").await;
+
+        // Sunucu tarafı iptal (cancel belirteci → FETCH sırasında pg_cancel).
+        let qm = fx.qm.clone();
+        let p = fx.path("b.csv");
+        let p2 = p.clone();
+        let task = tokio::spawn(async move {
+            qm.export_csv(id, "select g, pg_sleep(0.01) from generate_series(1, 100000) g", &p2, no_bom(), &mut |_| true).await
+        });
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        fx.qm.cancel(id);
+        let r = tokio::time::timeout(Duration::from_secs(10), task).await.unwrap().unwrap();
+        let Err(Error::Query { message, .. }) = r else { panic!("iptal bekleniyordu: {r:?}") };
+        assert_eq!(message, CANCELLED_MESSAGE);
+        assert!(!p.exists() && !has_tmp(&p));
+        assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::InTransaction);
+
+        // Transaction hâlâ kullanılabilir ve COMMIT öncekilerle birlikte çalışır.
+        fx.run(id, "insert into qe_sp values (3)").await;
+        fx.qm.tx(id, pgt_query::session::TxAction::Commit).await.unwrap();
+        let n: i64 = admin_client(&ts, &ts.config.maintenance_db)
+            .await
+            .query_one("select count(*) from qe_sp", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(n, 3);
     }
 }

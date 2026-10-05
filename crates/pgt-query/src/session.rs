@@ -584,8 +584,12 @@ fn user_cancelled() -> Error {
     Error::Query { sqlstate: None, message: CANCELLED_MESSAGE.into(), detail: None, hint: None }
 }
 
-/// `export_csv` gövdesi: imleç açma, parça parça yazma, kapama. Hata/iptalde `.tmp` (CsvFile düşünce) silinir,
-/// çalıştırıcının kendi transaction'ı geri alınır; kullanıcının transaction'ına yalnızca `DECLARE`/`CLOSE` gider.
+/// `export_csv` gövdesi. Hata/iptalde `.tmp` (CsvFile düşünce) silinir. Transaction yönetimi:
+/// - oturum transaction'da değilse ve açık ızgara imleci yoksa çalıştırıcı kendi `BEGIN`/`COMMIT`'ini kullanır;
+/// - aksi halde (manuel mod ya da ızgara imlecinin transaction'ı) `SAVEPOINT pgt_export` açılır: hata/iptalde
+///   `ROLLBACK TO` ile kullanıcının transaction'ı sağlam kalır, başarıda `RELEASE` edilir. Izgaranın `pgt_c`
+///   imlecine dokunulmaz (yalnızca `pgt_x` açılır/kapanır).
+///   Bu komutlar `exec_internal` ile gider: izlenen durum ve `in_tx` değişmez.
 async fn export_run(
     slot: &SessionSlot,
     exec: &mut Executor,
@@ -595,44 +599,56 @@ async fn export_run(
     progress: &mut (dyn FnMut(u64) -> bool + Send),
 ) -> Result<ExportSummary> {
     let started = std::time::Instant::now();
-    // Açık kullanıcı imleci (`pgt_c`) çalıştırıcının kendi transaction'ındaysa BEGIN/COMMIT onu bozardı.
-    close_cursor_quietly(exec).await;
-    resync(slot, exec).await;
-    let own_tx = match slot.state() {
-        TxState::Failed => return Err(Error::Invalid(TX_FAILED_MESSAGE.into())),
-        TxState::Idle => true,
-        TxState::InTransaction => false,
-    };
+    let grid_cursor = exec.cursor_open();
+    if !grid_cursor {
+        resync(slot, exec).await;
+    }
+    let state = slot.state();
+    if state == TxState::Failed {
+        return Err(Error::Invalid(TX_FAILED_MESSAGE.into()));
+    }
+    let own_tx = !grid_cursor && state == TxState::Idle;
+    exec.exec_internal(if own_tx { "BEGIN" } else { SAVEPOINT_EXPORT }).await?;
+    let body = export_body(slot, exec, text, path, &opts, progress).await;
+    match body {
+        Ok((file, rows)) => {
+            let finish = if own_tx { "COMMIT" } else { RELEASE_EXPORT };
+            if let Err(e) = exec.exec_internal(finish).await {
+                let _ = exec.exec_internal(if own_tx { "ROLLBACK" } else { ROLLBACK_EXPORT }).await;
+                return Err(e);
+            }
+            let bytes = file.bytes;
+            file.commit()?;
+            Ok(ExportSummary { rows, bytes, elapsed_ms: started.elapsed().as_millis() as u64 })
+        }
+        Err(e) => {
+            let _ = exec.exec_internal(if own_tx { "ROLLBACK" } else { ROLLBACK_EXPORT }).await;
+            Err(e)
+        }
+    }
+}
+
+const SAVEPOINT_EXPORT: &str = "SAVEPOINT pgt_export";
+const RELEASE_EXPORT: &str = "RELEASE SAVEPOINT pgt_export";
+const ROLLBACK_EXPORT: &str = "ROLLBACK TO SAVEPOINT pgt_export; RELEASE SAVEPOINT pgt_export";
+
+async fn export_body(
+    slot: &SessionSlot,
+    exec: &mut Executor,
+    text: &str,
+    path: &StdPath,
+    opts: &CsvOptions,
+    progress: &mut (dyn FnMut(u64) -> bool + Send),
+) -> Result<(CsvFile, u64)> {
     let columns = exec.prepare_columns(text).await?;
     if columns.is_empty() {
         return Err(Error::Invalid("Yalnızca satır döndüren ifadeler dışa aktarılabilir.".into()));
     }
-    let mut file = CsvFile::create(path, &opts, &columns)?;
-    if own_tx {
-        exec.exec_internal("BEGIN").await?;
-    }
-    if let Err(e) = exec.exec_internal(&format!("DECLARE pgt_x NO SCROLL CURSOR FOR {text}")).await {
-        if own_tx {
-            let _ = exec.exec_internal("ROLLBACK").await;
-        }
-        return Err(e);
-    }
-    let streamed = stream_chunks(slot, exec, &mut file, progress).await;
-    let closed = match &streamed {
-        Ok(_) => exec.exec_internal(if own_tx { "CLOSE pgt_x; COMMIT" } else { "CLOSE pgt_x" }).await.map(|_| ()),
-        Err(_) => Ok(()),
-    };
-    if streamed.is_err() || closed.is_err() {
-        // Kendi transaction'ımız geri alınır (imleci de kapatır); kullanıcınınkine `CLOSE` denenir (aborted ise
-        // sessizce başarısız olur ve imleç transaction'la birlikte gider).
-        let cleanup = if own_tx { "ROLLBACK" } else { "CLOSE pgt_x" };
-        let _ = exec.exec_internal(cleanup).await;
-    }
-    let rows = streamed?;
-    closed?;
-    let bytes = file.bytes;
-    file.commit()?;
-    Ok(ExportSummary { rows, bytes, elapsed_ms: started.elapsed().as_millis() as u64 })
+    let mut file = CsvFile::create(path, opts, &columns)?;
+    exec.exec_internal(&format!("DECLARE pgt_x NO SCROLL CURSOR FOR {text}")).await?;
+    let rows = stream_chunks(slot, exec, &mut file, progress).await?;
+    exec.exec_internal("CLOSE pgt_x").await?;
+    Ok((file, rows))
 }
 
 async fn stream_chunks(
@@ -821,8 +837,8 @@ impl QueryManager {
                 cancel_quietly(&handle).await;
             }
             let ok = outcome == StmtOutcome::Completed;
-            if ok && matches!(p.plan.kind, StmtKind::Ddl | StmtKind::Tx) {
-                // DDL (ve geri alabilecek transaction komutları) katalogu değiştirmiş olabilir.
+            if ok && p.plan.kind != StmtKind::Select {
+                // DDL, transaction komutları ve SET/DO/CALL… (arama yolu, katalog) önbelleği bayatlatabilir.
                 slot.invalidate_completions();
             }
             let event = if ok {
@@ -1135,26 +1151,34 @@ impl QueryManager {
             // Kopan bağlantının bildirimi (kaybolan transaction) sonraki `run`a kalır.
             return Ok(Vec::new());
         }
-        if inner.exec.is_none() && self.wake(&slot, &mut inner).await.is_err() {
-            return Ok(Vec::new());
-        }
+        // Uykudaki oturum uyandırılmaz (bağlantı kurmak kilidi uzun tutar ve boşta uykuyu boşa çıkarır).
         let Some(exec) = inner.exec.as_mut() else { return Ok(Vec::new()) };
         let handle = exec.cancel_handle();
+        // Transaction içindeyse (kullanıcının ya da ızgara imlecinin) arama bir SAVEPOINT'e sarılır: hata ya da
+        // zaman aşımı transaction'ı bozmaz.
+        let guarded = slot.state() != TxState::Idle || exec.cursor_open();
+        if guarded && exec.exec_internal("SAVEPOINT pgt_complete").await.is_err() {
+            return Ok(Vec::new());
+        }
         let found = match tokio::time::timeout(COMPLETION_TIMEOUT, lookup(exec, &req)).await {
             Ok(r) => r,
             Err(_) => {
                 cancel_quietly(&handle).await;
-                resync(&slot, exec).await;
-                return Ok(Vec::new());
+                Err(Error::Invalid("zaman aşımı".into()))
             }
         };
+        if guarded {
+            let end = if found.is_ok() {
+                "RELEASE SAVEPOINT pgt_complete"
+            } else {
+                "ROLLBACK TO SAVEPOINT pgt_complete; RELEASE SAVEPOINT pgt_complete"
+            };
+            let _ = exec.exec_internal(end).await;
+        }
         let items = match found {
             Ok(items) => items,
             Err(e) => {
                 tracing::debug!(code = %ErrorPayload::from(&e).code, "tamamlama sorgusu başarısız");
-                if matches!(e, Error::Query { .. }) {
-                    resync(&slot, exec).await; // kullanıcının transaction'ı hatayla `aborted` olmuş olabilir
-                }
                 return Ok(Vec::new());
             }
         };
@@ -1201,7 +1225,7 @@ impl QueryManager {
                 let result = cancellable(&slot.cancel, &handle, export_run(&slot, exec, text, path, opts, progress)).await;
                 let requested = slot.cancel.requested();
                 slot.cancel.end();
-                if matches!(result, Err(Error::Query { .. })) {
+                if matches!(result, Err(Error::Query { .. })) && !exec.cursor_open() {
                     resync(&slot, exec).await;
                 }
                 let is_cancel = result.as_ref().err().is_some_and(is_cancel_error);
