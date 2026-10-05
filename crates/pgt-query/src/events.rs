@@ -70,7 +70,8 @@ pub enum QueryEvent {
         elapsed_ms: u64,
         notices: Vec<NoticeInfo>,
     },
-    Failed { stmt_index: u32, error: ErrorPayload, position: Option<u32>, char_offset: u32 },
+    /// `notices`: hataya kadar gelen NOTICE'lar (ör. `RAISE NOTICE` ardından `RAISE EXCEPTION`).
+    Failed { stmt_index: u32, error: ErrorPayload, position: Option<u32>, char_offset: u32, notices: Vec<NoticeInfo> },
     ScriptDone { stmts_run: u32, stopped_on_error: bool },
 }
 

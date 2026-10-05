@@ -150,7 +150,7 @@ async fn row_limit_bounds_memory() {
         assert_eq!(sink.last_more(), Some(true));
         let (_, _, rows_sent, truncated, _) = sink.done();
         assert_eq!((rows_sent, truncated), (2500, true));
-        assert!(f.exec.has_open_cursor());
+        assert!(f.exec.cursor_open());
 
         let mut more = VecSink::default();
         f.exec.more(0, &mut more).await.unwrap();
@@ -160,7 +160,7 @@ async fn row_limit_bounds_memory() {
         assert_eq!(more.last_more(), Some(true));
         assert!(f.exec.peak_buffered_rows() <= 1000, "{}", f.exec.peak_buffered_rows());
         f.exec.close_cursor().await.unwrap();
-        assert!(!f.exec.has_open_cursor());
+        assert!(!f.exec.cursor_open());
     }
 }
 
@@ -174,7 +174,7 @@ async fn more_exhausts_and_closes_cursor() {
         let mut more = VecSink::default();
         f.exec.more(0, &mut more).await.unwrap();
         assert_eq!((more.rows().len(), more.last_more()), (5, Some(false)));
-        assert!(!f.exec.has_open_cursor());
+        assert!(!f.exec.cursor_open());
         assert!(f.exec.more(0, &mut more).await.is_err(), "açık imleç yok");
         let pid = backend_pid(&mut f.exec).await;
         assert_eq!(backend_state(&ts, &pid).await, "idle");
@@ -313,7 +313,7 @@ async fn error_has_position_and_stops_script() {
         let (outcome, sink) = run(&mut f.exec, "select 1 / (i - 2) from generate_series(1, 3) i", &AUTO).await;
         assert_eq!(outcome, StmtOutcome::Failed);
         assert_eq!(sink.failed().1, None);
-        assert!(!f.exec.has_open_cursor());
+        assert!(!f.exec.cursor_open());
 
         let ok = run_ok(&mut f.exec, "select 1", &AUTO).await;
         assert_eq!(ok.rows(), vec![vec![s("1")]]);
@@ -347,25 +347,38 @@ async fn error_position_is_relative_to_statement_chars() {
 async fn cancel_stops_a_long_query() {
     for ts in servers() {
         let mut f = connect(&ts).await;
+        let pid: i32 = backend_pid(&mut f.exec).await.parse().unwrap();
+        let admin = admin_client(&ts, &ts.config.maintenance_db).await;
         let cancel = f.exec.cancel_handle();
-        let started = Instant::now();
         let mut sink = VecSink::default();
         let run = f.exec.run_statement(0, "select pg_sleep(30)", 0, &AUTO, &mut sink);
+        // Sabit bekleme yerine: sorgu sunucuda gerçekten çalışırken iptal et (erken iptal kaybolurdu).
         let canceller = async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            cancel.cancel().await
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let row = admin
+                    .query_one("SELECT state = 'active' AND wait_event = 'PgSleep' FROM pg_stat_activity WHERE pid = $1", &[&pid])
+                    .await
+                    .unwrap();
+                if row.get::<_, Option<bool>>(0) == Some(true) {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "sorgu çalışmaya başlamadı");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let sent = Instant::now();
+            cancel.cancel().await.map(|()| sent)
         };
-        let (outcome, cancelled) = tokio::join!(run, canceller);
-        cancelled.unwrap();
+        let (outcome, sent) = tokio::join!(run, canceller);
+        let sent = sent.unwrap();
         assert_eq!(outcome, StmtOutcome::Failed);
-        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        assert!(sent.elapsed() < Duration::from_secs(2), "{:?}", sent.elapsed());
         let (error, _, _) = sink.failed();
         assert_eq!(error.detail.as_deref().map(|d| d.contains("cancel")), Some(true), "{error:?}");
-        assert!(!f.exec.has_open_cursor());
+        assert!(!f.exec.cursor_open());
         let ok = run_ok(&mut f.exec, "select 1", &AUTO).await;
         assert_eq!(ok.rows(), vec![vec![s("1")]]);
-        let pid = backend_pid(&mut f.exec).await;
-        assert_eq!(backend_state(&ts, &pid).await, "idle");
+        assert_eq!(backend_state(&ts, &pid.to_string()).await, "idle");
     }
 }
 
@@ -380,7 +393,7 @@ async fn cursor_is_closed_before_next_statement() {
         assert_eq!(backend_state(&ts, &pid).await, "idle in transaction", "imleç açıkken transaction açık");
         let next = run_ok(&mut f.exec, "select 1", &cfg).await;
         assert_eq!(next.rows(), vec![vec![s("1")]]);
-        assert!(!f.exec.has_open_cursor());
+        assert!(!f.exec.cursor_open());
         assert_eq!(backend_state(&ts, &pid).await, "idle");
     }
 }
@@ -392,13 +405,14 @@ async fn manual_mode_cursor_does_not_end_user_transaction() {
         let manual = ExecConfig { limit: 10, chunk: 1000, autocommit: false };
         let pid = backend_pid(&mut f.exec).await;
         // Transaction dışında manuel kipte imleç açılamaz (BEGIN eklenmez): doğrudan yol.
-        let direct = run_ok(&mut f.exec, "select * from generate_series(1,50)", &manual).await;
+        let direct = run_ok(&mut f.exec, "select * from generate_series(1,100000)", &manual).await;
         assert_eq!(f.exec.last_path(), Some(Path::Direct));
+        assert!(f.exec.peak_buffered_rows() <= 10, "doğrudan yol da sınırlı: {}", f.exec.peak_buffered_rows());
         assert_eq!((direct.rows().len(), direct.done().3), (10, true));
         assert_eq!(backend_state(&ts, &pid).await, "idle");
 
         run_ok(&mut f.exec, "begin", &manual).await;
-        assert!(f.exec.in_transaction());
+        assert!(f.exec.in_tx());
         run_ok(&mut f.exec, "create temp table m(i int)", &manual).await;
         let sink = run_ok(&mut f.exec, "select * from generate_series(1,50)", &manual).await;
         assert_eq!(f.exec.last_path(), Some(Path::Cursor));
@@ -406,7 +420,7 @@ async fn manual_mode_cursor_does_not_end_user_transaction() {
         run_ok(&mut f.exec, "select 1", &manual).await;
         assert_eq!(backend_state(&ts, &pid).await, "idle in transaction", "kullanıcının transaction'ı sürer");
         run_ok(&mut f.exec, "rollback", &manual).await;
-        assert!(!f.exec.in_transaction());
+        assert!(!f.exec.in_tx());
         assert_eq!(backend_state(&ts, &pid).await, "idle");
         let gone =
             run_ok(&mut f.exec, "select count(*) from pg_class where relname = 'm' and relpersistence = 't'", &manual)
@@ -458,7 +472,7 @@ async fn sink_disconnect_stops_execution() {
         let outcome = f.exec.run_statement(0, "select * from generate_series(1,100000)", 0, &cfg, &mut sink).await;
         assert_eq!(outcome, StmtOutcome::Failed);
         assert_eq!(sink.events.len(), 2);
-        assert!(!f.exec.has_open_cursor());
+        assert!(!f.exec.cursor_open());
         assert_eq!(backend_state(&ts, &pid).await, "idle");
     }
 }
@@ -475,5 +489,77 @@ async fn invalid_limit_and_copy_stdin_fail_without_running() {
         assert_eq!(outcome, StmtOutcome::Failed);
         assert_eq!(sink.failed().0.code, "invalid");
         run_ok(&mut f.exec, "select 1", &AUTO).await;
+    }
+}
+
+#[tokio::test]
+async fn failed_statement_keeps_its_notices() {
+    for ts in servers() {
+        let mut f = connect(&ts).await;
+        let (outcome, sink) =
+            run(&mut f.exec, "do $$ begin raise notice 'a'; raise exception 'b'; end $$", &AUTO).await;
+        assert_eq!(outcome, StmtOutcome::Failed);
+        let Some(QueryEvent::Failed { error, notices, .. }) = sink.events.last() else { panic!("{:?}", sink.events) };
+        assert_eq!(error.message, "b");
+        let got: Vec<(&str, &str)> = notices.iter().map(|n| (n.severity.as_str(), n.message.as_str())).collect();
+        assert_eq!(got, [("NOTICE", "a")]);
+        let next = run_ok(&mut f.exec, "select 1", &AUTO).await;
+        assert!(next.done().4.is_empty(), "sonraki ifadeye taşınmaz");
+    }
+}
+
+/// 100 bin NOTICE: en çok 100'ü tutulur ve kanal ifade sürerken boşaltılır (birikim bitişe kadar büyümez).
+#[tokio::test]
+async fn notice_flood_is_drained_during_execution() {
+    for ts in servers() {
+        let mut f = connect(&ts).await;
+        let sink = run_ok(
+            &mut f.exec,
+            "do $$ begin for i in 1..100000 loop raise notice 'n%', i; end loop; end $$",
+            &AUTO,
+        )
+        .await;
+        let notices = sink.done().4;
+        assert_eq!(notices.len(), 100);
+        assert_eq!((notices[0].message.as_str(), notices[99].message.as_str()), ("n1", "n100"));
+        let backlog = f.exec.peak_notice_backlog();
+        assert!(backlog < 50_000, "NOTICE'lar sonda toplu alınmış görünüyor: en büyük birikim {backlog}");
+        // Kalan iletiler sonraki ifadeye taşınmaz.
+        assert!(run_ok(&mut f.exec, "select 1", &AUTO).await.done().4.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn more_rejects_other_statement_index() {
+    for ts in servers() {
+        let mut f = connect(&ts).await;
+        let cfg = ExecConfig { limit: 5, chunk: 5, autocommit: true };
+        let mut sink = VecSink::default();
+        let outcome = f.exec.run_statement(3, "select * from generate_series(1,20)", 0, &cfg, &mut sink).await;
+        assert_eq!(outcome, StmtOutcome::Completed);
+        let mut more = VecSink::default();
+        let err = f.exec.more(2, &mut more).await.unwrap_err();
+        assert!(matches!(err, pgt_core::Error::Invalid(_)), "{err:?}");
+        assert!(more.events.is_empty());
+        assert!(f.exec.cursor_open(), "yanlış dizin imleci kapatmaz");
+        f.exec.more(3, &mut more).await.unwrap();
+        assert_eq!(more.rows().len(), 5);
+    }
+}
+
+#[tokio::test]
+async fn oversized_chunk_is_capped_at_1000() {
+    for ts in servers() {
+        let mut f = connect(&ts).await;
+        let cfg = ExecConfig { limit: 5000, chunk: 1_000_000, autocommit: true };
+        let sink = run_ok(&mut f.exec, "select * from generate_series(1,5000)", &cfg).await;
+        let sizes: Vec<usize> = sink
+            .events
+            .iter()
+            .filter_map(|e| if let QueryEvent::Rows { rows, .. } = e { Some(rows.len()) } else { None })
+            .collect();
+        assert!(sizes.iter().all(|&n| n <= 1000), "{sizes:?}");
+        assert_eq!(sizes.iter().sum::<usize>(), 5000);
+        assert!(f.exec.peak_buffered_rows() <= 1000);
     }
 }

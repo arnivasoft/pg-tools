@@ -9,15 +9,19 @@
 //! - Otomatik onay (autocommit) kipinde imleç için gereken transaction'ı çalıştırıcı açar ve kapatır; kullanıcının
 //!   açık bir transaction'ı varsa ya da manuel kipte (`autocommit = false`) kendi BEGIN/COMMIT/ROLLBACK'ini asla
 //!   eklemez.
+//! - NOTICE'lar her sunucu çağrısı **sürerken** kanaldan alınır (ifade başına en çok `NOTICES_PER_STMT_MAX`
+//!   tutulur, fazlası sayılıp atılır): uzun bir NOTICE seli kanalda birikmez.
 //!
 //! SQL metni asla günlüğe yazılmaz: `tracing` alanlarında yalnızca `kind`, `elapsed_ms`, `rows_sent` ve hata
 //! `code`'u bulunur.
 
+use std::future::Future;
 use std::time::Instant;
 
 use futures_util::StreamExt;
 use pgt_core::connection::{CancelHandle, DedicatedConn, Notice, ServerInfo};
 use pgt_core::{Error, ErrorPayload, Result};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_postgres::SimpleQueryMessage;
 use tokio_postgres::error::ErrorPosition;
 
@@ -27,17 +31,18 @@ use crate::lex::{Kind, lex};
 
 /// `ExecConfig.limit` üst sınırı; aşan değer buna kısılır.
 pub const MAX_LIMIT: u32 = 1_000_000;
-/// Önerilen parça boyu.
+/// Parça boyu; aynı zamanda üst sınırıdır (daha büyük `chunk` buna kısılır).
 pub const DEFAULT_CHUNK: u32 = 1000;
 
 const DECLARE_PREFIX: &str = "DECLARE pgt_c NO SCROLL CURSOR FOR ";
 const BEGIN_DECLARE_PREFIX: &str = "BEGIN; DECLARE pgt_c NO SCROLL CURSOR FOR ";
 
 type TextRows = Vec<Vec<Option<String>>>;
+type PgResult<T> = std::result::Result<T, tokio_postgres::Error>;
 
 /// Çalıştırma ayarları. `limit`: ilk yüklemede gönderilecek toplam satır sınırı (0 geçersiz, en çok
-/// `MAX_LIMIT`); `chunk`: tek `Rows` olayındaki en çok satır (0 geçersiz); `autocommit`: imleç için gereken
-/// transaction'ı çalıştırıcı yönetebilir mi.
+/// `MAX_LIMIT`); `chunk`: tek `Rows` olayındaki en çok satır (0 geçersiz, en çok `DEFAULT_CHUNK`);
+/// `autocommit`: imleç için gereken transaction'ı çalıştırıcı yönetebilir mi.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecConfig {
     pub limit: u32,
@@ -53,8 +58,11 @@ impl ExecConfig {
         if self.chunk == 0 {
             return Err(Error::Invalid("parça boyu 0 olamaz".into()));
         }
-        let limit = self.limit.min(MAX_LIMIT);
-        Ok(ExecConfig { limit, chunk: self.chunk.min(limit), autocommit: self.autocommit })
+        Ok(ExecConfig {
+            limit: self.limit.min(MAX_LIMIT),
+            chunk: self.chunk.min(DEFAULT_CHUNK),
+            autocommit: self.autocommit,
+        })
     }
 }
 
@@ -75,6 +83,8 @@ pub enum Path {
 }
 
 struct OpenCursor {
+    /// İmleci açan ifadenin dizini (`more()` yalnızca onu kabul eder).
+    stmt_index: u32,
     /// İmlecin transaction'ını çalıştırıcı açtı (kapanışta COMMIT, hatada ROLLBACK).
     own_tx: bool,
     chunk: u32,
@@ -82,7 +92,8 @@ struct OpenCursor {
 
 enum Outcome {
     Done { tag: String, rows_affected: Option<u64>, rows_sent: u64, truncated: bool },
-    Failed { error: Error, position: Option<u32> },
+    /// `reached_server`: hata sunucudan geldi (ifade sunucuya ulaştı); transaction izlemesi yalnızca o zaman güncellenir.
+    Failed { error: Error, position: Option<u32>, reached_server: bool },
     /// Olay alıcısı gitti.
     Gone,
 }
@@ -95,7 +106,12 @@ impl Outcome {
             (Some(ErrorPosition::Original(n)), Some(p)) => n.checked_sub(p).filter(|&n| n > 0),
             _ => None,
         };
-        Outcome::Failed { error: Error::from_query(e), position }
+        let reached_server = e.as_db_error().is_some();
+        Outcome::Failed { error: Error::from_query(e), position, reached_server }
+    }
+
+    fn local(error: Error) -> Outcome {
+        Outcome::Failed { error, position: None, reached_server: false }
     }
 }
 
@@ -106,14 +122,68 @@ enum CursorOpen {
     Failed(Outcome),
 }
 
+/// İfade başına toplanan NOTICE'lar.
+#[derive(Default)]
+struct NoticeBuf {
+    kept: Vec<Notice>,
+    dropped: u64,
+    /// Kanalda görülen en büyük birikim (testler: NOTICE'lar çalışma sırasında alınıyor mu).
+    peak_backlog: usize,
+}
+
+impl NoticeBuf {
+    fn push(&mut self, n: Notice) {
+        if self.kept.len() < NOTICES_PER_STMT_MAX {
+            self.kept.push(n);
+        } else {
+            self.dropped += 1;
+        }
+    }
+
+    fn absorb(&mut self, rx: &mut UnboundedReceiver<Notice>) {
+        self.peak_backlog = self.peak_backlog.max(rx.len());
+        while let Ok(n) = rx.try_recv() {
+            self.push(n);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.kept.clear();
+        self.dropped = 0;
+    }
+}
+
+/// `fut`'u beklerken gelen NOTICE'ları da alır; böylece uzun bir ifadenin NOTICE seli kanalda birikmez.
+async fn with_notices<F: Future>(fut: F, rx: &mut UnboundedReceiver<Notice>, buf: &mut NoticeBuf) -> F::Output {
+    let mut fut = std::pin::pin!(fut);
+    let mut open = true;
+    loop {
+        tokio::select! {
+            biased;
+            out = &mut fut => {
+                // Sürücü NOTICE'ı yanıtın sonundan önce kanala koyar: kalanlar şimdi alınır.
+                buf.absorb(rx);
+                return out;
+            }
+            n = rx.recv(), if open => match n {
+                Some(n) => {
+                    buf.push(n);
+                    buf.absorb(rx);
+                }
+                None => open = false,
+            },
+        }
+    }
+}
+
 /// Bir sorgu oturumunun çalıştırıcısı (oturum başına bir tane). Aynı anda en çok bir imleç (`pgt_c`) açıktır.
 pub struct Executor {
     conn: DedicatedConn,
     cursor: Option<OpenCursor>,
-    /// Oturum bir transaction bloğunda mı (kullanıcının BEGIN/COMMIT/ROLLBACK'lerinden izlenir).
+    /// Oturum bir transaction bloğunda mı. Kullanıcının BEGIN/COMMIT/ROLLBACK'lerinden izlenir ve sunucu
+    /// yanıtlarıyla (25001, 25P01, 25P02) düzeltilir; oturum katmanı `set_in_tx` ile kesin değeri yazabilir.
     in_tx: bool,
-    /// Bu ifade için toplanan NOTICE'lar (en çok `NOTICES_PER_STMT_MAX`).
-    notices: Vec<Notice>,
+    notices: NoticeBuf,
     last_path: Option<Path>,
     /// Bellekte aynı anda tutulan en çok satır (sınırın tutulduğunu doğrulamak için).
     peak_buffered: usize,
@@ -121,7 +191,14 @@ pub struct Executor {
 
 impl Executor {
     pub fn new(conn: DedicatedConn) -> Self {
-        Executor { conn, cursor: None, in_tx: false, notices: Vec::new(), last_path: None, peak_buffered: 0 }
+        Executor {
+            conn,
+            cursor: None,
+            in_tx: false,
+            notices: NoticeBuf::default(),
+            last_path: None,
+            peak_buffered: 0,
+        }
     }
 
     /// Çalışan ifadeyi iptal etmek için; `run_statement` sürerken başka bir görevden kullanılır. İptal edilen
@@ -135,12 +212,28 @@ impl Executor {
     }
 
     /// Çalıştırıcının bildiği kadarıyla oturum bir transaction bloğunda mı.
-    pub fn in_transaction(&self) -> bool {
+    pub fn in_tx(&self) -> bool {
         self.in_tx
     }
 
+    /// Oturum katmanının kesin bilgisiyle (ör. `statement_timestamp() <> transaction_timestamp()` yoklaması)
+    /// transaction durumunu düzeltir.
+    #[cfg_attr(not(test), allow(dead_code))] // Task 6 (oturum eşitlemesi) kullanır.
+    pub(crate) fn set_in_tx(&mut self, in_tx: bool) {
+        self.in_tx = in_tx;
+    }
+
+    /// Çalıştırıcının kendi iç SQL'i (yoklama, ayar): olay yok, transaction izlemesi yok, NOTICE'lar atılır.
+    /// Satırlar metin olarak döner. Açık imlece dokunmaz.
+    #[cfg_attr(not(test), allow(dead_code))] // Task 6 (oturum eşitlemesi) kullanır.
+    pub(crate) async fn exec_internal(&mut self, sql: &str) -> Result<TextRows> {
+        let messages = self.simple(sql).await;
+        self.notices.reset();
+        Ok(text_rows(&messages.map_err(Error::from_query)?))
+    }
+
     /// `more()` ile okunabilecek açık bir imleç var mı.
-    pub fn has_open_cursor(&self) -> bool {
+    pub fn cursor_open(&self) -> bool {
         self.cursor.is_some()
     }
 
@@ -152,6 +245,12 @@ impl Executor {
     #[doc(hidden)]
     pub fn peak_buffered_rows(&self) -> usize {
         self.peak_buffered
+    }
+
+    /// Test yardımcısı: NOTICE kanalında görülmüş en büyük birikim.
+    #[doc(hidden)]
+    pub fn peak_notice_backlog(&self) -> usize {
+        self.notices.peak_backlog
     }
 
     /// Tek bir ifadeyi çalıştırır. `char_offset` olaylara aynen geçer (ifadenin betikteki karakter ofseti).
@@ -172,25 +271,28 @@ impl Executor {
             tracing::debug!(code = %ErrorPayload::from(&e).code, "önceki imleç kapatılamadı");
         }
         // Önceki ifadelerden kalan iletiler bu ifadeye yazılmasın.
-        self.collect_notices();
-        self.notices.clear();
+        self.notices.absorb(&mut self.conn.notices);
+        self.notices.reset();
         self.last_path = None;
 
         let outcome = match cfg.checked() {
             Ok(cfg) => match unsupported(sql) {
-                Some(e) => Outcome::Failed { error: e, position: None },
+                Some(e) => Outcome::local(e),
                 None => self.execute(idx, sql, char_offset, kind, &cfg, sink).await,
             },
-            Err(e) => Outcome::Failed { error: e, position: None },
+            Err(e) => Outcome::local(e),
         };
-        self.collect_notices();
-        let notices: Vec<NoticeInfo> = std::mem::take(&mut self.notices).into_iter().map(NoticeInfo::from).collect();
+        self.notices.absorb(&mut self.conn.notices);
+        let dropped_notices = self.notices.dropped;
+        let notices: Vec<NoticeInfo> =
+            std::mem::take(&mut self.notices.kept).into_iter().map(NoticeInfo::from).collect();
+        self.notices.reset();
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         match outcome {
             Outcome::Done { tag, rows_affected, rows_sent, truncated } => {
                 self.track_tx(sql, true);
-                tracing::debug!(?kind, elapsed_ms, rows_sent, "ifade tamamlandı");
+                tracing::debug!(?kind, elapsed_ms, rows_sent, dropped_notices, "ifade tamamlandı");
                 let ev =
                     QueryEvent::Done { stmt_index: idx, tag, rows_affected, rows_sent, truncated, elapsed_ms, notices };
                 if sink.send(ev) {
@@ -200,15 +302,17 @@ impl Executor {
                     StmtOutcome::Failed
                 }
             }
-            Outcome::Failed { error, position } => {
-                self.track_tx(sql, false);
+            Outcome::Failed { error, position, reached_server } => {
+                if reached_server {
+                    self.track_tx(sql, false);
+                }
                 let code = match &error {
                     Error::Query { sqlstate: Some(s), .. } => s.clone(),
                     other => ErrorPayload::from(other).code,
                 };
-                tracing::debug!(?kind, elapsed_ms, %code, dropped_notices = notices.len(), "ifade başarısız");
+                tracing::debug!(?kind, elapsed_ms, %code, dropped_notices, "ifade başarısız");
                 let error = ErrorPayload::from(&error);
-                sink.send(QueryEvent::Failed { stmt_index: idx, error, position, char_offset });
+                sink.send(QueryEvent::Failed { stmt_index: idx, error, position, char_offset, notices });
                 StmtOutcome::Failed
             }
             Outcome::Gone => {
@@ -220,15 +324,16 @@ impl Executor {
     }
 
     /// Açık imleçten sonraki parçayı (en çok `chunk` satır) `Rows` olarak gönderir; imleç tükenirse kapatılır.
-    /// Alıcı giderse imleç kapatılır. Açık imleç yoksa `Error::Invalid`.
+    /// Alıcı giderse imleç kapatılır. Açık imleç yoksa ya da `idx` imleci açan ifade değilse `Error::Invalid`.
     pub async fn more(&mut self, idx: u32, sink: &mut dyn EventSink) -> Result<()> {
-        let Some(chunk) = self.cursor.as_ref().map(|c| c.chunk) else {
-            return Err(Error::Invalid("açık imleç yok".into()));
+        let chunk = match &self.cursor {
+            Some(c) if c.stmt_index == idx => c.chunk,
+            Some(_) => return Err(Error::Invalid("açık imleç bu ifadeye ait değil".into())),
+            None => return Err(Error::Invalid("açık imleç yok".into())),
         };
         let result = self.fetch(chunk).await;
         // `more()` sırasında gelen iletiler bir sonraki ifadeye yazılmasın.
-        self.collect_notices();
-        self.notices.clear();
+        self.notices.reset();
         let rows = match result {
             Ok(rows) => rows,
             Err(e) => {
@@ -258,6 +363,16 @@ impl Executor {
         }
     }
 
+    /// NOTICE'ları alarak `simple_query`.
+    async fn simple(&mut self, sql: &str) -> PgResult<Vec<SimpleQueryMessage>> {
+        with_notices(self.conn.client.simple_query(sql), &mut self.conn.notices, &mut self.notices).await
+    }
+
+    /// NOTICE'ları alarak `batch_execute`.
+    async fn batch(&mut self, sql: &str) -> PgResult<()> {
+        with_notices(self.conn.client.batch_execute(sql), &mut self.conn.notices, &mut self.notices).await
+    }
+
     async fn execute(
         &mut self,
         idx: u32,
@@ -267,7 +382,9 @@ impl Executor {
         cfg: &ExecConfig,
         sink: &mut dyn EventSink,
     ) -> Outcome {
-        let columns: Vec<Column> = match self.conn.client.prepare(sql).await {
+        let prepared =
+            with_notices(self.conn.client.prepare(sql), &mut self.conn.notices, &mut self.notices).await;
+        let columns: Vec<Column> = match prepared {
             Ok(stmt) => stmt
                 .columns()
                 .iter()
@@ -288,7 +405,7 @@ impl Executor {
             return self.run_without_rows(sql).await;
         }
         if cursor_capable(sql, kind) {
-            match self.open_cursor(sql, cfg).await {
+            match self.open_cursor(idx, sql, cfg).await {
                 CursorOpen::Opened => {
                     self.last_path = Some(Path::Cursor);
                     return self.fetch_initial(idx, sql, cfg, sink).await;
@@ -301,38 +418,49 @@ impl Executor {
         self.run_direct(idx, sql, cfg, sink).await
     }
 
-    /// `pgt_c` imlecini açar. Transaction yoksa: autocommit'te `BEGIN` ile aynı `batch_execute`'ta açılır,
-    /// manuel kipte imleç kullanılmaz (doğrudan yol).
-    async fn open_cursor(&mut self, sql: &str, cfg: &ExecConfig) -> CursorOpen {
-        for attempt in 0..2 {
-            let own_tx = !self.in_tx;
-            if own_tx && !cfg.autocommit {
-                return CursorOpen::Fallback;
-            }
+    /// `pgt_c` imlecini açar.
+    /// - autocommit ve transaction yok: `BEGIN; DECLARE …` tek `batch_execute` (kendi transaction'ımız).
+    /// - aksi halde düz `DECLARE`. Transaction bloğu dışında 25P01 ile reddedilir ve hiçbir durum değişmez:
+    ///   izleme düzeltilir; manuel kipte doğrudan yola, autocommit'te bir kez kendi transaction'ımızla denenir.
+    ///   Manuel kipte izleme yanılıp oturum aslında bir transaction'daysa `DECLARE` başarılı olur ve düzeltilir.
+    async fn open_cursor(&mut self, idx: u32, sql: &str, cfg: &ExecConfig) -> CursorOpen {
+        let mut retried = false;
+        loop {
+            let own_tx = !self.in_tx && cfg.autocommit;
             let prefix = if own_tx { BEGIN_DECLARE_PREFIX } else { DECLARE_PREFIX };
-            let result = self.conn.client.batch_execute(&format!("{prefix}{sql}")).await;
+            let result = self.batch(&format!("{prefix}{sql}")).await;
             // İzleme yanılmış ve oturum zaten bir transaction'daysa BEGIN 25001 uyarısı verir: transaction
             // kullanıcınındır, çalıştırıcı onu onaylamaz ya da geri almaz.
             let was_in_tx = own_tx && self.take_notice("25001");
-            if was_in_tx {
-                self.in_tx = true;
-            }
             let own_tx = own_tx && !was_in_tx;
             let e = match result {
                 Ok(()) => {
-                    self.cursor = Some(OpenCursor { own_tx, chunk: cfg.chunk });
+                    // Kendi transaction'ımız değilse imleç bir transaction bloğunda açıldı demektir.
+                    if !own_tx {
+                        self.in_tx = true;
+                    }
+                    self.cursor = Some(OpenCursor { stmt_index: idx, own_tx, chunk: cfg.chunk });
                     return CursorOpen::Opened;
                 }
                 Err(e) => e,
             };
+            if was_in_tx {
+                self.in_tx = true;
+            }
             if own_tx {
                 self.rollback_quietly().await;
             }
             let code = e.code().map(|c| c.code().to_string()).unwrap_or_default();
-            // İzleme yanılmış, transaction yok: bir kez de kendi transaction'ımızla dene.
-            if !own_tx && !was_in_tx && code == "25P01" && attempt == 0 {
+            if !own_tx && !was_in_tx && code == "25P01" {
                 self.in_tx = false;
-                continue;
+                if cfg.autocommit && !retried {
+                    retried = true;
+                    continue;
+                }
+                return CursorOpen::Fallback;
+            }
+            if code == "25P02" {
+                self.in_tx = true; // kullanıcının transaction'ı zaten `aborted`
             }
             // İmleçle açılamayan sorgu: hata ayrıştırma/planlama aşamasında, ifade hiç çalışmadı.
             if own_tx && matches!(code.as_str(), "42P11" | "42601" | "0A000") {
@@ -340,7 +468,6 @@ impl Executor {
             }
             return CursorOpen::Failed(Outcome::failed(e, Some(prefix.chars().count() as u32)));
         }
-        CursorOpen::Fallback
     }
 
     async fn fetch_initial(&mut self, idx: u32, sql: &str, cfg: &ExecConfig, sink: &mut dyn EventSink) -> Outcome {
@@ -373,24 +500,18 @@ impl Executor {
         }
     }
 
-    async fn fetch(&mut self, n: u32) -> std::result::Result<TextRows, tokio_postgres::Error> {
-        let messages = self.conn.client.simple_query(&format!("FETCH FORWARD {n} FROM pgt_c")).await?;
-        let rows: TextRows = messages
-            .iter()
-            .filter_map(|m| match m {
-                SimpleQueryMessage::Row(r) => Some(row_values(r)),
-                _ => None,
-            })
-            .collect();
+    async fn fetch(&mut self, n: u32) -> PgResult<TextRows> {
+        let messages = self.simple(&format!("FETCH FORWARD {n} FROM pgt_c")).await?;
+        let rows = text_rows(&messages);
         self.peak_buffered = self.peak_buffered.max(rows.len());
         Ok(rows)
     }
 
     /// İmleci kapatır; transaction çalıştırıcınınsa onaylar (hata olursa geri alır).
-    async fn finish_cursor(&mut self) -> std::result::Result<(), tokio_postgres::Error> {
+    async fn finish_cursor(&mut self) -> PgResult<()> {
         let Some(cursor) = self.cursor.take() else { return Ok(()) };
         let sql = if cursor.own_tx { "CLOSE pgt_c; COMMIT" } else { "CLOSE pgt_c" };
-        let result = self.conn.client.batch_execute(sql).await;
+        let result = self.batch(sql).await;
         if result.is_err() && cursor.own_tx {
             self.rollback_quietly().await;
         }
@@ -408,14 +529,16 @@ impl Executor {
     }
 
     async fn rollback_quietly(&mut self) {
-        if let Err(e) = self.conn.client.batch_execute("ROLLBACK").await {
+        if let Err(e) = self.batch("ROLLBACK").await {
             tracing::debug!(code = ?e.code().map(|c| c.code()), "ROLLBACK başarısız");
         }
     }
 
     /// İmleçsiz satır okuma: yanıt akış olarak okunur, `limit`'ten sonraki satırlar atılır (`truncated`).
     async fn run_direct(&mut self, idx: u32, sql: &str, cfg: &ExecConfig, sink: &mut dyn EventSink) -> Outcome {
-        let stream = match self.conn.client.simple_query_raw(sql).await {
+        let opened =
+            with_notices(self.conn.client.simple_query_raw(sql), &mut self.conn.notices, &mut self.notices).await;
+        let stream = match opened {
             Ok(s) => s,
             Err(e) => return Outcome::failed(e, Some(0)),
         };
@@ -423,7 +546,7 @@ impl Executor {
         let (chunk, limit) = (cfg.chunk as usize, u64::from(cfg.limit));
         let mut buf: TextRows = Vec::new();
         let (mut kept, mut truncated, mut count) = (0u64, false, None);
-        while let Some(message) = stream.next().await {
+        while let Some(message) = with_notices(stream.next(), &mut self.conn.notices, &mut self.notices).await {
             match message {
                 Ok(SimpleQueryMessage::Row(row)) if kept < limit => {
                     buf.push(row_values(&row));
@@ -450,13 +573,15 @@ impl Executor {
     }
 
     async fn run_without_rows(&mut self, sql: &str) -> Outcome {
-        let stream = match self.conn.client.simple_query_raw(sql).await {
+        let opened =
+            with_notices(self.conn.client.simple_query_raw(sql), &mut self.conn.notices, &mut self.notices).await;
+        let stream = match opened {
             Ok(s) => s,
             Err(e) => return Outcome::failed(e, Some(0)),
         };
         let mut stream = std::pin::pin!(stream);
         let mut count = None;
-        while let Some(message) = stream.next().await {
+        while let Some(message) = with_notices(stream.next(), &mut self.conn.notices, &mut self.notices).await {
             match message {
                 Ok(SimpleQueryMessage::CommandComplete(n)) => count = Some(n),
                 Ok(_) => {}
@@ -468,25 +593,15 @@ impl Executor {
         Outcome::Done { tag, rows_affected, rows_sent: 0, truncated: false }
     }
 
-    /// Kanalda bekleyen NOTICE'ları ifadenin listesine alır (en çok `NOTICES_PER_STMT_MAX`, fazlası atılır).
-    /// Bağlantı sürücüsü NOTICE'ı yanıtın sonundan önce kanala koyar; yanıt geldikten sonra boşaltmak yeterlidir.
-    fn collect_notices(&mut self) {
-        while let Ok(n) = self.conn.notices.try_recv() {
-            if self.notices.len() < NOTICES_PER_STMT_MAX {
-                self.notices.push(n);
-            }
-        }
-    }
-
     fn take_notice(&mut self, code: &str) -> bool {
-        self.collect_notices();
-        let before = self.notices.len();
-        self.notices.retain(|n| n.code != code);
-        self.notices.len() != before
+        self.notices.absorb(&mut self.conn.notices);
+        let before = self.notices.kept.len();
+        self.notices.kept.retain(|n| n.code != code);
+        self.notices.kept.len() != before
     }
 
-    /// Kullanıcının transaction komutlarından oturumun transaction durumunu izler. Başarısız COMMIT de
-    /// transaction'ı bitirir (geri alınır).
+    /// Kullanıcının transaction komutlarından oturumun transaction durumunu izler (yalnızca sunucuya ulaşan
+    /// ifadeler için çağrılır). Başarısız COMMIT de transaction'ı bitirir (geri alınır).
     fn track_tx(&mut self, sql: &str, ok: bool) {
         match tx_op(sql) {
             Some(TxOp::Begin) if ok => self.in_tx = true,
@@ -495,6 +610,16 @@ impl Executor {
             _ => {}
         }
     }
+}
+
+fn text_rows(messages: &[SimpleQueryMessage]) -> TextRows {
+    messages
+        .iter()
+        .filter_map(|m| match m {
+            SimpleQueryMessage::Row(r) => Some(row_values(r)),
+            _ => None,
+        })
+        .collect()
 }
 
 fn row_values(row: &tokio_postgres::SimpleQueryRow) -> Vec<Option<String>> {
@@ -664,7 +789,157 @@ mod tests {
         assert!(matches!(ExecConfig { limit: 10, chunk: 0, autocommit: true }.checked(), Err(Error::Invalid(_))));
         let big = ExecConfig { limit: u32::MAX, chunk: DEFAULT_CHUNK, autocommit: false }.checked().unwrap();
         assert_eq!((big.limit, big.chunk, big.autocommit), (MAX_LIMIT, DEFAULT_CHUNK, false));
+        // Parça boyu 1000 ile sınırlıdır (tek FETCH / tek `Rows` en çok 1000 satır); ilk yüklemede ayrıca
+        // `limit - gönderilen` ile kısılır, `more()` tam parça kullanır.
+        let huge = ExecConfig { limit: MAX_LIMIT, chunk: MAX_LIMIT, autocommit: true }.checked().unwrap();
+        assert_eq!((huge.limit, huge.chunk), (MAX_LIMIT, DEFAULT_CHUNK));
         let small = ExecConfig { limit: 5, chunk: 1000, autocommit: true }.checked().unwrap();
-        assert_eq!(small.chunk, 5);
+        assert_eq!((small.limit, small.chunk), (5, 1000));
+    }
+
+    #[test]
+    fn notice_buffer_caps_and_counts_drops() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let notice = |i: usize| Notice {
+            severity: "NOTICE".into(),
+            code: "00000".into(),
+            message: i.to_string(),
+            detail: None,
+            hint: None,
+        };
+        for i in 0..250 {
+            tx.send(notice(i)).unwrap();
+        }
+        let mut buf = NoticeBuf::default();
+        buf.absorb(&mut rx);
+        assert_eq!((buf.kept.len(), buf.dropped, buf.peak_backlog), (NOTICES_PER_STMT_MAX, 150, 250));
+        assert_eq!(buf.kept[0].message, "0", "ilk iletiler tutulur");
+        buf.reset();
+        assert_eq!((buf.kept.len(), buf.dropped), (0, 0));
+    }
+}
+
+/// Crate içi (`pub(crate)`) oturum yardımcılarını gerçek sunucuda sınar (`PGT_TEST_URLS` yoksa atlanır).
+#[cfg(test)]
+mod db_tests {
+    use pgt_core::connection::{ConnectionManager, SessionProfile, Target};
+    use pgt_core::testing::{TestServer, admin_client, test_servers};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Collect(Vec<QueryEvent>);
+
+    impl EventSink for Collect {
+        fn send(&mut self, ev: QueryEvent) -> bool {
+            self.0.push(ev);
+            true
+        }
+    }
+
+    async fn executor(ts: &TestServer) -> (ConnectionManager, Executor) {
+        let mgr = ConnectionManager::new();
+        mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+        let profile = SessionProfile::Query { read_only: false, statement_timeout_ms: 0 };
+        let conn = mgr.open_dedicated(ts.config.id, Target::Maintenance, profile).await.unwrap();
+        (mgr, Executor::new(conn))
+    }
+
+    async fn run(exec: &mut Executor, sql: &str, cfg: &ExecConfig) -> Collect {
+        let mut sink = Collect::default();
+        let outcome = exec.run_statement(0, sql, 0, cfg, &mut sink).await;
+        assert_eq!(outcome, StmtOutcome::Completed, "{:?}", sink.0);
+        sink
+    }
+
+    async fn state(ts: &TestServer, pid: i32) -> String {
+        let admin = admin_client(ts, &ts.config.maintenance_db).await;
+        admin.query_one("SELECT state FROM pg_stat_activity WHERE pid = $1", &[&pid]).await.unwrap().get(0)
+    }
+
+    async fn temp_table_exists(exec: &mut Executor, name: &str) -> bool {
+        let sql = format!("select count(*) from pg_class where relname = '{name}' and relpersistence = 't'");
+        exec.exec_internal(&sql).await.unwrap()[0][0].as_deref() == Some("1")
+    }
+
+    /// Manuel kip, izleme "transaction yok" sanıyor ama oturum transaction'da (izlenmeyen yoldan BEGIN):
+    /// düz DECLARE başarılı olur, imleç yolu kullanılır, bellek sınırlı kalır ve izleme düzelir.
+    #[tokio::test]
+    async fn manual_mode_recovers_from_untracked_begin() {
+        for ts in test_servers() {
+            let (_mgr, mut exec) = executor(&ts).await;
+            let pid: i32 = exec.exec_internal("select pg_backend_pid()").await.unwrap()[0][0].as_ref().unwrap().parse().unwrap();
+            exec.exec_internal("begin").await.unwrap();
+            exec.exec_internal("create temp table untracked(i int)").await.unwrap();
+            assert!(!exec.in_tx(), "exec_internal izlemeyi değiştirmez");
+            let manual = ExecConfig { limit: 2000, chunk: 500, autocommit: false };
+            let sink = run(&mut exec, "select * from generate_series(1,100000)", &manual).await;
+            assert_eq!(exec.last_path(), Some(Path::Cursor));
+            assert!(exec.in_tx(), "izleme düzeldi");
+            assert!(exec.peak_buffered_rows() <= 500, "{}", exec.peak_buffered_rows());
+            let rows: usize = sink.0.iter().map(|e| if let QueryEvent::Rows { rows, .. } = e { rows.len() } else { 0 }).sum();
+            assert_eq!(rows, 2000);
+            run(&mut exec, "select 1", &manual).await;
+            assert_eq!(state(&ts, pid).await, "idle in transaction", "çalıştırıcı kullanıcının transaction'ını bitirmez");
+            run(&mut exec, "rollback", &manual).await;
+            assert!(!exec.in_tx());
+            assert!(!temp_table_exists(&mut exec, "untracked").await);
+        }
+    }
+
+    /// Ters yön: izleme "transaction var" sanıyor ama yok. Manuel kipte DECLARE 25P01 → doğrudan yol (durum
+    /// değişmez, BEGIN eklenmez); autocommit'te kendi transaction'ıyla imleç.
+    #[tokio::test]
+    async fn stale_in_tx_is_corrected_by_25p01() {
+        for ts in test_servers() {
+            let (_mgr, mut exec) = executor(&ts).await;
+            let pid: i32 = exec.exec_internal("select pg_backend_pid()").await.unwrap()[0][0].as_ref().unwrap().parse().unwrap();
+            exec.set_in_tx(true);
+            let manual = ExecConfig { limit: 10, chunk: 10, autocommit: false };
+            let sink = run(&mut exec, "select * from generate_series(1,50)", &manual).await;
+            assert_eq!(exec.last_path(), Some(Path::Direct));
+            assert!(!exec.in_tx());
+            assert!(matches!(sink.0.last(), Some(QueryEvent::Done { truncated: true, rows_sent: 10, .. })));
+            assert_eq!(state(&ts, pid).await, "idle");
+
+            exec.set_in_tx(true);
+            let auto = ExecConfig { limit: 10, chunk: 10, autocommit: true };
+            run(&mut exec, "select * from generate_series(1,50)", &auto).await;
+            assert_eq!(exec.last_path(), Some(Path::Cursor));
+            assert!(!exec.in_tx());
+            exec.close_cursor().await.unwrap();
+            assert_eq!(state(&ts, pid).await, "idle");
+        }
+    }
+
+    /// Autocommit, izleme "transaction yok" sanıyor ama kullanıcı transaction'ı açık: BEGIN'in 25001 uyarısı
+    /// fark edilir, imleç kapanışı COMMIT etmez, uyarı kullanıcıya NOTICE olarak gösterilmez.
+    #[tokio::test]
+    async fn autocommit_detects_untracked_transaction_via_25001() {
+        for ts in test_servers() {
+            let (_mgr, mut exec) = executor(&ts).await;
+            exec.exec_internal("begin").await.unwrap();
+            exec.exec_internal("create temp table hidden_tx(i int)").await.unwrap();
+            let auto = ExecConfig { limit: 5, chunk: 5, autocommit: true };
+            let sink = run(&mut exec, "select * from generate_series(1,50)", &auto).await;
+            assert_eq!(exec.last_path(), Some(Path::Cursor));
+            assert!(exec.in_tx());
+            let Some(QueryEvent::Done { notices, .. }) = sink.0.last() else { panic!("{:?}", sink.0) };
+            assert!(notices.is_empty(), "{notices:?}");
+            exec.close_cursor().await.unwrap();
+            run(&mut exec, "rollback", &auto).await;
+            assert!(!temp_table_exists(&mut exec, "hidden_tx").await, "COMMIT edilmemeli");
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_internal_returns_text_rows_without_events() {
+        for ts in test_servers() {
+            let (_mgr, mut exec) = executor(&ts).await;
+            let rows = exec.exec_internal("select statement_timestamp() <> transaction_timestamp(), null::text").await.unwrap();
+            assert_eq!(rows, vec![vec![Some("f".to_string()), None]]);
+            let err = exec.exec_internal("selectt").await.unwrap_err();
+            assert!(matches!(err, Error::Query { .. }), "{err:?}");
+        }
     }
 }
