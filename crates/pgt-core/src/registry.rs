@@ -93,11 +93,25 @@ impl Registry {
         self.ensure_writable()?;
         let config = config.normalized();
         config.validate()?;
-        match self.servers.iter_mut().find(|s| s.id == config.id) {
-            Some(slot) => *slot = config.clone(),
-            None => self.servers.push(config.clone()),
+        // Kayıt başarısız olursa bellekteki değişiklik geri alınır (dosya ile bellek ayrışmasın).
+        let previous = match self.servers.iter_mut().find(|s| s.id == config.id) {
+            Some(slot) => Some(std::mem::replace(slot, config.clone())),
+            None => {
+                self.servers.push(config.clone());
+                None
+            }
+        };
+        if let Err(e) = self.save() {
+            match previous {
+                Some(prev) => {
+                    if let Some(slot) = self.servers.iter_mut().find(|s| s.id == config.id) {
+                        *slot = prev;
+                    }
+                }
+                None => self.servers.retain(|s| s.id != config.id),
+            }
+            return Err(e);
         }
-        self.save()?;
         Ok(config)
     }
 
@@ -107,7 +121,10 @@ impl Registry {
             return Ok(None);
         };
         let removed = self.servers.remove(index);
-        self.save()?;
+        if let Err(e) = self.save() {
+            self.servers.insert(index, removed);
+            return Err(e);
+        }
         Ok(Some(removed))
     }
 
@@ -186,6 +203,29 @@ mod tests {
         assert_eq!(reg.remove(c.id).unwrap().map(|s| s.id), Some(c.id));
         assert!(reg.remove(c.id).unwrap().is_none());
         assert!(Registry::load(path(&dir)).unwrap().registry.servers().is_empty());
+    }
+
+    #[test]
+    fn failed_save_rolls_back_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = path(&dir);
+        let mut reg = Registry::load(&p).unwrap().registry;
+        let a = reg.upsert(ServerConfig::new("a", "h", 5432, "u")).unwrap();
+        let b = reg.upsert(ServerConfig::new("b", "h", 5432, "u")).unwrap();
+        // servers.json'ın yerine bir dizin koy: sonraki kayıt (rename) başarısız olur.
+        std::fs::remove_file(&p).unwrap();
+        std::fs::create_dir(&p).unwrap();
+
+        assert!(reg.remove(a.id).is_err());
+        assert_eq!(reg.servers(), &[a.clone(), b.clone()], "silme geri alınmalı, sıra korunmalı");
+
+        let mut renamed = a.clone();
+        renamed.name = "yeni".into();
+        assert!(reg.upsert(renamed).is_err());
+        assert_eq!(reg.get(a.id), Some(&a), "güncelleme geri alınmalı");
+
+        assert!(reg.upsert(ServerConfig::new("c", "h", 5432, "u")).is_err());
+        assert_eq!(reg.servers(), &[a, b], "eklenen kayıt geri alınmalı");
     }
 
     #[test]

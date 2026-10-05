@@ -74,6 +74,11 @@ pub async fn connect_server(state: State<'_, AppState>, server_id: Uuid, passwor
         None => state.credentials.password(server_id)?,
     };
     let info = Box::pin(state.manager.connect(config.clone(), effective)).await?;
+    // Bağlantı sürerken sunucu silinmiş olabilir: oturumu kapat; kaydı ve parolayı geri getirme.
+    if state.registry.read().unwrap().get(server_id).is_none() {
+        state.manager.disconnect(server_id);
+        return Err(Error::UnknownServer(server_id).into());
+    }
     if let Some(p) = password {
         remember_after_connect(&state.registry, &state.credentials, &config, &p, remember);
     }
@@ -85,12 +90,19 @@ pub async fn connect_server(state: State<'_, AppState>, server_id: Uuid, passwor
 /// parola her durumda oturum belleğinde kalır (Credentials::remember önce oturumu günceller).
 fn remember_after_connect(registry: &RwLock<Registry>, creds: &Credentials, config: &ServerConfig, password: &str, remember: bool) {
     let mut persist = config.save_password;
-    if remember && !config.save_password {
-        let mut updated = config.clone();
-        updated.save_password = true;
-        match registry.write().unwrap().upsert(updated) {
-            Ok(_) => persist = true,
-            Err(e) => tracing::warn!(server = %config.id, error = %e, "\"parolayı kaydet\" tercihi kaydedilemedi"),
+    {
+        let mut registry = registry.write().unwrap();
+        // Bağlantı sürerken silinen sunucu: upsert kaydı geri getirir, kalıcı parola yetim kalır.
+        if registry.get(config.id).is_none() {
+            return;
+        }
+        if remember && !config.save_password {
+            let mut updated = config.clone();
+            updated.save_password = true;
+            match registry.upsert(updated) {
+                Ok(_) => persist = true,
+                Err(e) => tracing::warn!(server = %config.id, error = %e, "\"parolayı kaydet\" tercihi kaydedilemedi"),
+            }
         }
     }
     if let Err(e) = creds.remember(config.id, password, persist) {
@@ -135,19 +147,19 @@ fn delete_registered(registry: &RwLock<Registry>, manager: &ConnectionManager, c
 }
 
 #[tauri::command]
-pub fn delete_server(state: State<'_, AppState>, server_id: Uuid) -> CmdResult<()> {
+pub async fn delete_server(state: State<'_, AppState>, server_id: Uuid) -> CmdResult<()> {
     Ok(delete_registered(&state.registry, &state.manager, &state.credentials, server_id)?)
 }
 
 #[tauri::command]
-pub fn preview_pgadmin_import(state: State<'_, AppState>, path: String) -> CmdResult<Vec<pgt_core::import::ImportItem>> {
+pub async fn preview_pgadmin_import(state: State<'_, AppState>, path: String) -> CmdResult<Vec<pgt_core::import::ImportItem>> {
     let text = pgt_core::import::read_file(std::path::Path::new(&path))?;
     let existing = state.registry.read().unwrap().servers().to_vec();
     Ok(pgt_core::import::preview(&text, &existing)?)
 }
 
 #[tauri::command]
-pub fn apply_pgadmin_import(state: State<'_, AppState>, path: String, indices: Vec<u32>) -> CmdResult<u32> {
+pub async fn apply_pgadmin_import(state: State<'_, AppState>, path: String, indices: Vec<u32>) -> CmdResult<u32> {
     let text = pgt_core::import::read_file(std::path::Path::new(&path))?;
     Ok(pgt_core::import::apply(&mut state.registry.write().unwrap(), &text, &indices)?)
 }
@@ -233,7 +245,25 @@ mod tests {
         assert_eq!(store.get(&password_key(config.id)).unwrap().as_deref(), Some("typed"));
     }
 
-        #[test]
+    #[test]
+    fn remember_after_connect_skips_deleted_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = cfg(Uuid::new_v4());
+        config.save_password = false;
+        let registry = registry_with(dir.path(), &config);
+        registry.write().unwrap().remove(config.id).unwrap();
+        let store = Arc::new(MemorySecretStore::default());
+        let c = Credentials::new(store.clone());
+        remember_after_connect(&registry, &c, &config, "typed", true);
+        assert!(registry.read().unwrap().get(config.id).is_none(), "silinen kayıt geri gelmemeli");
+        let reloaded = Registry::load(dir.path().join("servers.json")).unwrap().registry;
+        assert!(reloaded.get(config.id).is_none());
+        use pgt_core::credentials::{SecretStore, password_key};
+        assert_eq!(store.get(&password_key(config.id)).unwrap(), None);
+        assert_eq!(c.password(config.id).unwrap(), None);
+    }
+
+    #[test]
     fn delete_server_removes_record_and_stored_password() {
         let dir = tempfile::tempdir().unwrap();
         let config = cfg(Uuid::new_v4());
