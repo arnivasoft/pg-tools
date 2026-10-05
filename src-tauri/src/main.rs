@@ -20,6 +20,15 @@ fn main() {
     tauri::async_runtime::set(runtime.handle().clone());
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .on_page_load(|webview, payload| {
+            // Sayfa yenilenince (F5, HMR, gezinme) arayüzün oturum kimlikleri kaybolur: yetim oturumları kapat.
+            if payload.event() == tauri::webview::PageLoadEvent::Started
+                && let Some(state) = webview.app_handle().try_state::<state::AppState>()
+            {
+                let query = state.query.clone();
+                tauri::async_runtime::spawn(async move { query::close_all_on_reload(&query).await });
+            }
+        })
         .setup(|app| {
             let state = state::AppState::init();
             let manager = state.manager.clone();
