@@ -342,19 +342,28 @@ async fn cancel_quietly(handle: &CancelHandle) {
     }
 }
 
-/// `fut`'u çalıştırır; sürerken iptal istenirse sunucuya iptal isteği gönderir (en çok bir kez). Önceden kalmış
-/// `Notify` izni `requested` bayrağı olmadan yok sayılır.
+/// `fut`'u çalıştırır; sürerken her iptal isteği (`request()` başına bir `notify`) sunucuya bir iptal isteği
+/// gönderir. PostgreSQL, iki gidiş-dönüş arasında (arka uç boştayken) gelen iptali yok sayar; tekrar basılan iptal
+/// bu yüzden yeniden gönderilmelidir. Önceden kalmış `Notify` izni `requested` bayrağı olmadan yok sayılır
+/// (boştayken gelen iptal `request()` tarafından zaten düşürülür).
 async fn cancellable<F: Future>(token: &CancelToken, handle: &CancelHandle, fut: F) -> F::Output {
+    cancellable_with(token, || cancel_quietly(handle), fut).await
+}
+
+async fn cancellable_with<F, C, CF>(token: &CancelToken, mut cancel: C, fut: F) -> F::Output
+where
+    F: Future,
+    C: FnMut() -> CF,
+    CF: Future<Output = ()>,
+{
     let mut fut = std::pin::pin!(fut);
-    let mut sent = false;
     loop {
         tokio::select! {
             biased;
             out = &mut fut => return out,
-            () = token.notify.notified(), if !sent => {
+            () = token.notify.notified() => {
                 if token.requested() {
-                    sent = true;
-                    cancel_quietly(handle).await;
+                    cancel().await;
                 }
             }
         }
@@ -1541,6 +1550,50 @@ mod tests {
         let err = export(plain, "select set_config('a','b',false)").await.unwrap_err();
         assert!(matches!(err, Error::NotConnected), "kilitsiz oturumda kapı yok: {err:?}");
         assert!(!path.exists());
+    }
+
+    /// Her iptal isteği bir iptal gönderir (kaybolan ilk iptal ikinci tıklamayla yeniden denenir); çalışma
+    /// yokken gelen istek ve `requested` olmadan kalan eski izin hiçbir şey göndermez.
+    #[tokio::test]
+    async fn every_cancel_request_sends_one_cancel() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let token = CancelToken::default();
+        let sent = AtomicUsize::new(0);
+        assert!(!token.request(), "boştayken yok sayılır");
+        token.notify.notify_one(); // eski izin, `requested` yok
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        token.begin();
+        let run = cancellable_with(
+            &token,
+            || {
+                sent.fetch_add(1, Ordering::SeqCst);
+                async {}
+            },
+            rx,
+        );
+        let driver = async {
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(sent.load(Ordering::SeqCst), 0, "eski izin iptal göndermez");
+            assert!(token.request());
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(sent.load(Ordering::SeqCst), 1);
+            // İlk iptal kayboldu (ifade sürüyor): ikinci istek yeniden gönderir.
+            assert!(token.request());
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(sent.load(Ordering::SeqCst), 2);
+            tx.send(()).unwrap();
+        };
+        let (out, ()) = tokio::join!(run, driver);
+        out.unwrap();
+        token.end();
+        assert!(!token.request());
+        assert_eq!(sent.load(Ordering::SeqCst), 2);
     }
 
     #[test]
