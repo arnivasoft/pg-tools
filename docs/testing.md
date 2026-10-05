@@ -15,7 +15,7 @@ Test kullanıcısı `CREATEDB` ve `CREATEROLE` yetkisine sahip olmalı (superuse
     cargo test --workspace --all-features
 
 Testler `pgt_fixture`, `pgt_roundtrip`, `pgt_perf`, `pgt_noconn`, `pgt_private` adlı veritabanlarını
-ve `pgt_reader`, `pgt_app`, `pgt_limited` rollerini oluşturur/yeniden kurar; üretim sunucusunda çalıştırmayın.
+ve `pgt_reader`, `pgt_app`, `pgt_limited`, `pgt_forever` rollerini oluşturur/yeniden kurar; üretim sunucusunda çalıştırmayın.
 
 Fixture: `tests/fixtures/schema.sql` her sürümde, `schema_pg11.sql` (procedure, partitioned index, `INCLUDE`,
 hash partition, partitioned tabloda satır trigger'ı) PG 11+ ve `schema_pg12.sql` (generated kolon) PG 12+

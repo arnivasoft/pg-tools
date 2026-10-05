@@ -12,7 +12,7 @@ LATERAL (VALUES
   (9, 'Yetkiler', 'Replikasyon', CASE WHEN r.rolreplication THEN 'evet' ELSE 'hayır' END),
   (10, 'Yetkiler', 'RLS atlayabilir', CASE WHEN r.rolbypassrls THEN 'evet' ELSE 'hayır' END),
   (11, 'Tanım', 'Bağlantı sınırı', CASE WHEN r.rolconnlimit >= 0 THEN r.rolconnlimit::text END),
-  (12, 'Tanım', 'Geçerlilik sonu', to_char(r.rolvaliduntil, 'YYYY-MM-DD HH24:MI:SS')),
+  (12, 'Tanım', 'Geçerlilik sonu', r.rolvaliduntil::text),
   (13, 'Tanım', 'Üye olduğu roller', (SELECT string_agg(quote_ident(g.rolname), ', ' ORDER BY g.rolname) FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = r.oid))
 ) AS v(n, section, label, value)
 WHERE r.oid = $1
