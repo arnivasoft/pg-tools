@@ -43,6 +43,9 @@ fn main() {
             commands::get_properties,
             commands::get_ddl,
             commands::startup_notice,
+            commands::delete_server,
+            commands::set_show_system,
+            commands::quote_identifiers,
         ])
         .run(tauri::generate_context!())
         .expect("pg-tools başlatılamadı");

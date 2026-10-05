@@ -125,6 +125,30 @@ pub fn startup_notice(state: State<'_, AppState>) -> Option<String> {
     state.startup_notice.clone()
 }
 
+fn delete_registered(registry: &RwLock<Registry>, manager: &ConnectionManager, creds: &Credentials, id: Uuid) -> Result<(), Error> {
+    let removed = registry.write().unwrap().remove(id)?;
+    if removed.is_none() {
+        return Err(Error::UnknownServer(id));
+    }
+    manager.disconnect(id);
+    creds.forget(id)
+}
+
+#[tauri::command]
+pub fn delete_server(state: State<'_, AppState>, server_id: Uuid) -> CmdResult<()> {
+    Ok(delete_registered(&state.registry, &state.manager, &state.credentials, server_id)?)
+}
+
+#[tauri::command]
+pub fn set_show_system(state: State<'_, AppState>, value: bool) {
+    state.catalog.set_show_system(value);
+}
+
+#[tauri::command]
+pub async fn quote_identifiers(state: State<'_, AppState>, server_id: Uuid, names: Vec<String>) -> CmdResult<Vec<String>> {
+    Ok(Box::pin(state.catalog.quote_identifiers(server_id, names)).await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +218,39 @@ mod tests {
         remember_after_connect(&registry, &c, &config, "typed", true);
         use pgt_core::credentials::{SecretStore, password_key};
         assert_eq!(store.get(&password_key(config.id)).unwrap().as_deref(), Some("typed"));
+    }
+
+        #[test]
+    fn delete_server_removes_record_and_stored_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(Uuid::new_v4());
+        let registry = registry_with(dir.path(), &config);
+        let store = Arc::new(MemorySecretStore::default());
+        let c = Credentials::new(store.clone());
+        c.remember(config.id, "pw", true).unwrap();
+        let manager = ConnectionManager::new();
+        delete_registered(&registry, &manager, &c, config.id).unwrap();
+        assert!(registry.read().unwrap().get(config.id).is_none());
+        assert_eq!(c.password(config.id).unwrap(), None);
+    }
+
+    #[test]
+    fn delete_unknown_server_is_unknown_server_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = registry_with(dir.path(), &cfg(Uuid::new_v4()));
+        let err = delete_registered(&registry, &ConnectionManager::new(), &creds(), Uuid::new_v4()).unwrap_err();
+        assert!(matches!(err, Error::UnknownServer(_)));
+    }
+
+    #[test]
+    fn delete_server_on_read_only_registry_keeps_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let registry = RwLock::new(Registry::unavailable(dir.path().join("servers.json")));
+        let c = creds();
+        c.remember(id, "pw", true).unwrap();
+        assert!(delete_registered(&registry, &ConnectionManager::new(), &c, id).is_err());
+        assert_eq!(c.password(id).unwrap().as_deref(), Some("pw"), "kayıt silinemediyse parola da silinmemeli");
     }
 
     fn cfg(id: Uuid) -> ServerConfig {
