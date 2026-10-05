@@ -61,6 +61,12 @@ export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement
                     selected={ex.state().selected === row().id}
                     onSelect={() => ex.controller.select(row().id)}
                     onToggle={() => void ex.controller.toggle(row().id)}
+                    onRetry={() => void ex.controller.retry(row().id)}
+                    onRefreshParent={() => {
+                      const parent = ex.state().parent.get(row().id);
+                      if (parent === undefined) return;
+                      void (parent === ROOT ? ex.controller.reloadServers() : ex.controller.refresh(parent));
+                    }}
                   />
                 )}
               </Show>

@@ -41,7 +41,8 @@ export function Inspector(props: { explorer: Explorer }) {
     try {
       return await call();
     } catch (e) {
-      props.explorer.controller.sessionLost(id, toPayload(e));
+      const payload = toPayload(e);
+      if (!props.explorer.controller.sessionLost(id, payload)) props.explorer.controller.nodeGone(id, payload);
       throw e;
     }
   };

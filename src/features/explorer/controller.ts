@@ -161,6 +161,24 @@ export class ExplorerController {
     if (id === ROOT || this.get().children.has(id)) await this.load(id);
   }
 
+  async retry(id: string): Promise<void> {
+    const node = this.get().nodes.get(id);
+    if (!node) return;
+    if (node.kind === "server" && !node.flags.connected) {
+      if (!(await this.ensureConnected(id))) return;
+      if (!this.get().nodes.has(id)) return;
+      this.update((s) => expand(s, id));
+    }
+    await this.load(id);
+  }
+
+  /** Düğümün artık var olmadığı (not_found) başka bir yoldan öğrenildiğinde satırı hatalı işaretler. */
+  nodeGone(id: string, error: ErrorPayload): boolean {
+    if (error.code !== "not_found" || !this.get().nodes.has(id)) return false;
+    this.update((s) => setError(s, id, error));
+    return true;
+  }
+
   disconnect(id: string): void {
     const node = this.get().nodes.get(id);
     if (node?.kind !== "server" || !node.serverId) return;

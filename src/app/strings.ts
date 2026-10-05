@@ -98,5 +98,11 @@ export const t = {
       `‘${name}’ kaydı ve kayıtlı parolası silinir. PostgreSQL sunucusundaki hiçbir şey etkilenmez.`,
     confirmLabel: "Sil",
   },
+  error: {
+    badge: "Hata ayrıntısı",
+    retry: "Tekrar dene",
+    refreshParent: "Üst düğümü yenile",
+    gone: "Nesne artık mevcut değil.",
+  },
   toast: { dismiss: "Kapat" },
 } as const;

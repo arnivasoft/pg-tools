@@ -353,3 +353,57 @@ describe("ExplorerController lost sessions", () => {
     });
   });
 });
+
+describe("ExplorerController retry / nodeGone", () => {
+  const noApi = { connectServer: vi.fn(), disconnectServer: vi.fn() };
+
+  it("retry on a disconnected server reconnects then reloads", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1" });
+    const { c, get, connectServer, listChildren } = setup({ [ROOT]: [srv], srv: [n("dbs")] });
+    await c.load(ROOT);
+    await c.retry("srv");
+    expect(connectServer).toHaveBeenCalledTimes(1);
+    expect(listChildren).toHaveBeenCalledWith("srv");
+    expect(get().nodes.get("srv")!.flags.connected).toBe(true);
+    expect(get().errors.has("srv")).toBe(false);
+    expect(flatten(get()).map((r) => r.id)).toEqual(["srv", "dbs"]);
+  });
+
+  it("retry on a regular node reloads it and clears the error", async () => {
+    let calls = 0;
+    const listChildren = vi.fn(async (id: string) => {
+      if (id === ROOT) return [n("a")];
+      if (calls++ === 0) throw err("query");
+      return [n("a1")];
+    });
+    const { c, get } = setup({}, { api: { listChildren, ...noApi } });
+    await c.load(ROOT);
+    await c.expand("a");
+    expect(get().errors.get("a")?.code).toBe("query");
+    await c.retry("a");
+    expect(get().errors.has("a")).toBe(false);
+    expect(get().children.get("a")).toEqual(["a1"]);
+  });
+
+  it("nodeGone marks only not_found errors and only for existing nodes", async () => {
+    const { c, get } = setup({ [ROOT]: [n("a")] });
+    await c.load(ROOT);
+    const payload = (code: string): ErrorPayload => ({ code, message: code, detail: null, hint: null });
+    expect(c.nodeGone("a", payload("query"))).toBe(false);
+    expect(c.nodeGone("ghost", payload("not_found"))).toBe(false);
+    expect(c.nodeGone("a", payload("not_found"))).toBe(true);
+    expect(get().errors.get("a")?.code).toBe("not_found");
+  });
+
+  it("a not_found load error keeps the node in the tree", async () => {
+    const listChildren = vi.fn(async (id: string) => {
+      if (id === ROOT) return [n("a")];
+      throw err("not_found");
+    });
+    const { c, get } = setup({}, { api: { listChildren, ...noApi } });
+    await c.load(ROOT);
+    await c.expand("a");
+    const row = flatten(get())[0];
+    expect([row.id, row.error?.code]).toEqual(["a", "not_found"]);
+  });
+});
