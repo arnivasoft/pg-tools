@@ -277,4 +277,41 @@ describe("ExplorerController lost sessions", () => {
     expect(get().errors.get("dbs")?.code).toBe("query");
     expect(get().nodes.get("srv")!.flags.connected).toBe(true);
   });
+
+  it("sessionLost marks the owning server disconnected, clears its subtree and the next expand reconnects", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1" });
+    const { c, get, connectServer } = setup({ [ROOT]: [srv], srv: [n("dbs")] });
+    await c.load(ROOT);
+    await c.expand("srv");
+    expect(get().nodes.get("srv")!.flags.connected).toBe(true);
+    c.select("dbs");
+
+    const payload: ErrorPayload = { code: "connection_lost", message: "Bağlantı koptu", detail: "x", hint: null };
+    expect(c.sessionLost("dbs", payload)).toBe(true);
+
+    const server = get().nodes.get("srv")!;
+    expect([server.flags.connected, server.detail]).toEqual([false, null]);
+    expect(get().nodes.has("dbs")).toBe(false);
+    expect(get().errors.get("srv")?.code).toBe("connection_lost");
+    expect(get().selected).toBe("srv");
+
+    await c.expand("srv");
+    expect(connectServer).toHaveBeenCalledTimes(2);
+    expect(get().nodes.get("srv")!.flags.connected).toBe(true);
+    expect(flatten(get()).map((r) => r.id)).toEqual(["srv", "dbs"]);
+  });
+
+  it("sessionLost ignores unrelated error codes and nodes outside any server", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1" });
+    const { c, get } = setup({ [ROOT]: [srv, n("grp:G", { kind: "serverGroup" })], srv: [n("dbs")] });
+    await c.load(ROOT);
+    await c.expand("srv");
+    const query: ErrorPayload = { code: "query", message: "m", detail: null, hint: null };
+    expect(c.sessionLost("dbs", query)).toBe(false);
+    expect(get().nodes.get("srv")!.flags.connected).toBe(true);
+    const lost: ErrorPayload = { code: "not_connected", message: "m", detail: null, hint: null };
+    expect(c.sessionLost("grp:G", lost)).toBe(false);
+    expect(c.sessionLost("yok", lost)).toBe(false);
+    expect(get().nodes.get("srv")!.flags.connected).toBe(true);
+  });
 });

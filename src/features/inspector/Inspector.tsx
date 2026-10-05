@@ -35,13 +35,23 @@ export function Inspector(props: { explorer: Explorer }) {
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
   onCleanup(() => clearTimeout(copiedTimer));
 
+  // Backend çağrısı oturum kaybıyla başarısız olursa ağaç da sunucuyu bağlantısız göstermeli.
+  const guarded = async <T,>(id: string, call: () => Promise<T>): Promise<T> => {
+    try {
+      return await call();
+    } catch (e) {
+      props.explorer.controller.sessionLost(id, toPayload(e));
+      throw e;
+    }
+  };
+
   const [properties] = createResource(
     () => selected()?.id,
-    async (id) => ({ id, value: await commands.getProperties(id) }),
+    async (id) => ({ id, value: await guarded(id, () => commands.getProperties(id)) }),
   );
   const [ddl] = createResource(
     () => (tab() === "ddl" ? selected()?.id : undefined),
-    async (id) => ({ id, value: await commands.getDdl(id) }),
+    async (id) => ({ id, value: await guarded(id, () => commands.getDdl(id)) }),
   );
 
   // Hatalı bir resource'un `.latest` değeri okunursa Solid hatayı fırlatır; bu yüzden önce `.error` kontrol edilir.
