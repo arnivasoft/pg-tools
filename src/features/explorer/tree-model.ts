@@ -45,6 +45,16 @@ function removeSubtreeMut(s: TreeState, id: string): void {
   if (s.selected === id) s.selected = null;
 }
 
+/** `id`, `ancestor`'ın kendisi veya torunu mu? */
+function isWithin(s: TreeState, id: string | null, ancestor: string): boolean {
+  let cur: string | undefined = id ?? undefined;
+  while (cur !== undefined && cur !== ROOT) {
+    if (cur === ancestor) return true;
+    cur = s.parent.get(cur);
+  }
+  return false;
+}
+
 export function startLoading(s: TreeState, id: string): TreeState {
   const next = clone(s);
   next.loading.add(id);
@@ -59,7 +69,9 @@ export function stopLoading(s: TreeState, id: string): TreeState {
 }
 
 export function setChildren(s: TreeState, parentId: string, list: TreeNode[]): TreeState {
+  if (parentId !== ROOT && !s.nodes.has(parentId)) return s;
   const next = clone(s);
+  let disconnectedSelection: string | null = null;
   const selectedBefore = s.selected;
   const keep = new Set(list.map((n) => n.id));
   for (const old of s.children.get(parentId) ?? []) {
@@ -70,6 +82,11 @@ export function setChildren(s: TreeState, parentId: string, list: TreeNode[]): T
     if (previous?.flags.connected && !n.flags.connected) {
       removeChildrenMut(next, n.id);
       next.expanded.delete(n.id);
+      next.loading.delete(n.id);
+      next.errors.delete(n.id);
+      if (selectedBefore !== null && selectedBefore !== n.id && isWithin(s, selectedBefore, n.id)) {
+        disconnectedSelection = n.id;
+      }
     }
     next.nodes.set(n.id, n);
     next.parent.set(n.id, parentId);
@@ -80,6 +97,7 @@ export function setChildren(s: TreeState, parentId: string, list: TreeNode[]): T
   if (selectedBefore !== null && next.selected === null) {
     next.selected = parentId === ROOT ? null : parentId;
   }
+  if (disconnectedSelection !== null) next.selected = disconnectedSelection;
   return next;
 }
 
@@ -107,6 +125,7 @@ export function expand(s: TreeState, id: string): TreeState {
 export function collapse(s: TreeState, id: string): TreeState {
   const next = clone(s);
   next.expanded.delete(id);
+  if (s.selected !== null && s.selected !== id && isWithin(s, s.selected, id)) next.selected = id;
   return next;
 }
 
@@ -117,9 +136,10 @@ export function select(s: TreeState, id: string | null): TreeState {
 /** Çocukları siler ve düğümü daraltır (yeniden yüklenmeleri gerekir). */
 export function invalidate(s: TreeState, id: string): TreeState {
   const next = clone(s);
+  const selectedBefore = s.selected;
   removeChildrenMut(next, id);
   next.expanded.delete(id);
-  if (next.selected !== null && !next.nodes.has(next.selected)) next.selected = id;
+  if (selectedBefore !== null && selectedBefore !== id && isWithin(s, selectedBefore, id)) next.selected = id;
   return next;
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "../../ipc/bindings/TreeNode";
 import {
-  ROOT, collapse, emptyTree, expand, flatten, keyIntent, patchNode, rowLabel, select, setChildren, setError, startLoading,
+  ROOT, collapse, invalidate, emptyTree, expand, flatten, keyIntent, patchNode, rowLabel, select, setChildren, setError, startLoading,
 } from "./tree-model";
 
 const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false };
@@ -102,5 +102,41 @@ describe("tree-model", () => {
     expect(rowLabel(flatten(s)[0])).toBe("Tables");
     s = setChildren(s, "t", Array.from({ length: 1243 }, (_, i) => node(`t${i}`)));
     expect(rowLabel(flatten(s)[0])).toBe("Tables (1.243)");
+  });
+});
+
+describe("tree-model selection and stale results", () => {
+  it("invalidate moves selection inside the subtree to the invalidated node", () => {
+    const s = invalidate(select(sample(), "a2"), "a");
+    expect(s.children.has("a")).toBe(false);
+    expect(s.selected).toBe("a");
+  });
+
+  it("collapse moves a hidden descendant selection to the collapsed node", () => {
+    let s = expand(sample(), "a1");
+    s = setChildren(s, "a1", [node("a1x")]);
+    s = select(s, "a1x");
+    expect(collapse(s, "a").selected).toBe("a");
+    expect(collapse(select(s, "b"), "a").selected).toBe("b");
+  });
+
+  it("setChildren for a missing parent is a no-op", () => {
+    const s = sample();
+    const r = setChildren(s, "gone", [node("zz")]);
+    expect(r).toBe(s);
+    expect(r.nodes.has("zz")).toBe(false);
+  });
+
+  it("disconnect moves selection to the server and clears its loading/error", () => {
+    const on = { ...flags, connected: true };
+    let s = setChildren(emptyTree(), ROOT, [node("srv", { kind: "server", flags: on })]);
+    s = expand(s, "srv");
+    s = setChildren(s, "srv", [node("dbs")]);
+    s = select(s, "dbs");
+    s = startLoading(s, "srv");
+    s = setChildren(s, ROOT, [node("srv", { kind: "server", flags })]);
+    expect(s.selected).toBe("srv");
+    expect(s.loading.has("srv")).toBe(false);
+    expect(s.errors.has("srv")).toBe(false);
   });
 });
