@@ -171,7 +171,7 @@ mod tests {
         let saved = reg.upsert(ServerConfig::new(" prod ", "h", 5432, "u")).unwrap();
         assert_eq!(saved.name, "prod");
         let again = Registry::load(path(&dir)).unwrap().registry;
-        assert_eq!(again.servers(), &[saved.clone()]);
+        assert_eq!(again.servers(), std::slice::from_ref(&saved));
         assert_eq!(again.get(saved.id), Some(&saved));
         assert!(!path(&dir).with_extension("json.tmp").exists());
     }

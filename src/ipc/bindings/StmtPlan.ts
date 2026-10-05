@@ -19,4 +19,8 @@ lockedReject: boolean, lockedReason: LockedReason | null,
 /**
  * Parola/bağlantı dizesi içerebilir; geçmişe yazılmamalı.
  */
-sensitive: boolean, charOffset: number, };
+sensitive: boolean, charOffset: number, 
+/**
+ * İfade metninin karakter (Unicode scalar) uzunluğu: metin `[char_offset, char_offset + char_len)`.
+ */
+charLen: number, };

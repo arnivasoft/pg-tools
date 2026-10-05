@@ -563,7 +563,6 @@ mod tests {
     #[tokio::test]
     async fn save_server_closes_sessions_only_for_target_lock_or_production_changes() {
         let Some(fx) = fixture().await else { return };
-        let sid = fx.ts.config.id;
 
         // Yalnızca ad/grup/renk: oturum açık kalır.
         let (id, pid) = session_with_open_tx(&fx, "pgt_qt8_save_meta").await;
@@ -594,6 +593,5 @@ mod tests {
             save_registered(&fx.registry, &fx.manager, &fx.qm, new).await.unwrap();
             assert_closed_and_rolled_back(&fx, id, pid, table).await;
         }
-        let _ = sid;
     }
 }

@@ -153,6 +153,8 @@ pub struct StmtPlan {
     /// Parola/bağlantı dizesi içerebilir; geçmişe yazılmamalı.
     pub sensitive: bool,
     pub char_offset: u32,
+    /// İfade metninin karakter (Unicode scalar) uzunluğu: metin `[char_offset, char_offset + char_len)`.
+    pub char_len: u32,
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -236,6 +238,7 @@ pub(crate) fn plan_script(sql: &str, scope: Scope, guard: Guard) -> Result<Vec<P
                 locked_reason,
                 sensitive: a.sensitive,
                 char_offset: chars,
+                char_len: text.chars().count() as u32,
             },
             range,
             tx: tx_op(text),
@@ -847,7 +850,7 @@ impl QueryManager {
             if let Err(e) = step(state, TxEvent::Ok(p.tx)) {
                 sink.send(QueryEvent::Failed {
                     stmt_index: idx,
-                    error: ErrorPayload::from(&e),
+                    error: crate::error_codes::query_payload(&e),
                     position: None,
                     char_offset: offset,
                     notices: Vec::new(),
@@ -1483,6 +1486,7 @@ mod tests {
         let all = plan_script(sql, Scope::All, PLAIN).unwrap();
         assert_eq!(all.iter().map(|p| (p.plan.index, p.plan.char_offset)).collect::<Vec<_>>(), [(0, 0), (1, 13), (2, 25)]);
         assert_eq!(&sql[all[2].range.clone()], "select 3");
+        assert_eq!(all.iter().map(|p| p.plan.char_len).collect::<Vec<_>>(), [11, 8, 8], "ğü iki karakter");
 
         // Seçim kendi başına bir betiktir: indeksler seçim içi, ofsetler editör metnine göre.
         let sel = plan_script(sql, Scope::Selection { start: 13, end: 34 }, PLAIN).unwrap();
