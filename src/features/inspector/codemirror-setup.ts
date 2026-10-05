@@ -38,5 +38,9 @@ export function createReadOnlyEditor(parent: HTMLElement, doc: string): EditorVi
 }
 
 export function replaceDoc(view: EditorView, doc: string): void {
-  view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: doc } });
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: doc },
+    selection: { anchor: 0 },
+    effects: EditorView.scrollIntoView(0, { y: "start" }),
+  });
 }

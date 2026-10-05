@@ -13,5 +13,5 @@ export default function DdlView(props: { text: string }) {
     if (view && view.state.doc.toString() !== text) replaceDoc(view, text);
   });
   onCleanup(() => view?.destroy());
-  return <div ref={host} class="h-full min-h-0" />;
+  return <div ref={host} class="absolute inset-0" />;
 }

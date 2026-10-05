@@ -8,6 +8,7 @@ import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
 import { TabPanel, Tabs } from "../../ui/Tabs";
 import type { Explorer } from "../explorer/explorer-store";
+import { forNode } from "./for-node";
 import { kindLabel } from "./labels";
 import { PropertiesView } from "./PropertiesView";
 
@@ -36,16 +37,17 @@ export function Inspector(props: { explorer: Explorer }) {
 
   const [properties] = createResource(
     () => selected()?.id,
-    (id) => commands.getProperties(id),
+    async (id) => ({ id, value: await commands.getProperties(id) }),
   );
   const [ddl] = createResource(
     () => (tab() === "ddl" ? selected()?.id : undefined),
-    (id) => commands.getDdl(id),
+    async (id) => ({ id, value: await commands.getDdl(id) }),
   );
 
   // Hatalı bir resource'un `.latest` değeri okunursa Solid hatayı fırlatır; bu yüzden önce `.error` kontrol edilir.
-  const propsData = () => (properties.error ? undefined : properties.latest);
-  const ddlText = () => (ddl.error ? undefined : ddl.latest);
+  // Değer yalnızca şu an seçili düğümü üreten istekten geliyorsa geçerlidir (aksi halde "yükleniyor").
+  const propsData = () => forNode(properties.error ? undefined : properties.latest, selected()?.id);
+  const ddlText = () => forNode(ddl.error ? undefined : ddl.latest, selected()?.id);
 
   const copy = async () => {
     const text = ddlText();
@@ -88,7 +90,7 @@ export function Inspector(props: { explorer: Explorer }) {
                 <Match when={properties.error}>
                   <ErrorView error={properties.error} />
                 </Match>
-                <Match when={properties.loading && !propsData()}>
+                <Match when={propsData() === undefined}>
                   <Muted text={t.inspector.loading} />
                 </Match>
                 <Match when={propsData()?.length === 0}>
@@ -97,12 +99,12 @@ export function Inspector(props: { explorer: Explorer }) {
                 <Match when={propsData()}>{(sections) => <PropertiesView sections={sections()} />}</Match>
               </Switch>
             </TabPanel>
-            <TabPanel value="ddl" class="min-h-0 flex-1">
+            <TabPanel value="ddl" class="relative min-h-0 flex-1">
               <Switch>
                 <Match when={ddl.error}>
                   <ErrorView error={ddl.error} />
                 </Match>
-                <Match when={ddl.loading && ddlText() === undefined}>
+                <Match when={ddlText() === undefined}>
                   <Muted text={t.inspector.loading} />
                 </Match>
                 <Match when={ddlText() === ""}>
