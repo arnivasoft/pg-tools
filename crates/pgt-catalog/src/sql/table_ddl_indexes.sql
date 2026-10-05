@@ -7,4 +7,4 @@ JOIN pg_namespace n ON n.oid = ic.relnamespace
 WHERE x.indrelid = $1
   AND NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conindid = x.indexrelid AND k.contype IN ('p', 'u', 'x'))
   AND NOT EXISTS (SELECT 1 FROM pg_inherits ih WHERE ih.inhrelid = x.indexrelid)
-ORDER BY ic.relname COLLATE "C"
+ORDER BY ic.relname::text COLLATE "C"

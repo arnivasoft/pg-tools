@@ -3,4 +3,4 @@ SELECT n.oid, n.nspname::text AS name,
         OR n.nspname LIKE 'pg\_toast%'
         OR n.nspname LIKE 'pg\_temp\_%') AS is_system
 FROM pg_namespace n
-ORDER BY is_system, n.nspname COLLATE "C"
+ORDER BY is_system, n.nspname::text COLLATE "C"

@@ -3,4 +3,4 @@ SELECT p.oid, p.polname::text AS name,
        true AS leaf
 FROM pg_policy p
 WHERE p.polrelid = $1
-ORDER BY p.polname COLLATE "C"
+ORDER BY p.polname::text COLLATE "C"

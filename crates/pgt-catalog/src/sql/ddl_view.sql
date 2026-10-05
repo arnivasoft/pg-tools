@@ -7,7 +7,7 @@ SELECT CASE c.relkind WHEN 'm' THEN 'Materialized View' ELSE 'View' END AS title
            || CASE WHEN c.reloptions IS NOT NULL THEN E'\nWITH (' || array_to_string(c.reloptions, ', ') || ')' ELSE '' END
            || E'\nAS\n' || rtrim(pg_get_viewdef(c.oid, true), E';\n ')
            || CASE WHEN c.relispopulated THEN E'\nWITH DATA;\n' ELSE E'\nWITH NO DATA;\n' END
-           || coalesce((SELECT E'\n' || string_agg(pg_get_indexdef(x.indexrelid) || E';\n', E'\n' ORDER BY ic.relname COLLATE "C")
+           || coalesce((SELECT E'\n' || string_agg(pg_get_indexdef(x.indexrelid) || E';\n', E'\n' ORDER BY ic.relname::text COLLATE "C")
                         FROM pg_index x JOIN pg_class ic ON ic.oid = x.indexrelid WHERE x.indrelid = c.oid), '')
          ELSE
            'CREATE OR REPLACE VIEW ' || q.qname

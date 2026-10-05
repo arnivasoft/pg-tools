@@ -7,7 +7,7 @@ SELECT 'Domain' AS title,
                  ELSE '' END
          || CASE WHEN t.typdefault IS NOT NULL THEN E'\n    DEFAULT ' || t.typdefault ELSE '' END
          || CASE WHEN t.typnotnull THEN E'\n    NOT NULL' ELSE '' END
-         || coalesce((SELECT string_agg(E'\n    CONSTRAINT ' || quote_ident(k.conname) || ' ' || pg_get_constraintdef(k.oid, true), '' ORDER BY k.conname COLLATE "C")
+         || coalesce((SELECT string_agg(E'\n    CONSTRAINT ' || quote_ident(k.conname) || ' ' || pg_get_constraintdef(k.oid, true), '' ORDER BY k.conname::text COLLATE "C")
                       FROM pg_constraint k WHERE k.contypid = t.oid AND k.contype = 'c'), '')
          || E';\n' AS body,
        NULL::text AS extra_stmt,

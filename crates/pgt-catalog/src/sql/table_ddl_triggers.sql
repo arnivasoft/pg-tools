@@ -4,4 +4,4 @@ SELECT pg_get_triggerdef(t.oid, true) || ';' AS def,
        quote_literal(obj_description(t.oid, 'pg_trigger')) AS comment
 FROM pg_trigger t
 WHERE t.tgrelid = $1 AND NOT t.tgisinternal AND t.tgparentid = 0
-ORDER BY t.tgname COLLATE "C"
+ORDER BY t.tgname::text COLLATE "C"

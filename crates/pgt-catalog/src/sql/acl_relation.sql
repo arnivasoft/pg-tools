@@ -7,4 +7,4 @@ SELECT grantee, privilege, grantable FROM (
   WHERE o.oid = $1
 ) s
 -- Sahip rolü (adı ne olursa olsun) önce, sonra diğerleri ada göre: sıra ortamdan bağımsız.
-ORDER BY is_owner DESC, grantee COLLATE "C", privilege
+ORDER BY is_owner DESC, grantee::text COLLATE "C", privilege

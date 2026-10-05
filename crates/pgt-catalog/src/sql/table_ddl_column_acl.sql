@@ -11,4 +11,4 @@ SELECT stmt FROM (
   WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped AND a.attacl IS NOT NULL
   GROUP BY n.nspname, c.relname, a2.grantee, a2.is_grantable
 ) x
-ORDER BY stmt COLLATE "C"
+ORDER BY stmt::text COLLATE "C"

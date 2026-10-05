@@ -6,4 +6,4 @@ SELECT grantee, privilege, grantable FROM (
   FROM pg_proc o, LATERAL aclexplode(o.proacl) a
   WHERE o.oid = $1
 ) s
-ORDER BY is_owner DESC, grantee COLLATE "C", privilege
+ORDER BY is_owner DESC, grantee::text COLLATE "C", privilege

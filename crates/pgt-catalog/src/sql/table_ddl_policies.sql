@@ -13,4 +13,4 @@ FROM pg_policy p
 JOIN pg_class c ON c.oid = p.polrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE p.polrelid = $1
-ORDER BY p.polname COLLATE "C"
+ORDER BY p.polname::text COLLATE "C"

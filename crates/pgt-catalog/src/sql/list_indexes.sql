@@ -5,4 +5,4 @@ FROM pg_index x
 JOIN pg_class c ON c.oid = x.indexrelid
 JOIN pg_am am ON am.oid = c.relam
 WHERE x.indrelid = $1
-ORDER BY c.relname COLLATE "C"
+ORDER BY c.relname::text COLLATE "C"

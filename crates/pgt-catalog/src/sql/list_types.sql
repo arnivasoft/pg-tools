@@ -7,4 +7,4 @@ WHERE t.typnamespace = $1
   AND t.typtype IN ('e', 'c', 'r', 'b')
   AND (t.typtype <> 'c' OR EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = t.typrelid AND c.relkind = 'c'))
   AND NOT EXISTS (SELECT 1 FROM pg_type el WHERE el.oid = t.typelem AND el.typarray = t.oid)
-ORDER BY t.typname COLLATE "C"
+ORDER BY t.typname::text COLLATE "C"

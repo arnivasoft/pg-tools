@@ -4,4 +4,4 @@ SELECT p.oid, p.proname::text || '(' || pg_get_function_identity_arguments(p.oid
 FROM pg_proc p
 WHERE p.pronamespace = $1 AND p.prokind IN ('f', 'w') AND p.prorettype = 'trigger'::regtype
   AND NOT EXISTS (SELECT 1 FROM pg_depend i WHERE i.classid = 'pg_proc'::regclass AND i.objid = p.oid AND i.deptype = 'i')
-ORDER BY p.proname COLLATE "C", p.oid
+ORDER BY p.proname::text COLLATE "C", p.oid

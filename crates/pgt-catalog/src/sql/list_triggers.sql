@@ -3,4 +3,4 @@ SELECT t.oid, t.tgname::text AS name,
        true AS leaf
 FROM pg_trigger t
 WHERE t.tgrelid = $1 AND NOT t.tgisinternal
-ORDER BY t.tgname COLLATE "C"
+ORDER BY t.tgname::text COLLATE "C"
