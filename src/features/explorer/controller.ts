@@ -161,6 +161,28 @@ export class ExplorerController {
     if (id === ROOT || this.get().children.has(id)) await this.load(id);
   }
 
+  /** Yüklü tüm listeleri yeniden okur: önce ROOT, sonra derinliğe göre; sıralı, hata yutulur, bağlantısız sunucular atlanır. */
+  async reloadAll(): Promise<void> {
+    const depthOf = (id: string): number => {
+      let d = 0;
+      for (let cur = this.get().parent.get(id); cur !== undefined && cur !== ROOT; cur = this.get().parent.get(cur)) d++;
+      return d;
+    };
+    const ids = [...this.get().children.keys()].sort((a, b) => (a === ROOT ? -1 : b === ROOT ? 1 : depthOf(a) - depthOf(b)));
+    for (const id of ids) {
+      try {
+        if (id !== ROOT) {
+          if (!this.get().nodes.has(id)) continue; // önceki yenilemede kalktı
+          const server = serverOf(this.get(), id);
+          if (server && !server.flags.connected) continue;
+        }
+        if (this.get().children.has(id)) await this.load(id);
+      } catch (e) {
+        console.error("reloadAll failed for", id, e);
+      }
+    }
+  }
+
   async retry(id: string): Promise<void> {
     const node = this.get().nodes.get(id);
     if (!node) return;

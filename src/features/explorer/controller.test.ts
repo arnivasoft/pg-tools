@@ -406,4 +406,51 @@ describe("ExplorerController retry / nodeGone", () => {
     const row = flatten(get())[0];
     expect([row.id, row.error?.code]).toEqual(["a", "not_found"]);
   });
+
+  it("reloadAll reloads every loaded list, parents first", async () => {
+    const { c, listChildren } = setup({ [ROOT]: [n("a")], a: [n("a1")], a1: [n("a11")] });
+    await c.load(ROOT);
+    await c.expand("a");
+    await c.expand("a1");
+    listChildren.mockClear();
+    await c.reloadAll();
+    expect(listChildren.mock.calls.map(([id]) => id)).toEqual([ROOT, "a", "a1"]);
+  });
+
+  it("reloadAll skips disconnected servers", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1", flags: { ...flags, connected: true } });
+    const { c, get, listChildren } = setup({ [ROOT]: [srv], srv: [n("dbs")] });
+    await c.load(ROOT);
+    await c.expand("srv");
+    c.disconnect("srv");
+    listChildren.mockClear();
+    await c.reloadAll();
+    expect(listChildren.mock.calls.map(([id]) => id)).toEqual([ROOT]);
+    expect(get().errors.size).toBe(0);
+  });
+
+  it("reloadAll keeps expansion and selection of surviving nodes", async () => {
+    const { c, get } = setup({ [ROOT]: [n("a")], a: [n("a1")] });
+    await c.load(ROOT);
+    await c.expand("a");
+    c.select("a1");
+    await c.reloadAll();
+    expect([get().expanded.has("a"), get().selected]).toEqual([true, "a1"]);
+  });
+
+  it("reloadAll continues after a failing load", async () => {
+    let failA = false;
+    const listChildren = vi.fn(async (id: string) => {
+      if (id === "a" && failA) throw err("query");
+      return id === ROOT ? [n("a"), n("b")] : id === "b" ? [n("b1")] : id === "a" ? [n("a1")] : [];
+    });
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(), disconnectServer: vi.fn() } });
+    await c.load(ROOT);
+    await c.expand("a");
+    await c.expand("b");
+    failA = true;
+    await c.reloadAll();
+    expect(get().errors.get("a")?.code).toBe("query");
+    expect(get().children.get("b")).toEqual(["b1"]);
+  });
 });

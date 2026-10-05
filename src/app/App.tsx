@@ -21,7 +21,10 @@ import { t } from "./strings";
 import { Toaster } from "./Toaster";
 import { toast } from "./toast";
 import { Toolbar } from "./Toolbar";
+import { readStorage, writeStorage } from "./storage";
 import { applyTheme, loadThemePreference, nextPreference, saveThemePreference, watchSystemTheme } from "./theme";
+
+const SHOW_SYSTEM_KEY = "pgt.showSystem";
 
 export default function App() {
   const prompt = createPasswordPrompt();
@@ -30,6 +33,7 @@ export default function App() {
   const [dialogOpen, setDialogOpen] = createSignal(false);
   const [editing, setEditing] = createSignal<ServerConfig | null>(null);
   const [importOpen, setImportOpen] = createSignal(false);
+  const [showSystem, setShowSystem] = createSignal(readStorage(SHOW_SYSTEM_KEY) === "1");
   const [groups, setGroups] = createSignal<string[]>([]);
 
   const openDialog = async (serverId: string | null) => {
@@ -60,6 +64,7 @@ export default function App() {
   };
 
   onMount(async () => {
+    await commands.setShowSystem(showSystem()).catch(() => {});
     try {
       await explorer.controller.load(ROOT);
     } catch {
@@ -94,6 +99,27 @@ export default function App() {
   window.addEventListener("keydown", onWindowKey);
   onCleanup(() => window.removeEventListener("keydown", onWindowKey));
 
+  let togglingSystem = false;
+  const toggleSystem = async () => {
+    if (togglingSystem) return;
+    togglingSystem = true;
+    const next = !showSystem();
+    try {
+      await commands.setShowSystem(next);
+      setShowSystem(next);
+      writeStorage(SHOW_SYSTEM_KEY, next ? "1" : "0");
+    } catch (e) {
+      toast.show(toPayload(e).message, "error");
+      togglingSystem = false;
+      return;
+    }
+    try {
+      await explorer.controller.reloadAll();
+    } finally {
+      togglingSystem = false;
+    }
+  };
+
   const refreshSelected = () => {
     const selected = explorer.state().selected;
     void (selected === null ? explorer.controller.reloadServers() : explorer.controller.refresh(selected));
@@ -103,6 +129,8 @@ export default function App() {
     <div class="flex h-full flex-col">
       <header class="flex h-9 shrink-0 items-center gap-1 border-b border-border bg-panel px-2">
         <Toolbar
+          showSystem={showSystem()}
+          onToggleSystem={() => void toggleSystem()}
           onRefresh={refreshSelected}
           filter={explorer.state().filter}
           onFilter={(q) => explorer.controller.setFilter(q)}

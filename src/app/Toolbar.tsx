@@ -1,10 +1,11 @@
-import { Moon, RefreshCw, X, Sun, SunMoon } from "lucide-solid";
+import { Eye, EyeOff, Moon, RefreshCw, X, Sun, SunMoon } from "lucide-solid";
 import { Match, Switch, type JSX } from "solid-js";
 import { Button } from "../ui/Button";
 import { t } from "./strings";
 import type { ThemePreference } from "./theme";
 
 export function Toolbar(props: {
+  showSystem: boolean; onToggleSystem: () => void;
   onRefresh: () => void; themePref: ThemePreference; onCycleTheme: () => void; children?: JSX.Element;
   filter: string;
   onFilter: (q: string) => void;
@@ -27,6 +28,15 @@ export function Toolbar(props: {
       {props.children}
       <Button variant="ghost" title={t.toolbar.refresh} aria-label={t.toolbar.refresh} onClick={props.onRefresh}>
         <RefreshCw size={14} />
+      </Button>
+      <Button
+        variant="ghost"
+        title={t.toolbar.showSystem}
+        aria-label={t.toolbar.showSystem}
+        aria-pressed={props.showSystem}
+        onClick={props.onToggleSystem}
+      >
+        {props.showSystem ? <Eye size={14} /> : <EyeOff size={14} />}
       </Button>
       <div class="relative ml-2 w-56">
         <input

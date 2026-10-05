@@ -27,6 +27,7 @@ export const t = {
     refresh: "Yenile (F5)",
     filter: "Filtre…  (Ctrl+F)",
     clearFilter: "Filtreyi temizle",
+    showSystem: "Sistem nesnelerini göster (pg_catalog, information_schema, pg_* roller…)",
     theme: { system: "Tema: sistem", light: "Tema: açık", dark: "Tema: koyu" },
   },
   explorer: {
