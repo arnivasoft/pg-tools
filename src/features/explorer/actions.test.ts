@@ -141,3 +141,17 @@ describe("executeAction", () => {
     expect(d.controller.expand).not.toHaveBeenCalled();
   });
 });
+
+describe("deleteServer stale target", () => {
+  it("re-reads the node after the confirmation dialog", async () => {
+    const s = sampleTree();
+    const d = deps(s);
+    d.confirmDelete.mockImplementation(async () => {
+      s.nodes.delete("srv-up");
+      return true;
+    });
+    await executeAction(asDeps(d), "deleteServer", "srv-up");
+    expect(d.api.deleteServer).not.toHaveBeenCalled();
+    expect(d.notify).toHaveBeenCalledWith(t.menu.gone, "error");
+  });
+});

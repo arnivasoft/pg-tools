@@ -107,7 +107,13 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
       case "deleteServer": {
         if (!node.serverId) return;
         if (!(await deps.confirmDelete(node.label))) return;
-        await deps.api.deleteServer(node.serverId);
+        // Diyalog açıkken düğüm kaybolmuş olabilir: yeniden oku.
+        const still = deps.state().nodes.get(id);
+        if (!still?.serverId) {
+          deps.notify(t.menu.gone, "error");
+          return;
+        }
+        await deps.api.deleteServer(still.serverId);
         await deps.controller.serverRemoved();
         deps.notify(t.menu.deleted(node.label), "success");
         return;

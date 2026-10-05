@@ -1,5 +1,5 @@
 import { ContextMenu } from "@kobalte/core/context-menu";
-import { For, Show, createEffect, createSignal } from "solid-js";
+import { For, Show, createSignal } from "solid-js";
 import { t } from "../../app/strings";
 import { actionsFor, executeAction, groupOf, type ActionDeps, type ActionId } from "./actions";
 import type { Explorer } from "./explorer-store";
@@ -17,7 +17,6 @@ export function rowIdFromTarget(target: EventTarget | null): string | null {
 
 export function ExplorerMenu(props: { explorer: Explorer; deps: ActionDeps; treeRef?: (el: HTMLElement) => void }) {
   const ex = props.explorer;
-  const [open, setOpen] = createSignal(false);
   const [target, setTarget] = createSignal<string | null>(null);
   let treeEl: HTMLElement | undefined;
 
@@ -30,17 +29,10 @@ export function ExplorerMenu(props: { explorer: Explorer; deps: ActionDeps; tree
     return node ? actionsFor(ex.state(), node) : [];
   };
 
-  // Menü açıkken hedef ağaçtan kalkarsa (yenileme/silme) menüyü kapat.
-  createEffect(() => {
-    if (open() && targetNode() === null) setOpen(false);
-  });
-
   const label = (a: ActionId) => t.menu[a];
 
   return (
-    // `open` ContextMenuRootProps tiplerinde yok, ama Kobalte 0.13 kökü `{...others}`ı `open={...}`tan SONRA yayar,
-    // yani verilen `open` kazanır (context-menu-root.tsx). Hedef kaybolunca menüyü kapatmak için gerekli.
-    <ContextMenu onOpenChange={setOpen} {...({ open: open() } as object)}>
+    <ContextMenu>
       <ContextMenu.Trigger
         class="h-full"
         // Kobalte kendi işleyicisinden ÖNCE bunu çağırır (callHandler); defaultPrevented ise menüyü açmaz.
@@ -65,6 +57,8 @@ export function ExplorerMenu(props: { explorer: Explorer; deps: ActionDeps; tree
         />
       </ContextMenu.Trigger>
       <ContextMenu.Portal>
+        {/* Hedef menü açıkken ağaçtan kalkarsa içerik hiçbir şey çizmez; Kobalte durumu zorlanmaz (sonraki sağ tık hedefi yeniler). */}
+        <Show when={targetNode()}>
         <ContextMenu.Content
           class="z-50 min-w-48 rounded-md border border-border bg-bg py-1 shadow-xl outline-none"
           onCloseAutoFocus={(e: Event) => {
@@ -91,6 +85,7 @@ export function ExplorerMenu(props: { explorer: Explorer; deps: ActionDeps; tree
             )}
           </For>
         </ContextMenu.Content>
+        </Show>
       </ContextMenu.Portal>
     </ContextMenu>
   );
