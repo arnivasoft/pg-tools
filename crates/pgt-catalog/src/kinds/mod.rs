@@ -176,6 +176,8 @@ pub(crate) async fn ddl(cat: &Catalog, id: &NodeId) -> Result<String> {
         Seg::Db(d) => database::ddl(cat, server, *d).await,
         Seg::Schema(s) => schema::ddl(cat, server, db_req(db)?, *s).await,
         Seg::Table(t) => table::ddl(cat, server, db_req(db)?, *t).await,
+        // View/MatView kolonlarının ayrı DDL'i yok (tanım görünümün kendisinde).
+        Seg::Column(_) if matches!(path.iter().rev().nth(1), Some(Seg::View(_) | Seg::MatView(_))) => Ok(String::new()),
         Seg::Column(c) => {
             let rel = parent_oid(path).ok_or_else(|| invalid(id))?;
             column::ddl(cat, server, db_req(db)?, rel, *c).await

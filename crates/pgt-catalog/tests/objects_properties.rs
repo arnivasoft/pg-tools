@@ -205,3 +205,30 @@ async fn missing_oid_is_not_found_for_every_kind() {
         assert!(fx.catalog.properties(&customers.child(Seg::Coll(Coll::Indexes))).await.unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn view_and_matview_columns_have_properties_but_no_ddl() {
+    for fx in fixtures().await {
+        let schema = fx.schema("app").await;
+        for (coll, rel, col) in [(Coll::Views, "customer_orders", "email"), (Coll::MatViews, "order_totals", "total")] {
+            let rel_id = fx.child_of(&schema, coll, rel).await;
+            let col_id = fx.child_of(&rel_id, Coll::Columns, col).await;
+            assert_eq!(fx.catalog.ddl(&col_id).await.unwrap(), "", "{col_id}");
+            assert!(!fx.catalog.properties(&col_id).await.unwrap().is_empty(), "{col_id}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn role_valid_until_infinity_is_valid_ddl() {
+    for fx in fixtures().await {
+        let admin = pgt_core::testing::admin_client(&fx.ts, &fx.ts.config.maintenance_db).await;
+        admin.batch_execute("DROP ROLE IF EXISTS pgt_forever; CREATE ROLE pgt_forever NOLOGIN VALID UNTIL 'infinity'").await.unwrap();
+        let role = fx.child_of(&fx.server_id(), Coll::Roles, "pgt_forever").await;
+        let ddl = fx.catalog.ddl(&role).await.unwrap();
+        assert!(ddl.contains("VALID UNTIL 'infinity'"), "{ddl}");
+        let s = fx.catalog.properties(&role).await.unwrap();
+        assert_eq!(prop(&s, "Tanım", "Geçerlilik sonu"), Some("infinity"));
+        admin.batch_execute("DROP ROLE pgt_forever").await.unwrap();
+    }
+}
