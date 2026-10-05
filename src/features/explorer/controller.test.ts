@@ -24,7 +24,7 @@ function setup(children: Record<string, TreeNode[]>, deps: Partial<ExplorerDeps>
     (s) => (state = s),
     { api: { listChildren, connectServer, disconnectServer }, requestPassword, ...deps },
   );
-  return { c, get: () => state, listChildren, connectServer, disconnectServer, requestPassword };
+  return { c, get: () => state, set: (next: TreeState) => (state = next), listChildren, connectServer, disconnectServer, requestPassword };
 }
 
 describe("ExplorerController", () => {
@@ -423,21 +423,31 @@ describe("ExplorerController retry / nodeGone", () => {
   });
 
   it("reloadAll reloads every loaded list, parents first", async () => {
-    const { c, listChildren } = setup({ [ROOT]: [n("a")], a: [n("a1")], a1: [n("a11")] });
+    const { c, get, set, listChildren } = setup({ [ROOT]: [n("a")], a: [n("a1")], a1: [n("a11")] });
     await c.load(ROOT);
     await c.expand("a");
     await c.expand("a1");
+    // Derin listeler sığlardan önce yüklenmiş gibi: Map ekleme sırası a1, a, ROOT.
+    set({ ...get(), children: new Map([...get().children].reverse()) });
+    expect([...get().children.keys()]).toEqual(["a1", "a", ROOT]);
     listChildren.mockClear();
     await c.reloadAll();
     expect(listChildren.mock.calls.map(([id]) => id)).toEqual([ROOT, "a", "a1"]);
   });
 
-  it("reloadAll skips disconnected servers", async () => {
-    const srv = n("srv", { kind: "server", serverId: "u1", flags: { ...flags, connected: true } });
-    const { c, get, listChildren } = setup({ [ROOT]: [srv], srv: [n("dbs")] });
+  it("reloadAll skips the loaded lists of a disconnected server", async () => {
+    let connected = true;
+    const srv = () => n("srv", { kind: "server", serverId: "u1", flags: { ...flags, connected } });
+    const listChildren = vi.fn(async (id: string) => (id === ROOT ? [srv()] : id === "srv" ? [n("dbs")] : id === "dbs" ? [n("db1")] : []));
+    const { c, get, set } = setup({}, { api: { listChildren, connectServer: vi.fn(), disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
-    c.disconnect("srv");
+    await c.expand("dbs");
+    // `disconnect` alt ağacı boşaltır; burada alt listeleri hâlâ duran bağlantısız bir sunucu kuruyoruz.
+    connected = false;
+    const s = get();
+    set({ ...s, nodes: new Map(s.nodes).set("srv", srv()) });
+    expect([get().children.has("srv"), get().children.has("dbs")]).toEqual([true, true]);
     listChildren.mockClear();
     await c.reloadAll();
     expect(listChildren.mock.calls.map(([id]) => id)).toEqual([ROOT]);
@@ -457,7 +467,7 @@ describe("ExplorerController retry / nodeGone", () => {
     let failA = false;
     const listChildren = vi.fn(async (id: string) => {
       if (id === "a" && failA) throw err("query");
-      return id === ROOT ? [n("a"), n("b")] : id === "b" ? [n("b1")] : id === "a" ? [n("a1")] : [];
+      return id === ROOT ? [n("a"), n("b")] : id === "b" ? [n(failA ? "b2" : "b1")] : id === "a" ? [n("a1")] : [];
     });
     const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(), disconnectServer: vi.fn() } });
     await c.load(ROOT);
@@ -466,7 +476,29 @@ describe("ExplorerController retry / nodeGone", () => {
     failA = true;
     await c.reloadAll();
     expect(get().errors.get("a")?.code).toBe("query");
-    expect(get().children.get("b")).toEqual(["b1"]);
+    expect(get().children.get("b")).toEqual(["b2"]);
+  });
+
+  it("reloadAll continues when a reload rejects outright", async () => {
+    let version = 1;
+    const listChildren = vi.fn(async (id: string) =>
+      id === ROOT ? [n("a"), n("b")] : id === "a" ? [n("a1")] : id === "b" ? [n(`b${version}`)] : [],
+    );
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(), disconnectServer: vi.fn() } });
+    await c.load(ROOT);
+    await c.expand("a");
+    await c.expand("b");
+    version = 2;
+    const original = c.reload.bind(c);
+    vi.spyOn(c, "reload").mockImplementation((id: string) => (id === "a" ? Promise.reject(new Error("boom")) : original(id)));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(c.reloadAll()).resolves.toBeUndefined();
+      expect(logged).toHaveBeenCalledWith("reloadAll failed for", "a", expect.any(Error));
+    } finally {
+      logged.mockRestore();
+    }
+    expect(get().children.get("b")).toEqual(["b2"]);
   });
 });
 
