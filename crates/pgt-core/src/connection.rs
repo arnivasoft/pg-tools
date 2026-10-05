@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn rejects_options_only_for_the_pooler_startup_parameter_error() {
-        let cases: [(Option<&str>, &str, bool); 7] = [
+        let cases: [(Option<&str>, &str, bool); 10] = [
             (Some("08P01"), "unsupported startup parameter: options", true),
             (None, "unsupported startup parameter: options", true),
             (Some("28P01"), "password authentication failed for user \"postgres\"", false),
@@ -462,6 +462,11 @@ mod tests {
             (None, "error performing TLS handshake: invalid peer certificate: UnknownIssuer", false),
             (Some("3D000"), "database \"x\" does not exist", false),
             (Some("08P01"), "unsupported startup parameter: foo", false),
+            // SQLSTATE koruması: ileti eşleşse bile başka bir kod yedek yolu tetiklemez.
+            (Some("28P01"), "unsupported startup parameter: options", false),
+            // "options" tek başına yetmez; "startup parameter" da geçmeli.
+            (None, "invalid value for parameter \"options\"", false),
+            (Some("08P01"), "invalid options in connection string", false),
         ];
         for (code, msg, want) in cases {
             assert_eq!(rejects_options_message(code, msg), want, "{code:?} {msg}");
