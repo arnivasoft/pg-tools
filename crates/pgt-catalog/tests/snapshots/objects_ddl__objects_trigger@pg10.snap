@@ -1,0 +1,12 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Trigger: customers_touch ON app.customers
+
+-- DROP TRIGGER IF EXISTS customers_touch ON app.customers;
+
+CREATE TRIGGER customers_touch BEFORE UPDATE ON app.customers FOR EACH ROW WHEN (old.email IS DISTINCT FROM new.email) EXECUTE PROCEDURE app.touch_row();
+
+COMMENT ON TRIGGER customers_touch ON app.customers
+    IS 'Dokunma';

@@ -1,0 +1,20 @@
+---
+source: crates/pgt-catalog/tests/ddl.rs
+expression: fx.normalize(& ddl)
+---
+-- Table: app.events
+
+-- DROP TABLE IF EXISTS app.events;
+
+CREATE TABLE IF NOT EXISTS app.events
+(
+    id bigint NOT NULL,
+    happened_on date NOT NULL,
+    payload jsonb
+)
+PARTITION BY RANGE (happened_on);
+
+ALTER TABLE IF EXISTS app.events
+    OWNER TO <owner>;
+
+CREATE INDEX events_day_idx ON ONLY app.events USING btree (happened_on);

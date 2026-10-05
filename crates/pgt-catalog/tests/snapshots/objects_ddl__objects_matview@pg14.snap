@@ -1,0 +1,20 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Materialized View: app.order_totals
+
+-- DROP MATERIALIZED VIEW IF EXISTS app.order_totals;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS app.order_totals
+AS
+ SELECT orders.customer_id,
+    sum(orders.total) AS total
+   FROM app.orders
+  GROUP BY orders.customer_id
+WITH DATA;
+
+CREATE UNIQUE INDEX order_totals_pk ON app.order_totals USING btree (customer_id);
+
+ALTER MATERIALIZED VIEW app.order_totals
+    OWNER TO <owner>;

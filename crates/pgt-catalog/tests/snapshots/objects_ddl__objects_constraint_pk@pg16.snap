@@ -1,0 +1,10 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Constraint: customers_pkey ON app.customers
+
+-- ALTER TABLE IF EXISTS app.customers DROP CONSTRAINT IF EXISTS customers_pkey;
+
+ALTER TABLE IF EXISTS app.customers
+    ADD CONSTRAINT customers_pkey PRIMARY KEY (id);

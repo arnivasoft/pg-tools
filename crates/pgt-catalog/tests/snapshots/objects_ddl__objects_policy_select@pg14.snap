@@ -1,0 +1,17 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Policy: customers_select ON app.customers
+
+-- DROP POLICY IF EXISTS customers_select ON app.customers;
+
+CREATE POLICY customers_select
+    ON app.customers
+    AS PERMISSIVE
+    FOR SELECT
+    TO pgt_reader
+    USING (true);
+
+COMMENT ON POLICY customers_select ON app.customers
+    IS 'Okuma politikası';

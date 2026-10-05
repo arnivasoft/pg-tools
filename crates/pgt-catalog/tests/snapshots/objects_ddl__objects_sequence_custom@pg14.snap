@@ -1,0 +1,25 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Sequence: app.invoice_seq
+
+-- DROP SEQUENCE IF EXISTS app.invoice_seq;
+
+CREATE SEQUENCE IF NOT EXISTS app.invoice_seq
+    AS bigint
+    INCREMENT BY 5
+    MINVALUE 100
+    MAXVALUE 100000
+    START WITH 100
+    CACHE 10
+    CYCLE;
+
+ALTER SEQUENCE app.invoice_seq
+    OWNER TO <owner>;
+
+COMMENT ON SEQUENCE app.invoice_seq
+    IS 'Fatura numarası';
+
+GRANT SELECT, UPDATE, USAGE ON SEQUENCE app.invoice_seq TO <owner>;
+GRANT USAGE ON SEQUENCE app.invoice_seq TO pgt_reader;
