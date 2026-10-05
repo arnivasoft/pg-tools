@@ -21,9 +21,10 @@ export function ServerDialog(props: {
   editing: ServerConfig | null;
   groups: string[];
   onClose: () => void;
-  onSaved: (config: ServerConfig) => void;
+  /** `passwordTyped`: diyalogda parola yazıldı (arka uç oturumları kapatır). */
+  onSaved: (config: ServerConfig, passwordTyped: boolean) => void;
   /** Kayıttan önce (ör. açık transaction uyarısı); `false` kaydı durdurur. */
-  beforeSave?: (prev: ServerConfig | null, next: ServerConfig) => Promise<boolean>;
+  beforeSave?: (prev: ServerConfig | null, next: ServerConfig, passwordTyped: boolean) => Promise<boolean>;
 }) {
   const [form, setForm] = createSignal<ServerForm>(emptyForm());
   const [tab, setTab] = createSignal<FormTab>("general");
@@ -89,12 +90,12 @@ export function ServerDialog(props: {
     const gen = generation;
     setBusy(true);
     try {
-      if (props.beforeSave && !(await props.beforeSave(props.editing, r.config))) return;
+      if (props.beforeSave && !(await props.beforeSave(props.editing, r.config, r.password !== null))) return;
       if (gen !== generation) return;
       const saved = await commands.saveServer(r.config, r.password);
       if (gen === generation) {
         setForm(emptyForm());
-        props.onSaved(saved);
+        props.onSaved(saved, r.password !== null);
       }
     } catch (err) {
       if (gen === generation) setFeedback({ kind: "error", error: toPayload(err) });

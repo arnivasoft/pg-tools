@@ -112,6 +112,10 @@ describe("ortam istemi", () => {
     expect(saveClosesSessions(a, { ...a, readOnlyLock: true })).toBe(true);
     expect(saveClosesSessions(a, { ...a, port: 5433 })).toBe(true);
     expect(saveClosesSessions(a, { ...a, ssl: { ...a.ssl, mode: "require" } })).toBe(true);
+    // Yazılmış parola (hedef aynı olsa da) oturumları kapatır; yeni kayıtta oturum yok.
+    expect(saveClosesSessions(a, { ...a, name: "x" }, true)).toBe(true);
+    expect(saveClosesSessions(a, a, true)).toBe(true);
+    expect(saveClosesSessions(null, a, true)).toBe(false);
   });
 });
 

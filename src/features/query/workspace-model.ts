@@ -86,10 +86,14 @@ export function applyEnvChoice(config: ServerConfig, choice: EnvChoice, lock: bo
   return { ...config, label: envLabel(choice), readOnlyLock: choice === "production" ? lock : config.readOnlyLock };
 }
 
-/** Arka uç `should_close_query_sessions` ile aynı: hedef, SSL, kilit ya da üretim olma durumu değişirse oturumlar kapanır. */
-export function saveClosesSessions(prev: ServerConfig | null, next: ServerConfig): boolean {
+/**
+ * Arka uç `save_registered` ile aynı: kayıtlı sunucuda parola yazıldıysa ya da hedef, SSL, kilit veya üretim olma
+ * durumu değiştiyse oturumlar kapanır (yeni kayıtta oturum yoktur).
+ */
+export function saveClosesSessions(prev: ServerConfig | null, next: ServerConfig, passwordTyped = false): boolean {
   if (!prev) return false;
   return (
+    passwordTyped ||
     prev.host !== next.host ||
     prev.port !== next.port ||
     prev.username !== next.username ||

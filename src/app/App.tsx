@@ -226,9 +226,9 @@ export default function App() {
             editing={editing()}
             groups={groups()}
             onClose={() => setDialogOpen(false)}
-            beforeSave={async (prev, next) => !prev || !saveClosesSessions(prev, next) || query.confirmServerChange(prev.id, prev.name)}
-            onSaved={(saved) => {
-              if (saveClosesSessions(editing(), saved)) query.serverSessionsClosed(saved.id, false);
+            beforeSave={async (prev, next, typed) => !prev || !saveClosesSessions(prev, next, typed) || query.confirmServerChange(prev.id, prev.name)}
+            onSaved={(saved, typed) => {
+              if (saveClosesSessions(editing(), saved, typed)) query.serverSessionsClosed(saved.id, false);
               void query.refreshServers();
               setDialogOpen(false);
               explorer.controller.reloadServers().catch(() => {});
