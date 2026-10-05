@@ -109,3 +109,12 @@ CREATE TABLE extra.tickets (
     title text NOT NULL
 );
 ALTER TABLE app.events_2026 ADD CONSTRAINT events_2026_day_check CHECK (happened_on > '2025-12-31');
+
+COMMENT ON CONSTRAINT customers_email_check ON app.customers IS 'E-posta biçimi';
+COMMENT ON POLICY customers_select ON app.customers IS 'Okuma politikası';
+CREATE UNLOGGED TABLE extra.audit_log (id int, name text);
+CREATE TABLE extra.secrets (id int, name text);
+ALTER TABLE extra.secrets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE extra.secrets FORCE ROW LEVEL SECURITY;
+CREATE TRIGGER secrets_touch BEFORE INSERT ON extra.secrets FOR EACH ROW EXECUTE PROCEDURE app.touch_row();
+ALTER TABLE extra.secrets DISABLE TRIGGER secrets_touch;

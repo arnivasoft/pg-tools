@@ -85,6 +85,30 @@ async fn table_ddl_keeps_index_and_trigger_comments() {
         let index_comment = "COMMENT ON INDEX app.orders_customer_idx
     IS 'Müşteri dizini';";
         assert!(orders.contains(index_comment), "{orders}");
+        for part in [
+            "COMMENT ON CONSTRAINT customers_email_check ON app.customers\n    IS 'E-posta biçimi';",
+            "    USING (true);\nCOMMENT ON POLICY customers_select ON app.customers\n    IS 'Okuma politikası';",
+        ] {
+            assert!(customers.contains(part), "'{part}' eksik:\n{customers}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn unlogged_forced_rls_and_disabled_trigger() {
+    for fx in fixtures().await {
+        let log = fx.catalog.ddl(&fx.table("extra", "audit_log").await).await.unwrap();
+        assert!(log.contains("CREATE UNLOGGED TABLE IF NOT EXISTS extra.audit_log"), "{log}");
+        let secrets = fx.catalog.ddl(&fx.table("extra", "secrets").await).await.unwrap();
+        for part in [
+            "ALTER TABLE IF EXISTS extra.secrets ENABLE ROW LEVEL SECURITY;",
+            "ALTER TABLE IF EXISTS extra.secrets FORCE ROW LEVEL SECURITY;",
+            // PG 10'da EXECUTE PROCEDURE, 11+ EXECUTE FUNCTION yazılır
+            "CREATE TRIGGER secrets_touch BEFORE INSERT ON extra.secrets FOR EACH ROW EXECUTE",
+            "app.touch_row();\nALTER TABLE IF EXISTS extra.secrets DISABLE TRIGGER secrets_touch;",
+        ] {
+            assert!(secrets.contains(part), "'{part}' eksik:\n{secrets}");
+        }
     }
 }
 

@@ -12,3 +12,6 @@ CREATE POLICY customers_select
     FOR SELECT
     TO pgt_reader
     USING (true);
+
+COMMENT ON POLICY customers_select ON app.customers
+    IS 'Okuma politikası';

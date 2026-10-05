@@ -8,3 +8,6 @@ expression: ddl_text
 
 ALTER TABLE IF EXISTS app.customers
     ADD CONSTRAINT customers_email_check CHECK (POSITION(('@'::text) IN (email)) > 1);
+
+COMMENT ON CONSTRAINT customers_email_check ON app.customers
+    IS 'E-posta biçimi';

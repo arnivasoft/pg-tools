@@ -156,6 +156,10 @@ pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: u32, table: u32) -> Res
     for c in &cols {
         blocks.push(comment("COLUMN", &format!("{}.{}", h.qname, c.name), c.comment.as_deref()));
     }
+    for k in &constraints {
+        let target = format!("{} ON {}", k.get::<_, String>("name"), h.qname);
+        blocks.push(comment("CONSTRAINT", &target, k.get::<_, Option<String>>("comment").as_deref()));
+    }
     blocks.push(grants("TABLE", &h.qname, &acl));
     blocks.push(col_acl.iter().map(|r| format!("{}\n", r.get::<_, String>("stmt"))).collect());
     if h.rls_enabled {
@@ -164,7 +168,10 @@ pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: u32, table: u32) -> Res
     if h.rls_forced {
         blocks.push(format!("ALTER TABLE IF EXISTS {} FORCE ROW LEVEL SECURITY;\n", h.qname));
     }
-    blocks.extend(policies.iter().map(|r| format!("{}\n", r.get::<_, String>("def"))));
+    blocks.extend(policies.iter().map(|r| {
+        let target = format!("{} ON {}", r.get::<_, String>("name"), h.qname);
+        format!("{}\n{}", r.get::<_, String>("def"), comment("POLICY", &target, r.get::<_, Option<String>>("comment").as_deref()))
+    }));
     blocks.push(
         indexes
             .iter()
