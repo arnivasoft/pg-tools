@@ -1,0 +1,20 @@
+[package]
+name = "pgt-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pgt-core.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+serde.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+ts-rs.workspace = true
+
+[dev-dependencies]
+pgt-core = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+insta.workspace = true
+serde_json = "1"
