@@ -170,6 +170,14 @@ pub(crate) struct Planned {
     pub(crate) tx: Option<TxOp>,
 }
 
+/// İfade sunucu tarafı kod çalıştıran `DO` ya da `CALL` mı.
+fn runs_server_code(sql: &str) -> bool {
+    crate::lex::lex(sql)
+        .into_iter()
+        .find(|t| t.kind == crate::lex::Kind::Word)
+        .is_some_and(|t| t.is_word(sql, "do") || t.is_word(sql, "call"))
+}
+
 fn byte_at_char(sql: &str, ch: u32) -> usize {
     sql.char_indices().nth(ch as usize).map_or(sql.len(), |(b, _)| b)
 }
@@ -201,7 +209,9 @@ pub(crate) fn plan_script(sql: &str, scope: Scope, guard: Guard) -> Result<Vec<P
         at = range.start;
         let text = &sql[range.clone()];
         let a = classify(text);
-        let writes = matches!(a.kind, StmtKind::Write | StmtKind::Ddl);
+        // DO/CALL gövdesi görünmez ama yazabilir: üretim sunucusunda onay ister (yanlış pozitif kabul edilir).
+        // `select yazan_fonksiyon()` belgelenmiş sınırdır.
+        let writes = matches!(a.kind, StmtKind::Write | StmtKind::Ddl) || runs_server_code(text);
         let locked_reason = if !guard.locked {
             None
         } else if a.kind == StmtKind::Write {
@@ -1420,6 +1430,15 @@ mod tests {
         assert_eq!(invalid(gate("update t set a = 1 where id = 1", PROD, false)), CONFIRMATION_REQUIRED);
         assert!(gate("update t set a = 1 where id = 1", PROD, true).is_ok());
         assert!(gate("select 1", PROD, false).is_ok());
+        // DO / CALL gövdesi görünmez: üretimde onay ister, etiketsiz sunucuda istemez.
+        for sql in ["do $$ begin delete from t; end $$", "call p()", "/* c */ DO $$ begin null; end $$"] {
+            assert!(plans(sql, PROD)[0].production_write, "{sql}");
+            assert_eq!(invalid(gate(sql, PROD, false)), CONFIRMATION_REQUIRED, "{sql}");
+            assert!(gate(sql, PROD, true).is_ok());
+            assert!(!plans(sql, PLAIN)[0].production_write, "{sql}");
+            assert!(gate(sql, PLAIN, false).is_ok(), "{sql}");
+        }
+        assert!(!plans("select f_that_writes()", PROD)[0].production_write, "belgelenmiş sınır");
 
         let p = plans("update t set a = 1", PLAIN);
         assert_eq!((p[0].danger, p[0].production_write), (Some(Danger::UpdateWithoutWhere), false));

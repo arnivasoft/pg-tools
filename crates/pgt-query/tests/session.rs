@@ -667,6 +667,9 @@ async fn production_label_requires_confirmation_for_writes() {
         let plan = fx.qm.analyze(id, "select 1; create temp table p(i int)", Scope::All).unwrap();
         assert_eq!(plan.iter().map(|p| p.production_write).collect::<Vec<_>>(), [false, true]);
         fx.run_ok(id, "create temp table p(i int)").await;
+        let r = fx.qm.run(id, "do $$ begin delete from p; end $$", Scope::All, 100, false, &mut VecSink::default()).await;
+        assert_eq!(invalid_message(r), "confirmation_required");
+        fx.run_ok(id, "do $$ begin delete from p; end $$").await;
         let mut sink = VecSink::default();
         fx.qm.run(id, "select 1", Scope::All, 100, false, &mut sink).await.unwrap();
         sink.assert_ok();
