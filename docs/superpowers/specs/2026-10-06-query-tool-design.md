@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 2: Query Tool Çekirdeği Tasarımı
 
 - **Tarih:** 2026-10-06
-- **Durum:** Arka uç uygulandı (Plan 5); arayüz Plan 6
+- **Durum:** Uygulandı (Plan 5–6)
 - **Kapsam:** Çoklu sekmeli SQL editörü, sorgu çalıştırma (yazma dahil, korumalarla), sanal ızgarada sonuçlar, iptal, geçmiş, CSV dışa aktarma
 - **Önceki alt proje:** Object Explorer (`2026-10-05-object-explorer-design.md`) — Plan 1–4 ile tamamlandı ve `main`'de.
 - **Sonraki alt proje:** Gelişmiş editör zekâsı (alias çözümleme, join önerisi, formatter, LSP benzeri hata çizimi) — ayrı spec.
