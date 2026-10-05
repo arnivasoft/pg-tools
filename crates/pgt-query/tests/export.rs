@@ -10,7 +10,7 @@ use pgt_core::registry::Registry;
 use pgt_core::testing::{TestServer, admin_client, test_servers};
 use pgt_query::events::{EventSink, QueryEvent};
 use pgt_query::export::{CsvDelimiter, CsvOptions, EXPORT_CHUNK};
-use pgt_query::session::{CANCELLED_MESSAGE, QueryManager, Scope, SessionId, SessionOptions, TxMode, TxState};
+use pgt_query::session::{CANCELLED_MESSAGE, LOCKED_SETTING_MESSAGE, LOCKED_WRITE_MESSAGE, QueryManager, Scope, SessionId, SessionOptions, TxMode, TxState};
 use tempfile::TempDir;
 
 fn servers() -> Vec<TestServer> {
@@ -38,11 +38,17 @@ struct Fx {
 }
 
 async fn fixture(ts: &TestServer) -> Fx {
+    fixture_with(ts, false).await
+}
+
+async fn fixture_with(ts: &TestServer, locked: bool) -> Fx {
     let dir = tempfile::tempdir().unwrap();
     let mut registry = Registry::load(dir.path().join("servers.json")).unwrap().registry;
-    registry.upsert(ts.config.clone()).unwrap();
+    let mut config = ts.config.clone();
+    config.read_only_lock = locked;
+    registry.upsert(config.clone()).unwrap();
     let mgr = Arc::new(ConnectionManager::new());
-    mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+    mgr.connect(config, ts.password.clone()).await.unwrap();
     let qm = QueryManager::new(mgr, Arc::new(RwLock::new(registry)));
     Fx { qm: Arc::new(qm), ts: ts.clone(), dir }
 }
@@ -426,5 +432,28 @@ async fn failed_or_cancelled_export_keeps_the_manual_transaction() {
             .unwrap()
             .get(0);
         assert_eq!(n, 3);
+    }
+}
+
+/// Kilitli oturumda dışa aktarma da kilit kapısından geçer: `select set_config(...)` ile salt okunur ayarı
+/// kapatılamaz (sorgu hiç gönderilmez, ayar değişmez), yazma ifadesi de reddedilir.
+#[tokio::test]
+async fn locked_export_cannot_switch_off_read_only() {
+    for ts in servers() {
+        let fx = fixture_with(&ts, true).await;
+        let id = fx.open(TxMode::Autocommit).await;
+        let path = fx.path("gate.csv");
+        let sql = "select set_config('default_transaction_read_only','off',false)";
+        let err = fx.qm.export_csv(id, sql, &path, no_bom(), &mut |_| true).await.unwrap_err();
+        assert!(matches!(&err, Error::Invalid(m) if m == LOCKED_SETTING_MESSAGE), "{err:?}");
+        let err = fx.qm.export_csv(id, "insert into t values (1) returning *", &path, no_bom(), &mut |_| true).await.unwrap_err();
+        assert!(matches!(&err, Error::Invalid(m) if m == LOCKED_WRITE_MESSAGE), "{err:?}");
+        assert!(!path.exists());
+        let check = fx.path("check.csv");
+        fx.qm.export_csv(id, "select current_setting('default_transaction_read_only')", &check, no_bom(), &mut |_| true)
+            .await
+            .unwrap();
+        let text = std::fs::read_to_string(&check).unwrap();
+        assert!(text.lines().nth(1) == Some("on"), "{text}");
     }
 }

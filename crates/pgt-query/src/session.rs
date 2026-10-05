@@ -1220,6 +1220,10 @@ impl QueryManager {
             return Err(Error::Invalid("Dışa aktarma tek bir SELECT ifadesi ister.".into()));
         };
         let text = &sql[stmt.start..stmt.end];
+        // Kilit kapısı `run` ile aynı: kilitli oturumda yazma/şema ifadeleri ve salt okunur ayarını değiştirebilen
+        // ifadeler (`select set_config(...)` bir SELECT'tir!) reddedilir. Onay kapısı uygulanmaz: dışa aktarma
+        // yalnızca satır döndüren SELECT çalıştırır (tehlike/üretim yazması burada anlamsız).
+        check_gates(&plan_script(sql, Scope::All, slot.guard)?, true)?;
         if classify(text).kind != StmtKind::Select || !cursor_capable(text, StmtKind::Select) {
             return Err(Error::Invalid("Yalnızca satır döndüren SELECT/VALUES/TABLE sorguları dışa aktarılabilir.".into()));
         }
@@ -1508,6 +1512,35 @@ mod tests {
         assert!(matches!(err, Err(Error::Invalid(_))));
         qm.close(id, ClosePolicy::Refuse).await.unwrap();
         assert!(qm.tx_state(id).is_err());
+    }
+
+    /// Dışa aktarma kilit kapısını `run` ile paylaşır; red, oturum uyandırılmadan (ağa gitmeden) gelir.
+    #[tokio::test]
+    async fn export_applies_the_lock_gate_before_any_connection() {
+        let qm = manager();
+        let locked = qm.insert_sleeping(LOCKED, TxState::Idle);
+        let path = std::env::temp_dir().join("pgt-export-gate-unit.csv");
+        let export = |id, sql: &'static str| {
+            let qm = &qm;
+            let path = path.clone();
+            async move { qm.export_csv(id, sql, &path, CsvOptions::default(), &mut |_| true).await }
+        };
+        for (sql, msg) in [
+            ("select set_config('default_transaction_read_only','off',false)", LOCKED_SETTING_MESSAGE),
+            ("select set_config('default_transaction_' || 'read_only','off',false)", LOCKED_SETTING_MESSAGE),
+            ("insert into t values (1) returning *", LOCKED_WRITE_MESSAGE),
+            ("with d as (delete from t returning *) select * from d", LOCKED_WRITE_MESSAGE),
+        ] {
+            let err = export(locked, sql).await.unwrap_err();
+            assert!(matches!(&err, Error::Invalid(m) if m == msg), "{sql}: {err:?}");
+        }
+        // Kapıdan geçen sorgu uyandırmaya çalışır (bağlı sunucu yok).
+        let err = export(locked, "select 1").await.unwrap_err();
+        assert!(matches!(err, Error::NotConnected), "{err:?}");
+        let plain = qm.insert_sleeping(PLAIN, TxState::Idle);
+        let err = export(plain, "select set_config('a','b',false)").await.unwrap_err();
+        assert!(matches!(err, Error::NotConnected), "kilitsiz oturumda kapı yok: {err:?}");
+        assert!(!path.exists());
     }
 
     #[test]
