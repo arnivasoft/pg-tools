@@ -6,6 +6,7 @@ use pgt_core::config::ServerConfig;
 use pgt_core::credentials::Credentials;
 use pgt_core::connection::{ConnectionManager, ServerInfo};
 use pgt_core::registry::Registry;
+use pgt_query::session::QueryManager;
 use pgt_core::{Error, ErrorPayload};
 use tauri::State;
 use uuid::Uuid;
@@ -20,13 +21,8 @@ pub fn list_servers(state: State<'_, AppState>) -> CmdResult<Vec<ServerConfig>> 
 }
 
 #[tauri::command]
-pub fn save_server(state: State<'_, AppState>, config: ServerConfig, password: Option<String>) -> CmdResult<ServerConfig> {
-    let (saved, prev) = {
-        let mut registry = state.registry.write().unwrap();
-        let prev = registry.get(config.id).cloned();
-        (registry.upsert(config)?, prev)
-    };
-    state.manager.disconnect(saved.id);
+pub async fn save_server(state: State<'_, AppState>, config: ServerConfig, password: Option<String>) -> CmdResult<ServerConfig> {
+    let (saved, prev) = Box::pin(save_registered(&state.registry, &state.manager, &state.query, config)).await?;
     let forget = should_forget_stored(prev.as_ref(), &saved, password.as_deref());
     match (password, saved.save_password) {
         (Some(p), true) => state.credentials.remember(saved.id, &p, true)?,
@@ -37,9 +33,60 @@ pub fn save_server(state: State<'_, AppState>, config: ServerConfig, password: O
     Ok(saved)
 }
 
+/// Kaydı yazar, katalog bağlantısını keser; yazma başarısızsa hiçbir şeye dokunmaz. Hedef, kilit ya da üretim
+/// etiketi değiştiyse sorgu oturumları eski ayarlarla açılmıştır: kapatılır (Plan 6 yeniden bağlanmayı sunar).
+async fn save_registered(
+    registry: &RwLock<Registry>,
+    manager: &ConnectionManager,
+    query: &QueryManager,
+    config: ServerConfig,
+) -> Result<(ServerConfig, Option<ServerConfig>), Error> {
+    let (saved, prev) = {
+        let mut registry = registry.write().unwrap();
+        let prev = registry.get(config.id).cloned();
+        (registry.upsert(config)?, prev)
+    };
+    manager.disconnect(saved.id);
+    if should_close_query_sessions(prev.as_ref(), &saved) {
+        query.close_sessions_of(saved.id).await;
+    }
+    Ok((saved, prev))
+}
+
+/// Önce sorgu oturumları (açık transaction'lar geri alınır), sonra katalog bağlantısı.
+async fn disconnect_and_close(manager: &ConnectionManager, query: &QueryManager, id: Uuid) {
+    query.close_sessions_of(id).await;
+    manager.disconnect(id);
+}
+
+/// Kayıt silinemezse (bilinmeyen sunucu, salt-okunur kayıt) hiçbir oturum kapatılmaz.
+async fn delete_and_close(
+    registry: &RwLock<Registry>,
+    manager: &ConnectionManager,
+    creds: &Credentials,
+    query: &QueryManager,
+    id: Uuid,
+) -> Result<(), Error> {
+    delete_registered(registry, manager, creds, id)?;
+    query.close_sessions_of(id).await;
+    Ok(())
+}
+
 /// A stored password may only be used for the same host/port/user/maintenance db.
 fn same_target(a: &ServerConfig, b: &ServerConfig) -> bool {
     a.host == b.host && a.port == b.port && a.username == b.username && a.maintenance_db == b.maintenance_db
+}
+
+/// Kayıtlı sunucunun sorgu oturumlarının kapatılması gerekir mi: bağlantı hedefi (host/port/kullanıcı/bakım
+/// veritabanı/SSL), salt okunur kilit ya da etiketin üretim olup olmaması değiştiyse. Ad/grup/renk
+/// değişimi oturumları etkilemez.
+fn should_close_query_sessions(prev: Option<&ServerConfig>, new: &ServerConfig) -> bool {
+    prev.is_some_and(|p| {
+        !same_target(p, new)
+            || p.ssl != new.ssl
+            || p.read_only_lock != new.read_only_lock
+            || p.is_production() != new.is_production()
+    })
 }
 
 /// Typed password wins; otherwise fall back to the stored/session one,
@@ -114,8 +161,9 @@ fn remember_after_connect(registry: &RwLock<Registry>, creds: &Credentials, conf
 }
 
 #[tauri::command]
-pub fn disconnect_server(state: State<'_, AppState>, server_id: Uuid) {
-    state.manager.disconnect(server_id);
+pub async fn disconnect_server(state: State<'_, AppState>, server_id: Uuid) -> CmdResult<()> {
+    Box::pin(disconnect_and_close(&state.manager, &state.query, server_id)).await;
+    Ok(())
 }
 
 // Katalog gelecekleri büyüktür (DDL ~70 KB); kutulanmazsa invoke işleyicisinin ana iş parçacığı
@@ -151,7 +199,7 @@ fn delete_registered(registry: &RwLock<Registry>, manager: &ConnectionManager, c
 
 #[tauri::command]
 pub async fn delete_server(state: State<'_, AppState>, server_id: Uuid) -> CmdResult<()> {
-    Ok(delete_registered(&state.registry, &state.manager, &state.credentials, server_id)?)
+    Ok(Box::pin(delete_and_close(&state.registry, &state.manager, &state.credentials, &state.query, server_id)).await?)
 }
 
 #[tauri::command]
@@ -349,6 +397,9 @@ mod tests {
             username: "app".into(),
             save_password: true,
             ssl: Default::default(),
+            color: None,
+            label: None,
+            read_only_lock: false,
         }
     }
 
@@ -397,6 +448,44 @@ mod tests {
     }
 
     #[test]
+    fn close_sessions_decision() {
+        let id = Uuid::new_v4();
+        let prev = cfg(id);
+        let changed: [fn(&mut ServerConfig); 8] = [
+            |x| x.host = "other".into(),
+            |x| x.port = 1,
+            |x| x.username = "u2".into(),
+            |x| x.maintenance_db = "d2".into(),
+            |x| x.ssl.mode = pgt_core::config::SslMode::Require,
+            |x| x.read_only_lock = true,
+            |x| x.label = Some("PROD".into()),
+            |x| x.ssl.root_cert = Some("ca.pem".into()),
+        ];
+        for f in changed {
+            let mut new = cfg(id);
+            f(&mut new);
+            assert!(should_close_query_sessions(Some(&prev), &new));
+        }
+        // Üretim etiketinin kalkması da bir değişimdir; üretim olmayan etiket değişimi değildir.
+        let mut prod = cfg(id);
+        prod.label = Some("prod".into());
+        assert!(should_close_query_sessions(Some(&prod), &prev));
+        let mut a = cfg(id);
+        a.label = Some("test".into());
+        let mut b = cfg(id);
+        b.label = Some("dev".into());
+        assert!(!should_close_query_sessions(Some(&a), &b));
+        // Yalnızca ad/grup/renk/parola saklama: kapatma yok.
+        let mut meta = cfg(id);
+        meta.name = "yeni ad".into();
+        meta.group = Some("g".into());
+        meta.color = Some("red".into());
+        meta.save_password = false;
+        assert!(!should_close_query_sessions(Some(&prev), &meta));
+        assert!(!should_close_query_sessions(None, &prev), "yeni kayıtta oturum yok");
+    }
+
+    #[test]
     fn forget_decision() {
         let id = Uuid::new_v4();
         let prev = cfg(id);
@@ -406,5 +495,103 @@ mod tests {
         assert!(should_forget_stored(Some(&prev), &moved, None));
         assert!(!should_forget_stored(Some(&prev), &moved, Some("typed")));
         assert!(!should_forget_stored(None, &moved, None));
+    }
+
+    // ---- Docker'lı yaşam döngüsü testleri: kayıt/bağlantı işlemleri sorgu oturumlarını gerçekten kapatır ----
+
+    use crate::query::testkit::{Fx, fixture};
+    use pgt_query::session::{SessionId, TxMode, TxState};
+
+    /// Manuel modda açık transaction'lı (tablo oluşturulmuş) bir oturum + sunucu pid'i.
+    async fn session_with_open_tx(fx: &Fx, table: &str) -> (SessionId, i32) {
+        let id = fx.open(TxMode::Manual).await;
+        fx.exec(id, &format!("create table {table}(i int)")).await;
+        assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::InTransaction);
+        let pid = fx.pid(id).await;
+        (id, pid)
+    }
+
+    async fn assert_closed_and_rolled_back(fx: &Fx, id: SessionId, pid: i32, table: &str) {
+        assert!(fx.qm.tx_state(id).is_err(), "oturum kapanmış olmalı");
+        assert!(fx.wait_gone(pid).await, "backend pg_stat_activity'den gitmeli");
+        assert!(!fx.table_exists(table).await, "açık transaction geri alınmalı");
+    }
+
+    async fn assert_alive(fx: &Fx, id: SessionId, pid: i32) {
+        assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::InTransaction);
+        assert!(fx.backend_state(pid).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_server_closes_query_sessions() {
+        let Some(fx) = fixture().await else { return };
+        let (id, pid) = session_with_open_tx(&fx, "pgt_qt8_del").await;
+        delete_and_close(&fx.registry, &fx.manager, &creds(), &fx.qm, fx.ts.config.id).await.unwrap();
+        assert!(fx.registry.read().unwrap().get(fx.ts.config.id).is_none());
+        assert_closed_and_rolled_back(&fx, id, pid, "pgt_qt8_del").await;
+    }
+
+    #[tokio::test]
+    async fn failed_registry_write_closes_nothing_on_delete_and_save() {
+        let Some(fx) = fixture().await else { return };
+        let (id, pid) = session_with_open_tx(&fx, "pgt_qt8_fail").await;
+        // servers.json yerine dizin: sonraki kayıt (rename) başarısız olur.
+        let file = fx.dir.path().join("servers.json");
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        let sid = fx.ts.config.id;
+        assert!(delete_and_close(&fx.registry, &fx.manager, &creds(), &fx.qm, sid).await.is_err());
+        assert_alive(&fx, id, pid).await;
+        let mut changed = fx.ts.config.clone();
+        changed.read_only_lock = true;
+        assert!(save_registered(&fx.registry, &fx.manager, &fx.qm, changed).await.is_err());
+        assert_alive(&fx, id, pid).await;
+        // Bilinmeyen sunucu silme de hiçbir oturumu kapatmaz.
+        assert!(delete_and_close(&fx.registry, &fx.manager, &creds(), &fx.qm, Uuid::new_v4()).await.is_err());
+        assert_alive(&fx, id, pid).await;
+        fx.qm.close(id, pgt_query::session::ClosePolicy::Rollback).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_server_closes_query_sessions() {
+        let Some(fx) = fixture().await else { return };
+        let (id, pid) = session_with_open_tx(&fx, "pgt_qt8_disc").await;
+        disconnect_and_close(&fx.manager, &fx.qm, fx.ts.config.id).await;
+        assert_closed_and_rolled_back(&fx, id, pid, "pgt_qt8_disc").await;
+    }
+
+    #[tokio::test]
+    async fn save_server_closes_sessions_only_for_target_lock_or_production_changes() {
+        let Some(fx) = fixture().await else { return };
+
+        // Yalnızca ad/grup/renk: oturum açık kalır.
+        let (id, pid) = session_with_open_tx(&fx, "pgt_qt8_save_meta").await;
+        let mut meta = fx.ts.config.clone();
+        meta.name = "yeni ad".into();
+        meta.group = Some("grup".into());
+        meta.color = Some("blue".into());
+        save_registered(&fx.registry, &fx.manager, &fx.qm, meta).await.unwrap();
+        assert_alive(&fx, id, pid).await;
+        fx.qm.close(id, pgt_query::session::ClosePolicy::Rollback).await.unwrap();
+
+        // Her bir değişim (kilit, üretim etiketi, hedef) oturumu kapatır ve transaction'ı geri alır.
+        type Change = fn(&mut ServerConfig);
+        let changes: [(&str, Change); 3] = [
+            ("pgt_qt8_save_lock", |c| c.read_only_lock = true),
+            ("pgt_qt8_save_prod", |c| c.label = Some("PROD".into())),
+            ("pgt_qt8_save_port", |c| c.port = c.port.wrapping_add(1)),
+        ];
+        for (table, change) in changes {
+            // Önceki turun değişimini sıfırla (oturumlar kapalıyken); bu da bir değişim olabilir, hâlâ oturum yok.
+            let mut base = fx.ts.config.clone();
+            base.name = "yeni ad".into();
+            save_registered(&fx.registry, &fx.manager, &fx.qm, base.clone()).await.unwrap();
+            fx.manager.connect(base.clone(), fx.ts.password.clone()).await.unwrap();
+            let (id, pid) = session_with_open_tx(&fx, table).await;
+            let mut new = base;
+            change(&mut new);
+            save_registered(&fx.registry, &fx.manager, &fx.qm, new).await.unwrap();
+            assert_closed_and_rolled_back(&fx, id, pid, table).await;
+        }
     }
 }

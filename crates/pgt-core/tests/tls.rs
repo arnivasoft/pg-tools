@@ -9,7 +9,7 @@
 //! İki sunucu da yalnızca `hostssl` kabul eder.
 
 use pgt_core::config::{ServerConfig, SslMode};
-use pgt_core::connection::ConnectionManager;
+use pgt_core::connection::{ConnectionManager, SessionProfile, Target};
 use pgt_core::{ConnectErrorKind, Error};
 
 struct Env {
@@ -127,6 +127,31 @@ async fn verify_full_with_right_ca_and_ip_san_succeeds() {
     connect(&env, &env.ip_url, SslMode::VerifyFull, Some(&env.ca)).await.unwrap();
     // Aynı sunucu ilgisiz CA ile reddedilir: başarı ad eşleşmesinden değil, zincir doğrulamasından da geçer.
     assert_tls_error(connect(&env, &env.ip_url, SslMode::VerifyFull, Some(&env.other_ca)).await, Some("UnknownIssuer"));
+}
+
+/// Sorgu oturumunun iptali TLS'li sunucuda da çalışır: `CancelHandle` iptal bağlantısı için TLS bağlayıcısını
+/// sunucunun ayarından kurar (verify-full + doğru CA).
+#[tokio::test]
+async fn dedicated_query_cancel_works_over_tls() {
+    let Some(env) = env() else { return };
+    let config = config(&env.ip_url, SslMode::VerifyFull, Some(&env.ca));
+    let mgr = ConnectionManager::new();
+    mgr.connect(config.clone(), Some(env.password.clone())).await.unwrap();
+    let profile = SessionProfile::Query { read_only: false, statement_timeout_ms: 0 };
+    let conn = mgr.open_dedicated(config.id, Target::Maintenance, profile).await.unwrap();
+    let ssl: bool = conn.client.query_one("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()", &[]).await.unwrap().get(0);
+    assert!(ssl, "sorgu oturumu TLS kullanmalı");
+    let started = std::time::Instant::now();
+    let query = conn.client.batch_execute("SELECT pg_sleep(30)");
+    let cancel = async {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        conn.cancel.cancel().await
+    };
+    let (result, cancelled) = tokio::join!(query, cancel);
+    cancelled.unwrap();
+    let err = result.unwrap_err();
+    assert_eq!(err.code().map(|c| c.code()), Some("57014"), "{err:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
 }
 
 // `verify-full` + `host=pgt-tls.test` satırı (hosts girdisi olmadan) burada yoktur: bu, adın TCP için

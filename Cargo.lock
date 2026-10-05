@@ -2567,6 +2567,7 @@ version = "0.1.0"
 dependencies = [
  "pgt-catalog",
  "pgt-core",
+ "pgt-query",
  "serde",
  "tauri",
  "tauri-build",
@@ -2599,6 +2600,7 @@ dependencies = [
 name = "pgt-core"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "keyring-core",
  "rcgen",
  "rustls",
@@ -2614,6 +2616,22 @@ dependencies = [
  "ts-rs",
  "uuid",
  "windows-native-keyring-store",
+]
+
+[[package]]
+name = "pgt-query"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "pgt-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "ts-rs",
+ "uuid",
 ]
 
 [[package]]

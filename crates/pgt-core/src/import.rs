@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use ts_rs::TS;
 
-use crate::config::{ServerConfig, SslMode};
+use crate::config::{ServerConfig, SslMode, COLORS};
 use crate::registry::Registry;
 use crate::{Error, Result};
 
@@ -87,6 +87,36 @@ fn ssl_mode(raw: Option<String>, warnings: &mut Vec<String>) -> SslMode {
     }
 }
 
+/// Referans RGB değerleri (`COLORS` ile aynı sırada).
+const COLOR_RGB: [(u8, u8, u8); 8] = [
+    (0xdc, 0x26, 0x26),
+    (0xea, 0x58, 0x0c),
+    (0xd9, 0x77, 0x06),
+    (0x16, 0xa3, 0x4a),
+    (0x0d, 0x94, 0x88),
+    (0x25, 0x63, 0xeb),
+    (0x93, 0x33, 0xea),
+    (0x6b, 0x72, 0x80),
+];
+
+/// `#rrggbb` değerine RGB uzaklığı en küçük ön ayar rengi; geçersizse `None`.
+pub fn nearest_color(hex: &str) -> Option<&'static str> {
+    let h = hex.trim().strip_prefix('#')?;
+    if h.len() != 6 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let ch = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok().map(i32::from);
+    let (r, g, b) = (ch(0)?, ch(2)?, ch(4)?);
+    let dist = |&(cr, cg, cb): &(u8, u8, u8)| {
+        (r - i32::from(cr)).pow(2) + (g - i32::from(cg)).pow(2) + (b - i32::from(cb)).pow(2)
+    };
+    COLOR_RGB
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, rgb)| dist(rgb))
+        .map(|(i, _)| COLORS[i])
+}
+
 /// Yinelenme ölçütü: host (büyük/küçük harf duyarsız) + port + kullanıcı + ad.
 fn same_server(c: &ServerConfig, host: &str, port: u16, username: &str, name: &str) -> bool {
     c.host.eq_ignore_ascii_case(host) && c.port == port && c.username == username && c.name == name
@@ -143,6 +173,7 @@ fn parse_entry(index: u32, v: &Value, existing: &[ServerConfig]) -> Parsed {
         let mut c = ServerConfig::new(name.clone(), host.clone(), port, username.clone());
         c.group = group.clone();
         c.maintenance_db = text(v, "MaintenanceDB").unwrap_or_else(|| "postgres".into());
+        c.color = text(v, "BGColor").and_then(|h| nearest_color(&h)).map(String::from);
         c.ssl.mode = mode;
         c.ssl.root_cert = pick(v, "SSLRootCert", "sslrootcert");
         c.ssl.client_cert = cert;
@@ -303,6 +334,24 @@ mod tests {
             .map(|p| p.item.name)
             .collect();
         assert_eq!(names, ["one", "two", "ten"]);
+    }
+
+    #[test]
+    fn nearest_color_maps_hex_to_presets() {
+        assert_eq!(nearest_color("#ff0000"), Some("red"));
+        assert_eq!(nearest_color("#0000ff"), Some("blue"));
+        assert_eq!(nearest_color("#808080"), Some("gray"));
+        for bad in ["red", "", "#12", "#gggggg", "#ççç", "#+f+f+f"] {
+            assert_eq!(nearest_color(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn bgcolor_fills_config_color() {
+        let j = r##"{"Servers":{"1":{"Name":"n","Host":"h","Username":"u","BGColor":"#ff0000"},"2":{"Name":"m","Host":"h","Username":"u","BGColor":"nope"}}}"##;
+        let p = parse(j, &[]).unwrap();
+        assert_eq!(p[0].config.as_ref().unwrap().color.as_deref(), Some("red"));
+        assert_eq!(p[1].config.as_ref().unwrap().color, None);
     }
 
     #[test]

@@ -1,0 +1,22 @@
+[package]
+name = "pgt-query"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tokio-postgres.workspace = true
+pgt-core.workspace = true
+serde.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+ts-rs.workspace = true
+futures-util.workspace = true
+
+[dev-dependencies]
+# Entegrasyon testleri `pgt_core::testing` yardımcılarını kullanır.
+pgt-core = { workspace = true, features = ["testing"] }
+tempfile.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

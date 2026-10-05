@@ -164,3 +164,57 @@ NSIS paketi < 15 MB hedefinin (spec §1.3) altında. `tauri build` exe'si de `sm
 Filtre (Ctrl+F): `tree-model.test.ts` "filters 10,000 loaded nodes in under 50 ms" testi — 10.000 yüklenmiş
 tablo düğümünde filtreli düzleştirmenin 5 denemedeki en kısa süresi **0,93 ms** (3 ayrı çalıştırmada
 0,94 / 0,93 / 0,93 ms; bütçe 50 ms; vitest, Node, aynı makine).
+
+## Plan 5 sonu: Query Tool arka ucu (2026-10-06)
+
+Plan 5 arka uç ekler (`pgt-query` kutusu, `qt_*` komutları, `futures-util` bağımlılığı); Query Tool arayüzü henüz
+yok (Plan 6), bu yüzden boşta bellek değişmemelidir. Aynı makinede, seçilen ayarlarla (B + R1):
+
+    bun run build
+    cargo build --release -p pg-tools
+    powershell -NoProfile -File scripts/smoke-release.ps1     # BAŞARILI, çıkış kodu 0 (pencere 158 ms, 6 sn ayakta)
+    powershell -NoProfile -File scripts/measure.ps1 -Runs 5
+
+| Çalıştırma | Pencere (ms) | Toplam özel WS (MiB) | Toplam WS (MiB) | Rust özel WS (MiB) | Süreç |
+|---|---|---|---|---|---|
+| 1 | 34 | 72,8 | 347,0 | 7,2 | 7 |
+| 2 | 40 | 73,2 | 349,5 | 7,3 | 7 |
+| 3 | 41 | 73,1 | 347,2 | 7,2 | 7 |
+| 4 | 40 | 76,0 | 351,8 | 7,2 | 7 |
+| 5 | 40 | 72,5 | 348,9 | 7,2 | 7 |
+| **Medyan** | **40** | **73,1** | 348,9 | **7,2** | 7 |
+
+Hedeflerin hepsi karşılandı (pencere < 1 sn, toplam özel WS < 150 MB, Rust < 30 MB); karar kuralı uygulanmadı.
+Plan 3 sonuna göre (73,4 / 7,2 MiB) fark yok.
+
+### Exe boyutu (öncesi/sonrası)
+
+`cargo build --release -p pg-tools`, aynı `dist` ile, temiz hedef dizini:
+
+| Commit | `pg-tools.exe` |
+|---|---|
+| `abd97da` (Plan 5 öncesi, `main`) | 12,45 MiB (13.059.584 bayt) |
+| Plan 5 sonu (HEAD) | 13,34 MiB (13.992.448 bayt) |
+| Fark | **+0,89 MiB (+932.864 bayt, +%7,1)** |
+
+Fark `pgt-query` (lexer/sınıflandırıcı/çalıştırıcı/oturum yöneticisi/CSV), `qt_*` komutları ve `futures-util` +
+`pgt-core` değişikliklerinin toplamıdır; `futures-util` ayrı ölçülmedi (yeni bağımlılık yalnızca bu; ayrı bir
+derleme gerektirirdi). NSIS paketi yeniden üretilmedi; exe farkı kadar büyümesi beklenir (sıkıştırılmış < 1 MiB),
+15 MB hedefinin çok altında.
+
+### Akış, gecikme ve iptal ölçümleri (bilgi amaçlı)
+
+PG 18 (Docker, 127.0.0.1), **debug** test derlemesi, `PGT_QUERY_BIG=1 cargo test -p pgt-query --test memory -- --nocapture`:
+
+| Ölçüm | Değer |
+|---|---|
+| 1M satır `generate_series`, `limit=10.000`, parça 1.000 | tam 10.000 satır; hiçbir `Rows` olayı > 1.000; `more()` x3 -> 3 x 1.000; tepe tampon <= 1.000 satır; kapatınca `idle in transaction` yok (test assert eder) |
+| 1M satır CSV dışa aktarma | 1,82 sn (~550.000 satır/sn), 7.888.913 bayt, 200 ilerleme olayı (5.000'lik parçalar, monoton), tepe tampon 5.000 satır |
+| Tamamlama: şemalar (soğuk / önbellekli) | 2,6 ms / 9,8 us |
+| Tamamlama: `pg_catalog` ilişkileri (144 öğe, soğuk) | 3,0 ms |
+| İptal: `select pg_sleep(30)` -> `57014` (iptal isteğinden `run` dönene dek) | 4,3 ms |
+
+Süreler tek çalıştırmadır, assert edilmez; CSV hızı debug derlemede ve yerel Docker'da ölçüldü (yayın derlemesinde
+daha yüksek olması beklenir).
+
+Sınır: akış sayaçları yalnızca **satır** sayısını sınırlar; hücre başına bayt sınırı yoktur (1 GB'lık tek bir `bytea`/`text` hücresi bütün olarak bellekte tutulur ve gönderilir). Geniş satırlarda tepe bellek `satır x genişlik` ile büyür; ölçümlerdeki 1M satır dar (tek `int`) satırlardır.

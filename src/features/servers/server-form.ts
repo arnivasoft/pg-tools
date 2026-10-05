@@ -14,6 +14,9 @@ export interface ServerForm {
   rootCert: string;
   clientCert: string;
   clientKey: string;
+  color: string | null;
+  label: string;
+  readOnlyLock: boolean;
 }
 
 export type FormTab = "general" | "connection" | "ssl";
@@ -26,6 +29,7 @@ export function emptyForm(): ServerForm {
   return {
     name: "", group: "", host: "", port: "5432", maintenanceDb: "postgres", username: "", password: "",
     savePassword: false, sslMode: "prefer", rootCert: "", clientCert: "", clientKey: "",
+    color: null, label: "", readOnlyLock: false,
   };
 }
 
@@ -34,6 +38,7 @@ export function formFromConfig(c: ServerConfig): ServerForm {
     name: c.name, group: c.group ?? "", host: c.host, port: String(c.port), maintenanceDb: c.maintenanceDb,
     username: c.username, password: "", savePassword: c.savePassword, sslMode: c.ssl.mode,
     rootCert: c.ssl.rootCert ?? "", clientCert: c.ssl.clientCert ?? "", clientKey: c.ssl.clientKey ?? "",
+    color: c.color, label: c.label ?? "", readOnlyLock: c.readOnlyLock,
   };
 }
 
@@ -63,6 +68,9 @@ export function toConfig(f: ServerForm, id: string): FormResult {
       username: f.username.trim(),
       savePassword: f.savePassword,
       ssl: { mode: f.sslMode, rootCert: opt(f.rootCert), clientCert: opt(f.clientCert), clientKey: opt(f.clientKey) },
+      color: f.color,
+      label: opt(f.label),
+      readOnlyLock: f.readOnlyLock,
     },
   };
 }

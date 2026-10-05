@@ -21,6 +21,7 @@ describe("server-form", () => {
     expect(r.config).toEqual({
       id: ID, name: "prod", group: null, host: "db.local", port: 5432, maintenanceDb: "postgres", username: "app",
       savePassword: false, ssl: { mode: "prefer", rootCert: null, clientCert: null, clientKey: null },
+      color: null, label: null, readOnlyLock: false,
     });
     expect(r.password).toBeNull();
   });
@@ -43,6 +44,7 @@ describe("server-form", () => {
     const config: ServerConfig = {
       id: ID, name: "p", group: "Üretim", host: "h", port: 6432, maintenanceDb: "postgres", username: "u",
       savePassword: true, ssl: { mode: "verify-full", rootCert: "C:\ca.pem", clientCert: null, clientKey: null },
+      color: "red", label: "Üretim", readOnlyLock: true,
     };
     const form = formFromConfig(config);
     expect(form.password).toBe("");
@@ -52,7 +54,8 @@ describe("server-form", () => {
 
   it("lists distinct groups alphabetically", () => {
     const base = { id: ID, host: "h", port: 1, maintenanceDb: "postgres", username: "u", savePassword: false,
-      ssl: { mode: "prefer" as const, rootCert: null, clientCert: null, clientKey: null } };
+      ssl: { mode: "prefer" as const, rootCert: null, clientCert: null, clientKey: null },
+      color: null, label: null, readOnlyLock: false };
     const servers: ServerConfig[] = [
       { ...base, name: "a", group: "Test" }, { ...base, name: "b", group: "Üretim" }, { ...base, name: "c", group: "Test" }, { ...base, name: "d", group: null },
     ];
