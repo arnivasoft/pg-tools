@@ -133,7 +133,7 @@ export const t = {
       ariaLabel: "Sorgu sonucu",
       nullText: "[NULL]",
       rowsLoaded: (n: number) => `${n.toLocaleString("tr-TR")} satır yüklendi`,
-      loadMore: "Daha fazla yükle (1.000)",
+      loadMore: (n: number) => `Daha fazla yükle (${n.toLocaleString("tr-TR")})`,
       limitWarning: "Satır sınırına ulaşıldı; daha fazla satır var olabilir.",
       dropped: "Bellek sınırı nedeniyle bu ifadenin satırları atıldı; sonucu görmek için sorguyu yeniden çalıştırın.",
       rowNumber: "Satır no",

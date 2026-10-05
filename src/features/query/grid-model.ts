@@ -147,22 +147,64 @@ export function isJsonType(typeName: string): boolean {
   const t = typeName.toLowerCase();
   return t === "json" || t === "jsonb";
 }
-/** Panel metni: JSON ise güzel yazdırılır; 1 MB üstü kırpılır (`clipped`). Kırpılmış değer ayrıştırılmaz. */
-export function cellPanelText(v: string, typeName: string): { text: string; clipped: boolean } {
-  if (v.length > CELL_PANEL_MAX) return { text: v.slice(0, CELL_PANEL_MAX), clipped: true };
-  const trimmed = v.trimStart();
-  if (isJsonType(typeName) || trimmed.startsWith("{") || trimmed.startsWith("[")) {
-    try {
-      const parsed: unknown = JSON.parse(v);
-      if (typeof parsed === "object" && parsed !== null) {
-        const pretty = JSON.stringify(parsed, null, 2);
-        return pretty.length > CELL_PANEL_MAX
-          ? { text: pretty.slice(0, CELL_PANEL_MAX), clipped: true }
-          : { text: pretty, clipped: false };
+/** Kod noktası sınırında kırpar (vekil çiftini bölmez). */
+export function clipChars(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const code = s.charCodeAt(max - 1);
+  return s.slice(0, code >= 0xd800 && code <= 0xdbff ? max - 1 : max);
+}
+
+/**
+ * Kayıpsız JSON girintileme: sayılar ve metinler olduğu gibi kopyalanır (ayrıştırılmaz), yalnızca dizgi dışı
+ * boşluklar atılıp `{ [ ,` sonrasına satır sonu/girinti eklenir. Geçersiz JSON'da `null` döner.
+ */
+export function reindentJson(text: string): string | null {
+  try {
+    JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const out: string[] = [];
+  let depth = 0;
+  const nl = () => out.push("\n" + "  ".repeat(depth));
+  const n = text.length;
+  for (let i = 0; i < n; i++) {
+    const ch = text[i];
+    if (ch === '"') {
+      let j = i + 1;
+      while (j < n && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out.push(text.slice(i, j + 1));
+      i = j;
+    } else if (ch === "{" || ch === "[") {
+      let k = i + 1;
+      while (k < n && /\s/.test(text[k])) k++;
+      if (text[k] === (ch === "{" ? "}" : "]")) {
+        out.push(ch + text[k]);
+        i = k;
+      } else {
+        out.push(ch);
+        depth++;
+        nl();
       }
-    } catch {
-      /* JSON değil: ham metin */
+    } else if (ch === "}" || ch === "]") {
+      depth--;
+      nl();
+      out.push(ch);
+    } else if (ch === ",") {
+      out.push(",");
+      nl();
+    } else if (ch === ":") {
+      out.push(": ");
+    } else if (!/\s/.test(ch)) {
+      out.push(ch);
     }
   }
-  return { text: v, clipped: false };
+  return out.join("");
+}
+
+/** Panel metni: yalnızca json/jsonb sütunları kayıpsız girintilenir; 1 MB üstü kırpılır (`clipped`). */
+export function cellPanelText(v: string, typeName: string): { text: string; clipped: boolean } {
+  let text = v;
+  if (isJsonType(typeName) && v.length <= CELL_PANEL_MAX) text = reindentJson(v) ?? v;
+  return text.length > CELL_PANEL_MAX ? { text: clipChars(text, CELL_PANEL_MAX), clipped: true } : { text, clipped: false };
 }

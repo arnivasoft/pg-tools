@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Column } from "../../ipc/bindings/Column";
 import {
-  CELL_PANEL_MAX, cellPanelText, displayCell, extendTo, initialWidths, inRect, isNumericType, moveFocus,
+  CELL_PANEL_MAX, reindentJson, cellPanelText, displayCell, extendTo, initialWidths, inRect, isNumericType, moveFocus,
   selectAll, selectCell, selectColumn, selectRow, selectionToTsv, selRect,
 } from "./grid-model";
 
@@ -84,17 +84,31 @@ describe("seçim", () => {
 });
 
 describe("cellPanelText", () => {
-  it("json türünü güzel yazdırır", () => {
-    expect(cellPanelText('{"a":1}', "jsonb")).toEqual({ text: '{\n  "a": 1\n}', clipped: false });
+  it("json türünü girintiler", () => {
+    expect(cellPanelText('{"a":1,"b":[1,2],"c":{},"d":[]}', "jsonb").text).toBe(
+      '{\n  "a": 1,\n  "b": [\n    1,\n    2\n  ],\n  "c": {},\n  "d": []\n}',
+    );
   });
-  it("metin sütununda JSON nesnesini de yazdırır; skaler ve bozuk ham kalır", () => {
-    expect(cellPanelText("[1,2]", "text").text).toBe("[\n  1,\n  2\n]");
-    expect(cellPanelText("123", "text").text).toBe("123");
+  it("kayıpsız: büyük tamsayı, 1.10, 1e400, yinelenen anahtar", () => {
+    const out = cellPanelText('{"a":12345678901234567890,"b":1.10,"c":1e400,"k":1,"k":2}', "json").text;
+    for (const frag of ["12345678901234567890", "1.10", "1e400", '"k": 1', '"k": 2']) expect(out).toContain(frag);
+  });
+  it("metin içindeki parantez ve kaçışlı tırnak korunur", () => {
+    expect(reindentJson('{"a":"x{[,]}\\"y"}')).toBe('{\n  "a": "x{[,]}\\"y"\n}');
+  });
+  it("geçersiz JSON ham kalır; json olmayan sütun asla biçimlenmez", () => {
     expect(cellPanelText("{bozuk", "jsonb").text).toBe("{bozuk");
+    expect(cellPanelText('{"a":1}', "text").text).toBe('{"a":1}');
+    expect(cellPanelText("[1,2]", "text").text).toBe("[1,2]");
   });
   it("1 MB üstünü kırpar", () => {
     const r = cellPanelText("x".repeat(CELL_PANEL_MAX + 5), "text");
     expect(r.clipped).toBe(true);
     expect(r.text.length).toBe(CELL_PANEL_MAX);
+  });
+  it("kırpma vekil çiftini bölmez", () => {
+    const r = cellPanelText("x".repeat(CELL_PANEL_MAX - 1) + "😀", "text");
+    expect(r.clipped).toBe(true);
+    expect(r.text.length).toBe(CELL_PANEL_MAX - 1);
   });
 });

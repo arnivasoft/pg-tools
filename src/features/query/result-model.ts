@@ -12,6 +12,9 @@ export const USER_CANCEL_MESSAGE = "Sorgu kullanıcı tarafından iptal edildi."
 /** Bir sekmede bellekte tutulan en çok satır; aşılınca en eski ifadelerin satırları boşaltılır. */
 export const MAX_TAB_ROWS = 50_000;
 
+/** "Daha fazla yükle" parça boyutu (arka uç `qt_more` ile aynı). */
+export const LOAD_MORE_CHUNK = 1000;
+
 export type StmtStatus = "running" | "ok" | "failed" | "cancelled";
 
 /** `position`: ifade metnine göre 1 tabanlı karakter konumu; `charOffset`: ifadenin betikteki karakter ofseti. */

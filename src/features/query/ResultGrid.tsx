@@ -9,7 +9,7 @@ import {
   isNumericType, moveFocus, selRect, selectAll, selectCell, selectColumn, selectRow, selectionToTsv,
   type NavKey, type Selection,
 } from "./grid-model";
-import type { StmtResult } from "./result-model";
+import { LOAD_MORE_CHUNK, type StmtResult } from "./result-model";
 
 const HEADER_HEIGHT = ROW_HEIGHT;
 const FONT = '12px "Cascadia Mono", Consolas, monospace';
@@ -57,9 +57,13 @@ export function ResultGrid(props: {
     }),
   );
   // Satırlar ilk kez geldiğinde (başlangıçta boştu) örneğe göre yeniden boyutla.
+  let prevRows = 0;
   createEffect(() => {
     const n = rows().length;
+    const dropped = props.result.dropped;
     untrack(() => {
+      if (dropped || n < prevRows) setSel(null);
+      prevRows = n;
       if (n > 0 && !sizedWithRows && !userResized) {
         sizedWithRows = true;
         setWidths(initialWidths(columns(), rows().slice(0, SAMPLE_ROWS), measureText));
@@ -144,7 +148,10 @@ export function ResultGrid(props: {
       return;
     }
     if (mod && !e.altKey && key.toLowerCase() === "c") {
-      if ((window.getSelection()?.toString() ?? "") !== "") return;
+      const ae = document.activeElement as HTMLElement | null;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable)) return;
+      const ds = window.getSelection();
+      if (ds && ds.toString() !== "" && ds.anchorNode && scrollEl.contains(ds.anchorNode)) return;
       e.preventDefault();
       copy(e.shiftKey);
       return;
@@ -170,6 +177,7 @@ export function ResultGrid(props: {
     if (e.button !== 0 || (e.target as HTMLElement).closest("[data-resize]")) return;
     const p = posOf(e.target);
     if (!p) return;
+    window.getSelection()?.removeAllRanges();
     scrollEl.focus();
     const n = rows().length;
     const cc = columns().length;
@@ -248,6 +256,7 @@ export function ResultGrid(props: {
         class="relative min-h-0 flex-1 overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-accent select-none"
         style={{ font: FONT }}
         onKeyDown={onKeyDown}
+        onFocus={() => window.getSelection()?.removeAllRanges()}
         onMouseDown={onMouseDown}
         onMouseOver={onMouseOver}
       >
@@ -289,6 +298,7 @@ export function ResultGrid(props: {
                         style={{ left: `${item.start}px`, width: `${widths()[item.index] ?? MIN_COL_WIDTH}px`, height: `${HEADER_HEIGHT}px` }}
                       >
                         <span class="truncate">{col().name}</span>
+                        <span class="ml-1.5 shrink-0 truncate text-[10px] font-normal text-muted">{col().typeName}</span>
                         <div
                           data-resize
                           aria-hidden="true"
@@ -325,7 +335,7 @@ export function ResultGrid(props: {
                       {(cv) => (
                         <Show when={columns()[cv.index]}>
                           {(col) => {
-                            const cell = () => displayCell(rows()[row.index]?.[cv.index] ?? null);
+                            const cell = createMemo(() => displayCell(rows()[row.index]?.[cv.index] ?? null));
                             const selected = () => {
                               const r = rect();
                               return r !== null && inRect(r, row.index, cv.index);
@@ -379,7 +389,7 @@ export function ResultGrid(props: {
         </Show>
         <Show when={showMore()}>
           <Button class="ml-auto h-6 text-[12px]" disabled={!props.canLoadMore} onClick={() => props.onLoadMore()}>
-            {t.query.grid.loadMore}
+            {t.query.grid.loadMore(LOAD_MORE_CHUNK)}
           </Button>
         </Show>
       </div>
