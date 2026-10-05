@@ -19,3 +19,6 @@ WITH (fillfactor=80);
 
 ALTER TABLE IF EXISTS app.orders
     OWNER TO <owner>;
+
+CREATE INDEX orders_cover_idx ON app.orders USING btree (customer_id) INCLUDE (total);
+CREATE INDEX orders_customer_idx ON app.orders USING btree (customer_id, placed_on DESC) WHERE (total > (0)::numeric);

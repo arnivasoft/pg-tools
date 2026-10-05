@@ -60,6 +60,13 @@ pub(crate) static COLUMNS: VersionedSql = VersionedSql(&[
 ]);
 static CONSTRAINTS: VersionedSql = VersionedSql(&[(10, include_str!("../sql/table_ddl_constraints.sql"))]);
 static ACL: VersionedSql = VersionedSql(&[(10, include_str!("../sql/acl_relation.sql"))]);
+static INDEXES: VersionedSql = VersionedSql(&[(10, include_str!("../sql/table_ddl_indexes.sql"))]);
+static TRIGGERS: VersionedSql = VersionedSql(&[
+    (10, include_str!("../sql/table_ddl_triggers.pg10.sql")),
+    (13, include_str!("../sql/table_ddl_triggers.sql")),
+]);
+static POLICIES: VersionedSql = VersionedSql(&[(10, include_str!("../sql/table_ddl_policies.sql"))]);
+static COLUMN_ACL: VersionedSql = VersionedSql(&[(10, include_str!("../sql/table_ddl_column_acl.sql"))]);
 
 pub(crate) struct TableHead {
     pub qname: String,
@@ -69,6 +76,11 @@ pub(crate) struct TableHead {
     pub options: Option<String>,
     pub tablespace: Option<String>,
     pub comment: Option<String>,
+    pub partition_of: Option<String>,
+    pub partition_bound: Option<String>,
+    pub inherits: Option<String>,
+    pub rls_enabled: bool,
+    pub rls_forced: bool,
 }
 
 pub(crate) async fn head(cat: &Catalog, server: Uuid, db: u32, table: u32) -> Result<TableHead> {
@@ -81,29 +93,47 @@ pub(crate) async fn head(cat: &Catalog, server: Uuid, db: u32, table: u32) -> Re
         options: r.get("options"),
         tablespace: r.get("tablespace"),
         comment: r.get("comment"),
+        partition_of: r.get("partition_of"),
+        partition_bound: r.get("partition_bound"),
+        inherits: r.get("inherits"),
+        rls_enabled: r.get("rls_enabled"),
+        rls_forced: r.get("rls_forced"),
     })
 }
 
 pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: u32, table: u32) -> Result<String> {
     use crate::ddl::{ColumnDef, column_line, comment, grants, header, join_blocks, owner};
-    let h = head(cat, server, db, table).await?;
     let target = Target::Database(db);
-    let cols: Vec<ColumnDef> = crate::db::query(&cat.mgr, server, target, &COLUMNS, p![table, None::<i16>])
-        .await?
-        .iter()
-        .map(ColumnDef::from_row)
-        .collect();
-    let constraints = crate::db::query(&cat.mgr, server, target, &CONSTRAINTS, p![table]).await?;
-    let acl = super::acl(cat, server, target, &ACL, table).await?;
+    let q = |sql: &'static VersionedSql, params: crate::db::Params| query(&cat.mgr, server, target, sql, params);
+    // Aynı bağlantıda eş zamanlı (pipeline) çalışır: tek tur gidiş-dönüşe yakın süre.
+    let (h, col_rows, constraints, acl, indexes, triggers, policies, col_acl) = tokio::try_join!(
+        head(cat, server, db, table),
+        q(&COLUMNS, p![table, None::<i16>]),
+        q(&CONSTRAINTS, p![table]),
+        super::acl(cat, server, target, &ACL, table),
+        q(&INDEXES, p![table]),
+        q(&TRIGGERS, p![table]),
+        q(&POLICIES, p![table]),
+        q(&COLUMN_ACL, p![table]),
+    )?;
+    let cols: Vec<ColumnDef> = col_rows.iter().map(ColumnDef::from_row).collect();
 
-    let mut lines: Vec<String> = cols.iter().map(column_line).collect();
-    lines.extend(constraints.iter().map(|k| format!("CONSTRAINT {} {}", k.get::<_, String>("name"), k.get::<_, String>("def"))));
-    let body = lines.iter().map(|l| format!("    {l}")).collect::<Vec<_>>().join(",\n");
-    let mut create = format!(
-        "CREATE {}TABLE IF NOT EXISTS {}\n(\n{body}\n)",
-        if h.unlogged { "UNLOGGED " } else { "" },
-        h.qname
-    );
+    let unlogged = if h.unlogged { "UNLOGGED " } else { "" };
+    let mut create = match (&h.partition_of, &h.partition_bound) {
+        (Some(parent), Some(bound)) => {
+            format!("CREATE {unlogged}TABLE IF NOT EXISTS {} PARTITION OF {parent}\n    {bound}", h.qname)
+        }
+        _ => {
+            let mut lines: Vec<String> = cols.iter().map(column_line).collect();
+            lines.extend(constraints.iter().map(|k| format!("CONSTRAINT {} {}", k.get::<_, String>("name"), k.get::<_, String>("def"))));
+            let body = lines.iter().map(|l| format!("    {l}")).collect::<Vec<_>>().join(",\n");
+            let mut s = format!("CREATE {unlogged}TABLE IF NOT EXISTS {}\n(\n{body}\n)", h.qname);
+            if let Some(parents) = &h.inherits {
+                s.push_str(&format!("\nINHERITS ({parents})"));
+            }
+            s
+        }
+    };
     if let Some(key) = &h.partkey {
         create.push_str(&format!("\nPARTITION BY {key}"));
     }
@@ -120,5 +150,26 @@ pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: u32, table: u32) -> Res
         blocks.push(comment("COLUMN", &format!("{}.{}", h.qname, c.name), c.comment.as_deref()));
     }
     blocks.push(grants("TABLE", &h.qname, &acl));
+    blocks.push(col_acl.iter().map(|r| format!("{}\n", r.get::<_, String>("stmt"))).collect());
+    if h.rls_enabled {
+        blocks.push(format!("ALTER TABLE IF EXISTS {} ENABLE ROW LEVEL SECURITY;\n", h.qname));
+    }
+    if h.rls_forced {
+        blocks.push(format!("ALTER TABLE IF EXISTS {} FORCE ROW LEVEL SECURITY;\n", h.qname));
+    }
+    blocks.extend(policies.iter().map(|r| format!("{}\n", r.get::<_, String>("def"))));
+    blocks.push(indexes.iter().map(|r| format!("{}\n", r.get::<_, String>("def"))).collect());
+    blocks.push(
+        triggers
+            .iter()
+            .map(|r| {
+                let mut s = format!("{}\n", r.get::<_, String>("def"));
+                if let Some(state) = r.get::<_, Option<String>>("state") {
+                    s.push_str(&format!("ALTER TABLE IF EXISTS {} {state} TRIGGER {};\n", h.qname, r.get::<_, String>("name")));
+                }
+                s
+            })
+            .collect(),
+    );
     Ok(header("Table", &h.qname, &format!("DROP TABLE IF EXISTS {};", h.qname)) + &join_blocks(blocks))
 }
