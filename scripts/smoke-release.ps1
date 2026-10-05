@@ -7,7 +7,8 @@
   - MainWindowHandle en fazla 10 sn içinde oluşmazsa hata,
   - süreç -Seconds dolmadan çıkarsa ExitCode ile hata (ör. release'de açılıştan ~1 sn sonra
     STATUS_STACK_OVERFLOW = -1073741571 / 0xC00000FD),
-  - sonunda uygulama + WebView2 alt süreç ağacının tamamını kapatır,
+  - sonunda uygulama + WebView2 alt süreç ağacının tamamını kapatır (ana süreç önceden ölmüş olsa bile:
+    alt süreçler üst süreç kimliği + ad + başlangıç zamanıyla bulunur),
   - geçici %LOCALAPPDATA%\pg-tools\logs altında "panicked" / "stack overflow" geçiyorsa hata.
   Çıkış kodu 0 = başarılı, 1 = başarısız.
 .PARAMETER Exe      Sınanacak exe (varsayılan: target\release\pg-tools.exe)
@@ -19,14 +20,18 @@ param(
 )
 $ErrorActionPreference = "Stop"
 
-function Get-Tree([int]$rootPid) {
+# Ana süreç ölmüş olsa bile alt süreçleri ParentProcessId hâlâ onun kimliğini taşır. Kimlik yeniden
+# kullanılmış olabileceğinden yalnızca beklenen adlı ve betik başladıktan sonra oluşmuş süreçler alınır.
+$TreeNames = @([IO.Path]::GetFileName($Exe), "pg-tools.exe", "msedgewebview2.exe")
+function Get-Tree([int]$rootPid, [datetime]$since) {
     $all = Get-CimInstance Win32_Process
     $ids = New-Object System.Collections.Generic.HashSet[int]
     [void]$ids.Add($rootPid)
     do {
         $added = $false
         foreach ($p in $all) {
-            if ($ids.Contains([int]$p.ParentProcessId) -and $ids.Add([int]$p.ProcessId)) { $added = $true }
+            if ($ids.Contains([int]$p.ParentProcessId) -and $TreeNames -contains $p.Name -and
+                $p.CreationDate -ge $since -and $ids.Add([int]$p.ProcessId)) { $added = $true }
         }
     } while ($added)
     , $ids
@@ -37,60 +42,70 @@ if (-not (Test-Path $Exe)) { Write-Output "BAŞARISIZ: exe bulunamadı: $Exe"; e
 $root = Join-Path $env:TEMP ("pgt-smoke-" + [guid]::NewGuid().ToString("N"))
 $appdata = Join-Path $root "Roaming"
 $localappdata = Join-Path $root "Local"
-New-Item -ItemType Directory $appdata, $localappdata | Out-Null
 $origAppData = $env:APPDATA
 $origLocalAppData = $env:LOCALAPPDATA
 $failure = $null
 $proc = $null
+$started = (Get-Date).AddSeconds(-1)   # CreationDate çözünürlüğü için küçük pay
 try {
-    $env:APPDATA = $appdata
-    $env:LOCALAPPDATA = $localappdata
-    $sw = [Diagnostics.Stopwatch]::StartNew()
-    $proc = Start-Process $Exe -PassThru
-    $null = $proc.Handle   # tutamacı önbelleğe al; yoksa süreç çıktıktan sonra ExitCode boş kalabilir
-    # Alt süreç (WebView2) ortamı devraldı; kendi ortamımızı hemen geri yükleyebiliriz.
-    $env:APPDATA = $origAppData
-    $env:LOCALAPPDATA = $origLocalAppData
+    try {
+        New-Item -ItemType Directory $appdata, $localappdata | Out-Null
+        $env:APPDATA = $appdata
+        $env:LOCALAPPDATA = $localappdata
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $proc = Start-Process $Exe -PassThru
+        $null = $proc.Handle   # tutamacı önbelleğe al; yoksa süreç çıktıktan sonra ExitCode boş kalabilir
+        # Alt süreç (WebView2) ortamı devraldı; kendi ortamımızı hemen geri yükleyebiliriz.
+        $env:APPDATA = $origAppData
+        $env:LOCALAPPDATA = $origLocalAppData
 
-    while (-not $proc.MainWindowHandle -or $proc.MainWindowHandle -eq 0) {
-        if ($proc.HasExited) { $failure = "pencere oluşmadan çıktı (kod $($proc.ExitCode))"; break }
-        if ($sw.Elapsed.TotalSeconds -gt 10) { $failure = "10 sn içinde ana pencere oluşmadı"; break }
-        Start-Sleep -Milliseconds 50; $proc.Refresh()
-    }
-    if (-not $failure) {
-        $windowMs = $sw.ElapsedMilliseconds
-        Write-Output "Pencere $windowMs ms'de oluştu; $Seconds sn izleniyor..."
-        $watch = [Diagnostics.Stopwatch]::StartNew()
-        while ($watch.Elapsed.TotalSeconds -lt $Seconds) {
-            if ($proc.HasExited) {
-                $failure = "pencereden $([math]::Round($watch.Elapsed.TotalSeconds, 1)) sn sonra çıktı (kod $($proc.ExitCode))"
-                break
+        while (-not $proc.MainWindowHandle -or $proc.MainWindowHandle -eq 0) {
+            if ($proc.HasExited) { $failure = "pencere oluşmadan çıktı (kod $($proc.ExitCode))"; break }
+            if ($sw.Elapsed.TotalSeconds -gt 10) { $failure = "10 sn içinde ana pencere oluşmadı"; break }
+            Start-Sleep -Milliseconds 50; $proc.Refresh()
+        }
+        if (-not $failure) {
+            $windowMs = $sw.ElapsedMilliseconds
+            Write-Output "Pencere $windowMs ms'de oluştu; $Seconds sn izleniyor..."
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            while ($watch.Elapsed.TotalSeconds -lt $Seconds) {
+                if ($proc.HasExited) {
+                    $failure = "pencereden $([math]::Round($watch.Elapsed.TotalSeconds, 1)) sn sonra çıktı (kod $($proc.ExitCode))"
+                    break
+                }
+                Start-Sleep -Milliseconds 100
             }
-            Start-Sleep -Milliseconds 100
+        }
+    } finally {
+        $env:APPDATA = $origAppData
+        $env:LOCALAPPDATA = $origLocalAppData
+        if ($proc) {
+            # Ana süreç çökmüş olsa da öksüz kalan WebView2 süreçleri kapatılmalı.
+            $ids = Get-Tree $proc.Id $started
+            # Kök kimlik yalnızca ana süreç hâlâ yaşıyorsa alınır (ölmüşse kimliği başkasına geçmiş olabilir).
+            $live = @(Get-Process -Id ([int[]]@($ids)) -ErrorAction SilentlyContinue |
+                Where-Object { $_.Id -ne $proc.Id -or -not $proc.HasExited })
+            if ($live.Count -gt 0) {
+                $live | Stop-Process -Force -ErrorAction SilentlyContinue
+                Start-Sleep -Seconds 2   # WebView2 süreçlerinin dosya kilitlerini bırakması için
+            }
         }
     }
+
+    $logDir = Join-Path $localappdata "pg-tools\logs"
+    if (Test-Path $logDir) {
+        $hits = Get-ChildItem $logDir -File | Select-String -Pattern "panicked", "stack overflow" -SimpleMatch
+        if ($hits) {
+            $msg = "logda panik/yığın taşması: " + (($hits | Select-Object -First 3 | ForEach-Object { $_.Line.Trim() }) -join " | ")
+            $failure = if ($failure) { "$failure; $msg" } else { $msg }
+        }
+    } elseif (-not $failure) {
+        Write-Output "Uyarı: log dizini oluşmadı ($logDir)"
+    }
 } finally {
-    $env:APPDATA = $origAppData
-    $env:LOCALAPPDATA = $origLocalAppData
-    if ($proc -and -not $proc.HasExited) {
-        $ids = Get-Tree $proc.Id
-        Get-Process -Id ([int[]]@($ids)) -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2   # WebView2 süreçlerinin dosya kilitlerini bırakması için
-    }
+    # Erken hata/kesmede de geçici dizin kalmasın.
+    Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
 }
-
-$logDir = Join-Path $localappdata "pg-tools\logs"
-if (Test-Path $logDir) {
-    $hits = Get-ChildItem $logDir -File | Select-String -Pattern "panicked", "stack overflow" -SimpleMatch
-    if ($hits) {
-        $msg = "logda panik/yığın taşması: " + (($hits | Select-Object -First 3 | ForEach-Object { $_.Line.Trim() }) -join " | ")
-        $failure = if ($failure) { "$failure; $msg" } else { $msg }
-    }
-} elseif (-not $failure) {
-    Write-Output "Uyarı: log dizini oluşmadı ($logDir)"
-}
-
-Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
 
 if ($failure) {
     Write-Output "BAŞARISIZ: $failure"

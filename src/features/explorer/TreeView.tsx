@@ -25,6 +25,16 @@ export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement
     if (index >= 0) virtualizer.scrollToIndex(index, { align: "auto" });
   });
 
+  // aria-activedescendant yalnızca DOM'da gerçekten bulunan bir satırı göstermeli: seçili düğüm
+  // süzmeyle gizlenmiş ya da sanal kaydırmada çizilmemiş olabilir.
+  const activeDescendant = createMemo(() => {
+    const selected = selectedId();
+    if (selected === null) return undefined;
+    const index = ex.rows().findIndex((r) => r.id === selected);
+    if (index < 0 || !virtualizer.getVirtualItems().some((item) => item.index === index)) return undefined;
+    return rowDomId(selected);
+  });
+
   const filtering = () => ex.state().filter.trim() !== "";
   const isEmpty = () => ex.rows().length === 0 && (filtering() || ex.state().children.has(ROOT));
 
@@ -36,7 +46,7 @@ export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement
       }}
       role="tree"
       aria-label={t.explorer.ariaLabel}
-      aria-activedescendant={ex.state().selected !== null ? rowDomId(ex.state().selected!) : undefined}
+      aria-activedescendant={activeDescendant()}
       tabIndex={0}
       class="relative h-full overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-accent"
       onKeyDown={(e) => {

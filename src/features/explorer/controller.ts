@@ -150,7 +150,10 @@ export class ExplorerController {
     this.update((s) => collapse(s, id));
   }
 
+  /** Fare ile aç/kapa. Süzülmüş görünümde etkisizdir (klavye gezintisiyle aynı kural): süzme tüm
+   *  eşleşmeleri ataları açık gösterir, gizli `expanded` durumunu değiştirmek süzme kalkınca sürpriz yaratır. */
   async toggle(id: string): Promise<void> {
+    if (this.get().filter.trim() !== "") return;
     if (this.get().expanded.has(id)) this.collapse(id);
     else await this.expand(id);
   }

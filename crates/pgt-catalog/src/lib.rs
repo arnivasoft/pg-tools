@@ -46,3 +46,18 @@ impl Catalog {
         kinds::list_children(self, id).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn show_system_flag_defaults_off_and_follows_the_setter() {
+        let catalog = Catalog::new(Arc::new(ConnectionManager::new()), Arc::new(RwLock::new(Registry::unavailable("servers.json"))));
+        assert!(!catalog.show_system(), "sistem nesneleri varsayılan olarak gizli");
+        catalog.set_show_system(true);
+        assert!(catalog.show_system());
+        catalog.set_show_system(false);
+        assert!(!catalog.show_system());
+    }
+}

@@ -87,6 +87,11 @@ fn ssl_mode(raw: Option<String>, warnings: &mut Vec<String>) -> SslMode {
     }
 }
 
+/// Yinelenme ölçütü: host (büyük/küçük harf duyarsız) + port + kullanıcı + ad.
+fn same_server(c: &ServerConfig, host: &str, port: u16, username: &str, name: &str) -> bool {
+    c.host.eq_ignore_ascii_case(host) && c.port == port && c.username == username && c.name == name
+}
+
 fn parse_entry(index: u32, v: &Value, existing: &[ServerConfig]) -> Parsed {
     let mut warnings = Vec::new();
     let host = text(v, "Host").unwrap_or_default();
@@ -129,12 +134,9 @@ fn parse_entry(index: u32, v: &Value, existing: &[ServerConfig]) -> Parsed {
         (cert, key) = (None, None);
     }
     let duplicate = error.is_none()
-        && existing.iter().any(|s| {
-            s.host.eq_ignore_ascii_case(&host)
-                && s.port == port
-                && s.username == username
-                && s.name == name
-        });
+        && existing
+            .iter()
+            .any(|s| same_server(s, &host, port, &username, &name));
 
     let mut config = None;
     if error.is_none() {
@@ -177,11 +179,21 @@ pub fn parse(text: &str, existing: &[ServerConfig]) -> Result<Vec<Parsed>> {
         .ok_or_else(invalid)?;
     let mut entries: Vec<(&String, &Value)> = servers.iter().collect();
     entries.sort_by_key(|(k, _)| (k.parse::<u64>().unwrap_or(u64::MAX), k.to_string()));
-    Ok(entries
-        .into_iter()
-        .enumerate()
-        .map(|(i, (_, v))| parse_entry(i as u32, v, existing))
-        .collect())
+    let mut parsed: Vec<Parsed> = Vec::with_capacity(entries.len());
+    for (i, (_, v)) in entries.into_iter().enumerate() {
+        let mut p = parse_entry(i as u32, v, existing);
+        // Aynı dosyada daha önce geçen geçerli bir kaydın kopyası da "zaten var" sayılır.
+        if p.config.is_some()
+            && parsed
+                .iter()
+                .filter_map(|q| q.config.as_ref())
+                .any(|c| same_server(c, &p.item.host, p.item.port, &p.item.username, &p.item.name))
+        {
+            p.item.duplicate = true;
+        }
+        parsed.push(p);
+    }
+    Ok(parsed)
 }
 
 pub fn preview(text: &str, existing: &[ServerConfig]) -> Result<Vec<ImportItem>> {
@@ -189,16 +201,24 @@ pub fn preview(text: &str, existing: &[ServerConfig]) -> Result<Vec<ImportItem>>
 }
 
 /// Seçilen (ve geçerli) kayıtları yeni UUID'lerle ekler; eklenen sayıyı döner.
+/// Aynı dosya içindeki kopyalardan (host+port+kullanıcı+ad) yalnızca ilk seçilen eklenir.
 pub fn apply(registry: &mut Registry, text: &str, indices: &[u32]) -> Result<u32> {
     let existing = registry.servers().to_vec();
-    let mut count = 0;
+    let mut added: Vec<ServerConfig> = Vec::new();
     for p in parse(text, &existing)? {
-        if let (true, Some(config)) = (indices.contains(&p.item.index), p.config) {
-            registry.upsert(config)?;
-            count += 1;
+        let Some(config) = p.config.filter(|_| indices.contains(&p.item.index)) else {
+            continue;
+        };
+        if added
+            .iter()
+            .any(|a| same_server(a, &config.host, config.port, &config.username, &config.name))
+        {
+            continue;
         }
+        registry.upsert(config.clone())?;
+        added.push(config);
     }
-    Ok(count)
+    Ok(added.len() as u32)
 }
 
 /// Dosyayı sınırlı boyutta okur.
@@ -208,7 +228,22 @@ pub fn read_file(path: &Path) -> Result<String> {
     if meta.len() > MAX_FILE_BYTES {
         return Err(Error::Invalid("Dosya çok büyük (en fazla 5 MB).".into()));
     }
-    std::fs::read_to_string(path).map_err(|e| Error::Config(format!("{}: {e}", path.display())))
+    let bytes =
+        std::fs::read(path).map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
+    decode(bytes)
+}
+
+const UTF16: &str = "Dosya UTF-16 kodlanmış; lütfen UTF-8 olarak kaydedip yeniden deneyin.";
+
+fn decode(bytes: Vec<u8>) -> Result<String> {
+    // BOM'lu UTF-16 ya da BOM'suz UTF-16 (JSON metninde ham NUL baytı geçemez; UTF-16'da
+    // ASCII karakterlerin yarısı NUL'dur).
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) || bytes.contains(&0) {
+        return Err(Error::Invalid(UTF16.into()));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        Error::Invalid("Dosya UTF-8 olarak okunamadı; lütfen UTF-8 olarak kaydedin.".into())
+    })
 }
 
 #[cfg(test)]
@@ -348,8 +383,73 @@ mod tests {
     #[test]
     fn passwords_in_the_file_are_never_read() {
         let j = r#"{"Servers":{"1":{"Name":"n","Host":"h","Username":"u","Password":"secret","password":"secret"}}}"#;
-        let dump = format!("{:?}", parse(j, &[]).unwrap().remove(0).item);
-        assert!(!dump.contains("secret"));
+        let p = parse(j, &[]).unwrap().remove(0);
+        let config = p.config.expect("geçerli kayıt");
+        let dumps = [
+            format!("{:?}", p.item),
+            format!("{config:?}"),
+            serde_json::to_string(&config).unwrap(),
+        ];
+        for dump in dumps {
+            assert!(!dump.contains("secret"), "{dump}");
+        }
+    }
+
+    const DUPES: &str = r#"{"Servers":{"1":{"Name":"a","Host":"h","Username":"u"},"2":{"Name":"a","Host":"H","Username":"u","Port":5432},"3":{"Name":"a","Host":"h","Username":"u","Port":5433}}}"#;
+
+    #[test]
+    fn duplicates_within_the_same_file_are_flagged_after_the_first() {
+        let items = preview(DUPES, &[]).unwrap();
+        let flags: Vec<_> = items.iter().map(|i| i.duplicate).collect();
+        assert_eq!(flags, [false, true, false], "farklı port kopya değildir");
+    }
+
+    #[test]
+    fn apply_does_not_add_a_duplicate_from_the_same_file_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = crate::registry::Registry::load(dir.path().join("servers.json"))
+            .unwrap()
+            .registry;
+        let n = apply(&mut reg, DUPES, &[0, 1, 2]).unwrap();
+        assert_eq!(n, 2);
+        let ports: Vec<_> = reg.servers().iter().map(|s| s.port).collect();
+        assert_eq!(ports, [5432, 5433]);
+        // Yalnızca kopya seçilirse (ilki seçilmemiş) o eklenir.
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut reg2 = crate::registry::Registry::load(dir2.path().join("servers.json"))
+            .unwrap()
+            .registry;
+        assert_eq!(apply(&mut reg2, DUPES, &[1]).unwrap(), 1);
+        assert_eq!(reg2.servers()[0].host, "H");
+    }
+
+    #[test]
+    fn utf16_files_get_a_clear_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{"Servers":{}}"#;
+        let le: Vec<u8> = json.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let be: Vec<u8> = json.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        let cases = [
+            ("le-bom.json", [vec![0xFF, 0xFE], le.clone()].concat()),
+            ("be-bom.json", [vec![0xFE, 0xFF], be].concat()),
+            ("le-nobom.json", le),
+        ];
+        for (name, bytes) in cases {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let err = read_file(&path).unwrap_err();
+            assert!(
+                matches!(&err, Error::Invalid(m) if m.contains("UTF-16")),
+                "{name}: {err:?}"
+            );
+        }
+        let latin = dir.path().join("latin1.json");
+        std::fs::write(&latin, b"{\"Servers\":{\"1\":{\"Name\":\"\xFC\"}}}").unwrap();
+        let err = read_file(&latin).unwrap_err();
+        assert!(
+            matches!(&err, Error::Invalid(m) if m.contains("UTF-8") && !m.contains("UTF-16")),
+            "{err:?}"
+        );
     }
 
     #[test]

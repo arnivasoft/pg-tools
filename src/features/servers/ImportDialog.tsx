@@ -16,6 +16,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
   const [busy, setBusy] = createSignal(false);
   const [reading, setReading] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [openWarnings, setOpenWarnings] = createSignal<Set<number>>(new Set());
   let generation = 0;
 
   createEffect(() => {
@@ -27,6 +28,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
     setBusy(false);
     setReading(false);
     setError(null);
+    setOpenWarnings(new Set<number>());
   });
 
   const choose = async () => {
@@ -39,6 +41,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
       const list = await commands.previewPgadminImport(picked);
       if (gen !== generation) return;
       setPath(picked);
+      setOpenWarnings(new Set<number>());
       setItems(list);
       setSelected(defaultSelection(list));
     } catch (e) {
@@ -47,6 +50,13 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
       if (gen === generation) setReading(false);
     }
   };
+
+  const toggleWarnings = (index: number) =>
+    setOpenWarnings((s) => {
+      const next = new Set(s);
+      if (!next.delete(index)) next.add(index);
+      return next;
+    });
 
   const toggle = (index: number, on: boolean) =>
     setSelected((s) => {
@@ -144,41 +154,61 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
             <tbody>
               <For each={items()}>
                 {(it) => (
-                  <tr class="border-t border-border">
-                    <td>
-                      <input
-                        type="checkbox"
-                        disabled={it.error !== null}
-                        checked={selected().has(it.index)}
-                        onChange={(e) => toggle(it.index, e.currentTarget.checked)}
-                      />
-                    </td>
-                    <td>{it.name}</td>
-                    <td>{groupLabel(it)}</td>
-                    <td>
-                      {it.host}:{it.port}
-                    </td>
-                    <td>{it.username}</td>
-                    <td>
-                      <Show
-                        when={it.error}
-                        fallback={
-                          <>
-                            <Show when={it.duplicate}>
-                              <span class="text-muted">{t.import.duplicate}</span>
-                            </Show>
-                            <Show when={it.warnings.length > 0}>
-                              <span class="ml-1 text-muted" title={`${t.import.warnings}:\n${it.warnings.join("\n")}`}>
-                                {t.import.warnBadge(it.warnings.length)}
-                              </span>
-                            </Show>
-                          </>
-                        }
-                      >
-                        <span class="text-danger">{it.error}</span>
-                      </Show>
-                    </td>
-                  </tr>
+                  <>
+                    <tr class="border-t border-border">
+                      <td>
+                        <input
+                          type="checkbox"
+                          disabled={it.error !== null}
+                          checked={selected().has(it.index)}
+                          onChange={(e) => toggle(it.index, e.currentTarget.checked)}
+                        />
+                      </td>
+                      <td>{it.name}</td>
+                      <td>{groupLabel(it)}</td>
+                      <td>
+                        {it.host}:{it.port}
+                      </td>
+                      <td>{it.username}</td>
+                      <td>
+                        <Show
+                          when={it.error}
+                          fallback={
+                            <>
+                              <Show when={it.duplicate}>
+                                <span class="text-muted">{t.import.duplicate}</span>
+                              </Show>
+                              <Show when={it.warnings.length > 0}>
+                                <button
+                                  type="button"
+                                  class="ml-1 rounded px-1 text-muted hover:bg-hover"
+                                  aria-expanded={openWarnings().has(it.index)}
+                                  aria-controls={openWarnings().has(it.index) ? `import-warnings-${it.index}` : undefined}
+                                  aria-label={(openWarnings().has(it.index) ? t.import.hideWarnings : t.import.showWarnings)(it.warnings.length)}
+                                  onClick={() => toggleWarnings(it.index)}
+                                >
+                                  {t.import.warnBadge(it.warnings.length)}
+                                </button>
+                              </Show>
+                            </>
+                          }
+                        >
+                          <span class="text-danger">{it.error}</span>
+                        </Show>
+                      </td>
+                    </tr>
+                    <Show when={it.error === null && it.warnings.length > 0 && openWarnings().has(it.index)}>
+                      <tr id={`import-warnings-${it.index}`}>
+                        <td />
+                        <td colSpan={5} class="pb-1">
+                          <p class="text-xs text-muted">{t.import.warnings}:</p>
+                          <ul class="list-disc pl-5 text-xs text-muted">
+                            <For each={it.warnings}>{(w) => <li>{w}</li>}</For>
+                          </ul>
+                        </td>
+                      </tr>
+                    </Show>
+                  </>
                 )}
               </For>
             </tbody>

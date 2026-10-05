@@ -1,11 +1,12 @@
-<#
+﻿<#
 .SYNOPSIS
   pg-tools exe'sinin açılış süresini ve boşta belleğini ölçer.
 .DESCRIPTION
   Her çalıştırma ayrı bir geçici APPDATA ile başlar (kullanıcının gerçek yapılandırmasına dokunmaz),
   pencere tutamacı oluşana kadar geçen süreyi ölçer, 8 sn boşta bekler, sonra uygulama + WebView2
   alt süreçlerinin özel çalışma kümesi (Görev Yöneticisi "Bellek" sütunu) ve çalışma kümesi
-  toplamlarını okur. Başlattığı tüm süreçleri kapatır.
+  toplamlarını okur (MiB = 1.048.576 bayt; PowerShell'in 1MB sabiti). Başlattığı tüm süreçleri kapatır.
+  UTF-8 BOM ile kaydedilmiştir: Windows PowerShell 5.1 BOM'suz dosyayı ANSI sayar ve Türkçe çıktı bozulur.
 .PARAMETER Exe   Ölçülecek exe (varsayılan: target\release\pg-tools.exe)
 .PARAMETER Runs  Çalıştırma sayısı
 #>
@@ -50,8 +51,8 @@ try {
         $ws = ($perf | Measure-Object WorkingSet -Sum).Sum / 1MB
         $rust = ($perf | Where-Object { [int]$_.IDProcess -eq $proc.Id }).WorkingSetPrivate / 1MB
         $results += [pscustomobject]@{
-            Run = $i; WindowMs = $windowMs; TotalPrivateWsMB = [math]::Round($privateWs, 1)
-            TotalWsMB = [math]::Round($ws, 1); RustPrivateWsMB = [math]::Round($rust, 1); Processes = $ids.Count
+            Run = $i; WindowMs = $windowMs; TotalPrivateWsMiB = [math]::Round($privateWs, 1)
+            TotalWsMiB = [math]::Round($ws, 1); RustPrivateWsMiB = [math]::Round($rust, 1); Processes = $ids.Count
         }
         $ids = Get-Tree $proc.Id
         Get-Process -Id ([int[]]@($ids)) -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -63,4 +64,4 @@ try {
 }
 $results | Format-Table -AutoSize | Out-String | Write-Output
 $med = { param($p) ($results | Sort-Object $p)[[int][math]::Floor($Runs / 2)].$p }
-"Medyan: pencere $(& $med 'WindowMs') ms, toplam özel WS $(& $med 'TotalPrivateWsMB') MB, toplam WS $(& $med 'TotalWsMB') MB, Rust özel WS $(& $med 'RustPrivateWsMB') MB"
+"Medyan: pencere $(& $med 'WindowMs') ms, toplam özel WS $(& $med 'TotalPrivateWsMiB') MiB, toplam WS $(& $med 'TotalWsMiB') MiB, Rust özel WS $(& $med 'RustPrivateWsMiB') MiB"

@@ -2,6 +2,11 @@
 
 ## Yöntem
 
+Birimler: `measure.ps1` ile ölçülen değerler ve bayt sayısıyla verilen boyutlar ikili birimdir — 1 KiB = 1024 bayt,
+1 MiB = 1.048.576 bayt (betik PowerShell'in `1MB` sabitiyle böler; bu da 1 MiB'dir). Plan 1 değerleri ve pgAdmin
+tahmini birimi belirsiz kaynaklardan geldiği için MB olarak bırakıldı. Spec hedefleri spec'teki gibi MB yazılır;
+ölçülen her değer hedefin hem MB hem MiB okumasıyla çok altındadır.
+
     bun tauri build --no-bundle        # ya da bun tauri build (kurulum paketiyle)
     ./scripts/measure.ps1 -Runs 5      # varsayılan exe: target\release\pg-tools.exe
 
@@ -40,16 +45,16 @@ hedefi Plan 2'de bu metrikle yeniden tanımlandı.
 
 ## Taban çizgisi (2026-10-05, Plan 2 sonu, ayar yok)
 
-5 çalıştırma medyanı: pencere **27 ms**, toplam özel WS **110,2 MB**, toplam WS 392,3 MB,
-Rust özel WS **8,5 MB**, 7 süreç.
+5 çalıştırma medyanı: pencere **27 ms**, toplam özel WS **110,2 MiB**, toplam WS 392,3 MiB,
+Rust özel WS **8,5 MiB**, 7 süreç.
 
 Plan 1'deki ~191 MB "özel bellek" değeri büyük olasılıkla farklı bir sayaçtı (ör. Private Bytes; RAM'de
-olmayan taahhüt edilmiş sayfaları da içerir); bu betikle ölçülen özel çalışma kümesi ayarsız hâliyle 110 MB'dır.
-Rust sürecinin Plan 1'deki 30–40 MB değeri de çalışma kümesiydi; özel çalışma kümesi 8,5 MB.
+olmayan taahhüt edilmiş sayfaları da içerir); bu betikle ölçülen özel çalışma kümesi ayarsız hâliyle 110 MiB'dır.
+Rust sürecinin Plan 1'deki 30–40 MB değeri de çalışma kümesiydi; özel çalışma kümesi 8,5 MiB.
 
 > Not: ölçüme başlarken release exe açılıştan hemen sonra `STATUS_STACK_OVERFLOW` ile çıkıyordu. Plan 2'de
-> büyüyen katalog gelecekleri (DDL geleceği ~70 KB) Tauri'nin invoke işleyicisinde ana iş parçacığının
-> 1 MB'lık yığınına gömülüyordu. `get_ddl`/`get_properties`/`list_children` komutlarında gelecekler
+> büyüyen katalog gelecekleri (DDL geleceği ~70 KiB) Tauri'nin invoke işleyicisinde ana iş parçacığının
+> 1 MiB'lık yığınına gömülüyordu. `get_ddl`/`get_properties`/`list_children` komutlarında gelecekler
 > `Box::pin` ile kutulanarak giderildi (ayrı commit); taban çizgisi bu düzeltmeden sonra ölçüldü.
 
 ## Denenen ayarlar
@@ -58,21 +63,21 @@ Her satır ayrı bir release derlemesi, 5 çalıştırma medyanıdır. WebView2 
 `app.windows[0].additionalBrowserArgs` ile verildi; bu alan Tauri'nin varsayılan argümanlarının yerine geçtiği
 için varsayılan `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection` her denemede korundu.
 
-| Deneme | Ayar | Pencere (ms) | Toplam özel WS (MB) | Toplam WS (MB) | Rust özel WS (MB) | Sonuç |
+| Deneme | Ayar | Pencere (ms) | Toplam özel WS (MiB) | Toplam WS (MiB) | Rust özel WS (MiB) | Sonuç |
 |---|---|---|---|---|---|---|
 | Taban | — | 27 | 110,2 | 392,3 | 8,5 | |
 | A | `--renderer-process-limit=1` | 41 | 110,3 | 392,8 | 8,5 | etkisiz (tek sayfa zaten tek çizici süreç kullanıyor) |
-| B | A + `--disable-gpu --disable-gpu-compositing` | 37 | **74,3** | 355,0 | 8,5 | **−36 MB**; kullanılabilirlik doğrulandı (aşağıda) |
+| B | A + `--disable-gpu --disable-gpu-compositing` | 37 | **74,3** | 355,0 | 8,5 | **−36 MiB**; kullanılabilirlik doğrulandı (aşağıda) |
 | C | A + `--js-flags=--max-old-space-size=64` | 39 | 110,4 | 391,5 | 8,5 | etkisiz; büyük ağaçlarda yığın sınırı riski — seçilmedi |
-| R1 | tokio çalışma zamanı 2 işçi iş parçacığı (`main.rs`) | 32 | 110,5 | 393,9 | 7,6 | Rust −0,9 MB; güvenli |
-| R2 | `[profile.release]` `panic = "abort"`, `opt-level = "s"` | 39 | 111,3 | 394,1 | 8,4 | bellek etkisiz; exe 12,4 → 5,8 MB. Seçilmedi: `panic = "abort"` bir komuttaki panik yüzünden tüm uygulamayı kapatır (şu an tokio görevi panikte yalnızca o komut başarısız olur), `opt-level = "s"` DDL/ağaç yolunu yavaşlatabilir; kazanç bellek hedefiyle ilgisiz |
+| R1 | tokio çalışma zamanı 2 işçi iş parçacığı (`main.rs`) | 32 | 110,5 | 393,9 | 7,6 | Rust −0,9 MiB; güvenli |
+| R2 | `[profile.release]` `panic = "abort"`, `opt-level = "s"` | 39 | 111,3 | 394,1 | 8,4 | bellek etkisiz; exe 12,4 → 5,8 MiB. Seçilmedi: `panic = "abort"` bir komuttaki panik yüzünden tüm uygulamayı kapatır (şu an tokio görevi panikte yalnızca o komut başarısız olur), `opt-level = "s"` DDL/ağaç yolunu yavaşlatabilir; kazanç bellek hedefiyle ilgisiz |
 | **B + R1** | seçilen birleşim | 40 | **76,1** | 356,9 | **7,5** | seçildi |
 
 Pencere süresi hiçbir denemede 1000 ms sınırına yaklaşmadı.
 
 ### B (yazılım çizimi) kullanılabilirlik doğrulaması
 
-GPU kapatmak WebView2 süreçlerinin özel belleğini ~36 MB azaltır (GPU sürecinin sürücü/D3D kaynakları); çizim
+GPU kapatmak WebView2 süreçlerinin özel belleğini ~36 MiB azaltır (GPU sürecinin sürücü/D3D kaynakları); çizim
 WARP (`Microsoft Basic Render Driver`) ile CPU'da yapılır. Kaydırma akıcılığı CDP ile ölçüldü (exe
 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223` ile açılıp playwright-core
 `connectOverCDP` ile bağlanıldı):
@@ -94,7 +99,7 @@ sekmesi açıldı (CodeMirror sözdizimi renkli çizildi), tema düğmesi sistem
 Sınır: ölçüm güçlü bir masaüstü CPU'sunda ve 1280×800 pencerede yapıldı. Yazılım çizimi CPU'ya yük bindirir;
 zayıf dizüstü bilgisayarlarda ya da yüksek DPI'lı büyük pencerelerde kaydırma ölçülmedi. Sorun görülürse
 `tauri.conf.json`'daki `--disable-gpu --disable-gpu-compositing` kaldırılarak GPU çizimine dönülür
-(bellek ~110 MB'a çıkar, yine hedefin altında).
+(bellek ~110 MiB'a çıkar, yine hedefin altında).
 
 ## Seçilen ayar
 
@@ -102,20 +107,20 @@ zayıf dizüstü bilgisayarlarda ya da yüksek DPI'lı büyük pencerelerde kayd
 - `src-tauri/src/main.rs`: tokio çalışma zamanı 2 işçi iş parçacığı (`tauri::async_runtime::set`).
 - `Cargo.toml` `[profile.release]` değişmedi.
 
-Sonuç (B + R1, 5 çalıştırma medyanı): pencere 40 ms, **toplam özel WS 76,1 MB**, toplam WS 356,9 MB,
-**Rust özel WS 7,5 MB**.
-Testlerden sonra yeniden derlenip `-Runs 3` ile tekrarlanan doğrulama: pencere 39 ms, toplam özel WS 73,6 MB,
-toplam WS 354,5 MB, Rust özel WS 7,4 MB.
+Sonuç (B + R1, 5 çalıştırma medyanı): pencere 40 ms, **toplam özel WS 76,1 MiB**, toplam WS 356,9 MiB,
+**Rust özel WS 7,5 MiB**.
+Testlerden sonra yeniden derlenip `-Runs 3` ile tekrarlanan doğrulama: pencere 39 ms, toplam özel WS 73,6 MiB,
+toplam WS 354,5 MiB, Rust özel WS 7,4 MiB.
 
 ## Hedef
 
 Karar kuralı (Plan 2, Task 10): seçilen ayarla toplam özel çalışma kümesi < 150 MB ise spec hedefi aynen
-kalır. 76,1 MB < 150 MB olduğundan hedef değerleri değişmedi; yalnızca metrik açıkça "özel çalışma kümesi"
+kalır. 76,1 MiB < 150 MB olduğundan hedef değerleri değişmedi; yalnızca metrik açıkça "özel çalışma kümesi"
 olarak tanımlandı:
 
-- Boşta toplam bellek (uygulama + WebView2 süreçleri, özel çalışma kümesi): **< 150 MB** (ölçülen 76 MB;
-  GPU çizimiyle 110 MB)
-- Rust süreci (özel çalışma kümesi): **< 30 MB** (ölçülen 7,5 MB)
+- Boşta toplam bellek (uygulama + WebView2 süreçleri, özel çalışma kümesi): **< 150 MB** (ölçülen 76 MiB;
+  GPU çizimiyle 110 MiB)
+- Rust süreci (özel çalışma kümesi): **< 30 MB** (ölçülen 7,5 MiB)
 
 Karşılaştırma: pgAdmin4 masaüstü (Electron/NW.js kabuğu + Python sunucusu) Plan 1 notlarına göre boşta
 ~400 MB+ kullanır.
@@ -130,7 +135,7 @@ tembel yüklenen diyaloglar) sonrasında aynı makinede, Plan 2'de seçilen ayar
     powershell -NoProfile -File scripts/smoke-release.ps1     # BAŞARILI, çıkış kodu 0 (pencere 192 ms, 6 sn ayakta)
     powershell -NoProfile -File scripts/measure.ps1 -Runs 5
 
-| Çalıştırma | Pencere (ms) | Toplam özel WS (MB) | Toplam WS (MB) | Rust özel WS (MB) | Süreç |
+| Çalıştırma | Pencere (ms) | Toplam özel WS (MiB) | Toplam WS (MiB) | Rust özel WS (MiB) | Süreç |
 |---|---|---|---|---|---|
 | 1 | 121 | 73,7 | 348,2 | 7,2 | 7 |
 | 2 | 43 | 73,4 | 347,7 | 7,3 | 7 |
@@ -140,7 +145,7 @@ tembel yüklenen diyaloglar) sonrasında aynı makinede, Plan 2'de seçilen ayar
 | **Medyan** | **43** | **73,4** | 347,9 | **7,2** | 7 |
 
 Hedeflerin hepsi karşılandı (pencere < 1 sn, toplam özel WS < 150 MB, Rust < 30 MB); karar kuralının
-uygulanmasına gerek kalmadı. Plan 2 sonuna göre (76,1 / 7,5 MB) fark ölçüm gürültüsü düzeyindedir. `ImportDialog` ve
+uygulanmasına gerek kalmadı. Plan 2 sonuna göre (76,1 / 7,5 MiB) fark ölçüm gürültüsü düzeyindedir. `ImportDialog` ve
 `ServerDialog` Plan 3'te tembel yüklenen ayrı parçalara ayrıldı (`DdlView` Plan 1'den beri ayrı); yeni
 özellikler açılıştaki boşta belleği artırmadı.
 
@@ -148,10 +153,10 @@ Boyutlar:
 
 | | Boyut |
 |---|---|
-| `dist` (ön yüz derlemesi, toplam) | 526 KB (538.567 bayt); en büyük parçalar `DdlView` 288 KB, `index` 184 KB, CSS 17 KB |
-| `target\release\pg-tools.exe` (`cargo build --release -p pg-tools`) | 12,4 MB (12.964.352 bayt) |
-| `target\release\pg-tools.exe` (`bun run tauri build`) | 12,5 MB (13.130.752 bayt) |
-| NSIS kurulum paketi `pg-tools_0.1.0_x64-setup.exe` (WebView2 gömülü değil) | **3,24 MB** (3.402.548 bayt) |
+| `dist` (ön yüz derlemesi, toplam) | 526 KiB (538.567 bayt); en büyük parçalar `DdlView` 288 KiB, `index` 184 KiB, CSS 17 KiB |
+| `target\release\pg-tools.exe` (`cargo build --release -p pg-tools`) | 12,4 MiB (12.964.352 bayt) |
+| `target\release\pg-tools.exe` (`bun run tauri build`) | 12,5 MiB (13.130.752 bayt) |
+| NSIS kurulum paketi `pg-tools_0.1.0_x64-setup.exe` (WebView2 gömülü değil) | **3,24 MiB** (3.402.548 bayt) |
 
 NSIS paketi < 15 MB hedefinin (spec §1.3) altında. `tauri build` exe'si de `smoke-release.ps1` ile sınandı
 (BAŞARILI, pencere 186 ms).

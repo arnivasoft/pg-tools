@@ -61,6 +61,59 @@ Bir test her sunucuda döngüyle çalıştığı için ilk başarısız sunucuda
 `.snap.new` dosyalarını tek seferde almak için `INSTA_FORCE_PASS=1` de verilebilir (yalnızca snapshot üretimi
 sırasında; doğrulama çalıştırması bu değişken olmadan yapılmalıdır).
 
+## pgbouncer ve `options` yedek yolu
+Oturumun salt okunur/zaman aşımı/`search_path` ayarları normalde `options` başlangıç parametresiyle gönderilir.
+pgbouncer gibi havuzlayıcılar bunu `unsupported startup parameter: options` (SQLSTATE 08P01) ile reddeder; bu durumda
+bağlantı kurucu bir kez `options`'sız yeniden bağlanır ve aynı üç ayarı (`SESSION_SETS`) bağlantıdan hemen sonra `SET`
+ile uygular (tek `batch_execute`; başarısız olursa bağlantı kapatılır). Başka hatalar (parola, ağ, TLS, eksik
+veritabanı) yeniden denemeyi tetiklemez. Sınır: `SET` oturum düzeyindedir; **transaction pooling** modunda sunucu
+bağlantısı işlemler arasında değişebilir ve ayarlar sonraki işlemlere taşınmayabilir. Salt okunurluk güvencesi için
+session pooling (ya da doğrudan bağlantı) kullanın. `options`'ı reddetmek yerine sessizce yok sayan kurulumlar
+(pgbouncer `ignore_startup_parameters = extra_float_digits,options`) için her bağlantıda sürüm sorgusu üç ayarı da
+okur; biri eksikse aynı `SESSION_SETS` aynı istemcide uygulanır (ek gidiş-dönüş yalnızca o durumda). Yedek yol ve bu
+denetim `connect_once(.., with_options=false)` testiyle (`session_settings_are_applied_without_options_parameter`) her
+sürümde doğrulanır; `SET` hatasının bağlantı hatası olarak döndüğü `failing_session_set_is_a_connect_error`, tek yeniden
+deneme ise sahte bir havuzlayıcıyla (`options_rejection_retries_once_without_options`, `other_startup_errors_do_not_retry`)
+sınanır; gerçek pgbouncer gerekmez.
+
+## TLS zincir testi (Docker)
+    powershell -NoProfile -File scripts/tls-test.ps1              # postgres:16
+    powershell -NoProfile -File scripts/tls-test.ps1 -Version 18
+    powershell -NoProfile -File scripts/tls-test.ps1 -KeepContainer   # sunucu kapsayıcılarını bırakır
+
+Betik bir yardımcı kapsayıcıda `openssl` ile bir test CA'sı, bu CA'dan iki sunucu sertifikası ve bağımsız ikinci bir
+CA üretir; sertifikaları geçici bir dizine alır ve yalnızca `hostssl all all all scram-sha-256` kabul eden
+(`ssl=on`, anahtar `postgres` sahipli ve `600`) iki PostgreSQL açar:
+
+| kapsayıcı | port | sertifika SAN'ı |
+|---|---|---|
+| `pgt-tls-a` | `127.0.0.1:55480` | yalnızca `DNS:pgt-tls.test` (IP yok) |
+| `pgt-tls-b` | `127.0.0.1:55481` | `DNS:pgt-tls.test`, `IP:127.0.0.1` |
+
+Ardından `cargo test -p pgt-core --test tls` şu ortam değişkenleriyle çalışır: `PGT_TLS_URL` / `PGT_TLS_IP_URL`
+(`host=127.0.0.1 port=… user=postgres`; parola içermez), `PGT_TLS_PASSWORD` (her çalıştırmada rastgele),
+`PGT_TLS_CA`, `PGT_TLS_OTHER_CA`. Değişkenler yoksa testler atlanır. Kapsayıcılar ve geçici dizin (CA'lar ve özel
+anahtarlar dahil) hata olsa da silinir; anahtarlar depoya hiç girmez. `-KeepContainer` ile yalnızca geçici dizin
+silinir: sunucu kapsayıcıları kalır ve içlerinde sunucu özel anahtarları ile o çalıştırmanın parolası (kapsayıcı
+ortamında `POSTGRES_PASSWORD`) durur; işiniz bitince `docker rm -f pgt-tls-a pgt-tls-b` ile silin. Bağlantı her
+zaman `127.0.0.1` iledir:
+
+| mod | sunucu | root_cert | beklenen |
+|---|---|---|---|
+| `disable` | A | – | hata, SQLSTATE 28000 (pg_hba yalnızca hostssl) |
+| `prefer` | A | – | başarılı (TLS kurulur) |
+| `require` | A | – | başarılı (sertifika doğrulanmaz) |
+| `verify-ca` | A | doğru CA | başarılı (host adı uyuşmazlığı yok sayılır) |
+| `verify-ca` | A | başka CA | hata, `kind = Tls` (`UnknownIssuer`) |
+| `verify-ca` | A | yok (Windows deposu) | hata, `kind = Tls` (`UnknownIssuer`) |
+| `verify-full` | A | doğru CA | hata, `kind = Tls` (127.0.0.1 SAN'da yok) |
+| `verify-full` | B | doğru CA | başarılı (zincir + IP SAN) |
+| `verify-full` | B | başka CA | hata, `kind = Tls` |
+
+`verify-full` + `host=pgt-tls.test` (hosts girdisi olmadan, `hostaddr` ile) sınanmaz: `ServerConfig` yalnızca
+`host` taşır ve bağlantı kurucu `hostaddr` ayarlamaz. Olumlu `verify-full` yolu bunun yerine IP SAN'lı B sunucusuyla
+sınanır. İstemci sertifikası senaryosu bu testin kapsamı dışındadır.
+
 ## Performans testi
 `cargo test -p pgt-catalog --test perf -- --nocapture` — 5.000 tablolu şemada liste/Properties/DDL süreleri
 (spec §1.3 bütçeleri). Yavaş makinede `PGT_PERF_FACTOR=2` ile bütçeler gevşetilebilir (CI'da kullanmayın).

@@ -88,26 +88,29 @@ pub async fn connect_server(state: State<'_, AppState>, server_id: Uuid, passwor
 /// Başarılı bir bağlantıdan sonra yazılan parolayı saklar. Bağlantı zaten kuruldu: kalıcı kayıt
 /// (servers.json ya da Kimlik Bilgisi Yöneticisi) başarısız olursa yalnızca uyarı günlüklenir;
 /// parola her durumda oturum belleğinde kalır (Credentials::remember önce oturumu günceller).
+///
+/// Kayıt kilidi `creds.remember` bitene dek tutulur: `delete_registered` kaydı aynı kilit altında
+/// siler ve parolayı ancak ondan sonra unutur. Böylece "kayıt var" denetimi ile parolanın yazılması
+/// arasına bir silme giremez (girseydi silinen sunucunun parolası depoda yetim kalırdı).
 fn remember_after_connect(registry: &RwLock<Registry>, creds: &Credentials, config: &ServerConfig, password: &str, remember: bool) {
     let mut persist = config.save_password;
-    {
-        let mut registry = registry.write().unwrap();
-        // Bağlantı sürerken silinen sunucu: upsert kaydı geri getirir, kalıcı parola yetim kalır.
-        if registry.get(config.id).is_none() {
-            return;
-        }
-        if remember && !config.save_password {
-            let mut updated = config.clone();
-            updated.save_password = true;
-            match registry.upsert(updated) {
-                Ok(_) => persist = true,
-                Err(e) => tracing::warn!(server = %config.id, error = %e, "\"parolayı kaydet\" tercihi kaydedilemedi"),
-            }
+    let mut registry = registry.write().unwrap();
+    // Bağlantı sürerken silinen sunucu: upsert kaydı geri getirir, kalıcı parola yetim kalır.
+    if registry.get(config.id).is_none() {
+        return;
+    }
+    if remember && !config.save_password {
+        let mut updated = config.clone();
+        updated.save_password = true;
+        match registry.upsert(updated) {
+            Ok(_) => persist = true,
+            Err(e) => tracing::warn!(server = %config.id, error = %e, "\"parolayı kaydet\" tercihi kaydedilemedi"),
         }
     }
     if let Err(e) = creds.remember(config.id, password, persist) {
         tracing::warn!(server = %config.id, error = %e, "parola kalıcı depoya yazılamadı; yalnızca bu oturumda kullanılacak");
     }
+    drop(registry);
 }
 
 #[tauri::command]
@@ -292,8 +295,47 @@ mod tests {
         let registry = RwLock::new(Registry::unavailable(dir.path().join("servers.json")));
         let c = creds();
         c.remember(id, "pw", true).unwrap();
-        assert!(delete_registered(&registry, &ConnectionManager::new(), &c, id).is_err());
+        let err = delete_registered(&registry, &ConnectionManager::new(), &c, id).unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "salt-okunur kayıt Config hatası vermeli: {err:?}");
         assert_eq!(c.password(id).unwrap().as_deref(), Some("pw"), "kayıt silinemediyse parola da silinmemeli");
+    }
+
+    /// Kalıcı depoya yazılırken kayıt kilidinin tutulduğunu doğrular: o sırada `delete_registered`
+    /// kaydı silemez, yani denetim ile yazma arasına silme giremez.
+    struct LockProbeStore {
+        registry: Arc<RwLock<Registry>>,
+        inner: MemorySecretStore,
+        locked_during_set: std::sync::Mutex<Vec<bool>>,
+    }
+    impl pgt_core::credentials::SecretStore for LockProbeStore {
+        fn get(&self, key: &str) -> pgt_core::Result<Option<String>> {
+            self.inner.get(key)
+        }
+        fn set(&self, key: &str, value: &str) -> pgt_core::Result<()> {
+            let locked = matches!(self.registry.try_write(), Err(std::sync::TryLockError::WouldBlock));
+            self.locked_during_set.lock().unwrap().push(locked);
+            self.inner.set(key, value)
+        }
+        fn delete(&self, key: &str) -> pgt_core::Result<()> {
+            self.inner.delete(key)
+        }
+    }
+
+    #[test]
+    fn remember_after_connect_writes_the_password_under_the_registry_lock() {
+        use pgt_core::credentials::SecretStore;
+        let dir = tempfile::tempdir().unwrap();
+        let config = cfg(Uuid::new_v4()); // save_password = true: kalıcı depoya yazılır
+        let registry = Arc::new(registry_with(dir.path(), &config));
+        let store = Arc::new(LockProbeStore { registry: registry.clone(), inner: MemorySecretStore::default(), locked_during_set: Default::default() });
+        let c = Credentials::new(store.clone());
+        remember_after_connect(&registry, &c, &config, "typed", false);
+        assert_eq!(*store.locked_during_set.lock().unwrap(), [true], "parola kayıt kilidi altında yazılmalı");
+        assert!(registry.try_write().is_ok(), "kilit sonunda bırakılmalı");
+        // Ardından silme parolayı da kaldırır (yetim parola kalmaz).
+        delete_registered(&registry, &ConnectionManager::new(), &c, config.id).unwrap();
+        assert_eq!(c.password(config.id).unwrap(), None);
+        assert_eq!(store.get(&pgt_core::credentials::password_key(config.id)).unwrap(), None);
     }
 
     fn cfg(id: Uuid) -> ServerConfig {
