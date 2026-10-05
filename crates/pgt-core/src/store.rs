@@ -5,6 +5,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -25,16 +27,21 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         fs::create_dir_all(dir).map_err(io_err)?;
     }
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("dosya");
-    let tmp = path.with_file_name(format!("{name}.tmp"));
-    fs::write(&tmp, bytes).map_err(io_err)?;
-    fs::rename(&tmp, path).map_err(io_err)?;
+    let tmp = path.with_file_name(format!("{name}.{}-{}.tmp", std::process::id(), UNIQUE.fetch_add(1, Ordering::Relaxed)));
+    let result = fs::write(&tmp, bytes).and_then(|()| fs::rename(&tmp, path));
+    if let Err(e) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(io_err(e));
+    }
     Ok(())
 }
 
+static UNIQUE: AtomicU64 = AtomicU64::new(0);
+
 fn backup_path(path: &Path) -> PathBuf {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("dosya");
-    path.with_file_name(format!("{name}.bak-{secs}"))
+    path.with_file_name(format!("{name}.bak-{ms}-{}", UNIQUE.fetch_add(1, Ordering::Relaxed)))
 }
 
 /// Dosyayı okur; yoksa `None`, ayrıştırılamazsa yedekleyip `None` (+ yedek yolu) döner.
@@ -84,7 +91,11 @@ impl AppSettings {
     pub fn load(path: &Path) -> Self {
         match read_json::<AppSettings>(path) {
             Ok((Some(s), _)) => s,
-            _ => Self::default(),
+            Ok(_) => Self::default(),
+            Err(e) => {
+                tracing::warn!(error = %e, "settings.json okunamadı; varsayılanlar kullanılıyor");
+                Self::default()
+            }
         }
     }
 
@@ -254,11 +265,17 @@ struct TabsFile {
 
 pub struct Drafts {
     dir: PathBuf,
+    /// `tabs.json` oku-değiştir-yaz döngülerini ve süpürmeyi sıralar (eşzamanlı komutlar sekme kaybetmesin).
+    lock: Mutex<()>,
 }
 
 impl Drafts {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self { dir: dir.into(), lock: Mutex::new(()) }
+    }
+
+    fn guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.lock.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn tabs_path(&self) -> PathBuf {
@@ -277,8 +294,10 @@ impl Drafts {
         write_atomic(&self.tabs_path(), &to_json(&TabsFile { version: 1, tabs })?)
     }
 
-    /// Var olan sekmenin sırası korunur; yeni sekme sona eklenir.
+    /// Var olan sekmenin sırası korunur; yeni sekme sona eklenir. Önce metin yazılır: araya giren bir hata
+    /// en kötü ihtimalle sahipsiz `.sql` bırakır, bu `load_all` sırasında süpürülür.
     pub fn save_tab(&self, tab: &DraftTab, sql: &str) -> Result<()> {
+        let _g = self.guard();
         write_atomic(&self.sql_path(tab.id), sql.as_bytes())?;
         let mut tabs = self.read_tabs()?;
         match tabs.iter_mut().find(|t| t.id == tab.id) {
@@ -289,6 +308,7 @@ impl Drafts {
     }
 
     pub fn remove(&self, id: Uuid) -> Result<()> {
+        let _g = self.guard();
         let mut tabs = self.read_tabs()?;
         tabs.retain(|t| t.id != id);
         self.write_tabs(tabs)?;
@@ -299,19 +319,37 @@ impl Drafts {
         }
     }
 
-    /// `tabs.json` sırasıyla; metni okunamayan/eksik taslak boş metinle gelir.
+    /// `tabs.json` sırasıyla. Metni okunamayan taslak boş metinle gelir (günlüğe yalnızca kimlik yazılır);
+    /// `tabs.json`ın anmadığı `<uuid>.sql` dosyaları süpürülür.
     pub fn load_all(&self) -> Result<Vec<(DraftTab, String)>> {
-        Ok(self
-            .read_tabs()?
+        let _g = self.guard();
+        let tabs = self.read_tabs()?;
+        self.sweep_orphans(&tabs);
+        Ok(tabs
             .into_iter()
             .map(|t| {
-                let sql = fs::read_to_string(self.sql_path(t.id)).unwrap_or_default();
+                let sql = fs::read_to_string(self.sql_path(t.id)).unwrap_or_else(|e| {
+                    tracing::warn!(draft = %t.id, error = %e, "taslak metni okunamadı; boş metinle açılıyor");
+                    String::new()
+                });
                 (t, sql)
             })
             .collect())
     }
 
+    fn sweep_orphans(&self, tabs: &[DraftTab]) {
+        let Ok(entries) = fs::read_dir(&self.dir) else { return };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".sql")) else { continue };
+            if Uuid::parse_str(stem).is_ok_and(|id| !tabs.iter().any(|t| t.id == id)) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
     pub fn clear(&self) -> Result<()> {
+        let _g = self.guard();
         let tabs = self.read_tabs()?;
         self.write_tabs(Vec::new())?;
         for t in tabs {
@@ -484,5 +522,66 @@ mod tests {
         assert_eq!(backups, 1);
         drafts.save_tab(&tab("x"), "select 1").unwrap();
         assert_eq!(drafts.load_all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn concurrent_saves_and_removes_lose_no_tabs() {
+        let dir = tempfile::tempdir().unwrap();
+        let drafts = std::sync::Arc::new(Drafts::new(dir.path().join("query")));
+        let tabs: Vec<DraftTab> = (0..16).map(|i| tab(&format!("t{i}"))).collect();
+        let handles: Vec<_> = tabs
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, t)| {
+                let d = drafts.clone();
+                std::thread::spawn(move || {
+                    d.save_tab(&t, &format!("select {i}")).unwrap();
+                    if i % 2 == 1 {
+                        d.remove(t.id).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let all = drafts.load_all().unwrap();
+        let mut got: Vec<Uuid> = all.iter().map(|(t, _)| t.id).collect();
+        let mut want: Vec<Uuid> = tabs.iter().enumerate().filter(|(i, _)| i % 2 == 0).map(|(_, t)| t.id).collect();
+        got.sort();
+        want.sort();
+        assert_eq!(got, want);
+        for (t, sql) in &all {
+            let i = tabs.iter().position(|x| x.id == t.id).unwrap();
+            assert_eq!(sql, &format!("select {i}"));
+        }
+        let leftovers = fs::read_dir(dir.path().join("query")).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tmp")).count();
+        assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn orphan_sql_files_are_swept_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let drafts = Drafts::new(dir.path());
+        let keep = tab("k");
+        drafts.save_tab(&keep, "select 1").unwrap();
+        let orphan = dir.path().join(format!("{}.sql", Uuid::new_v4()));
+        fs::write(&orphan, "x").unwrap();
+        let other = dir.path().join("notlar.sql");
+        fs::write(&other, "x").unwrap();
+        assert_eq!(drafts.load_all().unwrap().len(), 1);
+        assert!(!orphan.exists());
+        assert!(other.exists());
+    }
+
+    #[test]
+    fn failed_write_removes_its_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("hedef");
+        fs::create_dir(&target).unwrap(); // rename dosya -> dizin üzerine başarısız olur
+        assert!(write_atomic(&target, b"x").is_err());
+        let names: Vec<_> = fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names.len(), 1);
     }
 }
