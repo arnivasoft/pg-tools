@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/pgt-core", "crates/pgt-catalog"]
+members = ["crates/pgt-core", "crates/pgt-catalog", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

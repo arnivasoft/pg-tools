@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#2563eb"/>
+  <ellipse cx="256" cy="150" rx="150" ry="52" fill="#ffffff"/>
+  <path d="M106 150v212c0 29 67 52 150 52s150-23 150-52V150c0 29-67 52-150 52s-150-23-150-52z" fill="#dbe6fd"/>
+  <text x="256" y="340" text-anchor="middle" font-family="Segoe UI, sans-serif" font-size="120" font-weight="700" fill="#1d4ed8">pg</text>
+</svg>
