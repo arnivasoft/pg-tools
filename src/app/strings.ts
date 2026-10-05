@@ -15,6 +15,8 @@ export const t = {
       `${s.total} kayıt · ${s.importable} aktarılabilir · ${s.duplicates} zaten var · ${s.errors} hatalı`,
     warnings: "Uyarılar",
     warnBadge: (n: number) => `⚠ ${n}`,
+    showWarnings: (n: number) => `${n} uyarıyı göster`,
+    hideWarnings: (n: number) => `${n} uyarıyı gizle`,
     fileFilter: "pgAdmin servers.json",
     colName: "Ad",
     colGroup: "Grup",
