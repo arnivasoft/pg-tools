@@ -1,4 +1,4 @@
-import { createRoot, createSignal } from "solid-js";
+import { createRoot, createSignal, untrack } from "solid-js";
 import { dismissToast, durationFor, pushToast, type Toast, type ToastKind } from "./toast-model";
 
 export const toast = createRoot(() => {
@@ -21,7 +21,8 @@ export const toast = createRoot(() => {
     timers.set(id, setTimeout(() => dismiss(id), durationFor(kind)));
   };
   const show = (text: string, kind: ToastKind = "info") => {
-    const result = pushToast(list(), { id: nextId, kind, text });
+    // untrack: bir efekt/memo içinden çağrılırsa o efekt toast listesine abone olmasın (kapanış → yeniden göster döngüsü).
+    const result = pushToast(untrack(list), { id: nextId, kind, text });
     const id = result.mergedInto ?? nextId++;
     for (const evicted of result.evicted) clearTimer(evicted);
     setList(result.list);
