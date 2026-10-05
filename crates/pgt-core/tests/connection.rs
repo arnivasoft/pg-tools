@@ -38,20 +38,23 @@ async fn session_settings_are_applied() {
     for ts in servers() {
         let mgr = ConnectionManager::new();
         mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
-        let (read_only, app, timeout): (String, String, String) = mgr
+        let (read_only, app, timeout, search_path): (String, String, String, String) = mgr
             .run(ts.config.id, Target::Maintenance, |c| async move {
                 let row = c
                     .client
                     .query_one(
-                        "SELECT current_setting('default_transaction_read_only'), current_setting('application_name'), current_setting('statement_timeout')",
+                        "SELECT current_setting('default_transaction_read_only'), current_setting('application_name'), current_setting('statement_timeout'), current_setting('search_path')",
                         &[],
                     )
                     .await?;
-                Ok((row.get(0), row.get(1), row.get(2)))
+                Ok((row.get(0), row.get(1), row.get(2), row.get(3)))
             })
             .await
             .unwrap();
-        assert_eq!((read_only.as_str(), app.as_str(), timeout.as_str()), ("on", "pg-tools", "30s"));
+        assert_eq!(
+            (read_only.as_str(), app.as_str(), timeout.as_str(), search_path.as_str()),
+            ("on", "pg-tools", "30s", "pg_catalog")
+        );
     }
 }
 
