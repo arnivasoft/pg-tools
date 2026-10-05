@@ -1,0 +1,9 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Index: app.customers_lower_name_idx
+
+-- DROP INDEX IF EXISTS app.customers_lower_name_idx;
+
+CREATE UNIQUE INDEX customers_lower_name_idx ON app.customers USING btree (lower((name)::text));

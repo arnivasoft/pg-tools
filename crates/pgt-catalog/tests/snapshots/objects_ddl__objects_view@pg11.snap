@@ -1,0 +1,26 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- View: app.customer_orders
+
+-- DROP VIEW IF EXISTS app.customer_orders;
+
+CREATE OR REPLACE VIEW app.customer_orders
+WITH (security_barrier=true)
+AS
+ SELECT c.id AS customer_id,
+    c.email,
+    o.id AS order_id,
+    o.total
+   FROM app.customers c
+     JOIN app.orders o ON o.customer_id = c.id;
+
+ALTER TABLE app.customer_orders
+    OWNER TO <owner>;
+
+COMMENT ON VIEW app.customer_orders
+    IS 'Müşteri siparişleri';
+
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE app.customer_orders TO <owner>;
+GRANT SELECT ON TABLE app.customer_orders TO pgt_reader;
