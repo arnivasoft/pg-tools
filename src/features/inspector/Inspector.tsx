@@ -67,8 +67,8 @@ export function Inspector(props: { explorer: Explorer }) {
       {(node) => (
         <div class="flex h-full flex-col">
           <div class="flex h-9 shrink-0 items-center gap-2 border-b border-border px-3">
-            <span class="truncate font-semibold">{node().label}</span>
-            <span class="text-muted">· {kindLabel(node().kind)}</span>
+            <span class="min-w-0 truncate font-semibold" title={node().label}>{node().label}</span>
+            <span class="shrink-0 whitespace-nowrap text-muted">· {kindLabel(node().kind)}</span>
             <div class="flex-1" />
             <Show when={tab() === "ddl" && ddlText()}>
               <Button variant="ghost" onClick={() => void copy()}>
