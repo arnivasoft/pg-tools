@@ -24,7 +24,18 @@ export class ExplorerController {
     this.set(f(this.get()));
   }
 
-  async load(id: string): Promise<void> {
+  private readonly connecting = new Map<string, Promise<boolean>>();
+  private readonly loads = new Map<string, Promise<void>>();
+
+  load(id: string): Promise<void> {
+    const pending = this.loads.get(id);
+    if (pending) return pending;
+    const p = this.doLoad(id).finally(() => this.loads.delete(id));
+    this.loads.set(id, p);
+    return p;
+  }
+
+  private async doLoad(id: string): Promise<void> {
     this.update((s) => startLoading(s, id));
     try {
       const list = await this.deps.api.listChildren(id);
@@ -34,28 +45,53 @@ export class ExplorerController {
     }
   }
 
-  async ensureConnected(id: string): Promise<boolean> {
-    const node = this.get().nodes.get(id);
-    if (!node || node.kind !== "server" || node.flags.connected || !node.serverId) return true;
+  ensureConnected(id: string): Promise<boolean> {
+    const pending = this.connecting.get(id);
+    if (pending) return pending;
+    const p = this.doConnect(id).finally(() => this.connecting.delete(id));
+    this.connecting.set(id, p);
+    return p;
+  }
+
+  private async doConnect(id: string): Promise<boolean> {
+    const first = this.get().nodes.get(id);
+    if (!first || first.kind !== "server" || first.flags.connected || !first.serverId) return true;
+    const serverId = first.serverId;
     let password: string | null = null;
     let remember = false;
     for (;;) {
       this.update((s) => startLoading(s, id));
       try {
-        const info = await this.deps.api.connectServer(node.serverId, password, remember);
-        this.update((s) => patchNode(stopLoading(s, id), id, { detail: info.version, flags: { ...node.flags, connected: true } }));
+        const info = await this.deps.api.connectServer(serverId, password, remember);
+        const cur = this.get().nodes.get(id);
+        if (!cur) {
+          this.update((s) => stopLoading(s, id));
+          return false;
+        }
+        this.update((s) => {
+          const n = s.nodes.get(id);
+          return n ? patchNode(stopLoading(s, id), id, { detail: info.version, flags: { ...n.flags, connected: true } }) : s;
+        });
         return true;
       } catch (e) {
         const error = toPayload(e);
         if (error.code === "password_required" || error.code === "auth") {
           this.update((s) => stopLoading(s, id));
-          const answer = await this.deps.requestPassword(node, error.code === "auth");
+          const cur = this.get().nodes.get(id);
+          if (!cur) return false;
+          let answer: PasswordAnswer | null;
+          try {
+            answer = await this.deps.requestPassword(cur, error.code === "auth");
+          } catch (pe) {
+            this.update((s) => (s.nodes.has(id) ? setError(s, id, toPayload(pe)) : s));
+            return false;
+          }
           if (!answer) return false;
           password = answer.password;
           remember = answer.remember;
           continue;
         }
-        this.update((s) => setError(s, id, error));
+        this.update((s) => (s.nodes.has(id) ? setError(s, id, error) : s));
         return false;
       }
     }
@@ -65,6 +101,7 @@ export class ExplorerController {
     const node = this.get().nodes.get(id);
     if (!node?.hasChildren) return;
     if (!(await this.ensureConnected(id))) return;
+    if (!this.get().nodes.has(id)) return;
     this.update((s) => expand(s, id));
     if (!this.get().children.has(id)) await this.load(id);
   }
@@ -98,7 +135,11 @@ export class ExplorerController {
     const state = this.get();
     const intent = keyIntent(state, flatten(state), key);
     if (!intent) return false;
-    void this.apply(intent);
+    this.apply(intent).catch((e) => {
+      console.error("explorer key action failed", e);
+      const sel = this.get().selected;
+      if (sel !== null && this.get().nodes.has(sel)) this.update((s) => setError(s, sel, toPayload(e)));
+    });
     return true;
   }
 
