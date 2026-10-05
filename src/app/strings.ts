@@ -132,6 +132,9 @@ export const t = {
       title: "Çalıştırmayı onayla",
       intro: "Aşağıdaki ifadeler onay gerektiriyor:",
       run: "Çalıştır",
+      more: (n: number) => `… ve ${n} ifade daha`,
+      empty: "Çalıştırılacak ifade yok.",
+      productionBanner: "Üretim sunucusu — değişiklikler canlı veriyi etkiler.",
       production: "Üretim sunucusunda yazma",
       danger: {
         updateWithoutWhere: "WHERE olmayan UPDATE: tablodaki tüm satırlar değişir.",

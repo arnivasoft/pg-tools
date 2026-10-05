@@ -1,10 +1,11 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createSignal, onCleanup } from "solid-js";
 import { t } from "../../app/strings";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
-import type { ConfirmItem } from "./confirm-model";
+import { createConfirmGate, type ConfirmItem } from "./confirm-model";
 
 const MAX_CHARS = 500;
+const MAX_ITEMS = 50;
 const clip = (s: string) => {
   const chars = Array.from(s);
   return chars.length > MAX_CHARS ? chars.slice(0, MAX_CHARS).join("") + "…" : s;
@@ -42,10 +43,13 @@ export function ConfirmRunDialog(props: {
         </>
       }
     >
-      <div class={props.production ? "border-l-4 border-danger pl-3" : ""} data-production={props.production}>
+      <div data-production={props.production}>
+        <Show when={props.production}>
+          <div class="mb-3 rounded bg-danger/10 px-3 py-2 text-sm font-medium text-danger">{c.productionBanner}</div>
+        </Show>
         <p class="mb-2">{c.intro}</p>
         <ul class="flex flex-col gap-2">
-          <For each={props.items}>
+          <For each={props.items.slice(0, MAX_ITEMS)}>
             {(it) => (
               <li class="rounded border border-border p-2">
                 <div class="mb-1 flex flex-wrap gap-1">
@@ -61,35 +65,32 @@ export function ConfirmRunDialog(props: {
             )}
           </For>
         </ul>
+        <Show when={props.items.length > MAX_ITEMS}>
+          <p class="mt-2 text-xs text-muted">{c.more(props.items.length - MAX_ITEMS)}</p>
+        </Show>
       </div>
     </Dialog>
   );
 }
 
-type Request = { items: ConfirmItem[]; production: boolean; resolve: (ok: boolean) => void };
+type Request = { items: ConfirmItem[]; production: boolean };
 
-/** Söz tabanlı onay: `ask(items, production)`; `View` bir kez bağlanır. */
+/** Söz tabanlı onay: `ask(items, production)`; `View` bir kez bağlanır, kaldırılırsa bekleyen istek iptal sayılır. */
 export function createRunConfirm() {
   const [request, setRequest] = createSignal<Request | null>(null);
-  const ask = (items: ConfirmItem[], production = false) =>
-    new Promise<boolean>((resolve) => {
-      request()?.resolve(false);
-      setRequest({ items, production, resolve });
-    });
-  const finish = (ok: boolean) => {
-    const cur = request();
-    if (!cur) return;
-    setRequest(null);
-    cur.resolve(ok);
+  const gate = createConfirmGate<Request>(setRequest);
+  const ask = (items: ConfirmItem[], production = false) => gate.ask({ items, production });
+  const View = () => {
+    onCleanup(gate.dispose);
+    return (
+      <ConfirmRunDialog
+        open={request() !== null}
+        items={request()?.items ?? []}
+        production={request()?.production ?? false}
+        onConfirm={() => gate.finish(true)}
+        onCancel={() => gate.finish(false)}
+      />
+    );
   };
-  const View = () => (
-    <ConfirmRunDialog
-      open={request() !== null}
-      items={request()?.items ?? []}
-      production={request()?.production ?? false}
-      onConfirm={() => finish(true)}
-      onCancel={() => finish(false)}
-    />
-  );
   return { ask, View };
 }

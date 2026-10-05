@@ -8,12 +8,6 @@ import type { StmtPlan } from "../../ipc/bindings/StmtPlan";
 import { toPayload } from "../../ipc/errors";
 import { stmtText } from "./offsets";
 
-export interface ServerGuardInfo {
-  label: string | null;
-  readOnlyLock: boolean;
-  isProduction: boolean;
-}
-
 export interface ConfirmItem {
   index: number;
   reason: "danger" | "production";
@@ -30,12 +24,18 @@ export interface LockedItem {
 }
 
 export type Decision =
+  | { kind: "empty" }
   | { kind: "run" }
   | { kind: "confirm"; items: ConfirmItem[] }
   | { kind: "locked"; items: LockedItem[] };
 
-/** `_server` yalnızca arayüz biçimi içindir; karar arka uç planındaki bayraklardan gelir. */
-export function decide(plans: StmtPlan[], text: string, _server?: ServerGuardInfo): Decision {
+/**
+ * Karar yalnızca arka uç planındaki bayraklardan (`danger`, `productionWrite`, `lockedReject`) gelir.
+ * Üretim bandı çağıranın işidir: çağıran `isProductionLabel` (src/features/servers/server-form.ts)
+ * ile `production` prop'unu verir; burada üretim yazması istemcide yeniden türetilmez.
+ */
+export function decide(plans: StmtPlan[], text: string): Decision {
+  if (plans.length === 0) return { kind: "empty" };
   const locked = plans.filter((p) => p.lockedReject);
   if (locked.length > 0) {
     return {
@@ -81,6 +81,8 @@ export interface GuardDeps {
 export type GuardOutcome =
   | { kind: "done" }
   | { kind: "cancelled" }
+  /** Boş / yalnızca yorum / boş seçim: çalıştırılacak ifade yok. */
+  | { kind: "empty" }
   | { kind: "locked"; items: LockedItem[] }
   | { kind: "rejected"; error: ErrorPayload };
 
@@ -95,6 +97,7 @@ export async function runWithGuards(snapshot: Snapshot, deps: GuardDeps): Promis
     } catch (e) {
       return { kind: "rejected", error: toPayload(e) };
     }
+    if (decision.kind === "empty") return { kind: "empty" };
     if (decision.kind === "locked") return { kind: "locked", items: decision.items };
     let confirmed = false;
     if (decision.kind === "confirm") {
@@ -112,4 +115,26 @@ export async function runWithGuards(snapshot: Snapshot, deps: GuardDeps): Promis
     }
   }
   return outcome;
+}
+
+/**
+ * Söz tabanlı onay kapısı (çerçeveden bağımsız). `ask` bekleyen önceki isteği `false` ile çözer;
+ * `dispose` bekleyen isteği `false` ile çözer (görünüm kaldırılırsa `runWithGuards` asılı kalmaz).
+ */
+export function createConfirmGate<R>(onChange: (req: R | null) => void) {
+  let pending: { resolve: (ok: boolean) => void } | null = null;
+  const finish = (ok: boolean) => {
+    const cur = pending;
+    if (!cur) return;
+    pending = null;
+    onChange(null);
+    cur.resolve(ok);
+  };
+  const ask = (req: R) =>
+    new Promise<boolean>((resolve) => {
+      finish(false);
+      pending = { resolve };
+      onChange(req);
+    });
+  return { ask, finish, dispose: () => finish(false) };
 }
