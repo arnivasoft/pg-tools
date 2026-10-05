@@ -38,7 +38,8 @@ JOIN pg_attribute a ON a.attrelid = r.oid AND a.attnum > 0 AND NOT a.attisdroppe
 LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
 WHERE r.relkind IN ('r', 'p', 'v', 'm')
 UNION ALL
-SELECT 'constraint', r.qname || '.' || k.conname, pg_get_constraintdef(k.oid, true) || ' | ' || k.convalidated
+SELECT 'constraint', r.qname || '.' || k.conname,
+       concat_ws(' | ', pg_get_constraintdef(k.oid, true), k.convalidated, coalesce(obj_description(k.oid, 'pg_constraint'), ''))
 FROM rel r JOIN pg_constraint k ON k.conrelid = r.oid AND k.contype IN ('p', 'u', 'c', 'x', 'f')
 UNION ALL
 SELECT 'index', n.nspname || '.' || ic.relname, pg_get_indexdef(x.indexrelid) || ' | ' || coalesce(obj_description(ic.oid, 'pg_class'), '')
@@ -51,11 +52,28 @@ FROM rel r JOIN pg_trigger t ON t.tgrelid = r.oid AND NOT t.tgisinternal
 UNION ALL
 SELECT 'policy', r.qname || '.' || p.polname,
        concat_ws(' | ', p.polcmd::text, p.polpermissive, p.polroles::regrole[]::text,
-                 coalesce(pg_get_expr(p.polqual, p.polrelid, true), ''), coalesce(pg_get_expr(p.polwithcheck, p.polrelid, true), ''))
+                 coalesce(pg_get_expr(p.polqual, p.polrelid, true), ''), coalesce(pg_get_expr(p.polwithcheck, p.polrelid, true), ''),
+                 coalesce(obj_description(p.oid, 'pg_policy'), ''))
 FROM rel r JOIN pg_policy p ON p.polrelid = r.oid
 UNION ALL
 SELECT 'sequence', r.qname, concat_ws(' | ', s.seqtypid::regtype::text, s.seqstart, s.seqincrement, s.seqmin, s.seqmax, s.seqcache, s.seqcycle)
 FROM rel r JOIN pg_sequence s ON s.seqrelid = r.oid
+UNION ALL
+-- sequence sahipliği: serial/OWNED BY ('a') ve identity ('i') bağı
+SELECT 'seqowner', r.qname,
+       coalesce((SELECT string_agg(d.deptype::text || ' ' || tn.nspname || '.' || tc.relname || '.' || ta.attname, ',')
+                 FROM pg_depend d
+                 JOIN pg_class tc ON tc.oid = d.refobjid
+                 JOIN pg_namespace tn ON tn.oid = tc.relnamespace
+                 JOIN pg_attribute ta ON ta.attrelid = d.refobjid AND ta.attnum = d.refobjsubid
+                 WHERE d.classid = 'pg_class'::regclass AND d.objid = r.oid AND d.refclassid = 'pg_class'::regclass
+                   AND d.deptype IN ('a', 'i') AND d.refobjsubid > 0), '')
+FROM rel r
+WHERE r.relkind = 'S'
+UNION ALL
+SELECT 'extension', e.extname::text, concat_ws(' | ', en.nspname, e.extversion)
+FROM pg_extension e
+JOIN pg_namespace en ON en.oid = e.extnamespace
 UNION ALL
 SELECT 'function', n.nspname || '.' || p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')',
        concat_ws(' | ', pg_get_functiondef(p.oid), coalesce(p.proacl::text, ''), pg_get_userbyid(p.proowner), coalesce(obj_description(p.oid, 'pg_proc'), ''))

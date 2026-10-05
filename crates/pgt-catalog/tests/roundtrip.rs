@@ -90,21 +90,23 @@ async fn ddl_round_trip_reproduces_the_catalog() {
         let scratch = admin_client(&fx.ts, SCRATCH_DB).await;
 
         let mut deferred: Vec<String> = Vec::new();
-        let mut pending: Vec<(String, String)> = ddls
+        // (başlık, DDL, son deneme hatası)
+        let mut pending: Vec<(String, String, String)> = ddls
             .iter()
             .map(|(title, ddl)| {
                 let (ddl, owned) = split_owned_by(ddl);
                 deferred.extend(owned);
-                (title.clone(), ddl)
+                (title.clone(), ddl, String::new())
             })
             .collect();
 
         for _pass in 0..12 {
             let before = pending.len();
             let mut next = Vec::new();
-            for (title, ddl) in pending {
-                if scratch.batch_execute(&ddl).await.is_err() {
-                    next.push((title, ddl));
+            for (title, ddl, _) in pending {
+                if let Err(err) = scratch.batch_execute(&ddl).await {
+                    let msg = err.as_db_error().map(|d| d.message().to_string()).unwrap_or_else(|| err.to_string());
+                    next.push((title, ddl, msg));
                 }
             }
             pending = next;
@@ -113,12 +115,7 @@ async fn ddl_round_trip_reproduces_the_catalog() {
             }
         }
         if !pending.is_empty() {
-            let mut report = String::new();
-            for (title, ddl) in &pending {
-                let err = scratch.batch_execute(ddl).await.unwrap_err();
-                let msg = err.as_db_error().map(|d| d.message().to_string()).unwrap_or_else(|| err.to_string());
-                report.push_str(&format!("{title}\n  hata: {msg}\n"));
-            }
+            let report: String = pending.iter().map(|(title, _, msg)| format!("{title}\n  hata: {msg}\n")).collect();
             panic!("{} DDL uygulanamadı:\n{report}", pending.len());
         }
         for stmt in deferred {
@@ -127,6 +124,7 @@ async fn ddl_round_trip_reproduces_the_catalog() {
 
         let source = admin_client(&fx.ts, common::FIXTURE_DB).await;
         let (want, got) = (signature(&source).await, signature(&scratch).await);
+        assert!(want.len() >= 60, "imza beklenenden küçük ({} satır); kapsam daraldı mı?", want.len());
         let missing: Vec<_> = want.difference(&got).take(20).collect();
         let extra: Vec<_> = got.difference(&want).take(20).collect();
         assert!(
