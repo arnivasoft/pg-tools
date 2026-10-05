@@ -106,7 +106,7 @@ impl Fixture {
 
     /// Snapshot son eki için sunucunun ana sürümü (ör. 18).
     pub async fn major(&self) -> u32 {
-        self.mgr.info(self.server).await.expect("bağlı").version_num / 10_000
+        self.mgr.info(self.server).expect("bağlı").version_num / 10_000
     }
 }
 

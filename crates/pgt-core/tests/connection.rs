@@ -32,7 +32,7 @@ async fn connects_and_reports_version() {
     assert!(info.version_num >= 100000, "{info:?}");
     assert!(!info.version.contains(' '), "kısa sürüm bekleniyordu: {}", info.version);
     assert!(mgr.is_connected(ts.config.id));
-    assert_eq!(mgr.info(ts.config.id).await.unwrap().version_num, info.version_num);
+    assert_eq!(mgr.info(ts.config.id).unwrap().version_num, info.version_num);
 }
 
 #[tokio::test]

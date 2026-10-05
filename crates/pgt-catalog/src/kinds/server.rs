@@ -11,7 +11,7 @@ fn sorted(mut servers: Vec<ServerConfig>) -> Vec<ServerConfig> {
 
 async fn server_node(cat: &Catalog, s: &ServerConfig) -> TreeNode {
     let id = NodeId::server(s.id);
-    let info = cat.mgr.info(s.id).await;
+    let info = cat.mgr.info(s.id);
     TreeNode::new(&id, NodeKind::Server, s.name.clone())
         .with_detail(info.as_ref().map(|i| i.version.clone()))
         .with_server(s.id)
@@ -62,7 +62,7 @@ pub(crate) async fn properties(cat: &Catalog, server: uuid::Uuid) -> Result<Vec<
             .row("Bakım veritabanı", config.maintenance_db.clone())
             .row("SSL modu", ssl_mode),
     ];
-    if let Some(info) = cat.mgr.info(server).await {
+    if let Some(info) = cat.mgr.info(server) {
         out.push(PropertySection::new("Sunucu").row("Sürüm", info.version).row("Sürüm numarası", info.version_num.to_string()));
     }
     Ok(out)

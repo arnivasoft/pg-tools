@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::hash::Hash;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -53,14 +54,22 @@ pub enum Target {
 struct Session {
     config: ServerConfig,
     password: Option<String>,
-    info: ServerInfo,
     conns: HashMap<Target, Arc<PgConn>>,
     db_names: HashMap<u32, String>,
 }
 
+/// Oturum kaydı. `info` değişmez ve kilitsiz okunur; `state` (bağlantılar) yavaş bir yeniden
+/// bağlanma süresince tutulabilen async kilittir — `info()`/`is_connected()` onu beklemez.
+struct SessionEntry {
+    info: ServerInfo,
+    state: Mutex<Session>,
+}
+
+type SessionRef = Arc<SessionEntry>;
+
 #[derive(Default)]
 pub struct ConnectionManager {
-    sessions: StdMutex<HashMap<Uuid, Arc<Mutex<Session>>>>,
+    sessions: StdMutex<HashMap<Uuid, SessionRef>>,
 }
 
 impl ConnectionManager {
@@ -79,11 +88,11 @@ impl ConnectionManager {
         let session = Session {
             config: config.clone(),
             password,
-            info: info.clone(),
             conns: HashMap::from([(Target::Maintenance, Arc::new(conn))]),
             db_names: HashMap::new(),
         };
-        self.sessions.lock().unwrap().insert(config.id, Arc::new(Mutex::new(session)));
+        let entry = Arc::new(SessionEntry { info: info.clone(), state: Mutex::new(session) });
+        self.sessions.lock().unwrap().insert(config.id, entry);
         tracing::info!(server = %config.id, version = %info.version, "sunucuya bağlanıldı");
         Ok(info)
     }
@@ -97,13 +106,12 @@ impl ConnectionManager {
         self.sessions.lock().unwrap().contains_key(&server)
     }
 
-    pub async fn info(&self, server: Uuid) -> Option<ServerInfo> {
-        let session = self.sessions.lock().unwrap().get(&server).cloned()?;
-        let info = session.lock().await.info.clone();
-        Some(info)
+    /// Bağlıysa sunucu bilgisi. Oturum kilidini almaz; yeniden bağlanan bir oturumu beklemez.
+    pub fn info(&self, server: Uuid) -> Option<ServerInfo> {
+        self.sessions.lock().unwrap().get(&server).map(|e| e.info.clone())
     }
 
-    fn session(&self, server: Uuid) -> Result<Arc<Mutex<Session>>> {
+    fn session(&self, server: Uuid) -> Result<SessionRef> {
         self.sessions.lock().unwrap().get(&server).cloned().ok_or(Error::NotConnected)
     }
 
@@ -111,9 +119,9 @@ impl ConnectionManager {
     /// sunucu düzeyindeki hatalarda (bakım hedefi ya da ağ/zaman aşımı/kimlik/TLS) oturum kapatılır
     /// ve `ConnectionLost` döner; yalnızca bir veritabanı hedefine özgü hatada (ör. veritabanı
     /// silinmiş, 3D000) sadece o bağlantı ve ad önbelleği düşürülür, hata olduğu gibi döner.
-    async fn acquire(&self, server: Uuid, session: &Arc<Mutex<Session>>, target: Target) -> Result<Arc<PgConn>> {
+    async fn acquire(&self, server: Uuid, session: &SessionRef, target: Target) -> Result<Arc<PgConn>> {
         let result = {
-            let mut s = session.lock().await;
+            let mut s = session.state.lock().await;
             conn_locked(&mut s, target).await
         };
         match result {
@@ -129,7 +137,7 @@ impl ConnectionManager {
             Err(err) => {
                 tracing::warn!(%server, ?target, error = %err, "veritabanı bağlantısı açılamadı");
                 if let Target::Database(oid) = target {
-                    let mut s = session.lock().await;
+                    let mut s = session.state.lock().await;
                     s.conns.remove(&target);
                     s.db_names.remove(&oid);
                 }
@@ -139,15 +147,14 @@ impl ConnectionManager {
     }
 
     /// Oturumu yalnızca hâlâ aynı oturumsa kaldırır (araya yeni bir `connect` girmişse dokunmaz).
-    fn drop_session(&self, server: Uuid, session: &Arc<Mutex<Session>>) {
-        let mut sessions = self.sessions.lock().unwrap();
-        if sessions.get(&server).is_some_and(|cur| Arc::ptr_eq(cur, session)) {
-            sessions.remove(&server);
-        }
+    fn drop_session(&self, server: Uuid, session: &SessionRef) {
+        remove_if_same(&mut self.sessions.lock().unwrap(), &server, session);
     }
 
-    async fn evict(session: &Arc<Mutex<Session>>, target: Target) {
-        session.lock().await.conns.remove(&target);
+    /// Bozulan bağlantıyı çıkarır — yalnızca hâlâ aynı bağlantıysa; eşzamanlı bir hata, araya
+    /// başka bir görevin açtığı sağlıklı bağlantıyı düşürmesin.
+    async fn evict(session: &SessionRef, target: Target, failed: &Arc<PgConn>) {
+        remove_if_same(&mut session.state.lock().await.conns, &target, failed);
     }
 
     /// `f`'yi hedef bağlantıda çalıştırır; bağlantı kopmuşsa bir kez yeniden bağlanıp tekrar dener.
@@ -162,7 +169,7 @@ impl ConnectionManager {
             Ok(v) => Ok(v),
             Err(e) if is_disconnect(&e) || !conn.usable() => {
                 tracing::warn!(%server, ?target, error = %e, "bağlantı kopmuş, yeniden bağlanılıyor");
-                Self::evict(&session, target).await;
+                Self::evict(&session, target, &conn).await;
                 let conn = self.acquire(server, &session, target).await?;
                 f(conn).await.map_err(Error::from_query)
             }
@@ -174,7 +181,7 @@ impl ConnectionManager {
     pub async fn reap_idle(&self, max_idle: Duration) {
         let sessions: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
         for session in sessions {
-            let mut s = session.lock().await;
+            let mut s = session.state.lock().await;
             s.conns.retain(|_, c| c.usable() && c.idle_for() < max_idle);
         }
     }
@@ -192,6 +199,16 @@ fn drops_session(target: Target, err: &Error) -> bool {
                     ..
                 }
         )
+}
+
+/// `map[key]` tam olarak `expected` ise (aynı `Arc`) kaldırır.
+fn remove_if_same<K: Eq + Hash, V>(map: &mut HashMap<K, Arc<V>>, key: &K, expected: &Arc<V>) -> bool {
+    if map.get(key).is_some_and(|cur| Arc::ptr_eq(cur, expected)) {
+        map.remove(key);
+        true
+    } else {
+        false
+    }
 }
 
 fn is_disconnect(e: &tokio_postgres::Error) -> bool {
@@ -277,6 +294,36 @@ mod tests {
 
     fn connect_err(kind: ConnectErrorKind) -> Error {
         Error::Connect { kind, sqlstate: None, message: "x".into() }
+    }
+
+    #[test]
+    fn remove_if_same_only_removes_the_failed_arc() {
+        let failed = Arc::new(1);
+        let fresh = Arc::new(1);
+        let mut map = HashMap::from([(Target::Maintenance, fresh.clone())]);
+        assert!(!remove_if_same(&mut map, &Target::Maintenance, &failed), "taze bağlantı düşürülmemeli");
+        assert!(Arc::ptr_eq(&map[&Target::Maintenance], &fresh));
+        assert!(remove_if_same(&mut map, &Target::Maintenance, &fresh));
+        assert!(map.is_empty());
+        assert!(!remove_if_same(&mut map, &Target::Maintenance, &fresh));
+    }
+
+    #[tokio::test]
+    async fn info_does_not_wait_for_a_held_session_lock() {
+        let mgr = ConnectionManager::new();
+        let id = Uuid::new_v4();
+        let info = ServerInfo { version_num: 180000, version: "18.0".into() };
+        let session = Session {
+            config: ServerConfig::new("s", "127.0.0.1", 1, "u"),
+            password: None,
+            conns: HashMap::new(),
+            db_names: HashMap::new(),
+        };
+        let entry = Arc::new(SessionEntry { info: info.clone(), state: Mutex::new(session) });
+        mgr.sessions.lock().unwrap().insert(id, entry.clone());
+        let _held = entry.state.lock().await; // yavaş bir yeniden bağlanmayı temsil eder
+        assert_eq!(mgr.info(id), Some(info));
+        assert!(mgr.is_connected(id));
     }
 
     #[test]
