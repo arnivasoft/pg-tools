@@ -2,6 +2,7 @@ import { Pencil, Plus } from "lucide-solid";
 import { createSignal, onCleanup, onMount } from "solid-js";
 import { createExplorer } from "../features/explorer/explorer-store";
 import { TreeView } from "../features/explorer/TreeView";
+import { Inspector } from "../features/inspector/Inspector";
 import { ROOT } from "../features/explorer/tree-model";
 import { createPasswordPrompt } from "../features/servers/PasswordPrompt";
 import { ServerDialog } from "../features/servers/ServerDialog";
@@ -83,7 +84,7 @@ export default function App() {
           </Button>
         </Toolbar>
       </header>
-      <SplitPane left={<TreeView explorer={explorer} />} right={<div class="h-full" />} />
+      <SplitPane left={<TreeView explorer={explorer} />} right={<Inspector explorer={explorer} />} />
       <footer class="flex h-6 shrink-0 items-center border-t border-border bg-panel px-2 text-xs text-muted">
         <StatusBar explorer={explorer} notice={notice()} />
       </footer>
