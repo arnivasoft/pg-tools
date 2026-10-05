@@ -253,6 +253,9 @@ pub struct DraftTab {
     pub title: String,
     pub server_id: Option<Uuid>,
     pub database_oid: Option<u32>,
+    /// Görüntülenen veritabanı adı (taslak bağlanmadan geri yüklenince bağlam şeridinde gösterilir); eski dosyalarda yok.
+    #[serde(default)]
+    pub database: Option<String>,
     pub options: DraftOptions,
 }
 
@@ -377,7 +380,7 @@ mod tests {
     }
 
     fn tab(title: &str) -> DraftTab {
-        DraftTab { id: Uuid::new_v4(), title: title.into(), server_id: None, database_oid: Some(5), options: DraftOptions::default() }
+        DraftTab { id: Uuid::new_v4(), title: title.into(), server_id: None, database_oid: Some(5), database: Some("app".into()), options: DraftOptions::default() }
     }
 
     #[test]
@@ -507,6 +510,20 @@ mod tests {
         drafts.clear().unwrap();
         assert!(drafts.load_all().unwrap().is_empty());
         assert!(!dir.path().join("query").join(format!("{}.sql", a.id)).exists());
+    }
+
+    #[test]
+    fn old_tabs_json_without_database_name_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let drafts = Drafts::new(dir.path());
+        let id = Uuid::new_v4();
+        let json = format!(
+            r#"{{"version":1,"tabs":[{{"id":"{id}","title":"t","serverId":null,"databaseOid":7,"options":{{"mode":"manual","statementTimeoutMs":0}}}}]}}"#
+        );
+        fs::write(dir.path().join("tabs.json"), json).unwrap();
+        let all = drafts.load_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].0.database_oid, all[0].0.database.as_deref()), (Some(7), None));
     }
 
     #[test]

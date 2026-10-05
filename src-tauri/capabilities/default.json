@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Ana pencere yetkileri",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save"]
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "core:window:allow-destroy"]
 }

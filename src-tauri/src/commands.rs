@@ -1,4 +1,4 @@
-use pgt_catalog::node::{NodeId, TreeNode};
+use pgt_catalog::node::{NodeId, QueryTarget, TreeNode};
 use pgt_catalog::props::PropertySection;
 use std::sync::RwLock;
 
@@ -225,6 +225,18 @@ pub async fn quote_identifiers(state: State<'_, AppState>, server_id: Uuid, name
     Ok(Box::pin(state.catalog.quote_identifiers(server_id, names)).await?)
 }
 
+/// "Query Tool'da aç": düğümün sunucusu ve veritabanı OID'i (arayüz düğüm kimliğini ayrıştırmaz).
+fn target_of(node_id: &str) -> Result<QueryTarget, Error> {
+    NodeId::parse(node_id)?
+        .query_target()
+        .ok_or_else(|| Error::Invalid(format!("düğüm bir sunucuya ait değil: {node_id}")))
+}
+
+#[tauri::command]
+pub fn qt_target_of(node_id: String) -> CmdResult<QueryTarget> {
+    Ok(target_of(&node_id)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +338,17 @@ mod tests {
         delete_registered(&registry, &manager, &c, config.id).unwrap();
         assert!(registry.read().unwrap().get(config.id).is_none());
         assert_eq!(c.password(config.id).unwrap(), None);
+    }
+
+    #[test]
+    fn target_of_returns_server_and_database_oid() {
+        let u = Uuid::new_v4();
+        let t = target_of(&format!("srv:{u}/db:16384/sch:2200/tables/tbl:24576")).unwrap();
+        assert_eq!((t.server_id, t.database_oid), (u, Some(16384)));
+        assert_eq!(target_of(&format!("srv:{u}")).unwrap().database_oid, None);
+        assert!(matches!(target_of("grp:A"), Err(Error::Invalid(_))));
+        assert!(matches!(target_of(""), Err(Error::Invalid(_))));
+        assert!(target_of("srv:nope").is_err());
     }
 
     #[test]
