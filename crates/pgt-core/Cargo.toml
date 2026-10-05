@@ -28,3 +28,8 @@ windows-native-keyring-store.workspace = true
 tempfile.workspace = true
 rcgen.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+# Entegrasyon testleri `testing` yardımcılarını kullanır; özellik kapalıyken atlanır.
+[[test]]
+name = "connection"
+required-features = ["testing"]
