@@ -103,19 +103,21 @@ pub fn disconnect_server(state: State<'_, AppState>, server_id: Uuid) {
     state.manager.disconnect(server_id);
 }
 
+// Katalog gelecekleri büyüktür (DDL ~70 KB); kutulanmazsa invoke işleyicisinin ana iş parçacığı
+// yığın çerçevesine gömülür ve release derlemesinde 1 MB'lık ana yığın taşar.
 #[tauri::command]
 pub async fn list_children(state: State<'_, AppState>, id: String) -> CmdResult<Vec<TreeNode>> {
-    Ok(state.catalog.list_children(&NodeId::parse(&id)?).await?)
+    Ok(Box::pin(state.catalog.list_children(&NodeId::parse(&id)?)).await?)
 }
 
 #[tauri::command]
 pub async fn get_properties(state: State<'_, AppState>, id: String) -> CmdResult<Vec<PropertySection>> {
-    Ok(state.catalog.properties(&NodeId::parse(&id)?).await?)
+    Ok(Box::pin(state.catalog.properties(&NodeId::parse(&id)?)).await?)
 }
 
 #[tauri::command]
 pub async fn get_ddl(state: State<'_, AppState>, id: String) -> CmdResult<String> {
-    Ok(state.catalog.ddl(&NodeId::parse(&id)?).await?)
+    Ok(Box::pin(state.catalog.ddl(&NodeId::parse(&id)?)).await?)
 }
 
 #[tauri::command]
