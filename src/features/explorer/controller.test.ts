@@ -325,6 +325,21 @@ describe("ExplorerController lost sessions", () => {
     expect(flatten(get()).map((r) => r.id)).toEqual(["alpha", "beta"]);
   });
 
+  it("toggle does not change expansion while a filter is active", async () => {
+    const { c, get, listChildren } = setup({ [ROOT]: [n("alpha"), n("beta")], alpha: [n("a1")] });
+    await c.load(ROOT);
+    await c.expand("alpha");
+    c.setFilter("alp");
+    await c.toggle("alpha");
+    expect(get().expanded.has("alpha")).toBe(true);
+    await c.toggle("beta");
+    expect(get().expanded.has("beta")).toBe(false);
+    expect(listChildren).not.toHaveBeenCalledWith("beta");
+    c.setFilter("  ");
+    await c.toggle("alpha");
+    expect(get().expanded.has("alpha")).toBe(false);
+  });
+
   describe("server actions", () => {
     const srv = (connected: boolean) =>
       n("srv", { kind: "server", serverId: "u1", detail: connected ? "18.0" : null, flags: { ...flags, connected } });
