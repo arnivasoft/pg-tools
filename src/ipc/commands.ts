@@ -48,7 +48,7 @@ export const commands = {
   previewPgadminImport: (path: string) => call<ImportItem[]>("preview_pgadmin_import", { path }),
   applyPgadminImport: (path: string, indices: number[]) => call<number>("apply_pgadmin_import", { path, indices }),
 
-  // Sorgu Aracı. Hata `code`ları: confirmation_required | locked | busy | tx_failed | open_transaction
+  // Sorgu Aracı. Hata `code`ları: confirmation_required | locked | busy | tx_failed | open_transaction | session_reset
   // (bkz. bindings/QueryErrorCode), gerisi genel kodlar. Olaylar Channel ile akar; komut tamamlanınca söz çözülür.
   qtOpen: (serverId: string, databaseOid: number | null, options: SessionOptions) =>
     call<string>("qt_open", { serverId, databaseOid, options }),

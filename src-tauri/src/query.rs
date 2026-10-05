@@ -4,7 +4,7 @@
 //! yığın çerçevesine gömülürse release derlemesinde 1 MB'lık ana yığın taşar (bkz. commands.rs).
 //!
 //! Kapı/durum reddi hataları `Error::Invalid(<işaret>)` ile gelir; `pgt_query::error_codes` bunları ayrı
-//! `code`lara çevirir (`confirmation_required`, `locked`, `busy`, `tx_failed`, `open_transaction`; arayüz yalnızca
+//! `code`lara çevirir (`confirmation_required`, `locked`, `busy`, `tx_failed`, `open_transaction`, `session_reset`; arayüz yalnızca
 //! koda bakar). Geri kalan `Invalid` hataları `invalid` kalır.
 
 use std::path::PathBuf;

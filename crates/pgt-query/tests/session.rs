@@ -10,7 +10,7 @@ use pgt_core::{Error, ErrorPayload};
 use pgt_query::events::{EventSink, QueryEvent};
 use pgt_query::session::{
     BUSY_MESSAGE, CANCELLED_MESSAGE, ClosePolicy, LOCKED_SETTING_MESSAGE, LOCKED_WRITE_MESSAGE, MODE_IN_TX_MESSAGE,
-    OPEN_TX_MESSAGE, QueryManager, Scope, SessionId, SessionOptions, TX_FAILED_MESSAGE, TxAction, TxMode, TxState,
+    OPEN_TX_MESSAGE, QueryManager, SESSION_RESET_MESSAGE, Scope, SessionId, SessionOptions, TX_FAILED_MESSAGE, TxAction, TxMode, TxState,
 };
 use tempfile::TempDir;
 
@@ -673,5 +673,54 @@ async fn production_label_requires_confirmation_for_writes() {
         let mut sink = VecSink::default();
         fx.qm.run(id, "select 1", Scope::All, 100, false, &mut sink).await.unwrap();
         sink.assert_ok();
+    }
+}
+
+async fn terminate(fx: &Fx, pid: i32) {
+    fx.admin().await.execute("select pg_terminate_backend($1)", &[&pid]).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fx.backend_state(pid).await.is_some() {
+        assert!(Instant::now() < deadline, "arka uç sonlanmalı");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // İstemci sürücüsünün kapanışı fark etmesi için kısa bekleme.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+}
+
+/// `Select` dışında bir ifade oturumu durumlu (dirty) yapar: boşta uyutulmaz; bağlantısı koparsa ilk çalıştırma bir
+/// kez `session_reset` ile döner (yeni bağlantı hazırdır), sonraki çalıştırma çalışır. Durumsuz oturum sessizce
+/// yeniden bağlanır.
+#[tokio::test]
+async fn dirty_session_is_not_reaped_and_reports_reset_once() {
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        let clean = fx.open(TxMode::Autocommit).await;
+        let dirty = fx.open(TxMode::Autocommit).await;
+        fx.run_ok(clean, "select 1").await;
+        fx.run_ok(dirty, "set search_path = pg_catalog").await;
+        fx.qm.reap_idle(Duration::ZERO);
+        assert!(fx.qm.is_asleep(clean).unwrap(), "durumsuz oturum uyur");
+        assert!(!fx.qm.is_asleep(dirty).unwrap(), "durumlu oturum uyutulmaz");
+        assert_eq!(fx.run_ok(dirty, "show search_path").await.first_value(), "pg_catalog");
+
+        let pid: i32 = fx.run_ok(dirty, "select pg_backend_pid()").await.first_value().parse().unwrap();
+        terminate(&fx, pid).await;
+        let (r, sink) = fx.run_with(dirty, "show search_path", 100).await;
+        let err = r.unwrap_err();
+        assert!(matches!(&err, Error::Invalid(m) if m == SESSION_RESET_MESSAGE), "{err:?}");
+        assert_eq!(pgt_query::error_codes::query_payload(&err).code, "session_reset");
+        assert!(sink.events.is_empty());
+        let search_path = fx.run_ok(dirty, "show search_path").await.first_value();
+        assert_ne!(search_path, "pg_catalog", "yeni bağlantı, SET kayboldu");
+        let pid2: i32 = fx.run_ok(dirty, "select pg_backend_pid()").await.first_value().parse().unwrap();
+        assert_ne!(pid, pid2);
+        // Bayrak temizlendi: yeni bağlantıda yalnızca SELECT çalıştı, oturum yeniden uyuyabilir.
+        fx.qm.reap_idle(Duration::ZERO);
+        assert!(fx.qm.is_asleep(dirty).unwrap());
+
+        // Durumsuz oturumun kopan bağlantısı sessizce yeniden kurulur.
+        let pid: i32 = fx.run_ok(clean, "select pg_backend_pid()").await.first_value().parse().unwrap();
+        terminate(&fx, pid).await;
+        fx.run_ok(clean, "select 1").await;
     }
 }

@@ -47,6 +47,9 @@ pub const BUSY_MESSAGE: &str = "Bu sekmede bir sorgu zaten çalışıyor.";
 pub const OPEN_TX_MESSAGE: &str = "Açık transaction var.";
 pub const MODE_IN_TX_MESSAGE: &str = "Açık transaction varken mod değiştirilemez.";
 /// Oturum bağlanırken sunucunun salt okunur kilidi ya da üretim etiketi değişti; bağlantı bırakıldı.
+/// Oturum durumu değiştirilmiş (SET, geçici tablo, advisory kilit…) bir oturumun bağlantısı koptu ve yeniden
+/// kuruldu: bu durum kaybolmuş olabilir. Bir kez döner; yeni bağlantı hazırdır, tekrar çalıştırma çalışır.
+pub const SESSION_RESET_MESSAGE: &str = "Bağlantı yeniden kuruldu; oturum durumu (SET ayarları, geçici tablolar, advisory kilitler) kaybolmuş olabilir. Sorguyu tekrar çalıştırın.";
 pub const SETTINGS_CHANGED_MESSAGE: &str =
     "Sunucunun salt okunur kilidi ya da üretim etiketi bağlanırken değişti; sekmeyi yeniden açın.";
 /// Kullanıcının iptal ettiği ifadenin `Failed` iletisi (zaman aşımından ayırt edilir; sunucu iletisi `detail`'de).
@@ -465,6 +468,10 @@ struct Inner {
     cursor_timer: Option<JoinHandle<()>>,
     /// Her işlemde artar; boşta imleç zamanlayıcısı yalnızca kendi kuşağındaysa imleci kapatır.
     cursor_gen: u64,
+    /// Bağlantıya bağlı oturum durumu olabilir: `Select` dışında bir ifade başarıyla tamamlandı (SET, geçici
+    /// tablo, advisory kilit, DO/CALL, transaction komutu…). Böyle bir oturum boşta uyutulmaz; bağlantısı koparsa
+    /// yeniden bağlanırken bir kez `SESSION_RESET_MESSAGE` döner.
+    dirty: bool,
 }
 
 struct SessionSlot {
@@ -499,6 +506,11 @@ impl SessionSlot {
     fn profile(&self, opts: &SessionOptions) -> SessionProfile {
         SessionProfile::Query { read_only: self.guard.locked, statement_timeout_ms: opts.statement_timeout_ms }
     }
+}
+
+/// Boşta oturum uyutulabilir mi: transaction yok, oturum durumu yok, süre doldu.
+fn may_sleep(state: TxState, dirty: bool, idle: Duration, max_idle: Duration) -> bool {
+    state == TxState::Idle && !dirty && idle >= max_idle
 }
 
 fn busy() -> Error {
@@ -746,6 +758,7 @@ impl QueryManager {
                 last_used: Instant::now(),
                 cursor_timer: None,
                 cursor_gen: 0,
+                dirty: false,
             }),
             cancel: CancelToken::default(),
             completions: StdMutex::default(),
@@ -879,6 +892,7 @@ impl QueryManager {
             if ok && p.plan.kind != StmtKind::Select {
                 // DDL, transaction komutları ve SET/DO/CALL… (arama yolu, katalog) önbelleği bayatlatabilir.
                 slot.invalidate_completions();
+                inner.dirty = true;
             }
             let event = if ok {
                 Some(TxEvent::Ok(p.tx))
@@ -912,9 +926,11 @@ impl QueryManager {
         if slot.cancel.closed() {
             return Err(session_gone());
         }
+        let mut reset = false;
         if inner.exec.as_ref().is_some_and(Executor::is_closed) {
             inner.exec = None;
             let lost = slot.state() != TxState::Idle;
+            reset = std::mem::take(&mut inner.dirty) && !lost;
             slot.set_state(TxState::Idle);
             if lost {
                 tracing::warn!(server = %slot.server, "sorgu oturumunun bağlantısı koptu, açık transaction kayboldu");
@@ -932,6 +948,10 @@ impl QueryManager {
             inner.applied_timeout = Some(inner.opts.statement_timeout_ms);
             slot.set_state(TxState::Idle);
             tracing::debug!(server = %slot.server, "sorgu oturumu yeniden bağlandı");
+        }
+        if reset {
+            tracing::warn!(server = %slot.server, "durumlu sorgu oturumunun bağlantısı koptu, yeniden kuruldu");
+            return Err(Error::Invalid(SESSION_RESET_MESSAGE.into()));
         }
         Ok(())
     }
@@ -1160,12 +1180,13 @@ impl QueryManager {
     }
 
     /// `max_idle` boyunca kullanılmayan, transaction dışındaki oturumların bağlantısını kapatır ("uyku");
-    /// sonraki işlem sessizce yeniden bağlanır. Açık transaction'lı ya da meşgul oturumlara dokunmaz.
+    /// sonraki işlem sessizce yeniden bağlanır. Açık transaction'lı, durumlu (`dirty`) ya da meşgul oturumlara
+    /// dokunmaz.
     pub fn reap_idle(&self, max_idle: Duration) {
         let slots: Vec<Arc<SessionSlot>> = self.map().values().cloned().collect();
         for slot in slots {
             let Ok(mut inner) = slot.inner.try_lock() else { continue };
-            if inner.exec.is_some() && slot.state() == TxState::Idle && inner.last_used.elapsed() >= max_idle {
+            if inner.exec.is_some() && may_sleep(slot.state(), inner.dirty, inner.last_used.elapsed(), max_idle) {
                 disarm(&mut inner);
                 inner.exec = None;
                 tracing::debug!(server = %slot.server, "boşta kalan sorgu oturumu uyutuldu");
@@ -1331,6 +1352,7 @@ impl QueryManager {
                 last_used: Instant::now(),
                 cursor_timer: None,
                 cursor_gen: 0,
+                dirty: false,
             }),
             cancel: CancelToken::default(),
             completions: StdMutex::default(),
@@ -1665,6 +1687,16 @@ mod tests {
         assert!(qm.guard_unchanged(config.id, before).is_ok());
         registry.write().unwrap().remove(config.id).unwrap();
         assert!(matches!(qm.guard_unchanged(config.id, before), Err(Error::UnknownServer(_))));
+    }
+
+    #[test]
+    fn only_clean_idle_sessions_may_sleep() {
+        let (min, zero) = (Duration::from_secs(1800), Duration::ZERO);
+        assert!(may_sleep(TxState::Idle, false, min, min));
+        assert!(!may_sleep(TxState::Idle, false, zero, min), "süre dolmadı");
+        assert!(!may_sleep(TxState::Idle, true, min, min), "durumlu oturum uyutulmaz");
+        assert!(!may_sleep(TxState::InTransaction, false, min, min));
+        assert!(!may_sleep(TxState::Failed, false, min, min));
     }
 
     #[test]

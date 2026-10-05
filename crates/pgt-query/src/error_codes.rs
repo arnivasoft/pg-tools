@@ -7,7 +7,7 @@ use ts_rs::TS;
 
 use crate::session::{
     BUSY_MESSAGE, CONFIRMATION_REQUIRED, LOCKED_SETTING_MESSAGE, LOCKED_WRITE_MESSAGE, MODE_IN_TX_MESSAGE, OPEN_TX_MESSAGE,
-    SETTINGS_CHANGED_MESSAGE, TX_FAILED_MESSAGE,
+    SESSION_RESET_MESSAGE, SETTINGS_CHANGED_MESSAGE, TX_FAILED_MESSAGE,
 };
 
 /// Ayrı kodu olmayan ama "Geçersiz ayar:" önekiyle gösterilmemesi gereken işaretler (genel `invalid` kodu).
@@ -29,10 +29,14 @@ pub enum QueryErrorCode {
     TxFailed,
     /// Açık transaction var (kapatma reddi ya da mod değişimi reddi).
     OpenTransaction,
+    /// Durumlu oturumun bağlantısı koptu ve yeniden kuruldu; SET/geçici tablo/advisory kilit kaybolmuş olabilir.
+    /// Bir kez döner; yeni bağlantı hazırdır, tekrar çalıştırma çalışır.
+    SessionReset,
 }
 
 /// Arayüzün eşleştirebileceği kodların tam listesi (`QueryErrorCode`'un serde adları).
-pub const QUERY_ERROR_CODES: [&str; 5] = ["confirmation_required", "locked", "busy", "tx_failed", "open_transaction"];
+pub const QUERY_ERROR_CODES: [&str; 6] =
+    ["confirmation_required", "locked", "busy", "tx_failed", "open_transaction", "session_reset"];
 
 impl QueryErrorCode {
     pub fn as_str(self) -> &'static str {
@@ -42,6 +46,7 @@ impl QueryErrorCode {
             QueryErrorCode::Busy => QUERY_ERROR_CODES[2],
             QueryErrorCode::TxFailed => QUERY_ERROR_CODES[3],
             QueryErrorCode::OpenTransaction => QUERY_ERROR_CODES[4],
+            QueryErrorCode::SessionReset => QUERY_ERROR_CODES[5],
         }
     }
 
@@ -55,6 +60,7 @@ impl QueryErrorCode {
             m if m == TX_FAILED_MESSAGE => (Self::TxFailed, TX_FAILED_MESSAGE),
             m if m == OPEN_TX_MESSAGE => (Self::OpenTransaction, OPEN_TX_MESSAGE),
             m if m == MODE_IN_TX_MESSAGE => (Self::OpenTransaction, MODE_IN_TX_MESSAGE),
+            m if m == SESSION_RESET_MESSAGE => (Self::SessionReset, SESSION_RESET_MESSAGE),
             _ => return None,
         })
     }
@@ -89,6 +95,7 @@ mod tests {
             (TX_FAILED_MESSAGE, "tx_failed"),
             (OPEN_TX_MESSAGE, "open_transaction"),
             (MODE_IN_TX_MESSAGE, "open_transaction"),
+            (SESSION_RESET_MESSAGE, "session_reset"),
         ];
         for (marker, code) in cases {
             let p = query_payload(&Error::Invalid(marker.into()));
@@ -120,6 +127,7 @@ mod tests {
             QueryErrorCode::Busy,
             QueryErrorCode::TxFailed,
             QueryErrorCode::OpenTransaction,
+            QueryErrorCode::SessionReset,
         ];
         for c in all {
             assert_eq!(serde_json::to_value(c).unwrap(), c.as_str());
