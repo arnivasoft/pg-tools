@@ -63,7 +63,7 @@ pub async fn test_connection(state: State<'_, AppState>, config: ServerConfig, p
     config.validate()?;
     let registered = state.registry.read().unwrap().get(config.id).cloned();
     let effective = effective_password(&state.credentials, registered.as_ref(), &config, password)?;
-    Ok(ConnectionManager::test(&config, effective.as_deref()).await?)
+    Ok(Box::pin(ConnectionManager::test(&config, effective.as_deref())).await?)
 }
 
 #[tauri::command]
@@ -73,7 +73,7 @@ pub async fn connect_server(state: State<'_, AppState>, server_id: Uuid, passwor
         Some(p) => Some(p.clone()),
         None => state.credentials.password(server_id)?,
     };
-    let info = state.manager.connect(config.clone(), effective).await?;
+    let info = Box::pin(state.manager.connect(config.clone(), effective)).await?;
     if let Some(p) = password {
         remember_after_connect(&state.registry, &state.credentials, &config, &p, remember);
     }
