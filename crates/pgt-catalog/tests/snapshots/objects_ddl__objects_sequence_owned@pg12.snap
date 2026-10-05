@@ -16,7 +16,7 @@ CREATE SEQUENCE IF NOT EXISTS app.orders_id_seq
     NO CYCLE;
 
 ALTER SEQUENCE app.orders_id_seq
-    OWNED BY app.orders.id;
+    OWNER TO <owner>;
 
 ALTER SEQUENCE app.orders_id_seq
-    OWNER TO <owner>;
+    OWNED BY app.orders.id;

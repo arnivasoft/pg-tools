@@ -147,8 +147,9 @@ pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: Option<u32>, def: &DdlD
     };
     let blocks = vec![
         r.get::<_, String>("body"),
-        text("extra_stmt").unwrap_or_default(),
+        // OWNER TO, OWNED BY'dan önce gelmeli: dizi tabloyla aynı sahibe sahip olmadan bağlanamaz.
         text("owner_stmt").unwrap_or_default(),
+        text("extra_stmt").unwrap_or_default(),
         text("comment_stmt").unwrap_or_default(),
         grants_block,
     ];
