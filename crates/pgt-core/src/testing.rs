@@ -15,15 +15,17 @@ pub fn test_servers() -> Vec<TestServer> {
     let Ok(urls) = std::env::var("PGT_TEST_URLS") else {
         return Vec::new();
     };
-    urls.split(',').map(str::trim).filter(|u| !u.is_empty()).map(parse).collect()
+    urls.split(',').map(str::trim).filter(|u| !u.is_empty()).enumerate().map(|(i, u)| parse(i, u)).collect()
 }
 
 pub fn test_server() -> Option<TestServer> {
     test_servers().into_iter().next()
 }
 
-fn parse(url: &str) -> TestServer {
-    let pg: tokio_postgres::Config = url.parse().unwrap_or_else(|e| panic!("PGT_TEST_URLS geçersiz ({url}): {e}"));
+/// Adres parola içerir: hata mesajında asla adresin kendisi geçmez, yalnızca sırası ve ayrıştırma hatası.
+fn parse(index: usize, url: &str) -> TestServer {
+    let pg: tokio_postgres::Config =
+        url.parse().unwrap_or_else(|e| panic!("PGT_TEST_URLS içindeki {}. adres geçersiz: {e}", index + 1));
     let host = match pg.get_hosts().first() {
         Some(Host::Tcp(h)) => h.clone(),
         #[allow(unreachable_patterns)]
@@ -39,6 +41,18 @@ fn parse(url: &str) -> TestServer {
     };
     let password = pg.get_password().map(|p| String::from_utf8_lossy(p).into_owned());
     TestServer { config, password }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parse_failure_does_not_leak_the_url() {
+        let secret = "postgres://u:cok-gizli-parola@h:notaport/db";
+        let Err(panic) = std::panic::catch_unwind(|| super::parse(1, secret)) else { panic!("ayrıştırma başarısız olmalıydı") };
+        let msg = panic.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(msg.contains("2. adres"), "{msg}");
+        assert!(!msg.contains("cok-gizli-parola"), "{msg}");
+    }
 }
 
 /// Fixture kurulumu için yazılabilir (read-only olmayan) bağlantı.
