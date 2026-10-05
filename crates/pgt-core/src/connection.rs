@@ -107,16 +107,47 @@ impl ConnectionManager {
         self.sessions.lock().unwrap().get(&server).cloned().ok_or(Error::NotConnected)
     }
 
-    async fn conn(&self, server: Uuid, target: Target) -> Result<Arc<PgConn>> {
-        let session = self.session(server)?;
-        let mut s = session.lock().await;
-        conn_locked(&mut s, target).await
+    /// Hedef bağlantıyı verir (gerekirse açar). Başarısızlıkta düşürme politikası uygulanır:
+    /// sunucu düzeyindeki hatalarda (bakım hedefi ya da ağ/zaman aşımı/kimlik/TLS) oturum kapatılır
+    /// ve `ConnectionLost` döner; yalnızca bir veritabanı hedefine özgü hatada (ör. veritabanı
+    /// silinmiş, 3D000) sadece o bağlantı ve ad önbelleği düşürülür, hata olduğu gibi döner.
+    async fn acquire(&self, server: Uuid, session: &Arc<Mutex<Session>>, target: Target) -> Result<Arc<PgConn>> {
+        let result = {
+            let mut s = session.lock().await;
+            conn_locked(&mut s, target).await
+        };
+        match result {
+            Ok(conn) => {
+                conn.touch();
+                Ok(conn)
+            }
+            Err(err) if drops_session(target, &err) => {
+                tracing::warn!(%server, ?target, error = %err, "yeniden bağlanılamadı, oturum kapatıldı");
+                self.drop_session(server, session);
+                Err(Error::ConnectionLost(err.to_string()))
+            }
+            Err(err) => {
+                tracing::warn!(%server, ?target, error = %err, "veritabanı bağlantısı açılamadı");
+                if let Target::Database(oid) = target {
+                    let mut s = session.lock().await;
+                    s.conns.remove(&target);
+                    s.db_names.remove(&oid);
+                }
+                Err(err)
+            }
+        }
     }
 
-    async fn evict(&self, server: Uuid, target: Target) {
-        if let Ok(session) = self.session(server) {
-            session.lock().await.conns.remove(&target);
+    /// Oturumu yalnızca hâlâ aynı oturumsa kaldırır (araya yeni bir `connect` girmişse dokunmaz).
+    fn drop_session(&self, server: Uuid, session: &Arc<Mutex<Session>>) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if sessions.get(&server).is_some_and(|cur| Arc::ptr_eq(cur, session)) {
+            sessions.remove(&server);
         }
+    }
+
+    async fn evict(session: &Arc<Mutex<Session>>, target: Target) {
+        session.lock().await.conns.remove(&target);
     }
 
     /// `f`'yi hedef bağlantıda çalıştırır; bağlantı kopmuşsa bir kez yeniden bağlanıp tekrar dener.
@@ -125,22 +156,14 @@ impl ConnectionManager {
         F: Fn(Arc<PgConn>) -> Fut,
         Fut: Future<Output = std::result::Result<T, tokio_postgres::Error>>,
     {
-        let conn = self.conn(server, target).await?;
-        conn.touch();
+        let session = self.session(server)?;
+        let conn = self.acquire(server, &session, target).await?;
         match f(conn.clone()).await {
             Ok(v) => Ok(v),
             Err(e) if is_disconnect(&e) || !conn.usable() => {
-                tracing::info!(%server, error = %e, "bağlantı kopmuş, yeniden bağlanılıyor");
-                self.evict(server, target).await;
-                let conn = match self.conn(server, target).await {
-                    Ok(c) => c,
-                    Err(err) => {
-                        tracing::warn!(%server, error = %err, "yeniden bağlanılamadı, oturum kapatıldı");
-                        self.disconnect(server);
-                        return Err(err);
-                    }
-                };
-                conn.touch();
+                tracing::warn!(%server, ?target, error = %e, "bağlantı kopmuş, yeniden bağlanılıyor");
+                Self::evict(&session, target).await;
+                let conn = self.acquire(server, &session, target).await?;
                 f(conn).await.map_err(Error::from_query)
             }
             Err(e) => Err(Error::from_query(e)),
@@ -155,6 +178,20 @@ impl ConnectionManager {
             s.conns.retain(|_, c| c.usable() && c.idle_for() < max_idle);
         }
     }
+}
+
+/// Bu hata oturumun tamamını geçersiz kılar mı? Bakım bağlantısı her zaman sunucunun kendisidir;
+/// veritabanı hedefinde yalnızca sunucu düzeyindeki bağlantı hataları oturumu düşürür.
+fn drops_session(target: Target, err: &Error) -> bool {
+    target == Target::Maintenance
+        || matches!(
+            err,
+            Error::PasswordRequired
+                | Error::Connect {
+                    kind: ConnectErrorKind::Network | ConnectErrorKind::Timeout | ConnectErrorKind::Auth | ConnectErrorKind::Tls,
+                    ..
+                }
+        )
 }
 
 fn is_disconnect(e: &tokio_postgres::Error) -> bool {
@@ -232,4 +269,32 @@ async fn open(config: &ServerConfig, dbname: &str, password: Option<&str>) -> Re
     let full: String = row.get(1);
     let version = full.split_whitespace().next().unwrap_or(&full).to_string();
     Ok(PgConn { client, info: ServerInfo { version_num: num as u32, version }, last_used: StdMutex::new(Instant::now()) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connect_err(kind: ConnectErrorKind) -> Error {
+        Error::Connect { kind, sqlstate: None, message: "x".into() }
+    }
+
+    #[test]
+    fn maintenance_failures_always_drop_the_session() {
+        for err in [connect_err(ConnectErrorKind::Other), Error::NotFound("x".into()), connect_err(ConnectErrorKind::Network)] {
+            assert!(drops_session(Target::Maintenance, &err), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn database_target_drops_session_only_for_server_level_failures() {
+        for kind in [ConnectErrorKind::Network, ConnectErrorKind::Timeout, ConnectErrorKind::Auth, ConnectErrorKind::Tls] {
+            assert!(drops_session(Target::Database(1), &connect_err(kind)), "{kind:?}");
+        }
+        assert!(drops_session(Target::Database(1), &Error::PasswordRequired));
+        let missing_db = Error::Connect { kind: ConnectErrorKind::Other, sqlstate: Some("3D000".into()), message: "yok".into() };
+        for err in [missing_db, Error::NotFound("db".into())] {
+            assert!(!drops_session(Target::Database(1), &err), "{err:?}");
+        }
+    }
 }

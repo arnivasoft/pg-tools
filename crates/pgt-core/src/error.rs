@@ -31,6 +31,10 @@ pub enum Error {
     UnknownServer(Uuid),
     #[error("Sunucuya bağlı değil.")]
     NotConnected,
+    /// Oturum vardı ama bağlantı koptu ve sessiz yeniden bağlanma başarısız oldu; oturum kapatıldı.
+    /// İçerik, yeniden bağlanmayı engelleyen asıl hatadır.
+    #[error("Sunucu bağlantısı koptu; yeniden bağlanmak için sunucuyu açın.")]
+    ConnectionLost(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -86,6 +90,7 @@ impl From<&Error> for ErrorPayload {
             Error::NotFound(_) => payload("not_found", e.to_string(), None, None),
             Error::UnknownServer(_) => payload("unknown_server", e.to_string(), None, None),
             Error::NotConnected => payload("not_connected", e.to_string(), None, None),
+            Error::ConnectionLost(cause) => payload("connection_lost", e.to_string(), Some(cause.clone()), None),
         }
     }
 }
@@ -211,6 +216,15 @@ mod tests {
         let e = Error::Query { sqlstate: Some("XX000".into()), message: "boom".into(), detail: Some("d".into()), hint: None };
         let p = ErrorPayload::from(&e);
         assert_eq!((p.message.as_str(), p.detail.as_deref()), ("boom", Some("d")));
+    }
+
+    #[test]
+    fn connection_lost_is_distinct_from_not_connected_and_keeps_cause() {
+        let p = ErrorPayload::from(&Error::ConnectionLost("connection refused".into()));
+        assert_eq!(p.code, "connection_lost");
+        assert_ne!(p.code, ErrorPayload::from(&Error::NotConnected).code);
+        assert_eq!(p.detail.as_deref(), Some("connection refused"));
+        assert!(p.message.contains("koptu"), "{}", p.message);
     }
 
     #[test]

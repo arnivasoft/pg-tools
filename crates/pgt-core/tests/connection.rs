@@ -156,3 +156,53 @@ async fn disconnect_removes_session() {
     mgr.disconnect(ts.config.id);
     assert!(!mgr.is_connected(ts.config.id));
 }
+
+/// Sessiz yeniden bağlanma başarısız olunca oturum düşer ve hata `NotConnected`'tan ayırt edilebilir.
+#[tokio::test]
+async fn failed_silent_reconnect_reports_connection_lost() {
+    let ts = require_server!();
+    let role = format!("pgt_lost_{}", std::process::id());
+    let admin = admin_client(&ts, &ts.config.maintenance_db).await;
+    admin.batch_execute(&format!("DROP ROLE IF EXISTS {role}; CREATE ROLE {role} LOGIN PASSWORD 'pgt-lost-pw'")).await.unwrap();
+    let mut config = ts.config.clone();
+    config.id = uuid::Uuid::new_v4();
+    config.username = role.clone();
+    let mgr = ConnectionManager::new();
+    mgr.connect(config.clone(), Some("pgt-lost-pw".into())).await.unwrap();
+    let pid_query = |c: std::sync::Arc<pgt_core::connection::PgConn>| async move {
+        c.client.query_one("SELECT pg_backend_pid()", &[]).await.map(|r| r.get::<_, i32>(0))
+    };
+    let pid = mgr.run(config.id, Target::Maintenance, pid_query).await.unwrap();
+    admin.batch_execute(&format!("ALTER ROLE {role} NOLOGIN")).await.unwrap();
+    admin.execute("SELECT pg_terminate_backend($1)", &[&pid]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let err = mgr.run(config.id, Target::Maintenance, pid_query).await.unwrap_err();
+    admin.batch_execute(&format!("DROP ROLE IF EXISTS {role}")).await.unwrap();
+    assert!(matches!(err, Error::ConnectionLost(_)), "{err:?}");
+    assert!(!mgr.is_connected(config.id));
+    let again = mgr.run(config.id, Target::Maintenance, pid_query).await.unwrap_err();
+    assert!(matches!(again, Error::NotConnected), "{again:?}");
+}
+
+/// Bağlı bir veritabanı silinince yalnızca o bağlantı düşer; sunucu oturumu bağlı kalır.
+#[tokio::test]
+async fn dropped_database_keeps_session_connected() {
+    let ts = require_server!();
+    let db = format!("pgt_dropme_{}", std::process::id());
+    let admin = admin_client(&ts, &ts.config.maintenance_db).await;
+    admin.batch_execute(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)")).await.unwrap();
+    admin.batch_execute(&format!("CREATE DATABASE {db} TEMPLATE template0 ENCODING 'UTF8'")).await.unwrap();
+    let oid: u32 = admin.query_one("SELECT oid FROM pg_database WHERE datname = $1", &[&db]).await.unwrap().get(0);
+    let mgr = ConnectionManager::new();
+    mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+    let one = |c: std::sync::Arc<pgt_core::connection::PgConn>| async move {
+        c.client.query_one("SELECT 1", &[]).await.map(|r| r.get::<_, i32>(0))
+    };
+    assert_eq!(mgr.run(ts.config.id, Target::Database(oid), one).await.unwrap(), 1);
+    admin.batch_execute(&format!("DROP DATABASE {db} WITH (FORCE)")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let err = mgr.run(ts.config.id, Target::Database(oid), one).await.unwrap_err();
+    assert!(!matches!(err, Error::ConnectionLost(_) | Error::NotConnected), "{err:?}");
+    assert!(mgr.is_connected(ts.config.id));
+    assert_eq!(mgr.run(ts.config.id, Target::Maintenance, one).await.unwrap(), 1);
+}
