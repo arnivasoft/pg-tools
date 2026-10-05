@@ -91,6 +91,21 @@ impl<'a> Scan<'a> {
         ws.iter().any(|w| self.has(w))
     }
 
+    /// Gerçek bir DML eylemi var mı. `FOR [NO KEY] UPDATE` kilit cümleleri, `ON CONFLICT DO UPDATE`
+    /// ve MERGE kolları (`THEN UPDATE/DELETE`) eylem sayılmaz. Tür tespiti ve tehlike taraması ortak kullanır.
+    fn is_dml_action(&self, i: usize) -> bool {
+        let t = &self.toks[i];
+        if !DML.iter().any(|w| t.is_word(self.sql, w)) {
+            return false;
+        }
+        let prev = if i > 0 { self.word(i - 1) } else { None };
+        !matches!(prev.as_deref(), Some("for" | "key" | "do" | "then"))
+    }
+
+    fn has_dml(&self) -> bool {
+        (0..self.toks.len()).any(|i| self.is_dml_action(i))
+    }
+
     fn has_at_base(&self, w: &str) -> bool {
         let base = self.base();
         self.toks.iter().any(|t| t.depth == base && t.is_word(self.sql, w))
@@ -106,12 +121,19 @@ pub fn analyze(stmt_sql: &str) -> Analysis {
     let kind = match lead.as_str() {
         "select" if s.has_at_base("into") => StmtKind::Ddl,
         "select" | "values" | "table" | "show" => StmtKind::Select,
-        "with" if s.has_any(&DML) => StmtKind::Write,
+        "with" if s.has_dml() => StmtKind::Write,
+        "with" if s.has_at_base("into") => StmtKind::Ddl,
         "with" => StmtKind::Select,
-        "explain" if s.has_any(&["analyze", "analyse"]) && s.has_any(&DML) => StmtKind::Write,
+        // EXPLAIN ANALYZE ifadeyi gerçekten çalıştırır (DML, CREATE TABLE AS, SELECT INTO, REFRESH).
+        "explain"
+            if s.has_any(&["analyze", "analyse"])
+                && (s.has_dml() || s.has_any(&["create", "refresh", "into"])) =>
+        {
+            StmtKind::Write
+        }
         "explain" => StmtKind::Select,
         "insert" | "update" | "delete" | "merge" => StmtKind::Write,
-        "copy" if s.has_at_base("from") => StmtKind::Write,
+        "copy" if s.has_at_base("from") || s.has("program") || s.has_dml() => StmtKind::Write,
         "copy" => StmtKind::Select,
         "create" | "alter" | "drop" | "truncate" | "comment" | "grant" | "revoke" | "reindex" | "cluster"
         | "refresh" | "security" | "import" | "checkpoint" | "analyze" | "vacuum" | "reassign" => StmtKind::Ddl,
@@ -121,7 +143,9 @@ pub fn analyze(stmt_sql: &str) -> Analysis {
     };
 
     let danger = match kind {
-        StmtKind::Write if matches!(lead.as_str(), "with" | "insert" | "update" | "delete") => write_danger(&s),
+        StmtKind::Write if matches!(lead.as_str(), "with" | "insert" | "update" | "delete" | "explain" | "copy") => {
+            write_danger(&s)
+        }
         StmtKind::Ddl => match lead.as_str() {
             "truncate" => Some(Danger::Truncate),
             "drop" => Some(Danger::Drop),
@@ -143,15 +167,11 @@ pub fn analyze(stmt_sql: &str) -> Analysis {
 }
 
 /// Kendi parantez kapsamında `WHERE` bulunmayan UPDATE/DELETE var mı (CTE içi dahil).
+/// MERGE için tehlike denetlenmez (kabul edilen sınır).
 fn write_danger(s: &Scan) -> Option<Danger> {
     for (i, t) in s.toks.iter().enumerate() {
         let (is_up, is_del) = (t.is_word(s.sql, "update"), t.is_word(s.sql, "delete"));
-        if !(is_up || is_del) {
-            continue;
-        }
-        // Kilit cümlesi (`FOR [NO KEY] UPDATE`), `ON CONFLICT DO UPDATE`, MERGE kolları: eylem değil.
-        let prev = if i > 0 { s.word(i - 1) } else { None };
-        if matches!(prev.as_deref(), Some("for" | "key" | "do" | "then")) {
+        if !(is_up || is_del) || !s.is_dml_action(i) {
             continue;
         }
         let d = t.depth;
@@ -183,6 +203,16 @@ fn changes_read_only(s: &Scan) -> bool {
         }
     });
     if in_dollar {
+        return true;
+    }
+    // DO gövdesi / dize içindeki ifadeler Word olarak ayrışmaz: boşlukları normalleştirip metinsel bakılır.
+    let phrase_in_text = s.toks.iter().any(|t| {
+        matches!(t.kind, Kind::Dollar | Kind::Str) && {
+            let x = t.text(s.sql).to_ascii_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+            ["read write", "reset all", "discard all"].iter().any(|p| x.contains(p))
+        }
+    });
+    if phrase_in_text {
         return true;
     }
     (0..s.toks.len()).any(|i| {
@@ -232,6 +262,15 @@ mod tests {
             ("commit prepared 'x'", Tx), ("set transaction read only", Tx),
             ("set search_path = x", Other), ("do $$ begin end $$", Other), ("call p()", Other), ("prepare q as select 1", Other),
             ("", Other),
+            ("explain analyze select * from t for update", Select),
+            ("with a as (select 1) select * from a for update", Select),
+            ("with a as (select 1) select * into t2 from a", Ddl),
+            ("explain analyze create table t2 as select 1", Write),
+            ("explain analyze select * into t2 from t", Write),
+            ("explain delete from t", Select),
+            ("copy t to program 'x'", Write),
+            ("copy (delete from t returning *) to stdout", Write),
+            ("copy (select 1) to stdout", Select),
         ] {
             assert_eq!(analyze(sql).kind, want, "{sql}");
         }
@@ -259,6 +298,13 @@ mod tests {
             ("update t set a=(select b from u for update) where id=1", None),
             ("with d as (delete from t where id=1 returning *) select * from d", None),
             ("merge into t using s on true when matched then delete", None),
+            ("explain analyze update t set a=1", Some(UpdateWithoutWhere)),
+            ("explain analyze delete from t", Some(DeleteWithoutWhere)),
+            ("explain analyze delete from t where id=1", None),
+            ("explain delete from t", None),
+            ("copy (delete from t returning *) to stdout", Some(DeleteWithoutWhere)),
+            ("copy (select 1) to stdout", None),
+            ("explain analyze select * from t for update", None),
         ] {
             assert_eq!(analyze(sql).danger, want, "{sql}");
         }
@@ -301,6 +347,12 @@ mod tests {
             ("set transaction read write", true),
             ("set session characteristics as transaction read write", true),
             ("reset all", true), ("discard all", true), ("RESET  /* c */ ALL", true),
+            ("do $$ begin reset all; end $$", true),
+            ("do $$ begin discard all; end $$", true),
+            ("do $$ begin start transaction read write; end $$", true),
+            ("do $$ begin set transaction read
+  write; end $$", true),
+            ("do $$ begin null; end $$", false),
             ("show transaction_read_only", false),
             ("show default_transaction_read_only", false),
             ("select current_setting('transaction_read_only')", false),
