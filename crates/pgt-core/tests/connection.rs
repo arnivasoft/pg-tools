@@ -206,3 +206,23 @@ async fn dropped_database_keeps_session_connected() {
     assert!(mgr.is_connected(ts.config.id));
     assert_eq!(mgr.run(ts.config.id, Target::Maintenance, one).await.unwrap(), 1);
 }
+
+/// 28000 (ör. oturum açma izni olmayan rol) parola hatası değildir; sunucunun mesajıyla döner.
+#[tokio::test]
+async fn login_not_permitted_is_not_an_auth_error() {
+    let ts = require_server!();
+    let role = format!("pgt_nologin_{}", std::process::id());
+    let admin = admin_client(&ts, &ts.config.maintenance_db).await;
+    admin.batch_execute(&format!("DROP ROLE IF EXISTS {role}; CREATE ROLE {role} NOLOGIN PASSWORD 'pgt-nologin-pw'")).await.unwrap();
+    let mut config = ts.config.clone();
+    config.username = role.clone();
+    let err = ConnectionManager::test(&config, Some("pgt-nologin-pw")).await.unwrap_err();
+    admin.batch_execute(&format!("DROP ROLE IF EXISTS {role}")).await.unwrap();
+    assert!(
+        matches!(err, Error::Connect { kind: ConnectErrorKind::Other, ref sqlstate, .. } if sqlstate.as_deref() == Some("28000")),
+        "{err:?}"
+    );
+    let payload = pgt_core::ErrorPayload::from(&err);
+    assert_eq!(payload.code, "connect");
+    assert!(payload.message.contains("not permitted"), "{}", payload.message);
+}

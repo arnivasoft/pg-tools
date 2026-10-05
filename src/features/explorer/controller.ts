@@ -23,7 +23,8 @@ export type PasswordAnswer = { password: string; remember: boolean };
 
 export interface ExplorerDeps {
   api: Pick<Api, "listChildren" | "connectServer">;
-  requestPassword(node: TreeNode, retry: boolean): Promise<PasswordAnswer | null>;
+  /** `retry`: önceki parola reddedildi; `error` o reddin ayrıntısını (sunucunun mesajı) taşır. */
+  requestPassword(node: TreeNode, retry: boolean, error: ErrorPayload | null): Promise<PasswordAnswer | null>;
 }
 
 export class ExplorerController {
@@ -97,7 +98,8 @@ export class ExplorerController {
           if (!cur) return false;
           let answer: PasswordAnswer | null;
           try {
-            answer = await this.deps.requestPassword(cur, error.code === "auth");
+            const retry = error.code === "auth";
+            answer = await this.deps.requestPassword(cur, retry, retry ? error : null);
           } catch (pe) {
             this.update((s) => (s.nodes.has(id) ? setError(s, id, toPayload(pe)) : s));
             return false;

@@ -1,12 +1,13 @@
 import { Show, createSignal } from "solid-js";
 import { t } from "../../app/strings";
+import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { TreeNode } from "../../ipc/bindings/TreeNode";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import { Field, inputClass } from "../../ui/Field";
 import type { PasswordAnswer } from "../explorer/controller";
 
-type Request = { node: TreeNode; retry: boolean; resolve: (answer: PasswordAnswer | null) => void };
+type Request = { node: TreeNode; retry: boolean; error: ErrorPayload | null; resolve: (answer: PasswordAnswer | null) => void };
 
 export function createPasswordPrompt() {
   const [request, setRequest] = createSignal<Request | null>(null);
@@ -15,12 +16,12 @@ export function createPasswordPrompt() {
 
   let inputEl: HTMLInputElement | undefined;
 
-  const ask = (node: TreeNode, retry: boolean) =>
+  const ask = (node: TreeNode, retry: boolean, error: ErrorPayload | null = null) =>
     new Promise<PasswordAnswer | null>((resolve) => {
       request()?.resolve(null);
       setPassword("");
       setRemember(false);
-      setRequest({ node, retry, resolve });
+      setRequest({ node, retry, error, resolve });
     });
 
   const finish = (answer: PasswordAnswer | null) => {
@@ -59,7 +60,10 @@ export function createPasswordPrompt() {
         }}
       >
         <Show when={request()?.retry}>
-          <p class="text-danger">{t.password.retry}</p>
+          <p class="text-danger">{request()?.error?.message ?? t.password.retry}</p>
+          <Show when={request()?.error?.detail}>
+            {(detail) => <p class="text-muted break-words select-text">{detail()}</p>}
+          </Show>
         </Show>
         <Field label={t.server.password}>
           <input

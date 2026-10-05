@@ -51,7 +51,7 @@ pub struct ErrorPayload {
 
 fn friendly_sqlstate(code: &str) -> Option<&'static str> {
     match code {
-        "28P01" | "28000" => Some("Kimlik doğrulama başarısız: kullanıcı adı veya parola hatalı."),
+        "28P01" => Some("Kimlik doğrulama başarısız: kullanıcı adı veya parola hatalı."),
         "3D000" => Some("Veritabanı bulunamadı."),
         "42501" => Some("Bu işlem için yetkiniz yok."),
         "57014" => Some("Sorgu zaman aşımına uğradı (statement_timeout)."),
@@ -118,9 +118,7 @@ impl Error {
     /// Bağlantı kurulurken oluşan tokio-postgres hatasını sınıflandırır.
     pub fn from_connect(e: tokio_postgres::Error) -> Self {
         if let Some(db) = e.as_db_error() {
-            let code = db.code().code();
-            let kind = if code.starts_with("28") { ConnectErrorKind::Auth } else { ConnectErrorKind::Other };
-            return Error::Connect { kind, sqlstate: Some(code.to_string()), message: db.message().to_string() };
+            return classify_connect_db_error(db.code().code(), db.message());
         }
         let message = chain_message(&e);
         if message.contains("password missing") {
@@ -128,6 +126,14 @@ impl Error {
         }
         Error::Connect { kind: classify_source(&e), sqlstate: None, message }
     }
+}
+
+/// Bağlantı sırasında sunucudan gelen hatayı sınıflandırır. Yalnızca 28P01 (parola hatalı)
+/// parola sorulmasını gerektirir; diğer 28xxx'ler (pg_hba reddi, oturum açma izni olmayan rol,
+/// yalnızca hostssl kabul eden sunucu vb.) parolayla düzelmez, sunucunun mesajıyla gösterilir.
+fn classify_connect_db_error(sqlstate: &str, message: &str) -> Error {
+    let kind = if sqlstate == "28P01" { ConnectErrorKind::Auth } else { ConnectErrorKind::Other };
+    Error::Connect { kind, sqlstate: Some(sqlstate.to_string()), message: message.to_string() }
 }
 
 fn chain_message(e: &(dyn std::error::Error + 'static)) -> String {
@@ -216,6 +222,31 @@ mod tests {
         let e = Error::Query { sqlstate: Some("XX000".into()), message: "boom".into(), detail: Some("d".into()), hint: None };
         let p = ErrorPayload::from(&e);
         assert_eq!((p.message.as_str(), p.detail.as_deref()), ("boom", Some("d")));
+    }
+
+    #[test]
+    fn only_28p01_is_an_auth_failure() {
+        let wrong = classify_connect_db_error("28P01", "password authentication failed for user \"x\"");
+        assert!(matches!(wrong, Error::Connect { kind: ConnectErrorKind::Auth, .. }), "{wrong:?}");
+        assert_eq!(ErrorPayload::from(&wrong).code, "auth");
+        for (code, msg) in [
+            ("28000", "no pg_hba.conf entry for host \"10.0.0.1\", user \"x\", database \"postgres\", no encryption"),
+            ("28000", "role \"x\" is not permitted to log in"),
+        ] {
+            let e = classify_connect_db_error(code, msg);
+            assert!(matches!(e, Error::Connect { kind: ConnectErrorKind::Other, .. }), "{e:?}");
+            let p = ErrorPayload::from(&e);
+            assert_eq!(p.code, "connect");
+            assert_eq!(p.message, msg, "sunucunun kendi mesajı gösterilmeli");
+        }
+    }
+
+    #[test]
+    fn other_connect_sqlstates_keep_friendly_text_and_server_detail() {
+        let e = classify_connect_db_error("3D000", "database \"yok\" does not exist");
+        let p = ErrorPayload::from(&e);
+        assert_eq!((p.code.as_str(), p.message.as_str()), ("connect", "Veritabanı bulunamadı."));
+        assert_eq!(p.detail.as_deref(), Some("database \"yok\" does not exist"));
     }
 
     #[test]

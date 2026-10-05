@@ -58,7 +58,7 @@ describe("ExplorerController", () => {
     const { c } = setup({ [ROOT]: [srv] }, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
     await c.load(ROOT);
     await c.expand("srv");
-    expect(requestPassword).toHaveBeenCalledWith(expect.objectContaining({ id: "srv" }), false);
+    expect(requestPassword).toHaveBeenCalledWith(expect.objectContaining({ id: "srv" }), false, null);
     expect(connectServer).toHaveBeenLastCalledWith("u1", "p", true);
   });
 
@@ -77,6 +77,7 @@ describe("ExplorerController", () => {
     await c.load(ROOT);
     await c.expand("srv");
     expect(requestPassword.mock.calls.map((call) => call[1])).toEqual([true, true]);
+    expect(requestPassword.mock.calls[0][2]).toEqual(expect.objectContaining({ code: "auth" }));
     expect(connectServer).toHaveBeenLastCalledWith("u1", "dogru", true);
     expect(get().nodes.get("srv")!.flags.connected).toBe(true);
   });
@@ -195,6 +196,30 @@ describe("ExplorerController robustness", () => {
     expect(get().errors.has("srv")).toBe(false);
     expect(get().loading.has("srv")).toBe(false);
     expect(listChildren.mock.calls.some((call) => call[0] === "srv")).toBe(false);
+  });
+});
+
+describe("ExplorerController password prompt details", () => {
+  it("passes the auth error (with the server's detail) to the retry prompt", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1" });
+    const auth = new IpcError({ code: "auth", message: "Parola hatalı", detail: "password authentication failed for user \"x\"", hint: null });
+    const connectServer = vi.fn().mockRejectedValueOnce(auth).mockResolvedValueOnce({ versionNum: 1, version: "1" });
+    const requestPassword = vi.fn(async () => ({ password: "p", remember: false }));
+    const { c } = setup({}, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    await c.load(ROOT);
+    await c.expand("srv");
+    expect(requestPassword).toHaveBeenCalledWith(expect.objectContaining({ id: "srv" }), true, auth.payload);
+  });
+
+  it("a non-auth connect error (e.g. pg_hba rejection) is shown on the node, not re-prompted", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1" });
+    const connectServer = vi.fn().mockRejectedValue(err("connect"));
+    const requestPassword = vi.fn(async () => ({ password: "p", remember: false }));
+    const { c, get } = setup({}, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    await c.load(ROOT);
+    await c.expand("srv");
+    expect(requestPassword).not.toHaveBeenCalled();
+    expect(get().errors.get("srv")?.code).toBe("connect");
   });
 });
 
