@@ -128,6 +128,12 @@ export default function QueryTab(props: { ctl: QueryController }) {
     const target = swapEditorState(book, prevAlive ? prev : null, prevAlive ? snapView() : null, id, () =>
       editor!.createState(ctl.text(id), { readOnly: ctl.model(id)?.serverGone ?? false }),
     );
+    // Sunucusu sonradan silinen sekmenin kayıtlı durumu düzenlenebilir kalmasın.
+    if (ctl.model(id)?.serverGone && !target.state.readOnly) {
+      target.state = editor.createState(target.state.doc.toString(), { readOnly: true });
+      book.set(id, target);
+      if (prev === id) editor.setState(target.state);
+    }
     if (prev !== id) {
       editor.setState(target.state);
       setShownId(id);
@@ -141,6 +147,19 @@ export default function QueryTab(props: { ctl: QueryController }) {
     }
   };
   createEffect(on(activeId, (id) => untrack(() => switchTo(id)), { defer: true }));
+  // Gösterilen sekmenin sunucusu silinirse editör salt okunur olur.
+  createEffect(
+    on(
+      () => model()?.serverGone ?? false,
+      (gone) => {
+        if (!gone || !editor || editor.getState().readOnly) return;
+        const s = editor.view.scrollDOM;
+        const top = s.scrollTop;
+        editor.setState(editor.createState(editor.getState().doc.toString(), { readOnly: true }));
+        s.scrollTop = top;
+      },
+    ),
+  );
 
   // Kapanan sekmelerin defter kayıtları.
   createEffect(() => {

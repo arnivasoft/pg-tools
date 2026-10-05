@@ -130,15 +130,24 @@ export function createQueryController(deps: QueryControllerDeps) {
     });
 
   // ---- taslaklar
+  // Kapanan sekmeler: süren bir kayıt kaldırmadan sonra işlenirse sekme bir sonraki açılışta geri gelmesin.
+  const closed = new Set<string>();
+  const inflight = new Map<string, Promise<void>>();
   const saveDraft = async (id: string) => {
     const e = entries.get(id);
-    if (!e) return;
+    if (!e || closed.has(id)) return;
     const m = e.model();
-    try {
-      await api.qtDraftsSave(toDraft({ id, title: titleOf(id), serverId: m.serverId, databaseOid: m.databaseOid, database: m.database, options: m.options }), e.text);
-    } catch (err) {
-      notify(toPayload(err).message, "error");
-    }
+    if (m.serverGone) return; // salt okunur taslak: diskteki son hali korunur
+    const p = api
+      .qtDraftsSave(toDraft({ id, title: titleOf(id), serverId: m.serverId, databaseOid: m.databaseOid, database: m.database, options: m.options }), e.text)
+      .then(
+        () => {},
+        (err) => notify(toPayload(err).message, "error"),
+      );
+    inflight.set(id, p);
+    await p;
+    if (inflight.get(id) === p) inflight.delete(id);
+    if (closed.has(id)) await api.qtDraftsRemove(id).catch(() => {});
   };
   const saver = createDebouncer(DRAFT_DEBOUNCE_MS, saveDraft);
 
@@ -146,7 +155,7 @@ export function createQueryController(deps: QueryControllerDeps) {
     const e = entries.get(id);
     if (!e || e.text === text) return;
     e.text = text;
-    saver.touch(id);
+    if (!e.model().serverGone) saver.touch(id);
   };
 
   // ---- sunucular
@@ -369,10 +378,12 @@ export function createQueryController(deps: QueryControllerDeps) {
 
   // ---- kapanış
   const removeTab = (id: string) => {
+    closed.add(id);
     saver.cancel(id);
     tabs.close(id);
     entries.delete(id);
-    void api.qtDraftsRemove(id).catch(() => {});
+    // Süren bir kayıt varsa önce bitsin; kaldırma ondan sonra gider (saveDraft da kapanmışsa yeniden kaldırır).
+    void (inflight.get(id) ?? Promise.resolve()).then(() => api.qtDraftsRemove(id)).catch(() => {});
   };
 
   const closeWith = async (id: string, session: string, policy: ClosePolicy): Promise<"closed" | "openTx" | "failed"> => {

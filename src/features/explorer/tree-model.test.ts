@@ -47,6 +47,17 @@ describe("tree-model", () => {
     expect(s.selected).toBe("a");
   });
 
+  it("server list reload keeps a still-connected server expanded with its children (label-only save)", () => {
+    const up = { ...flags, connected: true };
+    let s = setChildren(emptyTree(), ROOT, [node("srv", { kind: "server", serverId: "S", flags: up, tag: null })]);
+    s = expand(s, "srv");
+    s = setChildren(s, "srv", [node("dbs", { kind: "databaseCollection" })]);
+    s = setChildren(s, ROOT, [node("srv", { kind: "server", serverId: "S", flags: up, tag: "Test" })]);
+    expect(s.nodes.get("srv")?.tag).toBe("Test");
+    expect(s.expanded.has("srv")).toBe(true);
+    expect(flatten(s).map((r) => r.id)).toEqual(["srv", "dbs"]);
+  });
+
   it("drops subtree when a server becomes disconnected", () => {
     let s = emptyTree();
     const on = { ...flags, connected: true };

@@ -113,6 +113,11 @@ impl Credentials {
         }
     }
 
+    /// Yalnızca kalıcı depodaki kaydı siler; oturumdaki (bellekteki) parola kalır.
+    pub fn forget_stored(&self, server: Uuid) -> Result<()> {
+        self.store.delete(&password_key(server))
+    }
+
     pub fn forget(&self, server: Uuid) -> Result<()> {
         self.session.lock().unwrap().remove(&server);
         self.store.delete(&password_key(server))
@@ -146,6 +151,16 @@ mod tests {
         c.remember(id, "yeni", false).unwrap();
         assert_eq!(c.password(id).unwrap().as_deref(), Some("yeni"));
         assert_eq!(store.get(&password_key(id)).unwrap(), None);
+    }
+
+    #[test]
+    fn forget_stored_keeps_the_session_password() {
+        let (store, c) = creds();
+        let id = Uuid::new_v4();
+        c.remember(id, "x", true).unwrap();
+        c.forget_stored(id).unwrap();
+        assert_eq!(store.get(&password_key(id)).unwrap(), None);
+        assert_eq!(c.password(id).unwrap().as_deref(), Some("x"));
     }
 
     #[test]

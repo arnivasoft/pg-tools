@@ -26,7 +26,9 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
     e.preventDefault();
     if (k !== "F5" || e.ctrlKey || e.shiftKey || e.altKey || isObject()) return;
     const target = e.target instanceof Element ? e.target : null;
-    if (target?.closest('[role="tree"]') || document.querySelector('[role="dialog"]')) return;
+    // Yalnızca sağ paneldeyken (ya da odak hiçbir yerde değilken); ağaç, filtre kutusu, araç çubuğu: F5 çalıştırmaz.
+    const here = target === null || target === document.body || target.closest("[data-query-panel]") !== null;
+    if (!here || document.querySelector('[role="dialog"]')) return;
     e.stopPropagation();
     ctl.runActive("all");
   };
@@ -40,7 +42,13 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
       .then(({ getCurrentWindow }) =>
         getCurrentWindow().onCloseRequested(async (event) => {
           // Açık transaction'lar için tek diyalog; sonra taslaklar yazılır ve pencere kapanır.
-          if (!(await ctl.beforeExit())) event.preventDefault();
+          let ok = true;
+          try {
+            ok = await ctl.beforeExit();
+          } catch (err) {
+            console.error("kapanış hazırlığı başarısız", err);
+          }
+          if (!ok) event.preventDefault();
         }),
       )
       .then((u) => (disposed ? u() : (unlisten = u)))
@@ -68,7 +76,7 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
     }`;
 
   return (
-    <div class="flex h-full min-h-0 flex-col">
+    <div data-query-panel class="flex h-full min-h-0 flex-col">
       <div role="tablist" aria-label={t.query.tabs.ariaLabel} class="flex h-8 shrink-0 overflow-x-auto border-b border-border bg-panel">
         <div
           role="tab"
@@ -135,7 +143,9 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
                     class="h-1.5 w-1.5 shrink-0 rounded-full"
                     classList={{ "bg-accent": m()?.run.tx === "inTransaction", "bg-danger": m()?.run.tx === "failed" }}
                     title={m()?.run.tx === "failed" ? t.query.ctx.failedTx : t.query.ctx.openTx("")}
-                  />
+                  >
+                    <span class="sr-only">{m()?.run.tx === "failed" ? t.query.tabs.txFailed : t.query.tabs.txOpen}</span>
+                  </span>
                 </Show>
                 <Show when={busy()}>
                   <span class="shrink-0 text-muted" aria-label={t.query.ctx.running}>…</span>
@@ -144,8 +154,8 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
                   type="button"
                   tabIndex={-1}
                   class="ml-0.5 shrink-0 rounded p-0.5 text-muted opacity-60 hover:bg-hover hover:text-fg hover:opacity-100"
-                  title={t.query.tabs.close}
-                  aria-label={t.query.tabs.close}
+                  title={t.query.tabs.closeNamed(tab.title)}
+                  aria-label={t.query.tabs.closeNamed(tab.title)}
                   onClick={(e) => {
                     e.stopPropagation();
                     void ctl.requestClose(tab.id);

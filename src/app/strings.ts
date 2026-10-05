@@ -129,6 +129,9 @@ export const t = {
     tabs: {
       ariaLabel: "Sağ panel sekmeleri",
       close: "Sekmeyi kapat (orta tık)",
+      closeNamed: (title: string) => `‘${title}’ sekmesini kapat (orta tık)`,
+      txOpen: "açık transaction",
+      txFailed: "hatalı transaction",
       loading: "Query Tool yükleniyor…",
       editorAria: "SQL editörü",
       resizeEditor: "Editör yüksekliği",

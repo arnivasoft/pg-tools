@@ -1,5 +1,5 @@
 import { Lock, Play, PlayCircle, RotateCcw, Square, Check, Undo2 } from "lucide-solid";
-import { For, Show, createSignal, onCleanup, createEffect } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { t } from "../../app/strings";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { TxMode } from "../../ipc/bindings/TxMode";
@@ -36,8 +36,10 @@ export function ContextBar(props: {
 
   // Açık transaction süre sayacı (yalnızca açıkken saniyede bir).
   const [now, setNow] = createSignal(Date.now());
+  // Yalnızca transaction başlangıcına bağlı (akan satır olayları zamanlayıcıyı yeniden kurmasın).
+  const since = createMemo(() => m().txSince);
   createEffect(() => {
-    if (m().txSince === null) return;
+    if (since() === null) return;
     setNow(Date.now());
     const h = setInterval(() => setNow(Date.now()), 1000);
     onCleanup(() => clearInterval(h));
@@ -128,8 +130,9 @@ export function ContextBar(props: {
           </Button>
         </Show>
         <Show when={m().run.tx === "inTransaction"}>
-          <span role="status" class="rounded bg-selected px-1.5 py-0.5 font-medium">
-            {c.openTx(formatElapsed(now() - (m().txSince ?? now())))}
+          {/* Saniyede bir değişir: canlı bölge değil (ekran okuyucu her tıkta okumasın). */}
+          <span aria-live="off" class="rounded bg-selected px-1.5 py-0.5 font-medium">
+            {c.openTx(formatElapsed(now() - (since() ?? now())))}
           </span>
         </Show>
         <Show when={m().run.tx === "failed"}>
