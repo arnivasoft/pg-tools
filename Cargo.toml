@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/pgt-core", "crates/pgt-catalog", "src-tauri"]
+members = ["crates/pgt-core", "crates/pgt-catalog", "crates/pgt-query", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ rust-version = "1.88"
 [workspace.dependencies]
 pgt-core = { path = "crates/pgt-core" }
 pgt-catalog = { path = "crates/pgt-catalog" }
+pgt-query = { path = "crates/pgt-query" }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-postgres = "0.7.18"
 # Yalnızca `stream::poll_fn` + `StreamExt::next` (sorgu bağlantısı sürücüsü); tokio-postgres zaten çeker.

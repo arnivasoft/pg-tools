@@ -2618,6 +2618,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgt-query"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "pgt-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
 name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
