@@ -32,6 +32,10 @@ impl Catalog {
         self.show_system.load(Ordering::Relaxed)
     }
 
+    pub async fn properties(&self, id: &NodeId) -> Result<Vec<props::PropertySection>> {
+        kinds::properties(self, id).await
+    }
+
     pub async fn list_children(&self, id: &NodeId) -> Result<Vec<TreeNode>> {
         kinds::list_children(self, id).await
     }

@@ -22,3 +22,18 @@ pub(crate) async fn list(cat: &Catalog, server: Uuid, db: u32) -> Result<Vec<Tre
         })
         .collect())
 }
+
+static PROPS: VersionedSql = VersionedSql(&[(10, include_str!("../sql/schema_props.sql"))]);
+
+pub(crate) async fn properties(cat: &Catalog, server: Uuid, db: u32, schema: u32) -> Result<Vec<crate::props::PropertySection>> {
+    use crate::props::PropertySection;
+    let r = crate::db::query_one(&cat.mgr, server, Target::Database(db), &PROPS, p![schema], "şema").await?;
+    Ok(vec![
+        PropertySection::new("Genel")
+            .row("Ad", r.get::<_, String>("name"))
+            .row("OID", r.get::<_, u32>("oid").to_string())
+            .row("Sahip", r.get::<_, String>("owner"))
+            .row_opt("Yorum", r.get::<_, Option<String>>("comment")),
+        PropertySection::new("Güvenlik").row_opt("Yetkiler", r.get::<_, Option<String>>("acl")),
+    ])
+}

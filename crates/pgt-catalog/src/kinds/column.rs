@@ -22,3 +22,31 @@ pub(crate) async fn list(cat: &Catalog, server: Uuid, db: u32, schema: u32, tabl
         })
         .collect())
 }
+
+static PROPS: VersionedSql = VersionedSql(&[
+    (10, include_str!("../sql/column_props.pg10.sql")),
+    (12, include_str!("../sql/column_props.sql")),
+]);
+
+pub(crate) async fn properties(cat: &Catalog, server: Uuid, db: u32, table: u32, attnum: i16) -> Result<Vec<crate::props::PropertySection>> {
+    use crate::props::{PropertySection, yes_no};
+    let r = crate::db::query_one(&cat.mgr, server, Target::Database(db), &PROPS, p![table, attnum], "kolon").await?;
+    let text = |c: &str| r.get::<_, Option<String>>(c);
+    let generated = text("generated");
+    let (default_label, default_value) = match &generated {
+        Some(kind) => (format!("Üretilen ifade ({kind})"), text("default_expr")),
+        None => ("Varsayılan".to_string(), text("default_expr")),
+    };
+    Ok(vec![
+        PropertySection::new("Genel")
+            .row("Ad", r.get::<_, String>("name"))
+            .row("Sıra", r.get::<_, i16>("attnum").to_string())
+            .row("Veri tipi", r.get::<_, String>("type_name"))
+            .row("Boş olamaz", yes_no(r.get("not_null")))
+            .row_opt("Yorum", text("comment")),
+        PropertySection::new("Tanım")
+            .row_opt(default_label, default_value)
+            .row_opt("Identity", text("identity"))
+            .row_opt("Collation", text("collation")),
+    ])
+}

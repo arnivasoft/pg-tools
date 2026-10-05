@@ -43,3 +43,24 @@ pub(crate) async fn list_children(cat: &Catalog, id: &NodeId) -> Result<Vec<Tree
         _ => Err(invalid(id)),
     }
 }
+
+pub(crate) async fn properties(cat: &Catalog, id: &NodeId) -> Result<Vec<crate::props::PropertySection>> {
+    let (server, path) = match id {
+        NodeId::Root | NodeId::Group(_) => return Ok(Vec::new()),
+        NodeId::Node { server, path } => (*server, path.as_slice()),
+    };
+    if let [] = path {
+        return server::properties(cat, server).await;
+    }
+    if !cat.mgr.is_connected(server) {
+        return Err(Error::NotConnected);
+    }
+    match path {
+        [.., Seg::Coll(_)] => Ok(Vec::new()),
+        [Seg::Db(db)] => database::properties(cat, server, *db).await,
+        [Seg::Db(db), Seg::Schema(sch)] => schema::properties(cat, server, *db, *sch).await,
+        [Seg::Db(db), Seg::Schema(_), Seg::Table(tbl)] => table::properties(cat, server, *db, *tbl).await,
+        [Seg::Db(db), Seg::Schema(_), Seg::Table(tbl), Seg::Column(col)] => column::properties(cat, server, *db, *tbl, *col).await,
+        _ => Err(invalid(id)),
+    }
+}

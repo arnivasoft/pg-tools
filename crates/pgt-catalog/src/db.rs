@@ -32,7 +32,6 @@ pub(crate) async fn query(mgr: &ConnectionManager, server: Uuid, target: Target,
 }
 
 /// Tek satır bekler; satır yoksa `Error::NotFound(what)`.
-#[allow(dead_code)] // sonraki görevlerde kullanılacak
 pub(crate) async fn query_one(mgr: &ConnectionManager, server: Uuid, target: Target, sql: &'static VersionedSql, params: Params, what: &str) -> Result<Row> {
     query(mgr, server, target, sql, params).await?.into_iter().next().ok_or_else(|| Error::NotFound(what.to_string()))
 }

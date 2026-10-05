@@ -41,3 +41,29 @@ pub(crate) async fn group_children(cat: &Catalog, group: &str) -> Result<Vec<Tre
     }
     Ok(out)
 }
+
+pub(crate) async fn properties(cat: &Catalog, server: uuid::Uuid) -> Result<Vec<crate::props::PropertySection>> {
+    use crate::props::PropertySection;
+    let config = cat
+        .registry
+        .read()
+        .unwrap()
+        .get(server)
+        .cloned()
+        .ok_or(pgt_core::Error::UnknownServer(server))?;
+    let ssl_mode = serde_json::to_value(config.ssl.mode).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+    let mut out = vec![
+        PropertySection::new("Genel")
+            .row("Ad", config.name.clone())
+            .row_opt("Grup", config.group_name())
+            .row("Host", config.host.clone())
+            .row("Port", config.port.to_string())
+            .row("Kullanıcı", config.username.clone())
+            .row("Bakım veritabanı", config.maintenance_db.clone())
+            .row("SSL modu", ssl_mode),
+    ];
+    if let Some(info) = cat.mgr.info(server).await {
+        out.push(PropertySection::new("Sunucu").row("Sürüm", info.version).row("Sürüm numarası", info.version_num.to_string()));
+    }
+    Ok(out)
+}
