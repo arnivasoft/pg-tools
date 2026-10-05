@@ -27,7 +27,7 @@ export function TreeRow(props: {
       aria-selected={props.selected}
       aria-expanded={r().node.hasChildren ? r().expanded : undefined}
       class="absolute left-0 right-0 flex cursor-default items-center gap-1 whitespace-nowrap pr-2 select-none"
-      classList={{ "bg-selected": props.selected, "hover:bg-hover": !props.selected }}
+      classList={{ "bg-selected": props.selected, "hover:bg-hover": !props.selected, "italic text-muted": r().node.flags.fromExtension }}
       style={{ height: `${ROW_HEIGHT}px`, transform: `translateY(${props.top}px)`, "padding-left": `${r().depth * 14 + 4}px` }}
       onClick={props.onSelect}
       onDblClick={props.onToggle}

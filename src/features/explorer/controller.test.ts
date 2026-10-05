@@ -5,7 +5,7 @@ import { IpcError } from "../../ipc/errors";
 import { ExplorerController, type ExplorerDeps } from "./controller";
 import { ROOT, emptyTree, flatten, type TreeState } from "./tree-model";
 
-const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false };
+const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false };
 const n = (id: string, extra: Partial<TreeNode> = {}): TreeNode =>
   ({ id, kind: "table", label: id, detail: null, hasChildren: true, serverId: null, flags, ...extra });
 const err = (code: string): IpcError => new IpcError({ code, message: code, detail: null, hint: null } as ErrorPayload);

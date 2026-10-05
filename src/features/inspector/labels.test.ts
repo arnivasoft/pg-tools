@@ -8,5 +8,9 @@ describe("kindLabel", () => {
     expect(kindLabel("tableCollection")).toBe("Tables");
     expect(kindLabel("columnCollection")).toBe("Columns");
     expect(kindLabel("database")).toBe("Database");
+    expect(kindLabel("policyCollection")).toBe("RLS Policies");
+    expect(kindLabel("triggerFunctionCollection")).toBe("Trigger Functions");
+    expect(kindLabel("materializedView")).toBe("Materialized View");
+    expect(kindLabel("roleCollection")).toBe("Login/Group Roles");
   });
 });
