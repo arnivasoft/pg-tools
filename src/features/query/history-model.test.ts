@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StmtPlan } from "../../ipc/bindings/StmtPlan";
-import { filterHistory, historyEntriesFor, insertAt, searchQuery } from "./history-model";
+import { displaySql, historyEntriesFor, insertAt, searchQuery } from "./history-model";
 import { emptyResult, type ResultState, type StmtResult } from "./result-model";
 
 const text = "select 1; create role x password 'p'; select 2; select 3";
@@ -40,14 +40,13 @@ describe("historyEntriesFor", () => {
 });
 
 describe("arama ve ekleme", () => {
-  const e = (sql: string) => ({ id: sql, sql, serverId: "s", serverName: "", database: null, atMs: 0, elapsedMs: 0, ok: true });
   it("searchQuery boşluğu null yapar", () => {
     expect(searchQuery("  ")).toBeNull();
     expect(searchQuery(" ab ")).toBe("ab");
   });
-  it("filterHistory büyük/küçük harf duyarsız", () => {
-    expect(filterHistory([e("SELECT a"), e("update b")], "select").map((x) => x.sql)).toEqual(["SELECT a"]);
-    expect(filterHistory([e("x")], "")).toHaveLength(1);
+  it("displaySql uzun metni kırpar", () => {
+    expect(displaySql("abc")).toBe("abc");
+    expect(displaySql("x".repeat(400))).toHaveLength(301);
   });
   it("insertAt: boş belge, satır başı, satır ortası, seçimi değiştirme", () => {
     expect(insertAt("", 0, 0, "select 1")).toEqual({ doc: "select 1", cursor: 8 });

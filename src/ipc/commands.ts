@@ -77,7 +77,6 @@ export const commands = {
   qtDraftsRemove: (id: string) => call<null>("qt_drafts_remove", { id }),
   qtDraftsLoad: () => call<[DraftTab, string][]>("qt_drafts_load"),
   qtDraftsClear: () => call<null>("qt_drafts_clear"),
-  fsExists: (path: string) => call<boolean>("fs_exists", { path }),
   settingsGet: () => call<AppSettings>("settings_get"),
   settingsSetHistory: (enabled: boolean) => call<AppSettings>("settings_set_history", { enabled }),
 };

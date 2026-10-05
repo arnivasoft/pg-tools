@@ -79,7 +79,6 @@ fn main() {
             store_cmds::qt_drafts_remove,
             store_cmds::qt_drafts_load,
             store_cmds::qt_drafts_clear,
-            store_cmds::fs_exists,
             store_cmds::settings_get,
             store_cmds::settings_set_history,
         ])

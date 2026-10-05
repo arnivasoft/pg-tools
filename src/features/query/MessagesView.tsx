@@ -35,7 +35,7 @@ function Detail(props: { error: Pick<ErrorPayload, "detail" | "hint">; position?
 export function MessagesView(props: { messages: Message[] }) {
   const m = t.query.messages;
   return (
-    <div role="log" aria-label={m.ariaLabel} class="h-full overflow-auto p-2 font-mono text-xs">
+    <div role="region" aria-label={m.ariaLabel} class="h-full overflow-auto p-2 font-mono text-xs">
       <Show when={props.messages.length > 0} fallback={<p class="text-muted">{m.empty}</p>}>
         <For each={props.messages}>
           {(msg) => (

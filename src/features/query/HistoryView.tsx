@@ -7,7 +7,7 @@ import { toPayload } from "../../ipc/errors";
 import { ConfirmDialog } from "../../ui/ConfirmDialog";
 import { inputClass } from "../../ui/Field";
 import { Button } from "../../ui/Button";
-import { searchQuery } from "./history-model";
+import { displaySql, searchQuery } from "./history-model";
 
 const LIST_LIMIT = 500;
 
@@ -41,7 +41,7 @@ export function HistoryView(props: {
   );
   const h = t.query.history;
   return (
-    <div class="flex h-full flex-col" aria-label={h.ariaLabel}>
+    <div role="region" class="flex h-full flex-col" aria-label={h.ariaLabel}>
       <div class="border-b border-border p-2">
         <input
           class={inputClass}
@@ -53,7 +53,10 @@ export function HistoryView(props: {
         />
       </div>
       <ul class="min-h-0 flex-1 overflow-auto">
-        <Show when={(entries() ?? []).length > 0} fallback={<li class="p-3 text-xs text-muted">{h.empty}</li>}>
+        <Show
+          when={(entries() ?? []).length > 0}
+          fallback={<li class="p-3 text-xs text-muted">{entries.loading ? t.query.history.loading : h.empty}</li>}
+        >
           <For each={entries()}>
             {(e) => (
               <li>
@@ -69,9 +72,11 @@ export function HistoryView(props: {
                     <Show when={!e.ok}>
                       <span class="text-danger">{h.failed}</span>
                     </Show>
-                    <span class="ml-auto">{t.query.strip.ms(e.elapsedMs)}</span>
+                    <Show when={e.ok}>
+                      <span class="ml-auto">{t.query.strip.ms(e.elapsedMs)}</span>
+                    </Show>
                   </div>
-                  <pre class="mt-0.5 line-clamp-3 whitespace-pre-wrap break-all font-mono text-xs">{e.sql}</pre>
+                  <pre class="mt-0.5 line-clamp-3 whitespace-pre-wrap break-all font-mono text-xs">{displaySql(e.sql)}</pre>
                 </button>
               </li>
             )}

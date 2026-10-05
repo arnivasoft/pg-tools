@@ -7,7 +7,6 @@ import type { CsvOptions } from "../../ipc/bindings/CsvOptions";
 import { commands } from "../../ipc/commands";
 import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
-import { ConfirmDialog } from "../../ui/ConfirmDialog";
 import { Dialog } from "../../ui/Dialog";
 import { Field, inputClass } from "../../ui/Field";
 import { DEFAULT_CSV_OPTIONS, runExport, type ExportOutcome } from "./export";
@@ -15,21 +14,21 @@ import { DEFAULT_CSV_OPTIONS, runExport, type ExportOutcome } from "./export";
 const DELIMITERS: CsvDelimiter[] = ["comma", "semicolon", "tab"];
 
 /**
- * Dışa aktarma arayüzü (söz tabanlı diyaloglar + ilerleme). `View` bir kez bağlanır; `start` akışı çalıştırır.
- * Kaydet diyaloğu `@tauri-apps/plugin-dialog` `save`; Windows'ta bu diyalog üzerine yazmayı kendisi de sorar,
- * ancak yol/sürüme bağlı olduğundan tutarlılık için `fs_exists` + kendi onayımız kullanılır (çift soru olabilir).
+ * Dışa aktarma arayüzü (söz tabanlı seçenek diyaloğu + ilerleme). `View` bir kez bağlanır; `start` akışı çalıştırır.
+ * Üzerine yazma onayını Windows kaydet diyaloğu verir (FOS_OVERWRITEPROMPT, spec §8); ayrı onay yoktur.
  */
 export function createExportUi() {
   const [optionsReq, setOptionsReq] = createSignal<((o: CsvOptions | null) => void) | null>(null);
-  const [overwriteReq, setOverwriteReq] = createSignal<{ path: string; resolve: (ok: boolean) => void } | null>(null);
   const [running, setRunning] = createSignal(false);
   const [rows, setRows] = createSignal(0);
   const [opts, setOpts] = createSignal<CsvOptions>(DEFAULT_CSV_OPTIONS);
   const e = t.query.export;
 
-  const askOptions = () =>
+  const [label, setLabel] = createSignal("");
+  const askOptions = (stmtLabel: string) =>
     new Promise<CsvOptions | null>((resolve) => {
       optionsReq()?.(null);
+      setLabel(stmtLabel);
       setOptionsReq(() => resolve);
     });
   const finishOptions = (o: CsvOptions | null) => {
@@ -37,29 +36,16 @@ export function createExportUi() {
     setOptionsReq(null);
     r?.(o);
   };
-  const confirmOverwrite = (path: string) =>
-    new Promise<boolean>((resolve) => {
-      overwriteReq()?.resolve(false);
-      setOverwriteReq({ path, resolve });
-    });
-  const finishOverwrite = (ok: boolean) => {
-    const r = overwriteReq();
-    setOverwriteReq(null);
-    r?.resolve(ok);
-  };
-
   let session: string | null = null;
 
   /** `relation`: varsa varsayılan dosya adında tablo adı olarak kullanılır. */
-  async function start(input: { session: string; sql: string; relation: string | null }): Promise<ExportOutcome> {
+  async function start(input: { session: string; sql: string; relation: string | null; stmtIndex: number }): Promise<ExportOutcome> {
     session = input.session;
     setRows(0);
     const outcome = await runExport(
       {
         askOptions,
         pickPath: (defaultName) => save({ defaultPath: defaultName, filters: [{ name: e.filterName, extensions: ["csv"] }], title: e.dialogTitle }),
-        exists: commands.fsExists,
-        confirmOverwrite,
         exportCsv: commands.qtExportCsv,
         onProgress: setRows,
         setRunning,
@@ -69,7 +55,7 @@ export function createExportUi() {
     session = null;
     if (outcome.kind === "done") {
       const s = outcome.summary;
-      toast.show(e.done(s.rows, (s.bytes / 1024).toFixed(1), t.query.strip.ms(s.elapsedMs)), "success");
+      toast.show(e.done(s.rows, (s.bytes / 1024).toLocaleString("tr-TR", { maximumFractionDigits: 1 }), t.query.strip.ms(s.elapsedMs)), "success");
     } else if (outcome.kind === "cancelled") {
       toast.show(e.cancelled, "info");
     } else if (outcome.kind === "error") {
@@ -99,6 +85,7 @@ export function createExportUi() {
         }
       >
         <div class="flex flex-col gap-3">
+          <p class="break-all font-mono text-xs text-muted">{label()}</p>
           <Field label={e.delimiter}>
             <select
               class={inputClass}
@@ -118,15 +105,6 @@ export function createExportUi() {
           </label>
         </div>
       </Dialog>
-      <ConfirmDialog
-        open={overwriteReq() !== null}
-        title={e.overwriteTitle}
-        message={e.overwriteMessage(overwriteReq()?.path ?? "")}
-        confirmLabel={e.overwriteConfirm}
-        danger
-        onConfirm={() => finishOverwrite(true)}
-        onCancel={() => finishOverwrite(false)}
-      />
       <Dialog
         open={running()}
         // Kapatma = iptal isteği; diyalog iş bitince (`setRunning(false)`) kapanır.

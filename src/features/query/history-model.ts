@@ -48,10 +48,11 @@ export function searchQuery(input: string): string | null {
   return q === "" ? null : q;
 }
 
-/** İstemci tarafı süzgeç (büyük/küçük harf duyarsız; arka uçla aynı anlam için yedek/anlık süzme). */
-export function filterHistory(entries: HistoryEntry[], input: string): HistoryEntry[] {
-  const q = searchQuery(input)?.toLowerCase();
-  return q ? entries.filter((e) => e.sql.toLowerCase().includes(q)) : entries;
+/** Listede gösterilen SQL en çok bu kadar karakter (ekleme tam metni kullanır). */
+export const DISPLAY_SQL_CHARS = 300;
+
+export function displaySql(sql: string): string {
+  return sql.length > DISPLAY_SQL_CHARS ? sql.slice(0, DISPLAY_SQL_CHARS) + "…" : sql;
 }
 
 /**

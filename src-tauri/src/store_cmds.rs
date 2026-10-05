@@ -71,32 +71,9 @@ pub fn settings_set_history(state: State<'_, AppState>, enabled: bool) -> CmdRes
     Ok(next)
 }
 
-/// CSV dışa aktarmada "üzerine yazılsın mı?" onayı için hedef var mı? Yalnızca mutlak yollar kabul edilir.
-/// (Windows'ta diyalog eklentisi de üzerine yazmayı kendisi sorar; arayüz tutarlılık için ayrıca onaylatır.)
-#[tauri::command]
-pub fn fs_exists(path: String) -> CmdResult<bool> {
-    path_exists(&path)
-}
-
-fn path_exists(path: &str) -> CmdResult<bool> {
-    let p = std::path::Path::new(path);
-    if !p.is_absolute() {
-        return Err(ErrorPayload { code: "invalid".into(), message: "Yol mutlak olmalı.".into(), detail: None, hint: None });
-    }
-    Ok(p.exists())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fs_exists_validates_and_checks() {
-        assert!(path_exists("relative/x.csv").is_err());
-        let dir = std::env::temp_dir();
-        assert!(path_exists(dir.to_str().unwrap()).unwrap());
-        assert!(!path_exists(dir.join("pgt_no_such_file_xyz.csv").to_str().unwrap()).unwrap());
-    }
 
     #[test]
     fn detects_sensitive_in_scripts() {
