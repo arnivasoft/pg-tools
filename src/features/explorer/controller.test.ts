@@ -17,13 +17,14 @@ function setup(children: Record<string, TreeNode[]>, deps: Partial<ExplorerDeps>
     versionNum: 180000,
     version: "18.0",
   }));
+  const disconnectServer = vi.fn();
   const requestPassword = vi.fn(async () => null);
   const c = new ExplorerController(
     () => state,
     (s) => (state = s),
-    { api: { listChildren, connectServer }, requestPassword, ...deps },
+    { api: { listChildren, connectServer, disconnectServer }, requestPassword, ...deps },
   );
-  return { c, get: () => state, listChildren, connectServer, requestPassword };
+  return { c, get: () => state, listChildren, connectServer, disconnectServer, requestPassword };
 }
 
 describe("ExplorerController", () => {
@@ -55,7 +56,7 @@ describe("ExplorerController", () => {
       .mockRejectedValueOnce(err("password_required"))
       .mockResolvedValueOnce({ versionNum: 160004, version: "16.4" });
     const requestPassword = vi.fn(async () => ({ password: "p", remember: true }));
-    const { c } = setup({ [ROOT]: [srv] }, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c } = setup({ [ROOT]: [srv] }, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     expect(requestPassword).toHaveBeenCalledWith(expect.objectContaining({ id: "srv" }), false, null);
@@ -73,7 +74,7 @@ describe("ExplorerController", () => {
       .fn()
       .mockResolvedValueOnce({ password: "yanlis", remember: false })
       .mockResolvedValueOnce({ password: "dogru", remember: true });
-    const { c, get } = setup({ [ROOT]: [srv] }, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c, get } = setup({ [ROOT]: [srv] }, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     expect(requestPassword.mock.calls.map((call) => call[1])).toEqual([true, true]);
@@ -85,7 +86,7 @@ describe("ExplorerController", () => {
   it("cancelled prompt leaves the server collapsed without error", async () => {
     const srv = n("srv", { kind: "server", serverId: "u1" });
     const connectServer = vi.fn().mockRejectedValue(err("password_required"));
-    const { c, get } = setup({ [ROOT]: [srv] }, { api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c, get } = setup({ [ROOT]: [srv] }, { api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     const row = flatten(get())[0];
@@ -95,7 +96,7 @@ describe("ExplorerController", () => {
   it("network error is shown on the server node", async () => {
     const srv = n("srv", { kind: "server", serverId: "u1" });
     const connectServer = vi.fn().mockRejectedValue(err("network"));
-    const { c, get } = setup({ [ROOT]: [srv] }, { api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c, get } = setup({ [ROOT]: [srv] }, { api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     expect(flatten(get())[0].error?.code).toBe("network");
@@ -103,7 +104,7 @@ describe("ExplorerController", () => {
 
   it("load errors are attached to the parent and cleared by a successful reload", async () => {
     const listChildren = vi.fn().mockRejectedValueOnce(err("query")).mockResolvedValueOnce([n("a")]);
-    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn() } });
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(), disconnectServer: vi.fn() } });
     await c.load(ROOT);
     expect(get().errors.get(ROOT)?.code).toBe("query");
     expect(get().loading.has(ROOT)).toBe(false);
@@ -147,7 +148,7 @@ describe("ExplorerController robustness", () => {
       .mockRejectedValueOnce(err("password_required"))
       .mockResolvedValueOnce({ versionNum: 180000, version: "18.0" });
     const listChildren = vi.fn(async (id: string) => (id === ROOT ? [srv] : [n("dbs")]));
-    const { c } = setup({}, { requestPassword, api: { listChildren, connectServer } });
+    const { c } = setup({}, { requestPassword, api: { listChildren, connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     const p = Promise.all([c.expand("srv"), c.expand("srv")]);
     await vi.waitFor(() => expect(requestPassword).toHaveBeenCalledTimes(1));
@@ -165,7 +166,7 @@ describe("ExplorerController robustness", () => {
     });
     const { c, get } = setup(
       {},
-      { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } },
+      { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } },
     );
     await c.load(ROOT);
     await expect(c.ensureConnected("srv")).resolves.toBe(false);
@@ -181,7 +182,7 @@ describe("ExplorerController robustness", () => {
       .mockResolvedValue({ versionNum: 1, version: "1" });
     let rootList = [srv];
     const listChildren = vi.fn(async (id: string) => (id === ROOT ? rootList : [n("dbs")]));
-    const { c, get } = setup({}, { requestPassword, api: { listChildren, connectServer } });
+    const { c, get } = setup({}, { requestPassword, api: { listChildren, connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     const p = c.expand("srv");
     await vi.waitFor(() => expect(requestPassword).toHaveBeenCalled());
@@ -205,7 +206,7 @@ describe("ExplorerController password prompt details", () => {
     const auth = new IpcError({ code: "auth", message: "Parola hatalı", detail: "password authentication failed for user \"x\"", hint: null });
     const connectServer = vi.fn().mockRejectedValueOnce(auth).mockResolvedValueOnce({ versionNum: 1, version: "1" });
     const requestPassword = vi.fn(async () => ({ password: "p", remember: false }));
-    const { c } = setup({}, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c } = setup({}, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     expect(requestPassword).toHaveBeenCalledWith(expect.objectContaining({ id: "srv" }), true, auth.payload);
@@ -215,7 +216,7 @@ describe("ExplorerController password prompt details", () => {
     const srv = n("srv", { kind: "server", serverId: "u1" });
     const connectServer = vi.fn().mockRejectedValue(err("connect"));
     const requestPassword = vi.fn(async () => ({ password: "p", remember: false }));
-    const { c, get } = setup({}, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c, get } = setup({}, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     expect(requestPassword).not.toHaveBeenCalled();
@@ -239,7 +240,7 @@ describe("ExplorerController lost sessions", () => {
         return [n("db1", { kind: "database", hasChildren: false })];
       });
       const connectServer = vi.fn(async () => ({ versionNum: 180000, version: "18.0" }));
-      const { c, get } = setup({}, { api: { listChildren, connectServer } });
+      const { c, get } = setup({}, { api: { listChildren, connectServer, disconnectServer: vi.fn() } });
       await c.load(ROOT);
       await c.expand("srv");
       await c.expand("dbs");
@@ -270,7 +271,7 @@ describe("ExplorerController lost sessions", () => {
       if (id === "srv") return [n("dbs")];
       throw err("query");
     });
-    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(async () => ({ versionNum: 1, version: "1" })) } });
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(async () => ({ versionNum: 1, version: "1" })), disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     await c.expand("dbs");
@@ -313,5 +314,184 @@ describe("ExplorerController lost sessions", () => {
     expect(c.sessionLost("grp:G", lost)).toBe(false);
     expect(c.sessionLost("yok", lost)).toBe(false);
     expect(get().nodes.get("srv")!.flags.connected).toBe(true);
+  });
+
+  it("setFilter filters flatten and blank restores", async () => {
+    const { c, get } = setup({ [ROOT]: [n("alpha"), n("beta")] });
+    await c.load(ROOT);
+    c.setFilter("alp");
+    expect(flatten(get()).map((r) => r.id)).toEqual(["alpha"]);
+    c.setFilter("");
+    expect(flatten(get()).map((r) => r.id)).toEqual(["alpha", "beta"]);
+  });
+
+  describe("server actions", () => {
+    const srv = (connected: boolean) =>
+      n("srv", { kind: "server", serverId: "u1", detail: connected ? "18.0" : null, flags: { ...flags, connected } });
+
+    it("disconnect marks the server disconnected, clears its subtree and calls the api once", async () => {
+      const { c, get, disconnectServer } = setup({ [ROOT]: [srv(true)], srv: [n("dbs")] });
+      await c.load(ROOT);
+      await c.expand("srv");
+      c.select("dbs");
+      c.disconnect("srv");
+      expect(disconnectServer).toHaveBeenCalledExactlyOnceWith("u1");
+      expect(get().nodes.get("srv")!.flags.connected).toBe(false);
+      expect(get().children.has("srv")).toBe(false);
+      expect(get().selected).toBe("srv");
+    });
+
+    it("removed server clears the selection and its subtree", async () => {
+      const children: Record<string, TreeNode[]> = { [ROOT]: [srv(true)], srv: [n("dbs")] };
+      const { c, get } = setup(children);
+      await c.load(ROOT);
+      await c.expand("srv");
+      c.select("dbs");
+      children[ROOT] = [];
+      await c.serverRemoved();
+      expect([get().nodes.has("srv"), get().nodes.has("dbs"), get().selected]).toEqual([false, false, null]);
+    });
+  });
+});
+
+describe("ExplorerController retry / nodeGone", () => {
+  const noApi = { connectServer: vi.fn(), disconnectServer: vi.fn() };
+
+  it("retry on a disconnected server reconnects then reloads", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1" });
+    const { c, get, connectServer, listChildren } = setup({ [ROOT]: [srv], srv: [n("dbs")] });
+    await c.load(ROOT);
+    await c.retry("srv");
+    expect(connectServer).toHaveBeenCalledTimes(1);
+    expect(listChildren).toHaveBeenCalledWith("srv");
+    expect(get().nodes.get("srv")!.flags.connected).toBe(true);
+    expect(get().errors.has("srv")).toBe(false);
+    expect(flatten(get()).map((r) => r.id)).toEqual(["srv", "dbs"]);
+  });
+
+  it("retry on a regular node reloads it and clears the error", async () => {
+    let calls = 0;
+    const listChildren = vi.fn(async (id: string) => {
+      if (id === ROOT) return [n("a")];
+      if (calls++ === 0) throw err("query");
+      return [n("a1")];
+    });
+    const { c, get } = setup({}, { api: { listChildren, ...noApi } });
+    await c.load(ROOT);
+    await c.expand("a");
+    expect(get().errors.get("a")?.code).toBe("query");
+    await c.retry("a");
+    expect(get().errors.has("a")).toBe(false);
+    expect(get().children.get("a")).toEqual(["a1"]);
+  });
+
+  it("nodeGone marks only not_found errors and only for existing nodes", async () => {
+    const { c, get } = setup({ [ROOT]: [n("a")] });
+    await c.load(ROOT);
+    const payload = (code: string): ErrorPayload => ({ code, message: code, detail: null, hint: null });
+    expect(c.nodeGone("a", payload("query"))).toBe(false);
+    expect(c.nodeGone("ghost", payload("not_found"))).toBe(false);
+    expect(c.nodeGone("a", payload("not_found"))).toBe(true);
+    expect(get().errors.get("a")?.code).toBe("not_found");
+  });
+
+  it("a not_found load error keeps the node in the tree", async () => {
+    const listChildren = vi.fn(async (id: string) => {
+      if (id === ROOT) return [n("a")];
+      throw err("not_found");
+    });
+    const { c, get } = setup({}, { api: { listChildren, ...noApi } });
+    await c.load(ROOT);
+    await c.expand("a");
+    const row = flatten(get())[0];
+    expect([row.id, row.error?.code]).toEqual(["a", "not_found"]);
+  });
+
+  it("reloadAll reloads every loaded list, parents first", async () => {
+    const { c, listChildren } = setup({ [ROOT]: [n("a")], a: [n("a1")], a1: [n("a11")] });
+    await c.load(ROOT);
+    await c.expand("a");
+    await c.expand("a1");
+    listChildren.mockClear();
+    await c.reloadAll();
+    expect(listChildren.mock.calls.map(([id]) => id)).toEqual([ROOT, "a", "a1"]);
+  });
+
+  it("reloadAll skips disconnected servers", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1", flags: { ...flags, connected: true } });
+    const { c, get, listChildren } = setup({ [ROOT]: [srv], srv: [n("dbs")] });
+    await c.load(ROOT);
+    await c.expand("srv");
+    c.disconnect("srv");
+    listChildren.mockClear();
+    await c.reloadAll();
+    expect(listChildren.mock.calls.map(([id]) => id)).toEqual([ROOT]);
+    expect(get().errors.size).toBe(0);
+  });
+
+  it("reloadAll keeps expansion and selection of surviving nodes", async () => {
+    const { c, get } = setup({ [ROOT]: [n("a")], a: [n("a1")] });
+    await c.load(ROOT);
+    await c.expand("a");
+    c.select("a1");
+    await c.reloadAll();
+    expect([get().expanded.has("a"), get().selected]).toEqual([true, "a1"]);
+  });
+
+  it("reloadAll continues after a failing load", async () => {
+    let failA = false;
+    const listChildren = vi.fn(async (id: string) => {
+      if (id === "a" && failA) throw err("query");
+      return id === ROOT ? [n("a"), n("b")] : id === "b" ? [n("b1")] : id === "a" ? [n("a1")] : [];
+    });
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(), disconnectServer: vi.fn() } });
+    await c.load(ROOT);
+    await c.expand("a");
+    await c.expand("b");
+    failA = true;
+    await c.reloadAll();
+    expect(get().errors.get("a")?.code).toBe("query");
+    expect(get().children.get("b")).toEqual(["b1"]);
+  });
+});
+
+describe("ExplorerController reload after an in-flight load", () => {
+  it("serverRemoved does not reuse a ROOT load that started before the delete", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let rootNodes = [n("s1", { kind: "server", serverId: "u1" }), n("s2", { kind: "server", serverId: "u2" })];
+    const listChildren = vi.fn(async (id: string) => {
+      const snapshot = id === ROOT ? rootNodes : [];
+      if (listChildren.mock.calls.length === 1) await gate; // ilk ROOT yüklemesi silmeden önce başladı
+      return snapshot;
+    });
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(), disconnectServer: vi.fn() } });
+    const stale = c.load(ROOT);
+    rootNodes = [rootNodes[1]]; // s1 silindi
+    const removed = c.serverRemoved();
+    release();
+    await Promise.all([stale, removed]);
+    expect(listChildren).toHaveBeenCalledTimes(2);
+    expect(get().children.get(ROOT)).toEqual(["s2"]);
+  });
+
+  it("reloadAll waits for a pending load and reads the list again", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let version = 1;
+    const listChildren = vi.fn(async (id: string) => {
+      const v = version;
+      if (listChildren.mock.calls.length === 2) await gate;
+      return id === ROOT ? [n(`a${v}`, { hasChildren: false })] : [];
+    });
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(), disconnectServer: vi.fn() } });
+    await c.load(ROOT);
+    const pending = c.load(ROOT);
+    version = 2;
+    const all = c.reloadAll();
+    release();
+    await Promise.all([pending, all]);
+    expect(listChildren).toHaveBeenCalledTimes(3);
+    expect(get().children.get(ROOT)).toEqual(["a2"]);
   });
 });

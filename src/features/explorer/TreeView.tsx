@@ -5,7 +5,7 @@ import type { Explorer } from "./explorer-store";
 import { ROW_HEIGHT, TreeRow, rowDomId } from "./TreeRow";
 import { ROOT } from "./tree-model";
 
-export function TreeView(props: { explorer: Explorer }) {
+export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement) => void; onCopyName?: (id: string) => void }) {
   const ex = props.explorer;
   let scrollEl!: HTMLDivElement;
   const virtualizer = createVirtualizer({
@@ -25,21 +25,33 @@ export function TreeView(props: { explorer: Explorer }) {
     if (index >= 0) virtualizer.scrollToIndex(index, { align: "auto" });
   });
 
-  const isEmpty = () => ex.rows().length === 0 && ex.state().children.has(ROOT);
+  const filtering = () => ex.state().filter.trim() !== "";
+  const isEmpty = () => ex.rows().length === 0 && (filtering() || ex.state().children.has(ROOT));
 
   return (
     <div
-      ref={scrollEl}
+      ref={(el) => {
+        scrollEl = el;
+        props.treeRef?.(el);
+      }}
       role="tree"
       aria-label={t.explorer.ariaLabel}
       aria-activedescendant={ex.state().selected !== null ? rowDomId(ex.state().selected!) : undefined}
       tabIndex={0}
       class="relative h-full overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-accent"
       onKeyDown={(e) => {
+        // Rozet düğmesi gibi iç öğelerden gelen tuşlar (Enter/Boşluk) ağaç gezintisine karışmasın.
+        if (e.target !== e.currentTarget) return;
+        const sel = ex.state().selected;
+        if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c" && sel !== null && (window.getSelection()?.toString() ?? "") === "") {
+          e.preventDefault();
+          props.onCopyName?.(sel);
+          return;
+        }
         if (ex.controller.handleKey(e.key)) e.preventDefault();
       }}
     >
-      <Show when={!isEmpty()} fallback={<p class="p-4 text-muted">{t.explorer.empty}</p>}>
+      <Show when={!isEmpty()} fallback={<p class="p-4 text-muted">{filtering() ? t.explorer.noMatch : t.explorer.empty}</p>}>
         <div style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative" }}>
           <For each={virtualizer.getVirtualItems()}>
             {(item) => (
@@ -51,6 +63,12 @@ export function TreeView(props: { explorer: Explorer }) {
                     selected={ex.state().selected === row().id}
                     onSelect={() => ex.controller.select(row().id)}
                     onToggle={() => void ex.controller.toggle(row().id)}
+                    onRetry={() => void ex.controller.retry(row().id)}
+                    onRefreshParent={() => {
+                      const parent = ex.state().parent.get(row().id);
+                      if (parent === undefined) return;
+                      void (parent === ROOT ? ex.controller.reloadServers() : ex.controller.refresh(parent));
+                    }}
                   />
                 )}
               </Show>

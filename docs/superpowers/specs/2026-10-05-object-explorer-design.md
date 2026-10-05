@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 1: Object Explorer Tasarımı
 
 - **Tarih:** 2026-10-05
-- **Durum:** İnceleme bekliyor
+- **Durum:** Uygulandı (Plan 1–3)
 - **Kapsam:** Sunucu kayıt defteri + bağlantı yönetimi + salt okunur Object Explorer (ağaç, Properties, DDL)
 
 ---

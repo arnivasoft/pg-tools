@@ -1,0 +1,16 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Type: app.address
+
+-- DROP TYPE IF EXISTS app.address;
+
+CREATE TYPE app.address AS (
+    street text,
+    city text,
+    zip character varying(10)
+);
+
+ALTER TYPE app.address
+    OWNER TO <owner>;

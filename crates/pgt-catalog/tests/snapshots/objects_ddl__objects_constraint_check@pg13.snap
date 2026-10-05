@@ -1,0 +1,13 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Constraint: customers_email_check ON app.customers
+
+-- ALTER TABLE IF EXISTS app.customers DROP CONSTRAINT IF EXISTS customers_email_check;
+
+ALTER TABLE IF EXISTS app.customers
+    ADD CONSTRAINT customers_email_check CHECK ("position"(email, '@'::text) > 1);
+
+COMMENT ON CONSTRAINT customers_email_check ON app.customers
+    IS 'E-posta biçimi';

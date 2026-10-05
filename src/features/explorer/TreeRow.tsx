@@ -1,5 +1,6 @@
-import { ChevronDown, ChevronRight, CircleAlert, LoaderCircle } from "lucide-solid";
+import { ChevronDown, ChevronRight, LoaderCircle } from "lucide-solid";
 import { Show } from "solid-js";
+import { ErrorBadge } from "./ErrorBadge";
 import { NodeIcon } from "./NodeIcon";
 import { rowLabel, type VisibleRow } from "./tree-model";
 
@@ -15,11 +16,14 @@ export function TreeRow(props: {
   selected: boolean;
   onSelect: () => void;
   onToggle: () => void;
+  onRetry: () => void;
+  onRefreshParent: () => void;
 }) {
   const r = () => props.row;
   return (
     <div
       id={rowDomId(r().id)}
+      data-node-id={encodeURIComponent(r().id)}
       role="treeitem"
       aria-level={r().depth + 1}
       aria-setsize={r().setSize}
@@ -27,7 +31,7 @@ export function TreeRow(props: {
       aria-selected={props.selected}
       aria-expanded={r().node.hasChildren ? r().expanded : undefined}
       class="absolute left-0 right-0 flex cursor-default items-center gap-1 whitespace-nowrap pr-2 select-none"
-      classList={{ "bg-selected": props.selected, "hover:bg-hover": !props.selected, "italic text-muted": r().node.flags.fromExtension }}
+      classList={{ "bg-selected": props.selected, "hover:bg-hover": !props.selected, "italic text-muted": r().node.flags.fromExtension, "line-through opacity-60": r().error?.code === "not_found" }}
       style={{ height: `${ROW_HEIGHT}px`, transform: `translateY(${props.top}px)`, "padding-left": `${r().depth * 14 + 4}px` }}
       onClick={props.onSelect}
       onDblClick={props.onToggle}
@@ -55,11 +59,7 @@ export function TreeRow(props: {
         <span class="truncate text-xs text-muted">{r().node.detail}</span>
       </Show>
       <Show when={r().error}>
-        {(error) => (
-          <span class="ml-auto shrink-0 text-danger" title={error().detail ? `${error().message}\n${error().detail}` : error().message}>
-            <CircleAlert size={13} />
-          </span>
-        )}
+        {(error) => <ErrorBadge error={error()} onRetry={props.onRetry} onRefreshParent={props.onRefreshParent} onSelect={props.onSelect} />}
       </Show>
     </div>
   );

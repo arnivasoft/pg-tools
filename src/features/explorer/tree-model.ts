@@ -12,10 +12,11 @@ export interface TreeState {
   loading: Set<string>;
   expanded: Set<string>;
   selected: string | null;
+  filter: string;
 }
 
 export function emptyTree(): TreeState {
-  return { nodes: new Map(), parent: new Map(), children: new Map(), errors: new Map(), loading: new Set(), expanded: new Set(), selected: null };
+  return { nodes: new Map(), parent: new Map(), children: new Map(), errors: new Map(), loading: new Set(), expanded: new Set(), selected: null, filter: "" };
 }
 
 function clone(s: TreeState): TreeState {
@@ -27,6 +28,7 @@ function clone(s: TreeState): TreeState {
     loading: new Set(s.loading),
     expanded: new Set(s.expanded),
     selected: s.selected,
+    filter: s.filter,
   };
 }
 
@@ -163,6 +165,7 @@ export interface VisibleRow {
 }
 
 export function flatten(s: TreeState): VisibleRow[] {
+  if (s.filter.trim() !== "") return filterRows(s, s.filter);
   const out: VisibleRow[] = [];
   const walk = (parentId: string, depth: number) => {
     const ids = s.children.get(parentId);
@@ -190,6 +193,54 @@ export function flatten(s: TreeState): VisibleRow[] {
   return out;
 }
 
+/** Büyük/küçük harf katlama; "İ".toLowerCase() = "i" + U+0307 olduğundan birleşik nokta atılır. */
+const fold = (text: string): string => text.toLowerCase().replace(/̇/g, "");
+
+export function filterRows(s: TreeState, query: string): VisibleRow[] {
+  const q = fold(query.trim());
+  if (q === "") return [];
+  const walk = (parentId: string, depth: number): VisibleRow[] => {
+    const ids = s.children.get(parentId);
+    if (!ids) return [];
+    const kept: { id: string; node: TreeNode; sub: VisibleRow[] }[] = [];
+    for (const id of ids) {
+      const node = s.nodes.get(id);
+      if (!node) continue;
+      const sub = walk(id, depth + 1);
+      if (sub.length > 0 || fold(node.label).includes(q)) kept.push({ id, node, sub });
+    }
+    const out: VisibleRow[] = [];
+    kept.forEach(({ id, node, sub }, index) => {
+      const kids = s.children.get(id);
+      out.push({
+        id,
+        node,
+        depth,
+        expanded: sub.length > 0,
+        loading: s.loading.has(id),
+        error: s.errors.get(id) ?? null,
+        childCount: kids ? kids.length : null,
+        setSize: kept.length,
+        posInSet: index + 1,
+      });
+      for (const r of sub) out.push(r);
+    });
+    return out;
+  };
+  return walk(ROOT, 0);
+}
+
+export function ancestorOfKind(s: TreeState, id: string | null, kinds: NodeKind[]): TreeNode | null {
+  let cur: string | undefined = id ?? undefined;
+  while (cur !== undefined && cur !== ROOT) {
+    const node = s.nodes.get(cur);
+    if (!node) return null;
+    if (kinds.includes(node.kind)) return node;
+    cur = s.parent.get(cur);
+  }
+  return null;
+}
+
 export type Intent = { select?: string; expand?: string; collapse?: string; refresh?: string };
 
 export function keyIntent(s: TreeState, rows: VisibleRow[], key: string): Intent | null {
@@ -199,6 +250,7 @@ export function keyIntent(s: TreeState, rows: VisibleRow[], key: string): Intent
     return ["ArrowDown", "ArrowUp", "Home", "End"].includes(key) ? { select: rows[0].id } : null;
   }
   const row = rows[index];
+  const filtered = s.filter.trim() !== "";
   switch (key) {
     case "ArrowDown":
       return index + 1 < rows.length ? { select: rows[index + 1].id } : null;
@@ -210,15 +262,15 @@ export function keyIntent(s: TreeState, rows: VisibleRow[], key: string): Intent
       return { select: rows[rows.length - 1].id };
     case "ArrowRight":
       if (!row.node.hasChildren) return null;
-      if (!row.expanded) return { expand: row.id };
+      if (!filtered && !row.expanded) return { expand: row.id };
       return rows[index + 1]?.depth === row.depth + 1 ? { select: rows[index + 1].id } : null;
     case "ArrowLeft": {
-      if (row.expanded) return { collapse: row.id };
+      if (row.expanded && !filtered) return { collapse: row.id };
       const parent = s.parent.get(row.id);
       return parent && parent !== ROOT ? { select: parent } : null;
     }
     case "Enter":
-      if (!row.node.hasChildren) return null;
+      if (filtered || !row.node.hasChildren) return null;
       return row.expanded ? { collapse: row.id } : { expand: row.id };
     case "F5":
       return { refresh: row.id };

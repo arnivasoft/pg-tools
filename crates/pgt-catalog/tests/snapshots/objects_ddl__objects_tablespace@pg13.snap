@@ -1,0 +1,9 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Tablespace: pg_default
+
+-- DROP TABLESPACE IF EXISTS pg_default;
+
+-- Yerleşik tablespace; oluşturulamaz.

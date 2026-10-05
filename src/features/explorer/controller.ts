@@ -26,7 +26,7 @@ function markDisconnected(s: TreeState, loadingId: string, serverId: string, err
 export type PasswordAnswer = { password: string; remember: boolean };
 
 export interface ExplorerDeps {
-  api: Pick<Api, "listChildren" | "connectServer">;
+  api: Pick<Api, "listChildren" | "connectServer" | "disconnectServer">;
   /** `retry`: önceki parola reddedildi; `error` o reddin ayrıntısını (sunucunun mesajı) taşır. */
   requestPassword(node: TreeNode, retry: boolean, error: ErrorPayload | null): Promise<PasswordAnswer | null>;
 }
@@ -63,6 +63,12 @@ export class ExplorerController {
     const p = this.doLoad(id).finally(() => this.loads.delete(id));
     this.loads.set(id, p);
     return p;
+  }
+
+  /** Süren bir yüklemeyi bekler ve listeyi yeniden okur (süren yükleme değişiklikten önce başlamış olabilir). */
+  async reload(id: string): Promise<void> {
+    await this.loads.get(id)?.catch(() => {});
+    return this.load(id);
   }
 
   private async doLoad(id: string): Promise<void> {
@@ -149,6 +155,10 @@ export class ExplorerController {
     else await this.expand(id);
   }
 
+  setFilter(query: string): void {
+    this.update((s) => ({ ...s, filter: query }));
+  }
+
   select(id: string): void {
     this.update((s) => select(s, id));
   }
@@ -157,12 +167,67 @@ export class ExplorerController {
     if (id === ROOT || this.get().children.has(id)) await this.load(id);
   }
 
+  /** Yüklü tüm listeleri yeniden okur: önce ROOT, sonra derinliğe göre; sıralı, hata yutulur, bağlantısız sunucular atlanır. */
+  async reloadAll(): Promise<void> {
+    const depthOf = (id: string): number => {
+      let d = 0;
+      for (let cur = this.get().parent.get(id); cur !== undefined && cur !== ROOT; cur = this.get().parent.get(cur)) d++;
+      return d;
+    };
+    const ids = [...this.get().children.keys()].sort((a, b) => (a === ROOT ? -1 : b === ROOT ? 1 : depthOf(a) - depthOf(b)));
+    for (const id of ids) {
+      try {
+        if (id !== ROOT) {
+          if (!this.get().nodes.has(id)) continue; // önceki yenilemede kalktı
+          const server = serverOf(this.get(), id);
+          if (server && !server.flags.connected) continue;
+        }
+        if (this.get().children.has(id)) await this.reload(id);
+      } catch (e) {
+        console.error("reloadAll failed for", id, e);
+      }
+    }
+  }
+
+  async retry(id: string): Promise<void> {
+    const node = this.get().nodes.get(id);
+    if (!node) return;
+    if (node.kind === "server" && !node.flags.connected) {
+      if (!(await this.ensureConnected(id))) return;
+      if (!this.get().nodes.has(id)) return;
+      this.update((s) => expand(s, id));
+    }
+    await this.load(id);
+  }
+
+  /** Düğümün artık var olmadığı (not_found) başka bir yoldan öğrenildiğinde satırı hatalı işaretler. */
+  nodeGone(id: string, error: ErrorPayload): boolean {
+    if (error.code !== "not_found" || !this.get().nodes.has(id)) return false;
+    this.update((s) => setError(s, id, error));
+    return true;
+  }
+
+  disconnect(id: string): void {
+    const node = this.get().nodes.get(id);
+    if (node?.kind !== "server" || !node.serverId) return;
+    void Promise.resolve(this.deps.api.disconnectServer(node.serverId)).catch((e) => console.error("disconnect failed", e));
+    this.update((s) => {
+      const n = s.nodes.get(id);
+      return n ? invalidate(patchNode(s, id, { detail: null, flags: { ...n.flags, connected: false } }), id) : s;
+    });
+  }
+
+  /** Sunucu kaydı silindi: düğümü ve alt ağacını kaldırmak için sunucu listesini yeniden yükler. */
+  async serverRemoved(): Promise<void> {
+    await this.reloadServers();
+  }
+
   async reloadServers(): Promise<void> {
-    await this.load(ROOT);
+    await this.reload(ROOT);
     const groups = (this.get().children.get(ROOT) ?? []).filter(
       (gid) => this.get().nodes.get(gid)?.kind === "serverGroup" && this.get().children.has(gid),
     );
-    for (const gid of groups) await this.load(gid);
+    for (const gid of groups) await this.reload(gid);
   }
 
   handleKey(key: string): boolean {

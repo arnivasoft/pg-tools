@@ -1,6 +1,7 @@
 mod db;
 mod ddl;
 mod kinds;
+mod quote;
 pub mod node;
 pub mod props;
 pub mod version;
