@@ -16,5 +16,7 @@ ts-rs.workspace = true
 futures-util.workspace = true
 
 [dev-dependencies]
+# Entegrasyon testleri `pgt_core::testing` yardımcılarını kullanır.
+pgt-core = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
