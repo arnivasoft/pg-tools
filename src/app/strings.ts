@@ -54,4 +54,5 @@ export const t = {
     connected: "bağlı",
     notConnected: "bağlı değil",
   },
+  toast: { dismiss: "Kapat" },
 } as const;

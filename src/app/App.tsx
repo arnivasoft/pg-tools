@@ -14,6 +14,8 @@ import { Button } from "../ui/Button";
 import { SplitPane } from "./SplitPane";
 import { StatusBar } from "./StatusBar";
 import { t } from "./strings";
+import { Toaster } from "./Toaster";
+import { toast } from "./toast";
 import { Toolbar } from "./Toolbar";
 import { applyTheme, loadThemePreference, nextPreference, saveThemePreference, watchSystemTheme } from "./theme";
 
@@ -21,7 +23,6 @@ export default function App() {
   const prompt = createPasswordPrompt();
   const explorer = createExplorer({ api: commands, requestPassword: prompt.ask });
   const [themePref, setThemePref] = createSignal(loadThemePreference());
-  const [notice, setNotice] = createSignal<string | null>(null);
   const [dialogOpen, setDialogOpen] = createSignal(false);
   const [editing, setEditing] = createSignal<ServerConfig | null>(null);
   const [groups, setGroups] = createSignal<string[]>([]);
@@ -35,7 +36,7 @@ export default function App() {
       setEditing(target);
       setDialogOpen(true);
     } catch (e) {
-      setNotice(toPayload(e).message);
+      toast.show(toPayload(e).message, "error");
     }
   };
   const selectedServerId = () => {
@@ -49,7 +50,8 @@ export default function App() {
     } catch {
       // load errors are surfaced on the tree node itself
     } finally {
-      setNotice(await commands.startupNotice().catch(() => null));
+      const n = await commands.startupNotice().catch(() => null);
+      if (n) toast.show(n, "error");
     }
   });
   onCleanup(watchSystemTheme(themePref));
@@ -86,9 +88,10 @@ export default function App() {
       </header>
       <SplitPane left={<TreeView explorer={explorer} />} right={<Inspector explorer={explorer} />} />
       <footer class="flex h-6 shrink-0 items-center border-t border-border bg-panel px-2 text-xs text-muted">
-        <StatusBar explorer={explorer} notice={notice()} />
+        <StatusBar explorer={explorer} />
       </footer>
       <prompt.View />
+      <Toaster />
       <ServerDialog
         open={dialogOpen()}
         editing={editing()}
