@@ -240,8 +240,9 @@ seçilen ayarlarla (B + R1), karar kuralı uygulanmadı (hiçbir hedef aşılmad
 > bağlantı hatası sayfası görünür. Bu çalıştırmada bu doğrudan görüldü (CDP hedef URL'si `http://localhost:1420/`;
 > gömülü exe'de `http://tauri.localhost/`). Gerçek uygulamanın ölçümü için `bun run tauri build` (ya da
 > `bun tauri build --no-bundle`) çıktısı kullanılmalıdır. Aşağıda **ikisi de** verilir; Plan 3/Plan 5 bölümlerinde
-> `cargo build --release` exe'si ölçülmüşse (73 MiB satırları) o değerler gerçek arayüzü yansıtmayabilir; gerçek arayüz
-> boşta ~76 MiB'dır (Plan 2'nin seçilen ayar sonucu 76,1 MiB ile aynı). Geçmiş rakamlar yeniden etiketlenmedi.
+> `cargo build --release` exe'si ölçülmüşse (73 MiB satırları) o değerler arayüzsüz WebView ile ölçülmüştür. Geçmiş
+> rakamlar yeniden etiketlenmedi. 73 → 76 MiB kayması **ortamdandır** (büyük olasılıkla WebView2 çalışma zamanı
+> güncellemesi): bugün aynı türden (arayüzsüz) `cargo build` exe'si de 75,9 MiB ölçüyor, Plan 5'te aynı tür 73,1 MiB'dı.
 
     bun run build
     cargo build --release -p pg-tools                        # exe: ön yüz gömülü DEĞİL (devUrl)
@@ -262,8 +263,10 @@ seçilen ayarlarla (B + R1), karar kuralı uygulanmadı (hiçbir hedef aşılmad
 | 5 | 45 | 76,2 | 357,4 | 7,5 | 7 |
 | **Medyan** | **45** | **76,1** | 357,1 | **7,4** | 7 |
 
-< 150 MB hedefi karşılandı. Plan 5 sonuna göre (73,1 MiB, ama bkz. yukarıdaki not) fark +3 MiB: Plan 2'deki 76,1 MiB ile
-aynı, yani Query Tool idle bellek eklemedi. Ham `cargo build --release` exe'si ile aynı komut: 75,9 / 7,1 MiB.
+< 150 MB hedefi karşılandı. Query Tool boşta bellek eklemedi: aynı tür karşılaştırma (arayüzsüz `cargo build` exe'si)
+bugün 75,9 / 7,1 MiB, Plan 5'te 73,1 / 7,2 MiB — +2,8 MiB'lık fark Plan 6 kodu yüklenmeden de görüldüğü için ortamdandır;
+gerçek (gömülü) exe 76,1 MiB, Plan 2'nin `tauri build` sonucu 76,1 MiB ile aynı. Plan 2 (satır 10) doğru yöntemi
+(`bun tauri build --no-bundle`) kullanmıştı; Plan 3 ve Plan 5 `cargo build`'e geçmişti.
 
 ### Query Tool senaryosu (elle, CDP ile)
 
@@ -295,10 +298,13 @@ bugün sunucusuz çalışır); basit olmadığı için elle, betikle ölçüldü
 | (ön deneme) | 80,9 | 46,6 | 85,6 | 116 | 96,7 | 97,1 |
 
 ¹ Ctrl+Enter'den ilk `gridcell`'in görünmesine kadar, 100 ms yoklamayla (≈ ±100 ms); ilk çalıştırma oturumu açmayı
-(`qt_open`) içerir. Bilgi amaçlı, hedefi yok.
+(`qt_open`) içerir. Spec §1.3 hedefi: basit sorguda (LAN, < 1.000 satır) ilk satır < 150 ms. Bu ölçüm 10.000 satır,
+`qt_open` dahil ve ±100 ms yoklama çözünürlüğüyle yapıldığından hedefi **ne doğrular ne çürütür**; açık iş olarak
+`docs/smoke-test.md`'de listelenir.
 
-- **İlk sorgu sekmesi açılış süresi: 38–47 ms** (hedef < 500 ms). Süre lazy `QueryTab` + `codemirror-setup` (+ `window`) parçalarının
+- **İlk sorgu sekmesi açılış süresi: 38–47 ms** (hedef < 500 ms). Süre lazy `QueryTab` + `codemirror-setup` parçalarının
   yüklenmesini, `qt_target_of`/`listServers` çağrılarını ve editörün kurulmasını içerir; ilk açılıştır (parçalar önbellekte değil).
+  (`window` parçası sorgu sekmesinde değil, uygulama açılışında `QueryTabs.onMount` içinde yüklenir.)
 - **10.000 satırlı sekmeyle toplam özel WS: en çok 109,1 MiB** (hedef < 250 MB); sonuna kaydırınca 101–102 MiB.
   Sunucuya bağlanıp ağaç açmak ~+9 MiB (85 vs 76); boş sekme ~+5 MiB; 10.000 satır ~+16–18 MiB.
 - Izgara DOM'u: 10.000 satır yüklüyken ve sonuna kaydırınca `gridcell` sayısı 92–96, toplam DOM düğümü 369 (sanal liste).

@@ -50,7 +50,7 @@ Doğrulama notları: **[test]** birim testi, **[T8]** Task 8 elle/CDP duman test
 - ✔ Tamamlama yazılırken çalıştırmadan önce `closeCompletion` çağrılır; anlık `busy` toast + sekme idle **[T8]** (kod incelemesi; yarış elle zorlanmadı).
 - — `CompletionKind::Function` hiç üretilmez (arka uç).
 - ✔ `qt_set_options` sonrası ızgara "daha fazla" düğmesi kapanır (`optionsChanged`) **[test]**.
-- ✔ CSV: ayrı imleç; yalnızca tek SELECT/VALUES/TABLE/WITH — dışa aktar düğmesi `canExport`'a göre etkin **[test]**.
+- ✔ CSV: ayrı imleç; yalnızca tek SELECT/VALUES/TABLE/WITH — dışa aktar düğmesi sekme boşta ve başka işlem yokken etkindir; uygunluk tıklamadan sonra denetlenir (`qtAnalyze` → `exportTarget`; uygun değilse bilgi toast'u `disabledHint`) **[test]**.
 - ✔ CSV üzerine yazma: Windows kaydet diyaloğunun "zaten var" onayı (+ ad sadeleştirme) **[T8]**. ✘ Hedef Excel'de açıkken hata **ancak sonda** görünür — önceden yazılabilirlik denemesi **eklenmedi** (arka uç sınırı korunuyor).
 - ✘ Kullanıcı iptali ile `statement_timeout`'u ayıran ayrı hata kodu **eklenmedi**; ayrım ileti metninden (arka uç değişmedi).
 - ✘ `smoke-release.ps1` hâlâ `qt_*` çağırmaz (yalnızca açılış). Uçtan uca doğrulama `docs/smoke-test.md` "Query Tool" listesi ve Task 8/9 CDP çalıştırmalarıyla yapıldı; **betikleştirilmiş, tekrarlanabilir bir uçtan uca testi eklenmedi** (CDP betikleri depoda değil).
