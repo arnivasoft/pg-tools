@@ -1,0 +1,1199 @@
+//! Sorgu oturumları (`QueryManager`): sekme başına ayrılmış bir bağlantı, transaction durum makinesi, salt okunur
+//! kilit ve onay kapısı, iptal, boşta imleç ve boşta oturum yönetimi.
+//!
+//! - **Kilit bir korumadır, güvenlik sınırı değildir.** Kilitli sunucuda oturum `default_transaction_read_only = on`
+//!   ile açılır; `run` yazma/şema ifadelerini ve oturumun salt okunur ayarını değiştirebilecek ifadeleri
+//!   (`Analysis.changes_read_only`) çalıştırmadan reddeder. Sınıflandırıcının göremediği yollar (dinamik SQL,
+//!   fonksiyon gövdeleri) yine de ayarı değiştirebilir; asıl yetki sınırı veritabanı rolünün yetkileridir.
+//! - **Onay kapısı** arayüzden bağımsızdır: tehlikeli ya da üretim sunucusunda yazan bir ifade `confirmed = true`
+//!   olmadan çalışmaz (`Error::Invalid("confirmation_required")`).
+//! - **Transaction durumu** sınıflandırmaya dayalı bir durum makinesiyle izlenir; her `Tx` sınıfı ifade ve her hata
+//!   sonrası sunucu yoklanır (`statement_timestamp() <> transaction_timestamp()`) ve çelişkide yoklama kazanır.
+//!
+//! SQL metni asla günlüğe yazılmaz.
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::ops::Range;
+use std::sync::{Arc, Mutex as StdMutex, PoisonError, RwLock};
+use std::time::Duration;
+
+use pgt_core::connection::{CancelHandle, ConnectionManager, MAX_STATEMENT_TIMEOUT_MS, SessionProfile, Target};
+use pgt_core::registry::Registry;
+use pgt_core::{Error, ErrorPayload, Result};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex, Notify};
+use tokio::task::JoinHandle;
+use tokio::time::Instant;
+use ts_rs::TS;
+use uuid::Uuid;
+
+use crate::classify::{Danger, StmtKind, TxOp, analyze as classify, tx_op};
+use crate::events::{EventSink, QueryEvent};
+use crate::exec::{DEFAULT_CHUNK, ExecConfig, Executor, Path, StmtOutcome};
+use crate::split::{split, stmt_at};
+
+pub type SessionId = Uuid;
+
+/// Onay gerektiren betikte `run(…, confirmed = false)` hatasının iletisi (arayüz onay diyaloğuna çevirir).
+pub const CONFIRMATION_REQUIRED: &str = "confirmation_required";
+pub const LOCKED_WRITE_MESSAGE: &str = "Bu sunucu salt okunur kilitli: yazma ve şema değiştiren ifadeler çalıştırılamaz.";
+pub const LOCKED_SETTING_MESSAGE: &str = "Bu sunucu salt okunur kilitli: oturumun salt okunur ayarı değiştirilemez.";
+pub const TX_FAILED_MESSAGE: &str = "Transaction hata durumunda; önce ROLLBACK yapın.";
+pub const BUSY_MESSAGE: &str = "Bu sekmede bir sorgu zaten çalışıyor.";
+pub const OPEN_TX_MESSAGE: &str = "Açık transaction var.";
+pub const MODE_IN_TX_MESSAGE: &str = "Açık transaction varken mod değiştirilemez.";
+/// Kullanıcının iptal ettiği ifadenin `Failed` iletisi (zaman aşımından ayırt edilir; sunucu iletisi `detail`'de).
+pub const CANCELLED_MESSAGE: &str = "Sorgu kullanıcı tarafından iptal edildi.";
+/// `more()` almayan açık imlecin kapatılma süresi (varsayılan).
+pub const DEFAULT_CURSOR_IDLE: Duration = Duration::from_secs(5 * 60);
+
+const PROBE: &str = "SELECT statement_timestamp() <> transaction_timestamp()";
+/// Oturumlar zorla kapatılırken ROLLBACK ve kilit için en çok bekleme.
+const FORCE_CLOSE_WAIT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum TxState {
+    Idle,
+    InTransaction,
+    /// Transaction hata aldı (PostgreSQL `aborted`): yalnızca ROLLBACK / ROLLBACK TO kabul edilir.
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum TxMode {
+    #[default]
+    Autocommit,
+    /// İlk ifadeden önce otomatik `BEGIN`; COMMIT/ROLLBACK kullanıcıdadır.
+    Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SessionOptions {
+    pub mode: TxMode,
+    /// 0 = sınırsız; en çok `MAX_STATEMENT_TIMEOUT_MS`.
+    pub statement_timeout_ms: u32,
+}
+
+/// Çalıştırılacak ifadelerin seçimi. Ofsetler editör metnindeki **karakter** (Unicode scalar) ofsetleridir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[ts(export)]
+pub enum Scope {
+    All,
+    /// `[start, end)` seçili metin kendi başına bir betik olarak ayrılır.
+    Selection { start: u32, end: u32 },
+    /// İmlecin bulunduğu tek ifade.
+    AtCursor { offset: u32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum TxAction {
+    Commit,
+    Rollback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum ClosePolicy {
+    Commit,
+    Rollback,
+    /// Açık transaction varsa kapatma (`Err("Açık transaction var.")`).
+    Refuse,
+}
+
+/// Kilitli sunucuda bir ifadenin neden reddedildiği.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum LockedReason {
+    Write,
+    Ddl,
+    /// Oturumun salt okunur ayarını değiştirebilecek ifade (`SET … read_only`, `BEGIN READ WRITE`, `RESET ALL`…).
+    ReadOnlySetting,
+}
+
+/// Çalıştırmadan önceki ifade planı. `index` olaylardaki `stmt_index` ile aynıdır (kapsam içi sıra);
+/// `char_offset` ifadenin editör metnindeki karakter ofsetidir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StmtPlan {
+    pub index: u32,
+    pub kind: StmtKind,
+    pub danger: Option<Danger>,
+    /// Üretim etiketli sunucuda yazma/şema ifadesi (onay gerekir).
+    pub production_write: bool,
+    /// Kilitli sunucuda reddedilecek ifade (betiğin tamamı başlamaz).
+    pub locked_reject: bool,
+    pub locked_reason: Option<LockedReason>,
+    /// Parola/bağlantı dizesi içerebilir; geçmişe yazılmamalı.
+    pub sensitive: bool,
+    pub char_offset: u32,
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Saf kurallar: plan, kapılar, durum makinesi
+// ---------------------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Guard {
+    pub(crate) locked: bool,
+    pub(crate) production: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Planned {
+    pub(crate) plan: StmtPlan,
+    /// İfadenin `sql` içindeki bayt aralığı.
+    pub(crate) range: Range<usize>,
+    pub(crate) tx: Option<TxOp>,
+}
+
+fn byte_at_char(sql: &str, ch: u32) -> usize {
+    sql.char_indices().nth(ch as usize).map_or(sql.len(), |(b, _)| b)
+}
+
+/// Kapsamın ifadelerinin bayt aralıkları (sırayla).
+fn scope_ranges(sql: &str, scope: Scope) -> Result<Vec<Range<usize>>> {
+    match scope {
+        Scope::All => Ok(split(sql).into_iter().map(|s| s.start..s.end).collect()),
+        Scope::Selection { start, end } => {
+            if start > end {
+                return Err(Error::Invalid("Seçim aralığı geçersiz.".into()));
+            }
+            let (b0, b1) = (byte_at_char(sql, start), byte_at_char(sql, end));
+            Ok(split(&sql[b0..b1]).into_iter().map(|s| b0 + s.start..b0 + s.end).collect())
+        }
+        Scope::AtCursor { offset } => {
+            let at = stmt_at(sql, byte_at_char(sql, offset));
+            Ok(at.and_then(|i| split(sql).get(i).map(|s| s.start..s.end)).into_iter().collect())
+        }
+    }
+}
+
+pub(crate) fn plan_script(sql: &str, scope: Scope, guard: Guard) -> Result<Vec<Planned>> {
+    let ranges = scope_ranges(sql, scope)?;
+    let (mut chars, mut at) = (0u32, 0usize);
+    let mut out = Vec::with_capacity(ranges.len());
+    for (i, range) in ranges.into_iter().enumerate() {
+        chars += sql[at..range.start].chars().count() as u32;
+        at = range.start;
+        let text = &sql[range.clone()];
+        let a = classify(text);
+        let writes = matches!(a.kind, StmtKind::Write | StmtKind::Ddl);
+        let locked_reason = if !guard.locked {
+            None
+        } else if a.kind == StmtKind::Write {
+            Some(LockedReason::Write)
+        } else if a.kind == StmtKind::Ddl {
+            Some(LockedReason::Ddl)
+        } else if a.changes_read_only {
+            Some(LockedReason::ReadOnlySetting)
+        } else {
+            None
+        };
+        out.push(Planned {
+            plan: StmtPlan {
+                index: i as u32,
+                kind: a.kind,
+                danger: a.danger,
+                production_write: guard.production && writes,
+                locked_reject: locked_reason.is_some(),
+                locked_reason,
+                sensitive: a.sensitive,
+                char_offset: chars,
+            },
+            range,
+            tx: tx_op(text),
+        });
+    }
+    Ok(out)
+}
+
+/// Çalıştırma öncesi kapılar: önce kilit (tek ifade bile tüm betiği engeller), sonra onay.
+pub(crate) fn check_gates(planned: &[Planned], confirmed: bool) -> Result<()> {
+    if let Some(p) = planned.iter().find(|p| p.plan.locked_reject) {
+        let msg = match p.plan.locked_reason {
+            Some(LockedReason::ReadOnlySetting) => LOCKED_SETTING_MESSAGE,
+            _ => LOCKED_WRITE_MESSAGE,
+        };
+        return Err(Error::Invalid(msg.into()));
+    }
+    if !confirmed && planned.iter().any(|p| p.plan.danger.is_some() || p.plan.production_write) {
+        return Err(Error::Invalid(CONFIRMATION_REQUIRED.into()));
+    }
+    Ok(())
+}
+
+/// Durum makinesinin girdisi: ifadenin transaction işlemi (yoksa `None`) ve başarılı olup olmadığı.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TxEvent {
+    Ok(Option<TxOp>),
+    Error(Option<TxOp>),
+}
+
+/// Sınıflandırmaya dayalı geçiş. `Failed` iken yalnızca ROLLBACK / ROLLBACK TO kabul edilir (diğerleri `Err`;
+/// `COMMIT` de reddedilir: PostgreSQL onu sessizce ROLLBACK'e çevirirdi).
+pub(crate) fn step(state: TxState, ev: TxEvent) -> Result<TxState> {
+    use TxState::{Failed, Idle, InTransaction};
+    let op = match ev {
+        TxEvent::Ok(op) | TxEvent::Error(op) => op,
+    };
+    if state == Failed && !matches!(op, Some(TxOp::Rollback | TxOp::RollbackTo)) {
+        return Err(Error::Invalid(TX_FAILED_MESSAGE.into()));
+    }
+    Ok(match ev {
+        TxEvent::Ok(Some(TxOp::Begin | TxOp::RollbackTo)) => InTransaction,
+        TxEvent::Ok(Some(TxOp::Commit | TxOp::Rollback)) => Idle,
+        TxEvent::Ok(_) => state,
+        // Başarısız COMMIT transaction'ı bitirir (geri alınır).
+        TxEvent::Error(Some(TxOp::Commit)) => Idle,
+        TxEvent::Error(_) if state == Idle => Idle,
+        TxEvent::Error(_) => Failed,
+    })
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// İptal
+// ---------------------------------------------------------------------------------------------------------------
+
+#[derive(Default)]
+struct CancelFlags {
+    /// Bir `run`/`more` sürüyor.
+    active: bool,
+    requested: bool,
+}
+
+/// Oturum kilidinden bağımsız iptal belirteci. Boştayken gelen iptal yok sayılır (sonraki bir ifadeyi vurmasın).
+#[derive(Default)]
+struct CancelToken {
+    flags: StdMutex<CancelFlags>,
+    notify: Notify,
+}
+
+impl CancelToken {
+    fn flags(&self) -> std::sync::MutexGuard<'_, CancelFlags> {
+        self.flags.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn begin(&self) {
+        *self.flags() = CancelFlags { active: true, requested: false };
+    }
+
+    fn end(&self) {
+        *self.flags() = CancelFlags::default();
+    }
+
+    /// Çalışma sürüyorsa iptal ister (`true`); boştaysa yok sayar.
+    fn request(&self) -> bool {
+        let mut f = self.flags();
+        if f.active {
+            f.requested = true;
+            self.notify.notify_one();
+        }
+        f.active
+    }
+
+    fn requested(&self) -> bool {
+        self.flags().requested
+    }
+}
+
+async fn cancel_quietly(handle: &CancelHandle) {
+    if let Err(e) = handle.cancel().await {
+        tracing::debug!(code = %ErrorPayload::from(&e).code, "iptal isteği gönderilemedi");
+    }
+}
+
+/// `fut`'u çalıştırır; sürerken iptal istenirse sunucuya iptal isteği gönderir (en çok bir kez). Önceden kalmış
+/// `Notify` izni `requested` bayrağı olmadan yok sayılır.
+async fn cancellable<F: Future>(token: &CancelToken, handle: &CancelHandle, fut: F) -> F::Output {
+    let mut fut = std::pin::pin!(fut);
+    let mut sent = false;
+    loop {
+        tokio::select! {
+            biased;
+            out = &mut fut => return out,
+            () = token.notify.notified(), if !sent => {
+                if token.requested() {
+                    sent = true;
+                    cancel_quietly(handle).await;
+                }
+            }
+        }
+    }
+}
+
+fn timeout_text() -> String {
+    let e = Error::Query { sqlstate: Some("57014".into()), message: String::new(), detail: None, hint: None };
+    ErrorPayload::from(&e).message
+}
+
+fn is_cancel_error(e: &Error) -> bool {
+    matches!(e, Error::Query { sqlstate: Some(s), .. } if s == "57014")
+}
+
+/// Olayları kullanıcı alıcısına aktarır: kullanıcı iptalinde 57014 iletisini değiştirir, hata ve alıcının
+/// gidişini kaydeder.
+struct GuardSink<'a> {
+    inner: &'a mut dyn EventSink,
+    cancel: &'a CancelToken,
+    timeout_text: String,
+    gone: bool,
+    failed: bool,
+}
+
+impl<'a> GuardSink<'a> {
+    fn new(inner: &'a mut dyn EventSink, cancel: &'a CancelToken) -> Self {
+        GuardSink { inner, cancel, timeout_text: timeout_text(), gone: false, failed: false }
+    }
+}
+
+impl EventSink for GuardSink<'_> {
+    fn send(&mut self, mut ev: QueryEvent) -> bool {
+        if self.gone {
+            return false;
+        }
+        if let QueryEvent::Failed { error, .. } = &mut ev {
+            self.failed = true;
+            if self.cancel.requested() && error.code == "query" && error.message == self.timeout_text {
+                error.message = CANCELLED_MESSAGE.into();
+            }
+        }
+        let ok = self.inner.send(ev);
+        self.gone = !ok;
+        ok
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Oturumlar
+// ---------------------------------------------------------------------------------------------------------------
+
+struct Inner {
+    /// `None`: oturum uykuda (boşta kaldığı için bağlantı kapatıldı); sonraki işlem yeniden bağlanır.
+    exec: Option<Executor>,
+    opts: SessionOptions,
+    /// Sunucuda oturum düzeyinde (transaction dışında) geçerli olduğu bilinen `statement_timeout`.
+    applied_timeout: Option<u32>,
+    last_used: Instant,
+    cursor_timer: Option<JoinHandle<()>>,
+    /// Her işlemde artar; boşta imleç zamanlayıcısı yalnızca kendi kuşağındaysa imleci kapatır.
+    cursor_gen: u64,
+}
+
+struct SessionSlot {
+    server: Uuid,
+    target: Target,
+    guard: Guard,
+    /// Kilitsiz okunur (`tx_state`); yalnızca `inner` kilidi tutulurken yazılır.
+    state: StdMutex<TxState>,
+    inner: Mutex<Inner>,
+    cancel: CancelToken,
+}
+
+impl SessionSlot {
+    fn state(&self) -> TxState {
+        *self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn set_state(&self, s: TxState) {
+        *self.state.lock().unwrap_or_else(PoisonError::into_inner) = s;
+    }
+
+    fn profile(&self, opts: &SessionOptions) -> SessionProfile {
+        SessionProfile::Query { read_only: self.guard.locked, statement_timeout_ms: opts.statement_timeout_ms }
+    }
+}
+
+fn busy() -> Error {
+    Error::Invalid(BUSY_MESSAGE.into())
+}
+
+fn disarm(inner: &mut Inner) {
+    if let Some(h) = inner.cursor_timer.take() {
+        h.abort();
+    }
+    inner.cursor_gen += 1;
+}
+
+/// Açık imleç varsa `idle` sonra kapatan görevi kurar (autocommit'te çalıştırıcının COMMIT'li kapanış yolu;
+/// böylece `idle in transaction` kalmaz).
+fn arm_cursor_timer(slot: &Arc<SessionSlot>, inner: &mut Inner, idle: Duration) {
+    disarm(inner);
+    if !inner.exec.as_ref().is_some_and(Executor::cursor_open) {
+        return;
+    }
+    let generation = inner.cursor_gen;
+    let weak = Arc::downgrade(slot);
+    inner.cursor_timer = Some(tokio::spawn(async move {
+        tokio::time::sleep(idle).await;
+        let Some(slot) = weak.upgrade() else { return };
+        let mut inner = slot.inner.lock().await;
+        if inner.cursor_gen != generation {
+            return;
+        }
+        inner.cursor_timer = None;
+        if let Some(exec) = inner.exec.as_mut()
+            && exec.cursor_open()
+        {
+            match exec.close_cursor().await {
+                Ok(()) => tracing::debug!("boşta kalan imleç kapatıldı"),
+                Err(e) => tracing::debug!(code = %ErrorPayload::from(&e).code, "boşta kalan imleç kapatılamadı"),
+            }
+        }
+    }));
+}
+
+async fn close_cursor_quietly(exec: &mut Executor) {
+    if let Err(e) = exec.close_cursor().await {
+        tracing::debug!(code = %ErrorPayload::from(&e).code, "imleç kapatılamadı");
+    }
+}
+
+/// Sunucuyu yoklayarak transaction durumunu düzeltir; çelişkide yoklama kazanır.
+async fn resync(slot: &SessionSlot, exec: &mut Executor) {
+    let machine = slot.state();
+    let probed = match exec.exec_internal(PROBE).await {
+        Ok(rows) => {
+            if rows.first().and_then(|r| r.first()).and_then(|v| v.as_deref()) == Some("t") {
+                TxState::InTransaction
+            } else {
+                TxState::Idle
+            }
+        }
+        Err(Error::Query { sqlstate: Some(code), .. }) if code == "25P02" => TxState::Failed,
+        Err(e) => {
+            tracing::warn!(code = %ErrorPayload::from(&e).code, "transaction durumu yoklanamadı");
+            return;
+        }
+    };
+    if probed != machine {
+        tracing::warn!(?machine, ?probed, "transaction durumu yoklamayla düzeltildi");
+    }
+    slot.set_state(probed);
+    exec.set_in_tx(probed != TxState::Idle);
+}
+
+/// Sorgu Aracı oturumları. `Arc` ile paylaşılır; oturum başına aynı anda tek işlem (`run`/`more`/`tx`/…).
+pub struct QueryManager {
+    mgr: Arc<ConnectionManager>,
+    registry: Arc<RwLock<Registry>>,
+    sessions: StdMutex<HashMap<SessionId, Arc<SessionSlot>>>,
+    /// `more()` almayan açık imlecin kapatılma süresi (varsayılan `DEFAULT_CURSOR_IDLE`).
+    pub cursor_idle: Duration,
+}
+
+impl QueryManager {
+    pub fn new(mgr: Arc<ConnectionManager>, registry: Arc<RwLock<Registry>>) -> Self {
+        QueryManager { mgr, registry, sessions: StdMutex::new(HashMap::new()), cursor_idle: DEFAULT_CURSOR_IDLE }
+    }
+
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<SessionId, Arc<SessionSlot>>> {
+        self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn slot(&self, session: SessionId) -> Result<Arc<SessionSlot>> {
+        self.map().get(&session).cloned().ok_or_else(|| Error::NotFound("sorgu oturumu".into()))
+    }
+
+    /// Bağlı bir sunucuda yeni bir sorgu oturumu açar. Sunucunun salt okunur kilidi ve üretim etiketi açılışta
+    /// okunur (değişirse oturumlar `close_sessions_of` ile kapatılmalıdır).
+    pub async fn open(&self, server: Uuid, db: Target, opts: SessionOptions) -> Result<SessionId> {
+        if !self.mgr.is_connected(server) {
+            return Err(Error::NotConnected);
+        }
+        let guard = {
+            let registry = self.registry.read().unwrap_or_else(PoisonError::into_inner);
+            let config = registry.get(server).ok_or(Error::UnknownServer(server))?;
+            Guard { locked: config.read_only_lock, production: config.is_production() }
+        };
+        let profile = SessionProfile::Query { read_only: guard.locked, statement_timeout_ms: opts.statement_timeout_ms };
+        let conn = self.mgr.open_dedicated(server, db, profile).await?;
+        let id = Uuid::new_v4();
+        let slot = Arc::new(SessionSlot {
+            server,
+            target: db,
+            guard,
+            state: StdMutex::new(TxState::Idle),
+            inner: Mutex::new(Inner {
+                exec: Some(Executor::new(conn)),
+                opts,
+                applied_timeout: Some(opts.statement_timeout_ms),
+                last_used: Instant::now(),
+                cursor_timer: None,
+                cursor_gen: 0,
+            }),
+            cancel: CancelToken::default(),
+        });
+        self.map().insert(id, slot);
+        tracing::debug!(%server, session = %id, locked = guard.locked, "sorgu oturumu açıldı");
+        Ok(id)
+    }
+
+    /// Ağa gitmeden betiğin planı (kilit/onay bayrakları dahil).
+    pub fn analyze(&self, session: SessionId, sql: &str, scope: Scope) -> Result<Vec<StmtPlan>> {
+        let slot = self.slot(session)?;
+        Ok(plan_script(sql, scope, slot.guard)?.into_iter().map(|p| p.plan).collect())
+    }
+
+    /// Kapsamdaki ifadeleri sırayla çalıştırır; ilk hatada durur. Kapılardan geçmeyen betiğin hiçbir ifadesi
+    /// çalışmaz (`Err`). Olay alıcısı giderse çalıştırma sessizce durur (`ScriptDone` gönderilmez).
+    pub async fn run(
+        &self,
+        session: SessionId,
+        sql: &str,
+        scope: Scope,
+        limit: u32,
+        confirmed: bool,
+        sink: &mut dyn EventSink,
+    ) -> Result<()> {
+        let slot = self.slot(session)?;
+        let planned = plan_script(sql, scope, slot.guard)?;
+        check_gates(&planned, confirmed)?;
+        if limit == 0 {
+            return Err(Error::Invalid("satır sınırı 0 olamaz".into()));
+        }
+        let mut inner = slot.inner.try_lock().map_err(|_| busy())?;
+        disarm(&mut inner);
+        if let Some(first) = planned.first() {
+            step(slot.state(), TxEvent::Ok(first.tx))?;
+        }
+        slot.cancel.begin();
+        let result = self.run_script(&slot, &mut inner, sql, &planned, limit, sink).await;
+        slot.cancel.end();
+        self.finish(&slot, &mut inner).await;
+        result
+    }
+
+    async fn run_script(
+        &self,
+        slot: &SessionSlot,
+        inner: &mut Inner,
+        sql: &str,
+        planned: &[Planned],
+        limit: u32,
+        sink: &mut dyn EventSink,
+    ) -> Result<()> {
+        if planned.is_empty() {
+            sink.send(QueryEvent::ScriptDone { stmts_run: 0, stopped_on_error: false });
+            return Ok(());
+        }
+        self.wake(slot, inner).await?;
+        let mode = inner.opts.mode;
+        let Some(exec) = inner.exec.as_mut() else { return Err(Error::NotConnected) };
+        let cfg = ExecConfig { limit, chunk: DEFAULT_CHUNK, autocommit: mode == TxMode::Autocommit };
+        let (mut stmts_run, mut stopped) = (0u32, false);
+        for p in planned {
+            if slot.cancel.requested() {
+                stopped = true;
+                break;
+            }
+            let (idx, offset) = (p.plan.index, p.plan.char_offset);
+            let state = slot.state();
+            if let Err(e) = step(state, TxEvent::Ok(p.tx)) {
+                sink.send(QueryEvent::Failed {
+                    stmt_index: idx,
+                    error: ErrorPayload::from(&e),
+                    position: None,
+                    char_offset: offset,
+                    notices: Vec::new(),
+                });
+                stopped = true;
+                break;
+            }
+            if mode == TxMode::Manual && state == TxState::Idle && p.plan.kind != StmtKind::Tx {
+                close_cursor_quietly(exec).await;
+                if let Err(e) = exec.exec_internal("BEGIN").await {
+                    stmts_run += 1;
+                    sink.send(QueryEvent::Failed {
+                        stmt_index: idx,
+                        error: ErrorPayload::from(&e),
+                        position: None,
+                        char_offset: offset,
+                        notices: Vec::new(),
+                    });
+                    resync(slot, exec).await;
+                    stopped = true;
+                    break;
+                }
+                exec.set_in_tx(true);
+                slot.set_state(TxState::InTransaction);
+            }
+
+            let handle = exec.cancel_handle();
+            let mut guarded = GuardSink::new(&mut *sink, &slot.cancel);
+            let text = &sql[p.range.clone()];
+            let outcome = cancellable(&slot.cancel, &handle, exec.run_statement(idx, text, offset, &cfg, &mut guarded)).await;
+            let (gone, failed) = (guarded.gone, guarded.failed);
+            stmts_run += 1;
+            if gone && exec.last_path() == Some(Path::Direct) {
+                // Doğrudan yolun akışı bırakıldı ama sunucu ifadeyi sürdürüyor olabilir: iptal edilir.
+                cancel_quietly(&handle).await;
+            }
+            let ok = outcome == StmtOutcome::Completed;
+            let event = if ok {
+                Some(TxEvent::Ok(p.tx))
+            } else if failed {
+                Some(TxEvent::Error(p.tx))
+            } else {
+                None // alıcı gitti; ifadenin sonucu belirsiz, yoklama karar verir
+            };
+            if let Some(ev) = event {
+                let before = slot.state();
+                slot.set_state(step(before, ev).unwrap_or(before));
+            }
+            if !ok || p.plan.kind == StmtKind::Tx {
+                resync(slot, exec).await;
+            }
+            if gone {
+                return Ok(());
+            }
+            if !ok {
+                stopped = true;
+                break;
+            }
+        }
+        sink.send(QueryEvent::ScriptDone { stmts_run, stopped_on_error: stopped });
+        Ok(())
+    }
+
+    /// Uykudaki ya da bağlantısı kopmuş oturumu yeniden bağlar. Kopan bağlantıda açık transaction varsa
+    /// bir kez hata döner (transaction kayboldu), sonraki çağrı yeniden bağlanır.
+    async fn wake(&self, slot: &SessionSlot, inner: &mut Inner) -> Result<()> {
+        if inner.exec.as_ref().is_some_and(Executor::is_closed) {
+            inner.exec = None;
+            let lost = slot.state() != TxState::Idle;
+            slot.set_state(TxState::Idle);
+            if lost {
+                tracing::warn!(server = %slot.server, "sorgu oturumunun bağlantısı koptu, açık transaction kayboldu");
+                return Err(Error::Query {
+                    sqlstate: None,
+                    message: "Sorgu oturumunun bağlantısı koptu; açık transaction geri alındı.".into(),
+                    detail: None,
+                    hint: Some("Sonraki çalıştırma yeniden bağlanır.".into()),
+                });
+            }
+        }
+        if inner.exec.is_none() {
+            let conn = self.mgr.open_dedicated(slot.server, slot.target, slot.profile(&inner.opts)).await?;
+            inner.exec = Some(Executor::new(conn));
+            inner.applied_timeout = Some(inner.opts.statement_timeout_ms);
+            slot.set_state(TxState::Idle);
+            tracing::debug!(server = %slot.server, "sorgu oturumu yeniden bağlandı");
+        }
+        Ok(())
+    }
+
+    /// İşlem sonu: transaction dışındaysa bekleyen `statement_timeout`'u uygular, boşta imleç zamanlayıcısını
+    /// kurar, son kullanım zamanını günceller.
+    async fn finish(&self, slot: &Arc<SessionSlot>, inner: &mut Inner) {
+        let want = inner.opts.statement_timeout_ms;
+        if slot.state() == TxState::Idle
+            && inner.applied_timeout != Some(want)
+            && let Some(exec) = inner.exec.as_mut()
+            && !exec.cursor_open()
+        {
+            match exec.exec_internal(&format!("SET statement_timeout = {want}")).await {
+                Ok(_) => inner.applied_timeout = Some(want),
+                Err(e) => tracing::warn!(code = %ErrorPayload::from(&e).code, "statement_timeout uygulanamadı"),
+            }
+        }
+        arm_cursor_timer(slot, inner, self.cursor_idle);
+        inner.last_used = Instant::now();
+    }
+
+    /// Açık imleçten sonraki parça. İmleç yoksa (kapandı, oturum uyudu) `Error::Invalid`.
+    pub async fn more(&self, session: SessionId, stmt_index: u32, sink: &mut dyn EventSink) -> Result<()> {
+        let slot = self.slot(session)?;
+        let mut inner = slot.inner.try_lock().map_err(|_| busy())?;
+        disarm(&mut inner);
+        let result = match inner.exec.as_mut() {
+            None => Err(Error::Invalid("açık imleç yok".into())),
+            Some(exec) => {
+                slot.cancel.begin();
+                let handle = exec.cancel_handle();
+                let mut guarded = GuardSink::new(&mut *sink, &slot.cancel);
+                let result = cancellable(&slot.cancel, &handle, exec.more(stmt_index, &mut guarded)).await;
+                let requested = slot.cancel.requested();
+                slot.cancel.end();
+                if matches!(result, Err(Error::Query { .. })) {
+                    resync(&slot, exec).await;
+                }
+                let is_cancel = result.as_ref().err().is_some_and(is_cancel_error);
+                result.map_err(|e| match e {
+                    Error::Query { message, .. } if requested && is_cancel => Error::Query {
+                        sqlstate: None,
+                        message: CANCELLED_MESSAGE.into(),
+                        detail: Some(message),
+                        hint: None,
+                    },
+                    e => e,
+                })
+            }
+        };
+        self.finish(&slot, &mut inner).await;
+        result
+    }
+
+    /// Çalışan ifadeyi iptal eder (oturum kilidini beklemez). Boştayken etkisizdir.
+    pub fn cancel(&self, session: SessionId) {
+        if let Ok(slot) = self.slot(session)
+            && slot.cancel.request()
+        {
+            tracing::debug!(session = %session, "iptal istendi");
+        }
+    }
+
+    /// COMMIT / ROLLBACK. `Failed` iken COMMIT reddedilir.
+    pub async fn tx(&self, session: SessionId, op: TxAction) -> Result<TxState> {
+        let slot = self.slot(session)?;
+        let mut inner = slot.inner.try_lock().map_err(|_| busy())?;
+        disarm(&mut inner);
+        let result = Self::tx_locked(&slot, &mut inner, op).await;
+        self.finish(&slot, &mut inner).await;
+        result
+    }
+
+    async fn tx_locked(slot: &SessionSlot, inner: &mut Inner, op: TxAction) -> Result<TxState> {
+        let tx = match op {
+            TxAction::Commit => TxOp::Commit,
+            TxAction::Rollback => TxOp::Rollback,
+        };
+        step(slot.state(), TxEvent::Ok(Some(tx)))?;
+        // Uykudaki oturumda transaction yoktur.
+        let Some(exec) = inner.exec.as_mut() else { return Ok(slot.state()) };
+        close_cursor_quietly(exec).await;
+        let sql = match op {
+            TxAction::Commit => "COMMIT",
+            TxAction::Rollback => "ROLLBACK",
+        };
+        let result = exec.exec_internal(sql).await;
+        // Başarılı ya da başarısız, COMMIT/ROLLBACK transaction'ı bitirir.
+        slot.set_state(TxState::Idle);
+        exec.set_in_tx(false);
+        resync(slot, exec).await;
+        result.map(|_| slot.state())
+    }
+
+    /// Makinenin bildiği transaction durumu (kilitsiz).
+    pub fn tx_state(&self, session: SessionId) -> Result<TxState> {
+        Ok(self.slot(session)?.state())
+    }
+
+    /// Mod ve `statement_timeout`. Mod değişikliği açık transaction varken reddedilir. Zaman aşımı hemen
+    /// uygulanır; transaction içindeyse (ROLLBACK onu geri alabileceği için) transaction bitince yeniden uygulanır.
+    pub async fn set_options(&self, session: SessionId, opts: SessionOptions) -> Result<()> {
+        if opts.statement_timeout_ms > MAX_STATEMENT_TIMEOUT_MS {
+            return Err(Error::Invalid("statement_timeout en fazla 2147483647 ms olabilir.".into()));
+        }
+        let slot = self.slot(session)?;
+        let mut inner = slot.inner.try_lock().map_err(|_| busy())?;
+        disarm(&mut inner);
+        let result = Self::set_options_locked(&slot, &mut inner, opts).await;
+        self.finish(&slot, &mut inner).await;
+        result
+    }
+
+    async fn set_options_locked(slot: &SessionSlot, inner: &mut Inner, opts: SessionOptions) -> Result<()> {
+        if let Some(exec) = inner.exec.as_mut() {
+            close_cursor_quietly(exec).await;
+        }
+        let state = slot.state();
+        if opts.mode != inner.opts.mode && state != TxState::Idle {
+            return Err(Error::Invalid(MODE_IN_TX_MESSAGE.into()));
+        }
+        inner.opts = opts;
+        if state == TxState::Failed {
+            return Ok(()); // ROLLBACK sonrası `finish` uygular
+        }
+        if let Some(exec) = inner.exec.as_mut() {
+            exec.exec_internal(&format!("SET statement_timeout = {}", opts.statement_timeout_ms)).await?;
+            if state == TxState::Idle {
+                inner.applied_timeout = Some(opts.statement_timeout_ms);
+            }
+        }
+        Ok(())
+    }
+
+    /// Oturumu kapatır. Açık transaction `policy`'ye göre onaylanır, geri alınır ya da kapanış reddedilir.
+    pub async fn close(&self, session: SessionId, policy: ClosePolicy) -> Result<()> {
+        let slot = self.slot(session)?;
+        let mut inner = slot.inner.try_lock().map_err(|_| busy())?;
+        disarm(&mut inner);
+        if let Some(exec) = inner.exec.as_mut() {
+            close_cursor_quietly(exec).await;
+            let state = slot.state();
+            if state != TxState::Idle {
+                let refused = match policy {
+                    ClosePolicy::Refuse => Some(Error::Invalid(OPEN_TX_MESSAGE.into())),
+                    ClosePolicy::Commit if state == TxState::Failed => Some(Error::Invalid(TX_FAILED_MESSAGE.into())),
+                    ClosePolicy::Commit => match exec.exec_internal("COMMIT").await {
+                        Ok(_) => None,
+                        Err(e) => {
+                            slot.set_state(TxState::Idle);
+                            resync(&slot, exec).await;
+                            Some(e)
+                        }
+                    },
+                    ClosePolicy::Rollback => {
+                        if let Err(e) = exec.exec_internal("ROLLBACK").await {
+                            tracing::debug!(code = %ErrorPayload::from(&e).code, "kapanışta ROLLBACK başarısız");
+                        }
+                        None
+                    }
+                };
+                if let Some(e) = refused {
+                    self.finish(&slot, &mut inner).await;
+                    return Err(e);
+                }
+            }
+        }
+        inner.exec = None;
+        slot.set_state(TxState::Idle);
+        self.map().remove(&session);
+        tracing::debug!(session = %session, "sorgu oturumu kapatıldı");
+        Ok(())
+    }
+
+    /// Sunucunun tüm oturumlarını kapatır: çalışan ifadeler iptal edilir, açık transaction'lar geri alınır
+    /// (sunucu silinirken, bağlantı kesilirken ya da hedef/kilit değişince).
+    pub async fn close_sessions_of(&self, server: Uuid) {
+        let slots: Vec<Arc<SessionSlot>> = {
+            let mut map = self.map();
+            let ids: Vec<SessionId> = map.iter().filter(|(_, s)| s.server == server).map(|(id, _)| *id).collect();
+            ids.into_iter().filter_map(|id| map.remove(&id)).collect()
+        };
+        for slot in slots {
+            slot.cancel.request();
+            let Ok(mut inner) = tokio::time::timeout(FORCE_CLOSE_WAIT, slot.inner.lock()).await else {
+                // Çalışma bitince oturum düşer ve bağlantı kapanır (sunucu transaction'ı geri alır).
+                tracing::warn!(%server, "sorgu oturumu zamanında durmadı; bitince kapanacak");
+                continue;
+            };
+            disarm(&mut inner);
+            if let Some(mut exec) = inner.exec.take()
+                && (slot.state() != TxState::Idle || exec.cursor_open())
+            {
+                // Bağlantı kapanınca sunucu da geri alır; açık ROLLBACK kısa bir süre sınırıyla denenir.
+                let _ = tokio::time::timeout(FORCE_CLOSE_WAIT, exec.exec_internal("ROLLBACK")).await;
+            }
+            slot.set_state(TxState::Idle);
+        }
+    }
+
+    /// `max_idle` boyunca kullanılmayan, transaction dışındaki oturumların bağlantısını kapatır ("uyku");
+    /// sonraki işlem sessizce yeniden bağlanır. Açık transaction'lı ya da meşgul oturumlara dokunmaz.
+    pub fn reap_idle(&self, max_idle: Duration) {
+        let slots: Vec<Arc<SessionSlot>> = self.map().values().cloned().collect();
+        for slot in slots {
+            let Ok(mut inner) = slot.inner.try_lock() else { continue };
+            if inner.exec.is_some() && slot.state() == TxState::Idle && inner.last_used.elapsed() >= max_idle {
+                disarm(&mut inner);
+                inner.exec = None;
+                tracing::debug!(server = %slot.server, "boşta kalan sorgu oturumu uyutuldu");
+            }
+        }
+    }
+
+    /// Test yardımcısı: oturum uykuda mı (bağlantısı kapatılmış).
+    #[doc(hidden)]
+    pub fn is_asleep(&self, session: SessionId) -> Result<bool> {
+        let slot = self.slot(session)?;
+        Ok(slot.inner.try_lock().map(|i| i.exec.is_none()).unwrap_or(false))
+    }
+
+    /// Test yardımcısı: bağlantısız (uykuda) bir oturum ekler.
+    #[cfg(test)]
+    fn insert_sleeping(&self, guard: Guard, state: TxState) -> SessionId {
+        let id = Uuid::new_v4();
+        let slot = Arc::new(SessionSlot {
+            server: Uuid::new_v4(),
+            target: Target::Maintenance,
+            guard,
+            state: StdMutex::new(state),
+            inner: Mutex::new(Inner {
+                exec: None,
+                opts: SessionOptions::default(),
+                applied_timeout: None,
+                last_used: Instant::now(),
+                cursor_timer: None,
+                cursor_gen: 0,
+            }),
+            cancel: CancelToken::default(),
+        });
+        self.map().insert(id, slot);
+        id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SELECT: Option<TxOp> = None;
+
+    #[test]
+    fn transaction_state_machine_table() {
+        use TxState::*;
+        let ok = |op| TxEvent::Ok(Some(op));
+        let cases: [(TxState, TxEvent, Option<TxState>); 12] = [
+            (Idle, ok(TxOp::Begin), Some(InTransaction)),
+            (InTransaction, ok(TxOp::Commit), Some(Idle)),
+            (InTransaction, ok(TxOp::Rollback), Some(Idle)),
+            (InTransaction, TxEvent::Error(SELECT), Some(Failed)),
+            (Idle, TxEvent::Error(SELECT), Some(Idle)),
+            (Failed, ok(TxOp::Rollback), Some(Idle)),
+            (Failed, ok(TxOp::RollbackTo), Some(InTransaction)),
+            (Failed, TxEvent::Ok(SELECT), None),
+            (Failed, ok(TxOp::Commit), None),
+            (InTransaction, ok(TxOp::Savepoint), Some(InTransaction)),
+            (InTransaction, TxEvent::Error(Some(TxOp::Commit)), Some(Idle)),
+            (Idle, TxEvent::Ok(SELECT), Some(Idle)),
+        ];
+        for (state, ev, want) in cases {
+            match (step(state, ev), want) {
+                (Ok(got), Some(want)) => assert_eq!(got, want, "{state:?} + {ev:?}"),
+                (Err(Error::Invalid(m)), None) => assert_eq!(m, TX_FAILED_MESSAGE),
+                (got, want) => panic!("{state:?} + {ev:?}: {got:?}, beklenen {want:?}"),
+            }
+        }
+    }
+
+    fn plans(sql: &str, guard: Guard) -> Vec<StmtPlan> {
+        plan_script(sql, Scope::All, guard).unwrap().into_iter().map(|p| p.plan).collect()
+    }
+
+    fn gate(sql: &str, guard: Guard, confirmed: bool) -> Result<()> {
+        check_gates(&plan_script(sql, Scope::All, guard).unwrap(), confirmed)
+    }
+
+    fn invalid(r: Result<()>) -> String {
+        match r {
+            Err(Error::Invalid(m)) => m,
+            other => panic!("Invalid bekleniyordu: {other:?}"),
+        }
+    }
+
+    const LOCKED: Guard = Guard { locked: true, production: false };
+    const PROD: Guard = Guard { locked: false, production: true };
+    const PLAIN: Guard = Guard { locked: false, production: false };
+
+    #[test]
+    fn locked_server_rejects_writes_and_allows_selects() {
+        let p = plans("insert into t values (1)", LOCKED);
+        assert!(p[0].locked_reject);
+        assert_eq!(p[0].locked_reason, Some(LockedReason::Write));
+        assert_eq!(plans("create table t(i int)", LOCKED)[0].locked_reason, Some(LockedReason::Ddl));
+        assert!(!plans("select 1", LOCKED)[0].locked_reject);
+        assert!(gate("select 1", LOCKED, false).is_ok());
+        assert!(!plans("insert into t values (1)", PLAIN)[0].locked_reject);
+        // Betikte tek bir yazma ifadesi tüm betiği engeller.
+        assert_eq!(invalid(gate("select 1; insert into t values (1); select 2", LOCKED, true)), LOCKED_WRITE_MESSAGE);
+    }
+
+    #[test]
+    fn locked_server_rejects_read_only_escapes() {
+        for sql in [
+            "set default_transaction_read_only = off",
+            "begin read write",
+            "select set_config('default_transaction_read_only','off',false)",
+            "reset all",
+        ] {
+            let p = plans(sql, LOCKED);
+            assert_eq!(p[0].locked_reason, Some(LockedReason::ReadOnlySetting), "{sql}");
+            assert_eq!(invalid(gate(sql, LOCKED, true)), LOCKED_SETTING_MESSAGE, "{sql}");
+            assert_eq!(invalid(gate(&format!("select 1; {sql}"), LOCKED, true)), LOCKED_SETTING_MESSAGE, "{sql}");
+            assert!(!plans(sql, PLAIN)[0].locked_reject, "{sql}");
+            assert!(gate(sql, PLAIN, false).is_ok(), "{sql}");
+        }
+        assert!(gate("begin read only", LOCKED, false).is_ok());
+    }
+
+    #[test]
+    fn production_writes_and_dangerous_statements_need_confirmation() {
+        let p = plans("update t set a = 1 where id = 1", PROD);
+        assert!(p[0].production_write && p[0].danger.is_none());
+        assert_eq!(invalid(gate("update t set a = 1 where id = 1", PROD, false)), CONFIRMATION_REQUIRED);
+        assert!(gate("update t set a = 1 where id = 1", PROD, true).is_ok());
+        assert!(gate("select 1", PROD, false).is_ok());
+
+        let p = plans("update t set a = 1", PLAIN);
+        assert_eq!((p[0].danger, p[0].production_write), (Some(Danger::UpdateWithoutWhere), false));
+        assert_eq!(invalid(gate("select 1; update t set a = 1", PLAIN, false)), CONFIRMATION_REQUIRED);
+        assert!(gate("update t set a = 1", PLAIN, true).is_ok());
+        assert!(gate("update t set a = 1 where id = 1", PLAIN, false).is_ok());
+        // Kilit onaydan önce gelir: onay kilidi aşmaz.
+        assert_eq!(invalid(gate("delete from t", LOCKED, true)), LOCKED_WRITE_MESSAGE);
+    }
+
+    #[test]
+    fn sensitive_statements_are_flagged_in_plan() {
+        let p = plans("select 1; alter role app password 'x'; create user u with password 'y'", PLAIN);
+        assert_eq!(p.iter().map(|p| p.sensitive).collect::<Vec<_>>(), [false, true, true]);
+    }
+
+    #[test]
+    fn scopes_pick_statements_with_char_offsets() {
+        let sql = "select 'ğü'; select 2;\n  select 3";
+        let all = plan_script(sql, Scope::All, PLAIN).unwrap();
+        assert_eq!(all.iter().map(|p| (p.plan.index, p.plan.char_offset)).collect::<Vec<_>>(), [(0, 0), (1, 13), (2, 25)]);
+        assert_eq!(&sql[all[2].range.clone()], "select 3");
+
+        // Seçim kendi başına bir betiktir: indeksler seçim içi, ofsetler editör metnine göre.
+        let sel = plan_script(sql, Scope::Selection { start: 13, end: 34 }, PLAIN).unwrap();
+        assert_eq!(sel.iter().map(|p| (p.plan.index, p.plan.char_offset)).collect::<Vec<_>>(), [(0, 13), (1, 25)]);
+        assert_eq!(&sql[sel[0].range.clone()], "select 2");
+
+        let at = plan_script(sql, Scope::AtCursor { offset: 16 }, PLAIN).unwrap();
+        assert_eq!(at.len(), 1);
+        assert_eq!((at[0].plan.index, at[0].plan.char_offset, &sql[at[0].range.clone()]), (0, 13, "select 2"));
+
+        assert!(plan_script(sql, Scope::Selection { start: 5, end: 2 }, PLAIN).is_err());
+        assert!(plan_script("", Scope::AtCursor { offset: 0 }, PLAIN).unwrap().is_empty());
+        assert!(plan_script(sql, Scope::Selection { start: 3, end: 3 }, PLAIN).unwrap().is_empty());
+    }
+
+    #[test]
+    fn plan_serializes_camel_case() {
+        let p = plans("insert into t values (1)", LOCKED)[0];
+        let v = serde_json::to_value(p).unwrap();
+        assert_eq!(v["lockedReject"], true);
+        assert_eq!(v["lockedReason"], "write");
+        assert_eq!(v["productionWrite"], false);
+        assert_eq!(serde_json::to_value(TxState::InTransaction).unwrap(), "inTransaction");
+        let scope: Scope = serde_json::from_value(serde_json::json!({"type": "atCursor", "offset": 3})).unwrap();
+        assert_eq!(scope, Scope::AtCursor { offset: 3 });
+        let opts: SessionOptions =
+            serde_json::from_value(serde_json::json!({"mode": "manual", "statementTimeoutMs": 5})).unwrap();
+        assert_eq!(opts, SessionOptions { mode: TxMode::Manual, statement_timeout_ms: 5 });
+    }
+
+    fn manager() -> QueryManager {
+        QueryManager::new(Arc::new(ConnectionManager::new()), Arc::new(RwLock::new(Registry::unavailable("servers.json"))))
+    }
+
+    struct Nop;
+    impl EventSink for Nop {
+        fn send(&mut self, _: QueryEvent) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn open_requires_a_connected_server() {
+        let qm = manager();
+        let err = qm.open(Uuid::new_v4(), Target::Maintenance, SessionOptions::default()).await.unwrap_err();
+        assert!(matches!(err, Error::NotConnected), "{err:?}");
+    }
+
+    /// Kapılar ağa gitmeden çalışır: geçen betik yeniden bağlanmaya çalışır (`NotConnected`), geçmeyen
+    /// kapı hatasıyla döner.
+    #[tokio::test]
+    async fn run_gates_apply_before_any_connection() {
+        let qm = manager();
+        let plain = qm.insert_sleeping(PLAIN, TxState::Idle);
+        let err = qm.run(plain, "update t set a = 1", Scope::All, 100, false, &mut Nop).await.unwrap_err();
+        assert!(matches!(&err, Error::Invalid(m) if m == CONFIRMATION_REQUIRED), "{err:?}");
+        let err = qm.run(plain, "update t set a = 1", Scope::All, 100, true, &mut Nop).await.unwrap_err();
+        assert!(matches!(err, Error::NotConnected), "onay sonrası çalıştırılmaya çalışılır: {err:?}");
+
+        let prod = qm.insert_sleeping(PROD, TxState::Idle);
+        let err = qm.run(prod, "insert into t values (1)", Scope::All, 100, false, &mut Nop).await.unwrap_err();
+        assert!(matches!(&err, Error::Invalid(m) if m == CONFIRMATION_REQUIRED), "{err:?}");
+
+        let locked = qm.insert_sleeping(LOCKED, TxState::Idle);
+        let err = qm.run(locked, "select 1; insert into t values (1)", Scope::All, 100, true, &mut Nop).await.unwrap_err();
+        assert!(matches!(&err, Error::Invalid(m) if m == LOCKED_WRITE_MESSAGE), "{err:?}");
+        let analyzed = qm.analyze(locked, "select 1; insert into t values (1)", Scope::All).unwrap();
+        assert_eq!(analyzed.iter().map(|p| p.locked_reject).collect::<Vec<_>>(), [false, true]);
+
+        let failed = qm.insert_sleeping(PLAIN, TxState::Failed);
+        let err = qm.run(failed, "select 1", Scope::All, 100, false, &mut Nop).await.unwrap_err();
+        assert!(matches!(&err, Error::Invalid(m) if m == TX_FAILED_MESSAGE), "{err:?}");
+        let err = qm.tx(failed, TxAction::Commit).await.unwrap_err();
+        assert!(matches!(&err, Error::Invalid(m) if m == TX_FAILED_MESSAGE), "{err:?}");
+        let err = qm.run(failed, "rollback", Scope::All, 100, false, &mut Nop).await.unwrap_err();
+        assert!(matches!(err, Error::NotConnected), "ROLLBACK kapıdan geçer: {err:?}");
+
+        let err = qm.run(plain, "select 1", Scope::All, 0, false, &mut Nop).await.unwrap_err();
+        assert!(matches!(err, Error::Invalid(_)), "{err:?}");
+        assert!(matches!(qm.tx_state(Uuid::new_v4()), Err(Error::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn busy_session_rejects_a_second_operation_and_idle_cancel_is_ignored() {
+        let qm = manager();
+        let id = qm.insert_sleeping(PLAIN, TxState::Idle);
+        let slot = qm.slot(id).unwrap();
+        assert!(!slot.cancel.request(), "boştayken iptal yok sayılır");
+        assert!(!slot.cancel.requested());
+        let held = slot.inner.lock().await;
+        let err = qm.run(id, "select 1", Scope::All, 100, false, &mut Nop).await.unwrap_err();
+        assert!(matches!(&err, Error::Invalid(m) if m == BUSY_MESSAGE), "{err:?}");
+        assert!(matches!(qm.tx(id, TxAction::Rollback).await, Err(Error::Invalid(m)) if m == BUSY_MESSAGE));
+        assert_eq!(qm.tx_state(id).unwrap(), TxState::Idle, "durum kilitsiz okunur");
+        drop(held);
+        let err = qm.set_options(id, SessionOptions { mode: TxMode::Manual, statement_timeout_ms: u32::MAX }).await;
+        assert!(matches!(err, Err(Error::Invalid(_))));
+        qm.close(id, ClosePolicy::Refuse).await.unwrap();
+        assert!(qm.tx_state(id).is_err());
+    }
+
+    #[test]
+    fn cancel_rewrites_only_timeout_failures_of_a_requested_cancel() {
+        struct Keep(Vec<QueryEvent>);
+        impl EventSink for Keep {
+            fn send(&mut self, ev: QueryEvent) -> bool {
+                self.0.push(ev);
+                true
+            }
+        }
+        let token = CancelToken::default();
+        let failed = |code: &str| QueryEvent::Failed {
+            stmt_index: 0,
+            error: ErrorPayload::from(&Error::Query {
+                sqlstate: Some(code.into()),
+                message: "canceling statement due to user request".into(),
+                detail: None,
+                hint: None,
+            }),
+            position: None,
+            char_offset: 0,
+            notices: Vec::new(),
+        };
+        let mut keep = Keep(Vec::new());
+        {
+            let mut g = GuardSink::new(&mut keep, &token);
+            g.send(failed("57014")); // iptal istenmedi: zaman aşımı iletisi kalır
+            token.begin();
+            token.request();
+            g.send(failed("57014"));
+            g.send(failed("22012"));
+            assert!(g.failed);
+        }
+        let msgs: Vec<_> = keep
+            .0
+            .iter()
+            .map(|e| match e {
+                QueryEvent::Failed { error, .. } => (error.message.clone(), error.detail.clone()),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(msgs[0].0, timeout_text());
+        assert_eq!(msgs[1].0, CANCELLED_MESSAGE);
+        assert_eq!(msgs[1].1.as_deref(), Some("canceling statement due to user request"));
+        assert_eq!(msgs[2].0, "canceling statement due to user request");
+        assert!(is_cancel_error(&Error::Query { sqlstate: Some("57014".into()), message: String::new(), detail: None, hint: None }));
+    }
+}

@@ -218,18 +218,21 @@ impl Executor {
 
     /// Oturum katmanının kesin bilgisiyle (ör. `statement_timestamp() <> transaction_timestamp()` yoklaması)
     /// transaction durumunu düzeltir.
-    #[cfg_attr(not(test), allow(dead_code))] // Task 6 (oturum eşitlemesi) kullanır.
     pub(crate) fn set_in_tx(&mut self, in_tx: bool) {
         self.in_tx = in_tx;
     }
 
     /// Çalıştırıcının kendi iç SQL'i (yoklama, ayar): olay yok, transaction izlemesi yok, NOTICE'lar atılır.
     /// Satırlar metin olarak döner. Açık imlece dokunmaz.
-    #[cfg_attr(not(test), allow(dead_code))] // Task 6 (oturum eşitlemesi) kullanır.
     pub(crate) async fn exec_internal(&mut self, sql: &str) -> Result<TextRows> {
         let messages = self.simple(sql).await;
         self.notices.reset();
         Ok(text_rows(&messages.map_err(Error::from_query)?))
+    }
+
+    /// Bağlantı kapandı mı (sunucu oturumu sonlandırdı, ağ koptu…).
+    pub fn is_closed(&self) -> bool {
+        self.conn.client.is_closed()
     }
 
     /// `more()` ile okunabilecek açık bir imleç var mı.
