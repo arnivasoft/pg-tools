@@ -8,6 +8,7 @@
   toplamlarını okur (MiB = 1.048.576 bayt; PowerShell'in 1MB sabiti). Başlattığı tüm süreçleri kapatır.
   UTF-8 BOM ile kaydedilmiştir: Windows PowerShell 5.1 BOM'suz dosyayı ANSI sayar ve Türkçe çıktı bozulur.
 .PARAMETER Exe   Ölçülecek exe (varsayılan: target\release\pg-tools.exe)
+                 Ön yüzü gömülü exe gerekir: `bun run tauri build --no-bundle` ile derleyin (düz cargo build reddedilir).
 .PARAMETER Runs  Çalıştırma sayısı
 #>
 param(
@@ -16,6 +17,12 @@ param(
 )
 $ErrorActionPreference = "Stop"
 if (-not (Test-Path $Exe)) { throw "exe bulunamadı: $Exe" }
+# Gömülü ön yüz denetimi (bkz. smoke-release.ps1): düz cargo build exe'si devUrl'ye yönelir, ölçüm gerçek arayüzü yansıtmaz.
+$exeText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Exe))
+if ($exeText.IndexOf("assets/index-", [StringComparison]::Ordinal) -lt 0) {
+    throw "exe ön yüzü gömmüyor (cargo build?). 'bun run tauri build --no-bundle' ile derleyin: $Exe"
+}
+Remove-Variable exeText
 
 function Get-Tree([int]$rootPid) {
     $all = Get-CimInstance Win32_Process

@@ -288,8 +288,7 @@ Bu yöntemle Task 8'de akışlar (onay, transaction, iptal, CSV, geçmiş, 50.00
 kapanışı) ve Task 9'da yayın exe'sinde sorgu sekmesi açılış süresi ile bellek (`docs/performance.md`) doğrulandı.
 
 ## Yayın exe duman testi
-    bun run build
-    cargo build --release -p pg-tools               # DİKKAT: ön yüzü gömmez (devUrl); gerçek arayüz için bun run tauri build
+    bun run tauri build --no-bundle                 # dist + ön yüzü gömülü targeteleasepg-tools.exe (NSIS yok)
     ./scripts/smoke-release.ps1                     # varsayılan: target\release\pg-tools.exe, 6 sn
     ./scripts/smoke-release.ps1 -Exe C:\yol\pg-tools.exe -Seconds 10
 
@@ -298,6 +297,20 @@ dokunmaz, sunucuya bağlanmaz, parola kullanmaz), ana pencerenin 10 sn içinde o
 `-Seconds` boyunca izler, sonra uygulama + WebView2 süreç ağacını kapatır ve geçici
 `%LOCALAPPDATA%\pg-tools\logs` altında `panicked` / `stack overflow` arar. Çıkış kodu 0 = başarılı; ≠ 0 =
 exe yok, pencere oluşmadı, süre dolmadan çıktı (çıkış kodu yazdırılır) ya da logda panik var.
+Betik önce exe'nin ön yüzü gömüp gömmediğini denetler (exe'de düz metin `assets/index-` varlık anahtarı); yoksa
+"BAŞARISIZ: exe ön yüzü gömmüyor (cargo build?)" ile çıkar. Düz `cargo build --release -p pg-tools`, `tauri`
+CLI'nin açtığı `custom-protocol` özelliği olmadan derlendiği için `devUrl`'ye (`http://localhost:1420`) yönelir: pencere
+bir bağlantı hatası sayfası gösterir ve arayüzün açılışta çağırdığı komutlar (`list_servers`, `list_children`,
+`startup_notice`, `qt_drafts_load`, `settings_get` …) hiç çalışmaz — yayın yığın taşması gibi gerilemeler kaçar.
+(Doğrulama 2026-10-06: `cargo build` exe'si 14.146.560 bayt, `assets/index-` yok; `bun run tauri build --no-bundle`
+exe'si 14.369.792 bayt, CDP hedef URL'si `http://tauri.localhost/`, `assets/index-` var; debug exe'de de yok.)
+`scripts/measure.ps1` aynı denetimi yapar.
+
+> **Geçmiş çalıştırmalar için not:** bu denetimden önce belgelenen `cargo build --release` + `smoke-release.ps1`
+> çalıştırmaları (Plan 3, Plan 5 sonu ve Plan 6 Task 8 doğrulama/düzeltme turları) ön yüzü gömülü olmayan exe ile
+> yapılmış olabilir; bunlar yalnızca açılışta çökme olmadığını gösterir, arayüz komutlarının yayın derlemesinde
+> çalıştığını göstermez. Plan 2 (`bun tauri build --no-bundle`) ve Plan 6 Task 9/son düzeltme dalgası `tauri build` exe'siyle yapıldı.
+
 Yalnızca debug derlemede görünmeyen hataları yakalamak içindir: Plan 2'de release exe açılıştan ~1 sn sonra
 ana iş parçacığında yığın taşmasıyla (`STATUS_STACK_OVERFLOW`) çöküyordu; varsayılan 6 sn bu tür bir
 gerilemeyi yakalayacak kadar uzundur. Her yayından önce çalıştırın.

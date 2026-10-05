@@ -135,6 +135,10 @@ tembel yüklenen diyaloglar) sonrasında aynı makinede, Plan 2'de seçilen ayar
     powershell -NoProfile -File scripts/smoke-release.ps1     # BAŞARILI, çıkış kodu 0 (pencere 192 ms, 6 sn ayakta)
     powershell -NoProfile -File scripts/measure.ps1 -Runs 5
 
+> **Not (sonradan eklendi):** bu bölümün exe'si düz `cargo build --release` ile derlendi; ön yüzü gömmeyen (devUrl'ye
+> yönelen) bir exe olabilir (bkz. Plan 6 bölümündeki not ve `docs/testing.md` "Yayın exe duman testi"). Rakamlar
+> değiştirilmedi; arayüzsüz WebView ile ölçülmüş olabilirler.
+
 | Çalıştırma | Pencere (ms) | Toplam özel WS (MiB) | Toplam WS (MiB) | Rust özel WS (MiB) | Süreç |
 |---|---|---|---|---|---|
 | 1 | 121 | 73,7 | 348,2 | 7,2 | 7 |
@@ -175,6 +179,10 @@ yok (Plan 6), bu yüzden boşta bellek değişmemelidir. Aynı makinede, seçile
     powershell -NoProfile -File scripts/smoke-release.ps1     # BAŞARILI, çıkış kodu 0 (pencere 158 ms, 6 sn ayakta)
     powershell -NoProfile -File scripts/measure.ps1 -Runs 5
 
+> **Not (sonradan eklendi):** bu bölümün exe'si düz `cargo build --release` ile derlendi; ön yüzü gömmeyen (devUrl'ye
+> yönelen) bir exe olabilir (bkz. Plan 6 bölümündeki not ve `docs/testing.md` "Yayın exe duman testi"). Rakamlar
+> değiştirilmedi; arayüzsüz WebView ile ölçülmüş olabilirler.
+
 | Çalıştırma | Pencere (ms) | Toplam özel WS (MiB) | Toplam WS (MiB) | Rust özel WS (MiB) | Süreç |
 |---|---|---|---|---|---|
 | 1 | 34 | 72,8 | 347,0 | 7,2 | 7 |
@@ -190,6 +198,7 @@ Plan 3 sonuna göre (73,4 / 7,2 MiB) fark yok.
 ### Exe boyutu (öncesi/sonrası)
 
 `cargo build --release -p pg-tools`, aynı `dist` ile, temiz hedef dizini:
+(Exe boyutu karşılaştırması için geçerli; bu exe ön yüzü gömmez — gömülü exe ~0,2 MiB daha büyüktür.)
 
 | Commit | `pg-tools.exe` |
 |---|---|
