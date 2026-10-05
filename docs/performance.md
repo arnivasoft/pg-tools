@@ -2,9 +2,10 @@
 
 ## Yöntem
 
-Birimler: bu belgedeki tüm bellek ve dosya boyutları ikili birimdir — 1 KiB = 1024 bayt, 1 MiB = 1.048.576 bayt
-(`measure.ps1` PowerShell'in `1MB` sabitiyle böler; bu da 1 MiB'dir). Spec hedefleri de aynı birimle okunur;
-ondalık MB ile aradaki ~%5 fark, buradaki hiçbir sonucu değiştirmez.
+Birimler: `measure.ps1` ile ölçülen değerler ve bayt sayısıyla verilen boyutlar ikili birimdir — 1 KiB = 1024 bayt,
+1 MiB = 1.048.576 bayt (betik PowerShell'in `1MB` sabitiyle böler; bu da 1 MiB'dir). Plan 1 değerleri ve pgAdmin
+tahmini birimi belirsiz kaynaklardan geldiği için MB olarak bırakıldı. Spec hedefleri spec'teki gibi MB yazılır;
+ölçülen her değer hedefin hem MB hem MiB okumasıyla çok altındadır.
 
     bun tauri build --no-bundle        # ya da bun tauri build (kurulum paketiyle)
     ./scripts/measure.ps1 -Runs 5      # varsayılan exe: target\release\pg-tools.exe
@@ -26,8 +27,8 @@ genellikle 100+ ms'dir; sonrakiler 20–45 ms.
 
 ### Metrik neden değişti
 
-Plan 1 "toplam bellek" olarak çalışma kümesi toplamını raporladı (~380 MiB). Çalışma kümesi, WebView2
-süreçlerinin paylaştığı DLL ve bellek eşlemeli sayfaları her süreçte yeniden sayar; 7 süreçte bu ~280 MiB'lık
+Plan 1 "toplam bellek" olarak çalışma kümesi toplamını raporladı (~380 MB). Çalışma kümesi, WebView2
+süreçlerinin paylaştığı DLL ve bellek eşlemeli sayfaları her süreçte yeniden sayar; 7 süreçte bu ~280 MB'lık
 şişmeye yol açar. Kullanıcının makinesinden gerçekten "aldığımız" bellek özel çalışma kümesidir; spec §1.3
 hedefi Plan 2'de bu metrikle yeniden tanımlandı.
 
@@ -47,9 +48,9 @@ hedefi Plan 2'de bu metrikle yeniden tanımlandı.
 5 çalıştırma medyanı: pencere **27 ms**, toplam özel WS **110,2 MiB**, toplam WS 392,3 MiB,
 Rust özel WS **8,5 MiB**, 7 süreç.
 
-Plan 1'deki ~191 MiB "özel bellek" değeri büyük olasılıkla farklı bir sayaçtı (ör. Private Bytes; RAM'de
+Plan 1'deki ~191 MB "özel bellek" değeri büyük olasılıkla farklı bir sayaçtı (ör. Private Bytes; RAM'de
 olmayan taahhüt edilmiş sayfaları da içerir); bu betikle ölçülen özel çalışma kümesi ayarsız hâliyle 110 MiB'dır.
-Rust sürecinin Plan 1'deki 30–40 MiB değeri de çalışma kümesiydi; özel çalışma kümesi 8,5 MiB.
+Rust sürecinin Plan 1'deki 30–40 MB değeri de çalışma kümesiydi; özel çalışma kümesi 8,5 MiB.
 
 > Not: ölçüme başlarken release exe açılıştan hemen sonra `STATUS_STACK_OVERFLOW` ile çıkıyordu. Plan 2'de
 > büyüyen katalog gelecekleri (DDL geleceği ~70 KiB) Tauri'nin invoke işleyicisinde ana iş parçacığının
@@ -113,16 +114,16 @@ toplam WS 354,5 MiB, Rust özel WS 7,4 MiB.
 
 ## Hedef
 
-Karar kuralı (Plan 2, Task 10): seçilen ayarla toplam özel çalışma kümesi < 150 MiB ise spec hedefi aynen
-kalır. 76,1 MiB < 150 MiB olduğundan hedef değerleri değişmedi; yalnızca metrik açıkça "özel çalışma kümesi"
+Karar kuralı (Plan 2, Task 10): seçilen ayarla toplam özel çalışma kümesi < 150 MB ise spec hedefi aynen
+kalır. 76,1 MiB < 150 MB olduğundan hedef değerleri değişmedi; yalnızca metrik açıkça "özel çalışma kümesi"
 olarak tanımlandı:
 
-- Boşta toplam bellek (uygulama + WebView2 süreçleri, özel çalışma kümesi): **< 150 MiB** (ölçülen 76 MiB;
+- Boşta toplam bellek (uygulama + WebView2 süreçleri, özel çalışma kümesi): **< 150 MB** (ölçülen 76 MiB;
   GPU çizimiyle 110 MiB)
-- Rust süreci (özel çalışma kümesi): **< 30 MiB** (ölçülen 7,5 MiB)
+- Rust süreci (özel çalışma kümesi): **< 30 MB** (ölçülen 7,5 MiB)
 
 Karşılaştırma: pgAdmin4 masaüstü (Electron/NW.js kabuğu + Python sunucusu) Plan 1 notlarına göre boşta
-~400 MiB+ kullanır.
+~400 MB+ kullanır.
 
 ## Plan 3 sonu (2026-10-05)
 
@@ -143,7 +144,7 @@ tembel yüklenen diyaloglar) sonrasında aynı makinede, Plan 2'de seçilen ayar
 | 5 | 29 | 73,2 | 347,1 | 7,2 | 7 |
 | **Medyan** | **43** | **73,4** | 347,9 | **7,2** | 7 |
 
-Hedeflerin hepsi karşılandı (pencere < 1 sn, toplam özel WS < 150 MiB, Rust < 30 MiB); karar kuralının
+Hedeflerin hepsi karşılandı (pencere < 1 sn, toplam özel WS < 150 MB, Rust < 30 MB); karar kuralının
 uygulanmasına gerek kalmadı. Plan 2 sonuna göre (76,1 / 7,5 MiB) fark ölçüm gürültüsü düzeyindedir. `ImportDialog` ve
 `ServerDialog` Plan 3'te tembel yüklenen ayrı parçalara ayrıldı (`DdlView` Plan 1'den beri ayrı); yeni
 özellikler açılıştaki boşta belleği artırmadı.
@@ -157,7 +158,7 @@ Boyutlar:
 | `target\release\pg-tools.exe` (`bun run tauri build`) | 12,5 MiB (13.130.752 bayt) |
 | NSIS kurulum paketi `pg-tools_0.1.0_x64-setup.exe` (WebView2 gömülü değil) | **3,24 MiB** (3.402.548 bayt) |
 
-NSIS paketi < 15 MiB hedefinin (spec §1.3) altında. `tauri build` exe'si de `smoke-release.ps1` ile sınandı
+NSIS paketi < 15 MB hedefinin (spec §1.3) altında. `tauri build` exe'si de `smoke-release.ps1` ile sınandı
 (BAŞARILI, pencere 186 ms).
 
 Filtre (Ctrl+F): `tree-model.test.ts` "filters 10,000 loaded nodes in under 50 ms" testi — 10.000 yüklenmiş
