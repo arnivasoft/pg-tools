@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::ops::Range;
+use std::path::Path as StdPath;
 use std::sync::{Arc, Mutex as StdMutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -28,9 +29,11 @@ use tokio::time::Instant;
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::complete::{CompletionItem, CompletionRequest, lookup};
 use crate::classify::{Danger, StmtKind, TxOp, analyze as classify, tx_op};
 use crate::events::{EventSink, QueryEvent};
-use crate::exec::{DEFAULT_CHUNK, ExecConfig, Executor, Path, StmtOutcome};
+use crate::exec::{DEFAULT_CHUNK, ExecConfig, Executor, Path, StmtOutcome, cursor_capable};
+use crate::export::{CsvFile, CsvOptions, EXPORT_CHUNK, ExportSummary, check_target};
 use crate::split::{split, stmt_at};
 
 pub type SessionId = Uuid;
@@ -47,6 +50,11 @@ pub const MODE_IN_TX_MESSAGE: &str = "Açık transaction varken mod değiştiril
 pub const CANCELLED_MESSAGE: &str = "Sorgu kullanıcı tarafından iptal edildi.";
 /// `more()` almayan açık imlecin kapatılma süresi (varsayılan).
 pub const DEFAULT_CURSOR_IDLE: Duration = Duration::from_secs(5 * 60);
+
+/// Tamamlama önbelleğinin tazelik süresi, bir aramanın en uzun süresi ve önbellek girdisi sınırı.
+pub const COMPLETION_TTL: Duration = Duration::from_secs(60);
+const COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
+const COMPLETION_CACHE_MAX: usize = 256;
 
 const PROBE: &str = "SELECT statement_timestamp() <> transaction_timestamp()";
 /// Oturumlar zorla kapatılırken ROLLBACK ve kilit için en çok bekleme.
@@ -445,11 +453,21 @@ struct SessionSlot {
     state: StdMutex<TxState>,
     inner: Mutex<Inner>,
     cancel: CancelToken,
+    /// Tamamlama önbelleği: istek -> (zaman, sonuç); 60 sn tazelik, DDL/transaction sonrası boşaltılır.
+    completions: StdMutex<HashMap<CompletionRequest, (Instant, Vec<CompletionItem>)>>,
 }
 
 impl SessionSlot {
     fn state(&self) -> TxState {
         *self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn completions(&self) -> std::sync::MutexGuard<'_, HashMap<CompletionRequest, (Instant, Vec<CompletionItem>)>> {
+        self.completions.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn invalidate_completions(&self) {
+        self.completions().clear();
     }
 
     fn set_state(&self, s: TxState) {
@@ -562,6 +580,84 @@ async fn resync(slot: &SessionSlot, exec: &mut Executor) {
     exec.set_in_tx(probed != TxState::Idle);
 }
 
+fn user_cancelled() -> Error {
+    Error::Query { sqlstate: None, message: CANCELLED_MESSAGE.into(), detail: None, hint: None }
+}
+
+/// `export_csv` gövdesi: imleç açma, parça parça yazma, kapama. Hata/iptalde `.tmp` (CsvFile düşünce) silinir,
+/// çalıştırıcının kendi transaction'ı geri alınır; kullanıcının transaction'ına yalnızca `DECLARE`/`CLOSE` gider.
+async fn export_run(
+    slot: &SessionSlot,
+    exec: &mut Executor,
+    text: &str,
+    path: &StdPath,
+    opts: CsvOptions,
+    progress: &mut (dyn FnMut(u64) -> bool + Send),
+) -> Result<ExportSummary> {
+    let started = std::time::Instant::now();
+    // Açık kullanıcı imleci (`pgt_c`) çalıştırıcının kendi transaction'ındaysa BEGIN/COMMIT onu bozardı.
+    close_cursor_quietly(exec).await;
+    resync(slot, exec).await;
+    let own_tx = match slot.state() {
+        TxState::Failed => return Err(Error::Invalid(TX_FAILED_MESSAGE.into())),
+        TxState::Idle => true,
+        TxState::InTransaction => false,
+    };
+    let columns = exec.prepare_columns(text).await?;
+    if columns.is_empty() {
+        return Err(Error::Invalid("Yalnızca satır döndüren ifadeler dışa aktarılabilir.".into()));
+    }
+    let mut file = CsvFile::create(path, &opts, &columns)?;
+    if own_tx {
+        exec.exec_internal("BEGIN").await?;
+    }
+    if let Err(e) = exec.exec_internal(&format!("DECLARE pgt_x NO SCROLL CURSOR FOR {text}")).await {
+        if own_tx {
+            let _ = exec.exec_internal("ROLLBACK").await;
+        }
+        return Err(e);
+    }
+    let streamed = stream_chunks(slot, exec, &mut file, progress).await;
+    let closed = match &streamed {
+        Ok(_) => exec.exec_internal(if own_tx { "CLOSE pgt_x; COMMIT" } else { "CLOSE pgt_x" }).await.map(|_| ()),
+        Err(_) => Ok(()),
+    };
+    if streamed.is_err() || closed.is_err() {
+        // Kendi transaction'ımız geri alınır (imleci de kapatır); kullanıcınınkine `CLOSE` denenir (aborted ise
+        // sessizce başarısız olur ve imleç transaction'la birlikte gider).
+        let cleanup = if own_tx { "ROLLBACK" } else { "CLOSE pgt_x" };
+        let _ = exec.exec_internal(cleanup).await;
+    }
+    let rows = streamed?;
+    closed?;
+    let bytes = file.bytes;
+    file.commit()?;
+    Ok(ExportSummary { rows, bytes, elapsed_ms: started.elapsed().as_millis() as u64 })
+}
+
+async fn stream_chunks(
+    slot: &SessionSlot,
+    exec: &mut Executor,
+    file: &mut CsvFile,
+    progress: &mut (dyn FnMut(u64) -> bool + Send),
+) -> Result<u64> {
+    let mut total = 0u64;
+    loop {
+        if slot.cancel.requested() {
+            return Err(user_cancelled());
+        }
+        let chunk = exec.fetch_export_chunk(EXPORT_CHUNK).await?;
+        file.write_rows(&chunk)?;
+        total += chunk.len() as u64;
+        if (!chunk.is_empty() || total == 0) && !progress(total) {
+            return Err(user_cancelled());
+        }
+        if chunk.len() < EXPORT_CHUNK as usize {
+            return Ok(total);
+        }
+    }
+}
+
 /// Sorgu Aracı oturumları. `Arc` ile paylaşılır; oturum başına aynı anda tek işlem (`run`/`more`/`tx`/…).
 pub struct QueryManager {
     mgr: Arc<ConnectionManager>,
@@ -612,6 +708,7 @@ impl QueryManager {
                 cursor_gen: 0,
             }),
             cancel: CancelToken::default(),
+            completions: StdMutex::default(),
         });
         self.map().insert(id, slot);
         tracing::debug!(%server, session = %id, locked = guard.locked, "sorgu oturumu açıldı");
@@ -724,6 +821,10 @@ impl QueryManager {
                 cancel_quietly(&handle).await;
             }
             let ok = outcome == StmtOutcome::Completed;
+            if ok && matches!(p.plan.kind, StmtKind::Ddl | StmtKind::Tx) {
+                // DDL (ve geri alabilecek transaction komutları) katalogu değiştirmiş olabilir.
+                slot.invalidate_completions();
+            }
             let event = if ok {
                 Some(TxEvent::Ok(p.tx))
             } else if failed {
@@ -852,6 +953,7 @@ impl QueryManager {
         let mut inner = lock_open(&slot)?;
         disarm(&mut inner);
         let result = Self::tx_locked(&slot, &mut inner, op).await;
+        slot.invalidate_completions();
         self.finish(&slot, &mut inner).await;
         result
     }
@@ -1005,6 +1107,129 @@ impl QueryManager {
         }
     }
 
+    /// Tamamlama önbelleğini boşaltır (DDL başarıyla bitince oturum katmanı kendisi çağırır).
+    pub fn invalidate_completion_cache(&self, session: SessionId) {
+        if let Ok(slot) = self.slot(session) {
+            slot.invalidate_completions();
+        }
+    }
+
+    /// Katalog tamamlama. Oturumun kendi bağlantısı **yalnızca boştayken** kullanılır; bir ifade çalışıyorsa ya da
+    /// transaction `Failed` ise beklemeden boş liste döner. Sonuçlar oturum başına 60 sn önbelleğe alınır; hata
+    /// olursa da boş liste döner (tamamlama kullanıcı akışını bozmamalı).
+    pub async fn complete(&self, session: SessionId, req: CompletionRequest) -> Result<Vec<CompletionItem>> {
+        let slot = self.slot(session)?;
+        if slot.state() == TxState::Failed {
+            return Ok(Vec::new());
+        }
+        if let Some((at, items)) = slot.completions().get(&req)
+            && at.elapsed() < COMPLETION_TTL
+        {
+            return Ok(items.clone());
+        }
+        let Ok(mut inner) = slot.inner.try_lock() else { return Ok(Vec::new()) };
+        if slot.cancel.closed() {
+            return Err(session_gone());
+        }
+        if slot.state() == TxState::Failed || inner.exec.as_ref().is_some_and(Executor::is_closed) {
+            // Kopan bağlantının bildirimi (kaybolan transaction) sonraki `run`a kalır.
+            return Ok(Vec::new());
+        }
+        if inner.exec.is_none() && self.wake(&slot, &mut inner).await.is_err() {
+            return Ok(Vec::new());
+        }
+        let Some(exec) = inner.exec.as_mut() else { return Ok(Vec::new()) };
+        let handle = exec.cancel_handle();
+        let found = match tokio::time::timeout(COMPLETION_TIMEOUT, lookup(exec, &req)).await {
+            Ok(r) => r,
+            Err(_) => {
+                cancel_quietly(&handle).await;
+                resync(&slot, exec).await;
+                return Ok(Vec::new());
+            }
+        };
+        let items = match found {
+            Ok(items) => items,
+            Err(e) => {
+                tracing::debug!(code = %ErrorPayload::from(&e).code, "tamamlama sorgusu başarısız");
+                if matches!(e, Error::Query { .. }) {
+                    resync(&slot, exec).await; // kullanıcının transaction'ı hatayla `aborted` olmuş olabilir
+                }
+                return Ok(Vec::new());
+            }
+        };
+        inner.last_used = Instant::now();
+        let mut cache = slot.completions();
+        if cache.len() >= COMPLETION_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(req, (Instant::now(), items.clone()));
+        Ok(items)
+    }
+
+    /// Satır döndüren tek bir `SELECT`/`VALUES`/`TABLE`/`WITH` sorgusunun sonucunu CSV'ye akıtır
+    /// (bkz. `crate::export`). `progress(toplam_satır)` her parçadan sonra çağrılır; `false` dönerse dışa aktarma
+    /// iptal edilir (`.tmp` silinir, hedefe dokunulmaz). Oturum dışa aktarma boyunca meşguldür; `cancel()` durdurur.
+    /// Açık transaction'a (manuel mod) dokunulmaz; transaction yoksa geçici bir `BEGIN`/`COMMIT` kullanılır.
+    pub async fn export_csv(
+        &self,
+        session: SessionId,
+        sql: &str,
+        path: &StdPath,
+        opts: CsvOptions,
+        progress: &mut (dyn FnMut(u64) -> bool + Send),
+    ) -> Result<ExportSummary> {
+        let slot = self.slot(session)?;
+        let stmts = split(sql);
+        let [stmt] = stmts.as_slice() else {
+            return Err(Error::Invalid("Dışa aktarma tek bir SELECT ifadesi ister.".into()));
+        };
+        let text = &sql[stmt.start..stmt.end];
+        if classify(text).kind != StmtKind::Select || !cursor_capable(text, StmtKind::Select) {
+            return Err(Error::Invalid("Yalnızca satır döndüren SELECT/VALUES/TABLE sorguları dışa aktarılabilir.".into()));
+        }
+        check_target(path)?;
+        let mut inner = lock_open(&slot)?;
+        step(slot.state(), TxEvent::Ok(None))?;
+        disarm(&mut inner);
+        let result = match self.wake(&slot, &mut inner).await {
+            Err(e) => Err(e),
+            Ok(()) => {
+                let Some(exec) = inner.exec.as_mut() else { return Err(Error::NotConnected) };
+                slot.cancel.begin();
+                let handle = exec.cancel_handle();
+                let result = cancellable(&slot.cancel, &handle, export_run(&slot, exec, text, path, opts, progress)).await;
+                let requested = slot.cancel.requested();
+                slot.cancel.end();
+                if matches!(result, Err(Error::Query { .. })) {
+                    resync(&slot, exec).await;
+                }
+                let is_cancel = result.as_ref().err().is_some_and(is_cancel_error);
+                result.map_err(|e| match e {
+                    Error::Query { message, .. } if requested && is_cancel => Error::Query {
+                        sqlstate: None,
+                        message: CANCELLED_MESSAGE.into(),
+                        detail: Some(message),
+                        hint: None,
+                    },
+                    e => e,
+                })
+            }
+        };
+        self.finish(&slot, &mut inner).await;
+        if let Ok(s) = &result {
+            tracing::debug!(rows = s.rows, bytes = s.bytes, elapsed_ms = s.elapsed_ms, "CSV dışa aktarma bitti");
+        }
+        result
+    }
+
+    /// Test yardımcısı: oturum çalıştırıcısında bellekte aynı anda tutulmuş en çok satır.
+    #[doc(hidden)]
+    pub fn peak_buffered_rows(&self, session: SessionId) -> Result<usize> {
+        let slot = self.slot(session)?;
+        Ok(slot.inner.try_lock().ok().and_then(|i| i.exec.as_ref().map(Executor::peak_buffered_rows)).unwrap_or(0))
+    }
+
     /// Test yardımcısı: oturum uykuda mı (bağlantısı kapatılmış).
     #[doc(hidden)]
     pub fn is_asleep(&self, session: SessionId) -> Result<bool> {
@@ -1030,6 +1255,7 @@ impl QueryManager {
                 cursor_gen: 0,
             }),
             cancel: CancelToken::default(),
+            completions: StdMutex::default(),
         });
         self.map().insert(id, slot);
         id

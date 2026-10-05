@@ -37,7 +37,7 @@ pub const DEFAULT_CHUNK: u32 = 1000;
 const DECLARE_PREFIX: &str = "DECLARE pgt_c NO SCROLL CURSOR FOR ";
 const BEGIN_DECLARE_PREFIX: &str = "BEGIN; DECLARE pgt_c NO SCROLL CURSOR FOR ";
 
-type TextRows = Vec<Vec<Option<String>>>;
+pub(crate) type TextRows = Vec<Vec<Option<String>>>;
 type PgResult<T> = std::result::Result<T, tokio_postgres::Error>;
 
 /// Çalıştırma ayarları. `limit`: ilk yüklemede gönderilecek toplam satır sınırı (0 geçersiz, en çok
@@ -228,6 +228,38 @@ impl Executor {
         let messages = self.simple(sql).await;
         self.notices.reset();
         Ok(text_rows(&messages.map_err(Error::from_query)?))
+    }
+
+    /// Parametreli (`$n`) salt okunur katalog sorgusu; her sütun metin olmalıdır. Açık imlece ve transaction
+    /// izlemesine dokunmaz, NOTICE'lar atılır.
+    pub(crate) async fn query_text(
+        &mut self,
+        sql: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> Result<TextRows> {
+        let result =
+            with_notices(self.conn.client.query(sql, params), &mut self.conn.notices, &mut self.notices).await;
+        self.notices.reset();
+        let rows = result.map_err(Error::from_query)?;
+        Ok(rows
+            .iter()
+            .map(|r| (0..r.len()).map(|i| r.try_get::<_, Option<String>>(i).ok().flatten()).collect())
+            .collect())
+    }
+
+    /// İfadenin sonuç sütun adları (`prepare`); boş liste satır döndürmeyen ifade demektir.
+    pub(crate) async fn prepare_columns(&mut self, sql: &str) -> Result<Vec<String>> {
+        let prepared = with_notices(self.conn.client.prepare(sql), &mut self.conn.notices, &mut self.notices).await;
+        self.notices.reset();
+        let stmt = prepared.map_err(Error::from_query)?;
+        Ok(stmt.columns().iter().map(|c| c.name().to_string()).collect())
+    }
+
+    /// Dışa aktarma imlecinden (`pgt_x`) bir parça; bellekteki en çok satır izlenir.
+    pub(crate) async fn fetch_export_chunk(&mut self, n: u32) -> Result<TextRows> {
+        let rows = self.exec_internal(&format!("FETCH FORWARD {n} FROM pgt_x")).await?;
+        self.peak_buffered = self.peak_buffered.max(rows.len());
+        Ok(rows)
     }
 
     /// Bağlantı kapandı mı (sunucu oturumu sonlandırdı, ağ koptu…).
@@ -658,7 +690,7 @@ fn unsupported(sql: &str) -> Option<Error> {
 
 /// İmleçle okunabilecek ifade: SELECT/VALUES/TABLE ya da veri değiştirmeyen WITH. Diğer satır döndürenler
 /// (INSERT … RETURNING, EXPLAIN, SHOW, FETCH, EXECUTE…) `DECLARE` ile açılamaz, doğrudan yoldan okunur.
-fn cursor_capable(sql: &str, kind: StmtKind) -> bool {
+pub(crate) fn cursor_capable(sql: &str, kind: StmtKind) -> bool {
     kind == StmtKind::Select && matches!(first_word(sql).as_deref(), Some("select" | "values" | "table" | "with"))
 }
 
