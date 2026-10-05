@@ -37,6 +37,9 @@ import { canCancel, canCommit, canLoadMoreRows, canRollback } from "./run-model"
 import { OBJECT_TAB_ID } from "./tabs-store";
 import { routeError, sameScope, swapEditorState, type SavedView } from "./workspace-model";
 
+/** Arka uç geçmiş sınırı (`MAX_HISTORY`). */
+const HISTORY_MAX = 500;
+
 /** `qt_run` satır sınırı (spec: varsayılan 10.000; sekme sınırı `MAX_TAB_ROWS` = 50.000'i aşmaz). */
 export const ROW_LIMIT = Math.min(10_000, MAX_TAB_ROWS);
 
@@ -271,11 +274,12 @@ export default function QueryTab(props: { ctl: QueryController }) {
         atMs: Date.now(),
         newId: () => crypto.randomUUID(),
       });
-      void (async () => {
-        for (const e of entries) await commands.qtHistoryPush(e);
-      })()
-        .catch((err) => console.warn("geçmiş yazılamadı", toPayload(err).code))
-        .finally(() => ctl.update(id, (x) => ({ ...x, historyKey: x.historyKey + 1 })));
+      // Tek çağrı, arka uçta tek dosya yazımı; yalnızca son MAX_HISTORY girdi anlamlıdır.
+      if (entries.length > 0)
+        void commands
+          .qtHistoryPushMany(entries.slice(-HISTORY_MAX))
+          .catch((err) => console.warn("geçmiş yazılamadı", toPayload(err).code))
+          .finally(() => ctl.update(id, (x) => ({ ...x, historyKey: x.historyKey + 1 })));
     }
     void ctl.refreshTx(id);
     const withCols = [...res.stmts].reverse().find((s) => s.columns.length > 0 && !s.dropped);

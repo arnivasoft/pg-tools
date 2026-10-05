@@ -181,23 +181,39 @@ impl History {
     }
 
     /// `is_sensitive(sql)` doğruysa (ör. PASSWORD içeren DDL) kayıt reddedilir; denetim kesmeden önceki tam metinle yapılır.
-    pub fn push_checked(&mut self, mut entry: HistoryEntry, is_sensitive: impl Fn(&str) -> bool) -> Result<bool> {
-        if !self.enabled || is_sensitive(&entry.sql) {
-            return Ok(false);
+    pub fn push_checked(&mut self, entry: HistoryEntry, is_sensitive: impl Fn(&str) -> bool) -> Result<bool> {
+        Ok(self.push_many(vec![entry], is_sensitive)? > 0)
+    }
+
+    /// Bir çalıştırmanın girdileri tek seferde: girdi başına hassas denetimi, kesme, 500 sınırı ve **tek** dosya
+    /// yazımı. Kapalıyken ya da hepsi elenirse hiçbir şey yazılmaz. Döner: eklenen girdi sayısı. Yazım başarısızsa
+    /// bellekteki liste eski haline döner.
+    pub fn push_many(&mut self, entries: Vec<HistoryEntry>, is_sensitive: impl Fn(&str) -> bool) -> Result<usize> {
+        if !self.enabled {
+            return Ok(0);
         }
-        entry.sql = truncate_sql(&entry.sql);
-        self.entries.push(entry);
+        let accepted: Vec<HistoryEntry> = entries
+            .into_iter()
+            .filter(|e| !is_sensitive(&e.sql))
+            .map(|mut e| {
+                e.sql = truncate_sql(&e.sql);
+                e
+            })
+            .collect();
+        if accepted.is_empty() {
+            return Ok(0);
+        }
+        let n = accepted.len();
+        let old = self.entries.clone();
+        self.entries.extend(accepted);
         let overflow = self.entries.len().saturating_sub(MAX_HISTORY);
-        let dropped: Vec<HistoryEntry> = self.entries.drain(..overflow).collect();
+        self.entries.drain(..overflow);
         if let Err(e) = self.save() {
             // Bellek ile dosya ayrışmasın.
-            self.entries.pop();
-            for (i, d) in dropped.into_iter().enumerate() {
-                self.entries.insert(i, d);
-            }
+            self.entries = old;
             return Err(e);
         }
-        Ok(true)
+        Ok(n)
     }
 
     /// Yeniden eskiye; `query` SQL'de veya sunucu adında (büyük/küçük harf duyarsız) aranır.
@@ -381,6 +397,30 @@ mod tests {
 
     fn tab(title: &str) -> DraftTab {
         DraftTab { id: Uuid::new_v4(), title: title.into(), server_id: None, database_oid: Some(5), database: Some("app".into()), options: DraftOptions::default() }
+    }
+
+    #[test]
+    fn push_many_writes_once_filters_per_entry_and_caps_at_500() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        let mut h = History::load(&path).unwrap();
+        h.push(entry("select eski")).unwrap();
+        let mut batch: Vec<HistoryEntry> = (0..600).map(|i| entry(&format!("select {i}"))).collect();
+        batch.insert(10, entry("create role x password 'gizli'"));
+        let added = h.push_many(batch, |s| s.contains("password")).unwrap();
+        assert_eq!(added, 600, "hassas girdi tek başına elenir");
+        let all = h.list(None, 1000);
+        assert_eq!(all.len(), 500);
+        assert_eq!(all[0].sql, "select 599");
+        assert_eq!(all[499].sql, "select 100");
+        assert!(all.iter().all(|e| !e.sql.contains("gizli")));
+        assert_eq!(History::load(&path).unwrap().list(None, 1000), all, "dosyaya yazıldı");
+        // Hepsi elenirse ya da kapalıysa yazım yok.
+        assert_eq!(h.push_many(vec![entry("alter user u password 'p'")], |s| s.contains("password")).unwrap(), 0);
+        assert_eq!(h.push_many(Vec::new(), |_| false).unwrap(), 0);
+        h.set_enabled(false);
+        assert_eq!(h.push_many(vec![entry("select 1")], |_| false).unwrap(), 0);
+        assert_eq!(h.list(None, 1000).len(), 500);
     }
 
     #[test]

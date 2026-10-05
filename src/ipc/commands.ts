@@ -72,8 +72,9 @@ export const commands = {
   qtExportCsv: (session: string, sql: string, path: string, options: CsvOptions, onProgress: (rows: number) => void) =>
     call<ExportSummary>("qt_export_csv", { session, sql, path, options, onProgress: channel(onProgress) }),
 
-  // Kalıcılık: geçmiş (≤500, arka uç hassas SQL'i ve kapalı geçmişi yazmaz → `false` döner), taslaklar, ayarlar.
-  qtHistoryPush: (entry: HistoryEntry) => call<boolean>("qt_history_push", { entry }),
+  // Kalıcılık: geçmiş (≤500; bir çalıştırmanın girdileri tek çağrıda, tek dosya yazımıyla; arka uç hassas SQL'i
+  // ve kapalı geçmişi yazmaz, eklenen sayısını döner), taslaklar, ayarlar.
+  qtHistoryPushMany: (entries: HistoryEntry[]) => call<number>("qt_history_push_many", { entries }),
   qtHistoryList: (query: string | null, limit: number) => call<HistoryEntry[]>("qt_history_list", { query, limit }),
   qtHistoryClear: () => call<null>("qt_history_clear"),
   qtDraftsSave: (tab: DraftTab, sql: string) => call<null>("qt_drafts_save", { tab, sql }),
