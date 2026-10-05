@@ -195,11 +195,17 @@ fn changes_read_only(s: &Scan) -> bool {
     if mentions && s.has_any(&["set", "set_config", "reset", "discard"]) {
         return true;
     }
+    // `set_config` herhangi bir ayarı hesaplanmış bir adla değiştirebilir ('default_transaction_' || 'read_only'):
+    // her çağrısı işaretlenir (kilitli oturumda yanlış pozitif kabul edilir).
+    if s.has("set_config") {
+        return true;
+    }
     // DO gövdesi gibi dolar tırnaklı metin içinde SET: gövde Word olarak ayrışmaz, metinsel bakılır.
     let in_dollar = s.toks.iter().any(|t| {
         t.kind == Kind::Dollar && {
             let x = t.text(s.sql).to_ascii_lowercase();
-            x.contains("transaction_read_only") && ["set", "discard"].iter().any(|w| x.contains(w))
+            (x.contains("transaction_read_only") && ["set", "discard"].iter().any(|w| x.contains(w)))
+                || x.contains("set_config")
         }
     });
     if in_dollar {
@@ -339,6 +345,10 @@ mod tests {
             ("set transaction_read_only to off", true),
             ("reset default_transaction_read_only", true),
             ("select set_config('default_transaction_read_only','off',false)", true),
+            ("select set_config('default_transaction_' || 'read_only','off',false)", true),
+            ("select set_config('search_path','x',false)", true),
+            ("do $$ begin perform set_config('a', 'b', false); end $$", true),
+            ("select current_setting('x')", false),
             ("do $$ begin set default_transaction_read_only = off; end $$", true),
             ("alter role app set default_transaction_read_only = off", true),
             ("alter database d set default_transaction_read_only to off", true),

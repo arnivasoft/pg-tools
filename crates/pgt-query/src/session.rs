@@ -272,6 +272,9 @@ struct CancelFlags {
     /// Bir `run`/`more` sürüyor.
     active: bool,
     requested: bool,
+    /// Oturum kapatıldı (kalıcı). Kapatma, oturum kilidini beklemeden işaretlenir: `begin()` iptali sıfırlamaz,
+    /// kilidi sonradan alan işlemler reddedilir ve kaldırılmış bir oturum yeniden bağlanmaz.
+    closed: bool,
 }
 
 /// Oturum kilidinden bağımsız iptal belirteci. Boştayken gelen iptal yok sayılır (sonraki bir ifadeyi vurmasın).
@@ -287,11 +290,27 @@ impl CancelToken {
     }
 
     fn begin(&self) {
-        *self.flags() = CancelFlags { active: true, requested: false };
+        let mut f = self.flags();
+        f.active = true;
+        f.requested = f.closed;
     }
 
     fn end(&self) {
-        *self.flags() = CancelFlags::default();
+        let mut f = self.flags();
+        f.active = false;
+        f.requested = false;
+    }
+
+    /// Oturumu kapalı işaretler ve çalışan işlemi iptal eder.
+    fn close(&self) {
+        let mut f = self.flags();
+        f.closed = true;
+        f.requested = true;
+        self.notify.notify_one();
+    }
+
+    fn closed(&self) -> bool {
+        self.flags().closed
     }
 
     /// Çalışma sürüyorsa iptal ister (`true`); boştaysa yok sayar.
@@ -341,6 +360,32 @@ fn timeout_text() -> String {
 
 fn is_cancel_error(e: &Error) -> bool {
     matches!(e, Error::Query { sqlstate: Some(s), .. } if s == "57014")
+}
+
+/// İfadeler arasında (ya da yeniden bağlanma/otomatik BEGIN/yoklama sırasında) gelen iptal: sıradaki ifade
+/// başlamaz ama kullanıcı yine iptal iletisini görür.
+fn cancelled_event(stmt_index: u32, char_offset: u32) -> QueryEvent {
+    QueryEvent::Failed {
+        stmt_index,
+        error: ErrorPayload { code: "query".into(), message: CANCELLED_MESSAGE.into(), detail: None, hint: None },
+        position: None,
+        char_offset,
+        notices: Vec::new(),
+    }
+}
+
+/// Manuel kipte otomatik BEGIN'i atlayan ifadeler: transaction'ı kendisi açan/bitirenler ve transaction bloğu
+/// dışında çalışması gerekenler (`COMMIT/ROLLBACK PREPARED`, `PREPARE TRANSACTION`). SAVEPOINT, RELEASE,
+/// ROLLBACK TO ve SET TRANSACTION otomatik BEGIN alır.
+fn skips_auto_begin(sql: &str, tx: Option<TxOp>) -> bool {
+    match tx {
+        Some(TxOp::Begin | TxOp::Commit | TxOp::Rollback) => true,
+        Some(TxOp::Other) => {
+            let first = crate::lex::lex(sql).into_iter().find(|t| t.kind == crate::lex::Kind::Word);
+            !first.is_some_and(|t| t.is_word(sql, "set"))
+        }
+        _ => false,
+    }
 }
 
 /// Olayları kullanıcı alıcısına aktarır: kullanıcı iptalinde 57014 iletisini değiştirir, hata ve alıcının
@@ -418,6 +463,38 @@ impl SessionSlot {
 
 fn busy() -> Error {
     Error::Invalid(BUSY_MESSAGE.into())
+}
+
+fn session_gone() -> Error {
+    Error::NotFound("sorgu oturumu".into())
+}
+
+/// Oturum kilidini bekletmeden alır; meşgulse `BUSY`, bu arada kapatıldıysa `NotFound`.
+fn lock_open(slot: &SessionSlot) -> Result<tokio::sync::MutexGuard<'_, Inner>> {
+    let inner = slot.inner.try_lock().map_err(|_| busy())?;
+    if slot.cancel.closed() {
+        return Err(session_gone());
+    }
+    Ok(inner)
+}
+
+/// Oturumu zorla kapatır: kapalı işaretler (çalışan ifade iptal edilir), kilidi en çok `FORCE_CLOSE_WAIT`
+/// bekler, açık transaction'ı geri alır ve bağlantıyı bırakır. Kilit zamanında alınamazsa çalışan işlem
+/// bitince `finish` bağlantıyı bırakır (sunucu transaction'ı geri alır). Oturum haritadan önceden çıkarılmalıdır.
+async fn force_close(slot: &SessionSlot) {
+    slot.cancel.close();
+    let Ok(mut inner) = tokio::time::timeout(FORCE_CLOSE_WAIT, slot.inner.lock()).await else {
+        tracing::warn!(server = %slot.server, "sorgu oturumu zamanında durmadı; bitince kapanacak");
+        return;
+    };
+    disarm(&mut inner);
+    if let Some(mut exec) = inner.exec.take()
+        && (slot.state() != TxState::Idle || exec.cursor_open())
+    {
+        // Bağlantı kapanınca sunucu da geri alır; açık ROLLBACK kısa bir süre sınırıyla denenir.
+        let _ = tokio::time::timeout(FORCE_CLOSE_WAIT, exec.exec_internal("ROLLBACK")).await;
+    }
+    slot.set_state(TxState::Idle);
 }
 
 fn disarm(inner: &mut Inner) {
@@ -564,11 +641,11 @@ impl QueryManager {
         if limit == 0 {
             return Err(Error::Invalid("satır sınırı 0 olamaz".into()));
         }
-        let mut inner = slot.inner.try_lock().map_err(|_| busy())?;
-        disarm(&mut inner);
+        let mut inner = lock_open(&slot)?;
         if let Some(first) = planned.first() {
             step(slot.state(), TxEvent::Ok(first.tx))?;
         }
+        disarm(&mut inner);
         slot.cancel.begin();
         let result = self.run_script(&slot, &mut inner, sql, &planned, limit, sink).await;
         slot.cancel.end();
@@ -595,11 +672,12 @@ impl QueryManager {
         let cfg = ExecConfig { limit, chunk: DEFAULT_CHUNK, autocommit: mode == TxMode::Autocommit };
         let (mut stmts_run, mut stopped) = (0u32, false);
         for p in planned {
+            let (idx, offset) = (p.plan.index, p.plan.char_offset);
             if slot.cancel.requested() {
+                sink.send(cancelled_event(idx, offset));
                 stopped = true;
                 break;
             }
-            let (idx, offset) = (p.plan.index, p.plan.char_offset);
             let state = slot.state();
             if let Err(e) = step(state, TxEvent::Ok(p.tx)) {
                 sink.send(QueryEvent::Failed {
@@ -612,10 +690,10 @@ impl QueryManager {
                 stopped = true;
                 break;
             }
-            if mode == TxMode::Manual && state == TxState::Idle && p.plan.kind != StmtKind::Tx {
+            let text = &sql[p.range.clone()];
+            if mode == TxMode::Manual && state == TxState::Idle && !skips_auto_begin(text, p.tx) {
                 close_cursor_quietly(exec).await;
                 if let Err(e) = exec.exec_internal("BEGIN").await {
-                    stmts_run += 1;
                     sink.send(QueryEvent::Failed {
                         stmt_index: idx,
                         error: ErrorPayload::from(&e),
@@ -629,11 +707,15 @@ impl QueryManager {
                 }
                 exec.set_in_tx(true);
                 slot.set_state(TxState::InTransaction);
+                if slot.cancel.requested() {
+                    sink.send(cancelled_event(idx, offset));
+                    stopped = true;
+                    break;
+                }
             }
 
             let handle = exec.cancel_handle();
             let mut guarded = GuardSink::new(&mut *sink, &slot.cancel);
-            let text = &sql[p.range.clone()];
             let outcome = cancellable(&slot.cancel, &handle, exec.run_statement(idx, text, offset, &cfg, &mut guarded)).await;
             let (gone, failed) = (guarded.gone, guarded.failed);
             stmts_run += 1;
@@ -671,6 +753,9 @@ impl QueryManager {
     /// Uykudaki ya da bağlantısı kopmuş oturumu yeniden bağlar. Kopan bağlantıda açık transaction varsa
     /// bir kez hata döner (transaction kayboldu), sonraki çağrı yeniden bağlanır.
     async fn wake(&self, slot: &SessionSlot, inner: &mut Inner) -> Result<()> {
+        if slot.cancel.closed() {
+            return Err(session_gone());
+        }
         if inner.exec.as_ref().is_some_and(Executor::is_closed) {
             inner.exec = None;
             let lost = slot.state() != TxState::Idle;
@@ -698,6 +783,12 @@ impl QueryManager {
     /// İşlem sonu: transaction dışındaysa bekleyen `statement_timeout`'u uygular, boşta imleç zamanlayıcısını
     /// kurar, son kullanım zamanını günceller.
     async fn finish(&self, slot: &Arc<SessionSlot>, inner: &mut Inner) {
+        if slot.cancel.closed() {
+            // Kapatma kilidi alamadan döndü: bağlantı burada bırakılır (sunucu açık transaction'ı geri alır).
+            disarm(inner);
+            inner.exec = None;
+            return;
+        }
         let want = inner.opts.statement_timeout_ms;
         if slot.state() == TxState::Idle
             && inner.applied_timeout != Some(want)
@@ -716,7 +807,7 @@ impl QueryManager {
     /// Açık imleçten sonraki parça. İmleç yoksa (kapandı, oturum uyudu) `Error::Invalid`.
     pub async fn more(&self, session: SessionId, stmt_index: u32, sink: &mut dyn EventSink) -> Result<()> {
         let slot = self.slot(session)?;
-        let mut inner = slot.inner.try_lock().map_err(|_| busy())?;
+        let mut inner = lock_open(&slot)?;
         disarm(&mut inner);
         let result = match inner.exec.as_mut() {
             None => Err(Error::Invalid("açık imleç yok".into())),
@@ -758,7 +849,7 @@ impl QueryManager {
     /// COMMIT / ROLLBACK. `Failed` iken COMMIT reddedilir.
     pub async fn tx(&self, session: SessionId, op: TxAction) -> Result<TxState> {
         let slot = self.slot(session)?;
-        let mut inner = slot.inner.try_lock().map_err(|_| busy())?;
+        let mut inner = lock_open(&slot)?;
         disarm(&mut inner);
         let result = Self::tx_locked(&slot, &mut inner, op).await;
         self.finish(&slot, &mut inner).await;
@@ -798,7 +889,7 @@ impl QueryManager {
             return Err(Error::Invalid("statement_timeout en fazla 2147483647 ms olabilir.".into()));
         }
         let slot = self.slot(session)?;
-        let mut inner = slot.inner.try_lock().map_err(|_| busy())?;
+        let mut inner = lock_open(&slot)?;
         disarm(&mut inner);
         let result = Self::set_options_locked(&slot, &mut inner, opts).await;
         self.finish(&slot, &mut inner).await;
@@ -827,9 +918,29 @@ impl QueryManager {
     }
 
     /// Oturumu kapatır. Açık transaction `policy`'ye göre onaylanır, geri alınır ya da kapanış reddedilir.
+    ///
+    /// Oturum meşgulse (bir ifade çalışıyorsa): `Rollback` çalışan ifadeyi iptal eder, en çok 5 sn bekler,
+    /// transaction'ı geri alır ve oturumu kapatır (sekme kapanınca bağlantı açık transaction'la kalmasın);
+    /// `Commit` reddedilir (`BUSY`: yarıda kalan bir çalışma onaylanamaz); `Refuse` açık transaction varsa
+    /// `Açık transaction var.`, yoksa `BUSY` döner.
     pub async fn close(&self, session: SessionId, policy: ClosePolicy) -> Result<()> {
         let slot = self.slot(session)?;
-        let mut inner = slot.inner.try_lock().map_err(|_| busy())?;
+        let mut inner = match slot.inner.try_lock() {
+            Ok(_) if slot.cancel.closed() => return Err(session_gone()),
+            Ok(inner) => inner,
+            Err(_) => {
+                return match policy {
+                    ClosePolicy::Rollback => {
+                        self.map().remove(&session);
+                        force_close(&slot).await;
+                        tracing::debug!(session = %session, "meşgul sorgu oturumu zorla kapatıldı");
+                        Ok(())
+                    }
+                    ClosePolicy::Refuse if slot.state() != TxState::Idle => Err(Error::Invalid(OPEN_TX_MESSAGE.into())),
+                    ClosePolicy::Refuse | ClosePolicy::Commit => Err(busy()),
+                };
+            }
+        };
         disarm(&mut inner);
         if let Some(exec) = inner.exec.as_mut() {
             close_cursor_quietly(exec).await;
@@ -860,6 +971,7 @@ impl QueryManager {
             }
         }
         inner.exec = None;
+        slot.cancel.close();
         slot.set_state(TxState::Idle);
         self.map().remove(&session);
         tracing::debug!(session = %session, "sorgu oturumu kapatıldı");
@@ -875,20 +987,7 @@ impl QueryManager {
             ids.into_iter().filter_map(|id| map.remove(&id)).collect()
         };
         for slot in slots {
-            slot.cancel.request();
-            let Ok(mut inner) = tokio::time::timeout(FORCE_CLOSE_WAIT, slot.inner.lock()).await else {
-                // Çalışma bitince oturum düşer ve bağlantı kapanır (sunucu transaction'ı geri alır).
-                tracing::warn!(%server, "sorgu oturumu zamanında durmadı; bitince kapanacak");
-                continue;
-            };
-            disarm(&mut inner);
-            if let Some(mut exec) = inner.exec.take()
-                && (slot.state() != TxState::Idle || exec.cursor_open())
-            {
-                // Bağlantı kapanınca sunucu da geri alır; açık ROLLBACK kısa bir süre sınırıyla denenir.
-                let _ = tokio::time::timeout(FORCE_CLOSE_WAIT, exec.exec_internal("ROLLBACK")).await;
-            }
-            slot.set_state(TxState::Idle);
+            force_close(&slot).await;
         }
     }
 
@@ -1148,6 +1247,65 @@ mod tests {
         assert!(matches!(err, Err(Error::Invalid(_))));
         qm.close(id, ClosePolicy::Refuse).await.unwrap();
         assert!(qm.tx_state(id).is_err());
+    }
+
+    #[test]
+    fn auto_begin_is_skipped_only_for_transaction_boundaries() {
+        for (sql, skip) in [
+            ("begin", true), ("start transaction", true), ("commit", true), ("rollback", true), ("end", true),
+            ("commit prepared 'x'", true), ("rollback prepared 'x'", true), ("prepare transaction 'x'", true),
+            ("savepoint a", false), ("release a", false), ("rollback to a", false),
+            ("set transaction isolation level serializable", false), ("select 1", false), ("insert into t values (1)", false),
+        ] {
+            assert_eq!(skips_auto_begin(sql, tx_op(sql)), skip, "{sql}");
+        }
+    }
+
+    #[test]
+    fn locked_server_flags_any_set_config_call() {
+        let p = plans("select set_config('default_transaction_' || 'read_only','off',false)", LOCKED);
+        assert_eq!(p[0].locked_reason, Some(LockedReason::ReadOnlySetting));
+        assert!(!plans("select current_setting('x')", LOCKED)[0].locked_reject);
+    }
+
+    #[test]
+    fn closed_token_keeps_cancel_and_cancelled_event_is_visible() {
+        let token = CancelToken::default();
+        token.close();
+        token.begin();
+        assert!(token.requested(), "kapatma iptali begin() ile sıfırlanmaz");
+        token.end();
+        assert!(token.closed());
+        let QueryEvent::Failed { stmt_index, error, char_offset, .. } = cancelled_event(2, 17) else { unreachable!() };
+        assert_eq!((stmt_index, char_offset), (2, 17));
+        assert_eq!((error.code.as_str(), error.message.as_str()), ("query", CANCELLED_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn busy_close_policies() {
+        let qm = Arc::new(manager());
+        let id = qm.insert_sleeping(PLAIN, TxState::InTransaction);
+        let slot = qm.slot(id).unwrap();
+        let held = slot.inner.lock().await;
+        assert!(matches!(qm.close(id, ClosePolicy::Commit).await, Err(Error::Invalid(m)) if m == BUSY_MESSAGE));
+        assert!(matches!(qm.close(id, ClosePolicy::Refuse).await, Err(Error::Invalid(m)) if m == OPEN_TX_MESSAGE));
+        slot.set_state(TxState::Idle);
+        assert!(matches!(qm.close(id, ClosePolicy::Refuse).await, Err(Error::Invalid(m)) if m == BUSY_MESSAGE));
+        slot.set_state(TxState::InTransaction);
+
+        let closer = {
+            let qm = qm.clone();
+            tokio::spawn(async move { qm.close(id, ClosePolicy::Rollback).await })
+        };
+        while !slot.cancel.closed() {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(qm.tx_state(id), Err(Error::NotFound(_))), "oturum hemen haritadan çıkar");
+        drop(held);
+        closer.await.unwrap().unwrap();
+        assert_eq!(slot.state(), TxState::Idle);
+        // Kaldırılmış oturumun eski bir tutamağı kilidi alsa da işlem yapamaz (yeniden bağlanmaz).
+        assert!(matches!(lock_open(&slot), Err(Error::NotFound(_))));
     }
 
     #[test]

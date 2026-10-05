@@ -201,6 +201,8 @@ async fn read_only_escapes_are_rejected_only_when_locked() {
         "select set_config('default_transaction_read_only','off',false)",
         "reset all",
     ];
+    // Hesaplanmış adla `set_config` yalnızca kilitliyken reddedilir (her `set_config` çağrısı işaretlenir).
+    const COMPUTED: &str = "select set_config('default_transaction_' || 'read_only','off',false)";
     for ts in servers() {
         let locked = fixture_with(&ts, true, None, None).await;
         let id = locked.open(TxMode::Autocommit).await;
@@ -209,11 +211,13 @@ async fn read_only_escapes_are_rejected_only_when_locked() {
             assert_eq!(invalid_message(r), LOCKED_SETTING_MESSAGE, "{sql}");
             assert!(sink.events.is_empty(), "betiğin hiçbir ifadesi çalışmaz");
         }
+        let (r, _) = locked.run_with(id, COMPUTED, 100).await;
+        assert_eq!(invalid_message(r), LOCKED_SETTING_MESSAGE);
         assert_eq!(locked.run_ok(id, "show default_transaction_read_only").await.first_value(), "on");
 
         let plain = fixture(&ts).await;
         let id = plain.open(TxMode::Autocommit).await;
-        for sql in ESCAPES {
+        for sql in ESCAPES.into_iter().chain([COMPUTED]) {
             plain.run_ok(id, sql).await;
             if sql.starts_with("begin") {
                 plain.run_ok(id, "rollback").await;
@@ -365,6 +369,57 @@ async fn close_refuses_open_transaction() {
         fx.run_ok(id, "insert into qs_close_commit values (1)").await;
         fx.qm.close(id, ClosePolicy::Commit).await.unwrap();
         assert_eq!(fx.count("qs_close_commit").await, 1);
+    }
+}
+
+/// Sekme bir ifade çalışırken kapatılırsa (`close(Rollback)`): ifade iptal edilir, transaction geri alınır,
+/// bağlantı kapanır ve oturum kaldırılır. `Commit` meşgulken reddedilir, `Refuse` açık transaction'ı bildirir.
+#[tokio::test]
+async fn busy_close_rollback_cancels_and_drops_the_session() {
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup("drop table if exists qs_busy_close; create table qs_busy_close(i int);").await;
+        let id = fx.open(TxMode::Manual).await;
+        fx.run_ok(id, "insert into qs_busy_close values (1)").await;
+        let pid: i32 = fx.run_ok(id, "select pg_backend_pid()").await.first_value().parse().unwrap();
+        assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::InTransaction);
+        let qm = fx.qm.clone();
+        let task = tokio::spawn(async move {
+            let mut sink = VecSink::default();
+            let r = qm.run(id, "select pg_sleep(30)", Scope::All, 100, false, &mut sink).await;
+            (r, sink)
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(invalid_message(fx.qm.close(id, ClosePolicy::Commit).await), BUSY_MESSAGE);
+        assert_eq!(invalid_message(fx.qm.close(id, ClosePolicy::Refuse).await), OPEN_TX_MESSAGE);
+
+        let started = Instant::now();
+        fx.qm.close(id, ClosePolicy::Rollback).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        assert!(matches!(fx.qm.tx_state(id), Err(Error::NotFound(_))));
+        let (r, sink) = task.await.unwrap();
+        r.unwrap();
+        assert_eq!(sink.failed().unwrap().1.message, CANCELLED_MESSAGE);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fx.backend_state(pid).await.is_some() {
+            assert!(Instant::now() < deadline, "oturumun bağlantısı kapanmalı");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(fx.count("qs_busy_close").await, 0, "transaction geri alındı");
+        assert!(matches!(fx.qm.run(id, "select 1", Scope::All, 100, false, &mut VecSink::default()).await, Err(Error::NotFound(_))));
+    }
+}
+
+/// Manuel kipte SAVEPOINT de otomatik BEGIN alır (transaction dışında 25P01 vermez).
+#[tokio::test]
+async fn manual_mode_auto_begins_before_savepoint() {
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        let id = fx.open(TxMode::Manual).await;
+        fx.run_ok(id, "savepoint a; select 1; rollback to a; release a").await;
+        assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::InTransaction);
+        assert_eq!(fx.qm.tx(id, TxAction::Rollback).await.unwrap(), TxState::Idle);
     }
 }
 
