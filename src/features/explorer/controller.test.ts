@@ -171,21 +171,29 @@ describe("ExplorerController robustness", () => {
     expect(flatten(get())[0].error?.code).toBe("query");
   });
 
-  it("does not expand a node removed during the password prompt", async () => {
-    let release!: (a: null) => void;
-    const requestPassword = vi.fn(() => new Promise<null>((r) => (release = r)));
-    const connectServer = vi.fn().mockResolvedValue({ versionNum: 1, version: "1" });
+  it("does not resurrect or expand a node removed during the password prompt", async () => {
+    let release!: (a: { password: string; remember: boolean }) => void;
+    const requestPassword = vi.fn(() => new Promise<{ password: string; remember: boolean }>((r) => (release = r)));
+    const connectServer = vi
+      .fn()
+      .mockRejectedValueOnce(err("password_required"))
+      .mockResolvedValue({ versionNum: 1, version: "1" });
     let rootList = [srv];
-    const listChildren = vi.fn(async (id: string) => (id === ROOT ? rootList : []));
+    const listChildren = vi.fn(async (id: string) => (id === ROOT ? rootList : [n("dbs")]));
     const { c, get } = setup({}, { requestPassword, api: { listChildren, connectServer } });
     await c.load(ROOT);
-    connectServer.mockRejectedValueOnce(err("password_required"));
     const p = c.expand("srv");
     await vi.waitFor(() => expect(requestPassword).toHaveBeenCalled());
     rootList = [];
     await c.load(ROOT);
-    release(null);
+    expect(get().nodes.has("srv")).toBe(false);
+    release({ password: "p", remember: false });
     await p;
+    expect(connectServer).toHaveBeenCalledTimes(2);
     expect(get().expanded.has("srv")).toBe(false);
+    expect(get().nodes.has("srv")).toBe(false);
+    expect(get().errors.has("srv")).toBe(false);
+    expect(get().loading.has("srv")).toBe(false);
+    expect(listChildren.mock.calls.some((call) => call[0] === "srv")).toBe(false);
   });
 });
