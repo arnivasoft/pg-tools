@@ -37,7 +37,12 @@ async fn setup_all() {
             .await
             .unwrap();
         admin.batch_execute(&format!("DROP DATABASE IF EXISTS {FIXTURE_DB}")).await.unwrap();
-        admin.batch_execute(&format!("CREATE DATABASE {FIXTURE_DB}")).await.unwrap();
+        // template1 yerel eklentiler/nesneler içerebilir ve kodlaması sunucuya göre değişir;
+        // fixture her sunucuda aynı, temiz ve UTF8 olsun.
+        admin
+            .batch_execute(&format!("CREATE DATABASE {FIXTURE_DB} TEMPLATE template0 ENCODING 'UTF8'"))
+            .await
+            .unwrap();
         let db = admin_client(&ts, FIXTURE_DB).await;
         db.batch_execute(SCHEMA_SQL).await.unwrap();
         db.batch_execute("ANALYZE").await.unwrap();

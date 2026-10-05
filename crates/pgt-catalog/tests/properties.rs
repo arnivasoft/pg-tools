@@ -35,7 +35,7 @@ async fn database_properties_without_connect_privilege() {
     for fx in fixtures().await {
         let admin = pgt_core::testing::admin_client(&fx.ts, &fx.ts.config.maintenance_db).await;
         admin.batch_execute("DROP DATABASE IF EXISTS pgt_private").await.unwrap();
-        admin.batch_execute("CREATE DATABASE pgt_private").await.unwrap();
+        admin.batch_execute("CREATE DATABASE pgt_private TEMPLATE template0 ENCODING 'UTF8'").await.unwrap();
         admin.batch_execute("REVOKE CONNECT ON DATABASE pgt_private FROM PUBLIC").await.unwrap();
         admin.batch_execute("DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgt_limited') THEN CREATE ROLE pgt_limited LOGIN PASSWORD 'pgt_limited'; END IF; END $$").await.unwrap();
         let oid: u32 = admin.query_one("SELECT oid FROM pg_database WHERE datname = 'pgt_private'", &[]).await.unwrap().get(0);

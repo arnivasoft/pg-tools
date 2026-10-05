@@ -55,7 +55,7 @@ async fn databases_without_connect_are_leaves() {
         let admin = pgt_core::testing::admin_client(&fx.ts, &fx.ts.config.maintenance_db).await;
         // CREATE/DROP DATABASE çok ifadeli sorguda (örtük transaction) çalışmaz; ayrı çağrılar gerekir.
         admin.batch_execute("DROP DATABASE IF EXISTS pgt_noconn").await.unwrap();
-        admin.batch_execute("CREATE DATABASE pgt_noconn").await.unwrap();
+        admin.batch_execute("CREATE DATABASE pgt_noconn TEMPLATE template0 ENCODING 'UTF8'").await.unwrap();
         admin.batch_execute("ALTER DATABASE pgt_noconn ALLOW_CONNECTIONS false").await.unwrap();
         let dbs = fx.catalog.list_children(&fx.server_id().child(Seg::Coll(Coll::Databases))).await.unwrap();
         assert!(!find(&dbs, "pgt_noconn").has_children);

@@ -60,7 +60,7 @@ async fn ddl_executes_in_scratch_database() {
     for fx in fixtures().await {
         let admin = admin_client(&fx.ts, &fx.ts.config.maintenance_db).await;
         admin.batch_execute("DROP DATABASE IF EXISTS pgt_scratch").await.unwrap();
-        admin.batch_execute("CREATE DATABASE pgt_scratch").await.unwrap();
+        admin.batch_execute("CREATE DATABASE pgt_scratch TEMPLATE template0 ENCODING 'UTF8'").await.unwrap();
         let scratch = admin_client(&fx.ts, "pgt_scratch").await;
 
         let schema_ddl = fx.catalog.ddl(&fx.schema("app").await).await.unwrap();
