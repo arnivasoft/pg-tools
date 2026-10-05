@@ -27,3 +27,4 @@ windows-native-keyring-store.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 rcgen.workspace = true
+tokio = { workspace = true }
