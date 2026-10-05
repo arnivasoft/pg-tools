@@ -13,7 +13,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            let state = state::AppState::init().map_err(|e| e.to_string())?;
+            let state = state::AppState::init();
             let manager = state.manager.clone();
             tauri::async_runtime::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(60));

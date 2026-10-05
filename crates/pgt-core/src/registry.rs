@@ -22,6 +22,9 @@ struct RegistryFileRef<'a> {
 pub struct Registry {
     path: PathBuf,
     servers: Vec<ServerConfig>,
+    /// Dosya okunamadığında (izin, kilit vb.) boş ve salt-okunur açılır: okunamayan dosyanın
+    /// üzerine boş bir listeyle yazıp kullanıcının sunucularını silmemek için kayıt reddedilir.
+    read_only: bool,
 }
 
 pub struct LoadOutcome {
@@ -40,19 +43,38 @@ impl Registry {
         let text = match fs::read_to_string(&path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(LoadOutcome { registry: Registry { path, servers: Vec::new() }, recovered_backup: None });
+                return Ok(LoadOutcome { registry: Registry { path, servers: Vec::new(), read_only: false }, recovered_backup: None });
             }
             Err(e) => return Err(Error::Config(format!("{}: {e}", path.display()))),
         };
         match serde_json::from_str::<RegistryFile>(&text) {
-            Ok(file) => Ok(LoadOutcome { registry: Registry { path, servers: file.servers }, recovered_backup: None }),
+            Ok(file) => Ok(LoadOutcome { registry: Registry { path, servers: file.servers, read_only: false }, recovered_backup: None }),
             Err(parse_error) => {
                 let backup = backup_path(&path);
                 fs::rename(&path, &backup).map_err(io_err)?;
                 tracing::warn!(error = %parse_error, backup = %backup.display(), "servers.json okunamadı, yedeklendi");
-                Ok(LoadOutcome { registry: Registry { path, servers: Vec::new() }, recovered_backup: Some(backup) })
+                Ok(LoadOutcome { registry: Registry { path, servers: Vec::new(), read_only: false }, recovered_backup: Some(backup) })
             }
         }
+    }
+
+    /// `path` okunamadığında kullanılacak boş, salt-okunur kayıt; dosyaya asla yazmaz.
+    pub fn unavailable(path: impl Into<PathBuf>) -> Self {
+        Registry { path: path.into(), servers: Vec::new(), read_only: true }
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(Error::Config(format!(
+                "{} başlangıçta okunamadığı için değişiklikler kaydedilemiyor; dosyayı düzeltip uygulamayı yeniden başlatın.",
+                self.path.display()
+            )));
+        }
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
@@ -68,6 +90,7 @@ impl Registry {
     }
 
     pub fn upsert(&mut self, config: ServerConfig) -> Result<ServerConfig> {
+        self.ensure_writable()?;
         let config = config.normalized();
         config.validate()?;
         match self.servers.iter_mut().find(|s| s.id == config.id) {
@@ -79,6 +102,7 @@ impl Registry {
     }
 
     pub fn remove(&mut self, id: Uuid) -> Result<Option<ServerConfig>> {
+        self.ensure_writable()?;
         let Some(index) = self.servers.iter().position(|s| s.id == id) else {
             return Ok(None);
         };
@@ -162,6 +186,22 @@ mod tests {
         assert_eq!(reg.remove(c.id).unwrap().map(|s| s.id), Some(c.id));
         assert!(reg.remove(c.id).unwrap().is_none());
         assert!(Registry::load(path(&dir)).unwrap().registry.servers().is_empty());
+    }
+
+    #[test]
+    fn unavailable_registry_never_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = path(&dir);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "korunmalı").unwrap();
+        let mut reg = Registry::unavailable(&p);
+        assert!(reg.is_read_only());
+        let c = ServerConfig::new("a", "h", 5432, "u");
+        let id = c.id;
+        assert!(matches!(reg.upsert(c), Err(Error::Config(_))));
+        assert!(reg.servers().is_empty(), "başarısız kayıt belleği de değiştirmemeli");
+        assert!(matches!(reg.remove(id), Err(Error::Config(_))));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "korunmalı");
     }
 
     #[test]
