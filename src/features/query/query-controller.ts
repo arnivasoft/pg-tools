@@ -4,7 +4,6 @@ import { createSignal, type Accessor, type Setter } from "solid-js";
 import { t } from "../../app/strings";
 import type { ToastKind } from "../../app/toast-model";
 import type { ClosePolicy } from "../../ipc/bindings/ClosePolicy";
-import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { Scope } from "../../ipc/bindings/Scope";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { SessionOptions } from "../../ipc/bindings/SessionOptions";
@@ -505,6 +504,16 @@ export function createQueryController(deps: QueryControllerDeps) {
     }
   };
 
+  /** "Geçmişi/taslakları temizle" sonrası: açık (sunucusu olan) sekmelerin taslakları hemen yeniden yazılır. */
+  const resaveDrafts = async () => {
+    await Promise.all(
+      [...entries.keys()].map((id) => {
+        saver.cancel(id);
+        return saveDraft(id);
+      }),
+    );
+  };
+
   const rename = (id: string, title: string) => {
     tabs.rename(id, title);
     saver.touch(id);
@@ -535,14 +544,13 @@ export function createQueryController(deps: QueryControllerDeps) {
     serverSessionsClosed,
     beforeExit,
     restore,
-    flushDrafts: () => saver.flushAll(),
+    resaveDrafts,
     /** Etkin sorgu sekmesinde F5 (genel kısayol) için QueryTab kaydeder. */
     setRunner: (fn: ((kind: "stmt" | "all") => void) | null) => (runner = fn),
     runActive: (kind: "stmt" | "all") => runner?.(kind),
     closeGate,
     bulkGate,
     envGate,
-    isLostError: (e: ErrorPayload) => routeError(e) === "lost",
   };
 }
 

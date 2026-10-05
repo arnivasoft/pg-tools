@@ -5,7 +5,6 @@ import {
   closeTab,
   createTabsStore,
   initialTabs,
-  isClosable,
   moveTab,
   openTab,
   renameTab,
@@ -49,7 +48,6 @@ describe("tabs-store (saf)", () => {
   it("Nesne sekmesi kapatılamaz", () => {
     const { s } = open3();
     expect(closeTab(s, OBJECT_TAB_ID)).toBe(s);
-    expect(isClosable(OBJECT_TAB_ID)).toBe(false);
   });
 
   it("etkin sekme kapanınca sağdaki, yoksa soldaki, yoksa Nesne", () => {

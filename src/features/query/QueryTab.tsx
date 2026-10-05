@@ -182,11 +182,14 @@ export default function QueryTab(props: { ctl: QueryController }) {
   async function run(kind: RunKind) {
     const id = shownId();
     if (!id || !editor || activeId() !== id || blocked(id)) return;
-    const snap: Snapshot = editor.getSnapshot(kind);
     const session = await ctl.ensureSession(id);
     if (!session) return;
     const m = ctl.model(id);
     if (!m || m.run.status !== "idle" || m.op !== null) return;
+    // Anlık görüntü oturum hazır olduktan SONRA (parola istemi sırasında yazılanlar dahil): analiz, onay ve
+    // çalıştırma bu tek metin/kapsamı kullanır. Bu arada başka sekmeye geçildiyse çalıştırma yok.
+    if (!editor || shownId() !== id || activeId() !== id) return;
+    const snap: Snapshot = editor.getSnapshot(kind);
     if (editor && shownId() === id) {
       closeCompletion(editor.view); // tamamlama oturum kilidini (≤5 sn) tutabilir
       editor.setErrorMark(null);
@@ -366,10 +369,11 @@ export default function QueryTab(props: { ctl: QueryController }) {
   const exportCsv = async () => {
     const id = shownId();
     if (!id || !editor || blocked(id)) return;
-    const snap = editor.getSnapshot("stmt");
     const session = await ctl.ensureSession(id);
     const m = ctl.model(id);
     if (!session || !m || m.op !== null || m.run.status !== "idle") return;
+    if (!editor || shownId() !== id) return;
+    const snap = editor.getSnapshot("stmt");
     ctl.patch(id, { op: "export" });
     try {
       const plans = await commands.qtAnalyze(session, snap.text, snap.scope);
@@ -593,6 +597,8 @@ export default function QueryTab(props: { ctl: QueryController }) {
                     onCleared={() => {
                       const id = shownId();
                       if (id) ctl.update(id, (x) => ({ ...x, historyKey: x.historyKey + 1 }));
+                      // Temizleme yalnızca geçmişi ve kapalı sekmelerin taslaklarını silmeli: açık sekmeler yeniden yazılır.
+                      void ctl.resaveDrafts();
                     }}
                   />
                 </div>

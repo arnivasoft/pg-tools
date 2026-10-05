@@ -261,7 +261,7 @@ export const t = {
       saveToggle: "Sorgu geçmişini kaydet",
       clear: "Geçmişi/taslakları temizle",
       clearTitle: "Geçmişi temizle",
-      clearMessage: "Sorgu geçmişi ve kayıtlı taslaklar silinecek. Bu geri alınamaz.",
+      clearMessage: "Sorgu geçmişi ve kapalı sekmelerin taslakları silinecek; açık sekmeler korunur. Bu geri alınamaz.",
       clearConfirm: "Temizle",
     },
     export: {

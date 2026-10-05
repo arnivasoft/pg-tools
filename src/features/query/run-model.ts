@@ -82,10 +82,6 @@ export function runReduce(state: RunState, ev: RunEvent): RunState {
   }
 }
 
-export function canRun(s: RunState): boolean {
-  return s.status === "idle";
-}
-
 /** İptal her basışta yeniden gönderilir (PG arada geleni yok sayabilir); `cancelling`'de de basılabilir. */
 export function canCancel(s: RunState): boolean {
   return isRunning(s.status);

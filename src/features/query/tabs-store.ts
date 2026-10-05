@@ -100,10 +100,6 @@ export function moveTab(state: TabsState, id: string, to: number): TabsState {
   return { ...state, tabs };
 }
 
-export function isClosable(id: string): boolean {
-  return id !== OBJECT_TAB_ID;
-}
-
 /** Solid store sarmalayıcısı; tüm mantık yukarıdaki saf işlevlerde. */
 export function createTabsStore(initial: TabsState = initialTabs()) {
   const [state, setState] = createStore<TabsState>(initial);
@@ -118,7 +114,6 @@ export function createTabsStore(initial: TabsState = initialTabs()) {
     close: (id: string) => apply((s) => closeTab(s, id)),
     rename: (id: string, title: string) => apply((s) => renameTab(s, id, title)),
     activate: (id: string) => apply((s) => activateTab(s, id)),
-    move: (id: string, to: number) => apply((s) => moveTab(s, id, to)),
   };
 }
 

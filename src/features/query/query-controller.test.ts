@@ -72,3 +72,17 @@ describe("query-controller taslakları", () => {
     expect(api.qtDraftsSave).not.toHaveBeenCalled();
   });
 });
+
+describe("temizleme sonrası", () => {
+  it("resaveDrafts açık sekmeleri hemen yeniden yazar, sunucusu olmayanı yazmaz", async () => {
+    const { ctl, api } = setup([
+      [draft("a"), "select 1"],
+      [draft("g", "GONE"), "select 2"],
+    ]);
+    await ctl.restore();
+    void ctl.resaveDrafts();
+    await Promise.resolve();
+    const saved = (api.qtDraftsSave as unknown as { mock: { calls: [DraftTab, string][] } }).mock.calls.map(([t, sql]) => [t.id, sql]);
+    expect(saved).toEqual([["a", "select 1"]]);
+  });
+});

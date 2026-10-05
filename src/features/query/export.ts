@@ -27,9 +27,6 @@ export function exportTarget(plans: StmtPlan[], hasSession: boolean, preferredIn
   return selects.length === 1 ? selects[0] : null;
 }
 
-export const canExport = (plans: StmtPlan[], hasSession: boolean, preferredIndex?: number | null) =>
-  exportTarget(plans, hasSession, preferredIndex) !== null;
-
 /** Seçenek diyaloğunda gösterilen etiket: "İfade N: <ilk 80 karakter>" (boşluklar tek satıra indirilir). */
 export function statementLabel(index: number, sql: string): string {
   const flat = Array.from(sql.replace(/\s+/g, " ").trim());

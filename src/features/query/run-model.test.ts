@@ -7,7 +7,6 @@ import {
   canCommit,
   canLoadMoreRows,
   canRollback,
-  canRun,
   closeChoices,
   closeNeedsConfirm,
   initialRun,
@@ -109,7 +108,7 @@ describe("runReduce", () => {
 
 describe("seçiciler", () => {
   const table: [TabStatus, TxState, boolean, boolean, boolean, boolean, boolean][] = [
-    // status, tx, canRun, canCancel, canCommit, canRollback, closeNeedsConfirm
+    // status, tx, boşta (çalıştırılabilir), canCancel, canCommit, canRollback, closeNeedsConfirm
     ["noSession", "idle", false, false, false, false, false],
     ["opening", "idle", false, false, false, false, false],
     ["idle", "idle", true, false, false, false, false],
@@ -122,7 +121,7 @@ describe("seçiciler", () => {
   ];
   it.each(table)("%s/%s", (status, tx, run, cancel, commit, rollback, confirm) => {
     const s = st(status, tx);
-    expect([canRun(s), canCancel(s), canCommit(s), canRollback(s), closeNeedsConfirm(s)]).toEqual([run, cancel, commit, rollback, confirm]);
+    expect([s.status === "idle", canCancel(s), canCommit(s), canRollback(s), closeNeedsConfirm(s)]).toEqual([run, cancel, commit, rollback, confirm]);
   });
 
   it("kapanış seçenekleri", () => {

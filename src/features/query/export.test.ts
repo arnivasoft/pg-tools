@@ -1,21 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 import type { StmtPlan } from "../../ipc/bindings/StmtPlan";
 import { IpcError } from "../../ipc/errors";
-import { DEFAULT_CSV_OPTIONS, canExport, defaultFileName, exportErrorHint, exportSql, exportTarget, runExport, statementLabel,  type ExportDeps } from "./export";
+import { DEFAULT_CSV_OPTIONS, defaultFileName, exportErrorHint, exportSql, exportTarget, runExport, statementLabel,  type ExportDeps } from "./export";
 import { USER_CANCEL_MESSAGE } from "./result-model";
 
 const plan = (index: number, kind: StmtPlan["kind"], charOffset = 0, charLen = 5): StmtPlan =>
   ({ index, kind, danger: null, productionWrite: false, lockedReject: false, lockedReason: null, sensitive: false, charOffset, charLen }) as StmtPlan;
 const err = (code: string, message = "x") => new IpcError({ code, message, detail: null, hint: null });
 
-describe("canExport", () => {
+describe("exportTarget (uygunluk)", () => {
   it("tam bir select ve oturum gerekir", () => {
-    expect(canExport([plan(0, "select")], true)).toBe(true);
-    expect(canExport([plan(0, "select")], false)).toBe(false);
-    expect(canExport([], true)).toBe(false);
-    expect(canExport([plan(0, "write")], true)).toBe(false);
-    expect(canExport([plan(0, "select"), plan(1, "select")], true)).toBe(false);
-    expect(canExport([plan(0, "write"), plan(1, "select")], true)).toBe(true);
+    expect((exportTarget([plan(0, "select")], true) !== null)).toBe(true);
+    expect((exportTarget([plan(0, "select")], false) !== null)).toBe(false);
+    expect((exportTarget([], true) !== null)).toBe(false);
+    expect((exportTarget([plan(0, "write")], true) !== null)).toBe(false);
+    expect((exportTarget([plan(0, "select"), plan(1, "select")], true) !== null)).toBe(false);
+    expect((exportTarget([plan(0, "write"), plan(1, "select")], true) !== null)).toBe(true);
   });
   it("yalnızca ifade metnini aktarır", () => {
     expect(exportSql("update t set a=1; select 2", plan(1, "select", 18, 8))).toBe("select 2");
@@ -96,7 +96,7 @@ describe("exportTarget seçili ifade", () => {
     expect(exportTarget(ps, true)).toBeNull();
     expect(exportTarget([plan(0, "select"), plan(1, "write")], true, 9)?.index).toBe(0);
     expect(exportTarget(ps, false, 1)).toBeNull();
-    expect(canExport(ps, true, 0)).toBe(true);
+    expect((exportTarget(ps, true, 0) !== null)).toBe(true);
   });
   it("statementLabel boşlukları sadeleştirir ve 80 karakterde keser", () => {
     expect(statementLabel(2, "select  1")).toBe("İfade 3: select 1");
