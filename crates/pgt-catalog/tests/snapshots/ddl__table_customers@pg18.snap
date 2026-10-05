@@ -26,5 +26,5 @@ COMMENT ON TABLE app.customers
 COMMENT ON COLUMN app.customers.email
     IS 'E-posta';
 
-GRANT SELECT, INSERT ON TABLE app.customers TO pgt_reader;
 GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN ON TABLE app.customers TO <owner>;
+GRANT SELECT, INSERT ON TABLE app.customers TO pgt_reader;
