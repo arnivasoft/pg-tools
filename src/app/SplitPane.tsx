@@ -1,12 +1,19 @@
-import { createSignal, type JSX } from "solid-js";
-import { clampWidth } from "./split";
+import { createSignal, onCleanup, onMount, type JSX } from "solid-js";
+import { clampWidth, parseStoredWidth } from "./split";
 import { readStorage, writeStorage } from "./storage";
 
 const KEY = "pgt.split.left";
 
 export function SplitPane(props: { left: JSX.Element; right: JSX.Element }) {
-  const [width, setWidth] = createSignal(Number(readStorage(KEY)) || 320);
+  const [width, setWidth] = createSignal(parseStoredWidth(readStorage(KEY)));
   let container!: HTMLDivElement;
+
+  onMount(() => {
+    const refit = () => setWidth((w) => clampWidth(w, container.clientWidth));
+    refit();
+    window.addEventListener("resize", refit);
+    onCleanup(() => window.removeEventListener("resize", refit));
+  });
 
   const onPointerDown = (e: PointerEvent) => {
     e.preventDefault();
@@ -16,11 +23,11 @@ export function SplitPane(props: { left: JSX.Element; right: JSX.Element }) {
       setWidth(clampWidth(ev.clientX - container.getBoundingClientRect().left, container.clientWidth));
     const up = () => {
       handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", up);
+      handle.removeEventListener("lostpointercapture", up);
       writeStorage(KEY, String(width()));
     };
     handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", up);
+    handle.addEventListener("lostpointercapture", up);
   };
 
   return (
