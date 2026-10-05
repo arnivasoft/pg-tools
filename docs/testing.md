@@ -61,6 +61,16 @@ Bir test her sunucuda döngüyle çalıştığı için ilk başarısız sunucuda
 `.snap.new` dosyalarını tek seferde almak için `INSTA_FORCE_PASS=1` de verilebilir (yalnızca snapshot üretimi
 sırasında; doğrulama çalıştırması bu değişken olmadan yapılmalıdır).
 
+## pgbouncer ve `options` yedek yolu
+Oturumun salt okunur/zaman aşımı/`search_path` ayarları normalde `options` başlangıç parametresiyle gönderilir.
+pgbouncer gibi havuzlayıcılar bunu `unsupported startup parameter: options` (SQLSTATE 08P01) ile reddeder; bu durumda
+bağlantı kurucu bir kez `options`'sız yeniden bağlanır ve aynı üç ayarı (`SESSION_SETS`) bağlantıdan hemen sonra `SET`
+ile uygular (tek `batch_execute`; başarısız olursa bağlantı kapatılır). Başka hatalar (parola, ağ, TLS, eksik
+veritabanı) yeniden denemeyi tetiklemez. Sınır: `SET` oturum düzeyindedir; **transaction pooling** modunda sunucu
+bağlantısı işlemler arasında değişebilir ve ayarlar sonraki işlemlere taşınmayabilir. Salt okunurluk güvencesi için
+session pooling (ya da doğrudan bağlantı) kullanın. Yedek yol `connect_once(.., with_options=false)` testiyle
+(`session_settings_are_applied_without_options_parameter`) her sürümde doğrulanır; gerçek pgbouncer gerekmez.
+
 ## Performans testi
 `cargo test -p pgt-catalog --test perf -- --nocapture` — 5.000 tablolu şemada liste/Properties/DDL süreleri
 (spec §1.3 bütçeleri). Yavaş makinede `PGT_PERF_FACTOR=2` ile bütçeler gevşetilebilir (CI'da kullanmayın).

@@ -26,6 +26,10 @@ const KEEPALIVE_RETRIES: u32 = 3;
 /// `search_path=pg_catalog`: `pg_get_*def`, `format_type` ve `regclass` çıktısı yalnızca yolda görünmeyen
 /// adları şema ile niteler; rol/veritabanı düzeyindeki `search_path` ayarı üretilen DDL'i niteliksiz bırakmasın.
 const SESSION_OPTIONS: &str = "-c default_transaction_read_only=on -c statement_timeout=30000 -c search_path=pg_catalog";
+/// `options` başlangıç parametresini reddeden sunucular/havuzlayıcılar (pgbouncer) için yedek: aynı üç ayar
+/// bağlantı kurulduktan hemen sonra `SET` ile uygulanır. `SESSION_OPTIONS` ile aynı değerleri taşımalıdır.
+const SESSION_SETS: [&str; 3] =
+    ["SET default_transaction_read_only = on", "SET statement_timeout = 30000", "SET search_path = pg_catalog"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -289,25 +293,55 @@ async fn open(config: &ServerConfig, dbname: &str, password: Option<&str>) -> Re
     result
 }
 
+/// Sunucu `options` başlangıç parametresini mi reddetti? (pgbouncer: `unsupported startup parameter: options`,
+/// SQLSTATE 08P01.) Saf çekirdek: yalnızca sunucu mesajına bakar; kimlik, ağ, TLS ve eksik veritabanı
+/// hataları `false` döner, böylece asıl hata maskelenmez.
+fn rejects_options_message(sqlstate: Option<&str>, message: &str) -> bool {
+    if sqlstate.is_some_and(|c| c != "08P01") {
+        return false;
+    }
+    let m = message.to_ascii_lowercase();
+    m.contains("startup parameter") && m.contains("options")
+}
+
+fn rejects_options(err: &Error) -> bool {
+    matches!(err, Error::Connect { sqlstate, message, .. } if rejects_options_message(sqlstate.as_deref(), message))
+}
+
 async fn open_inner(config: &ServerConfig, dbname: &str, password: Option<&str>) -> Result<PgConn> {
+    match connect_once(config, dbname, password, true).await {
+        Err(first) if rejects_options(&first) => {
+            tracing::info!("sunucu `options` başlangıç parametresini reddetti, oturum ayarları SET ile uygulanıyor");
+            connect_once(config, dbname, password, false).await
+        }
+        other => other,
+    }
+}
+
+/// Tek bir bağlantı denemesi. `with_options=true`: oturum ayarları `options` başlangıç parametresiyle;
+/// `false`: bağlantı kurulur kurulmaz `SESSION_SETS` ile (pgbouncer yedek yolu).
+#[doc(hidden)]
+pub async fn connect_once(config: &ServerConfig, dbname: &str, password: Option<&str>, with_options: bool) -> Result<PgConn> {
     let mut pg = tokio_postgres::Config::new();
     pg.host(&config.host)
         .port(config.port)
         .user(&config.username)
         .dbname(dbname)
         .application_name("pg-tools")
-        .options(SESSION_OPTIONS)
         .ssl_mode(tls::pg_ssl_mode(config.ssl.mode))
         .connect_timeout(CONNECT_TIMEOUT)
         .keepalives(true)
         .keepalives_idle(KEEPALIVE_IDLE)
         .keepalives_interval(KEEPALIVE_INTERVAL)
         .keepalives_retries(KEEPALIVE_RETRIES);
+    if with_options {
+        pg.options(SESSION_OPTIONS);
+    }
     if let Some(p) = password {
         pg.password(p);
     }
     let connector = tls::make_connector(&config.ssl)?;
-    // Sürüm sorgusu da aynı zaman penceresinde: kimlik doğrulamadan sonra askıda kalan bir
+    // Ayarlar ve sürüm sorgusu da aynı zaman penceresinde: kimlik doğrulamadan sonra askıda kalan bir
     // sunucu bağlantıyı sonsuza dek bekletmesin.
     let establish = async {
         let (client, connection) = pg.connect(connector).await.map_err(Error::from_connect)?;
@@ -316,6 +350,13 @@ async fn open_inner(config: &ServerConfig, dbname: &str, password: Option<&str>)
                 tracing::debug!(error = %e, "PostgreSQL bağlantısı kapandı");
             }
         });
+        if !with_options {
+            // Hata olursa `client` düşer ve bağlantı kapanır; salt okunur korumasız oturum asla dönmez.
+            client.batch_execute(&SESSION_SETS.join("; ")).await.map_err(|e| match Error::from_query(e) {
+                Error::Query { sqlstate, message, .. } => Error::Connect { kind: ConnectErrorKind::Other, sqlstate, message },
+                other => other,
+            })?;
+        }
         let row = client
             .query_one("SELECT current_setting('server_version_num')::int4, current_setting('server_version')", &[])
             .await
@@ -409,5 +450,35 @@ mod tests {
         for err in [missing_db, Error::NotFound("db".into())] {
             assert!(!drops_session(Target::Database(1), &err), "{err:?}");
         }
+    }
+
+    #[test]
+    fn rejects_options_only_for_the_pooler_startup_parameter_error() {
+        let cases: [(Option<&str>, &str, bool); 7] = [
+            (Some("08P01"), "unsupported startup parameter: options", true),
+            (None, "unsupported startup parameter: options", true),
+            (Some("28P01"), "password authentication failed for user \"postgres\"", false),
+            (None, "error connecting to server: Connection refused (os error 111)", false),
+            (None, "error performing TLS handshake: invalid peer certificate: UnknownIssuer", false),
+            (Some("3D000"), "database \"x\" does not exist", false),
+            (Some("08P01"), "unsupported startup parameter: foo", false),
+        ];
+        for (code, msg, want) in cases {
+            assert_eq!(rejects_options_message(code, msg), want, "{code:?} {msg}");
+        }
+    }
+
+    #[test]
+    fn session_sets_match_session_options() {
+        let from_options: Vec<String> = SESSION_OPTIONS
+            .split("-c ")
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(|p| {
+                let (k, v) = p.split_once('=').unwrap();
+                format!("SET {k} = {v}")
+            })
+            .collect();
+        assert_eq!(from_options, SESSION_SETS);
     }
 }

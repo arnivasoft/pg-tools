@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use pgt_core::config::ServerConfig;
-use pgt_core::connection::{ConnectionManager, Target};
+use pgt_core::connection::{ConnectionManager, Target, connect_once};
 use pgt_core::testing::{TestServer, admin_client, drop_database, test_servers};
 use pgt_core::{ConnectErrorKind, Error};
 
@@ -55,6 +55,25 @@ async fn session_settings_are_applied() {
             (read_only.as_str(), app.as_str(), timeout.as_str(), search_path.as_str()),
             ("on", "pg-tools", "30s", "pg_catalog")
         );
+    }
+}
+
+#[tokio::test]
+async fn session_settings_are_applied_without_options_parameter() {
+    for ts in servers() {
+        let conn = connect_once(&ts.config, &ts.config.maintenance_db, ts.password.as_deref(), false).await.unwrap();
+        let row = conn
+            .client
+            .query_one(
+                "SELECT current_setting('default_transaction_read_only'), current_setting('application_name'), current_setting('statement_timeout'), current_setting('search_path')",
+                &[],
+            )
+            .await
+            .unwrap();
+        let got: (String, String, String, String) = (row.get(0), row.get(1), row.get(2), row.get(3));
+        assert_eq!((got.0.as_str(), got.1.as_str(), got.2.as_str(), got.3.as_str()), ("on", "pg-tools", "30s", "pg_catalog"));
+        let err = conn.client.batch_execute("CREATE TEMP TABLE pgt_x(a int)").await.unwrap_err();
+        assert_eq!(err.code().map(|c| c.code()), Some("25006"), "{err:?}");
     }
 }
 
