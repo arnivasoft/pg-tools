@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/pgt-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[workspace.dependencies]
+pgt-core = { path = "crates/pgt-core" }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-postgres = "0.7.18"
+tokio-postgres-rustls = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.7"
+keyring-core = "1"
+windows-native-keyring-store = { version = "1.1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1.27", features = ["v4", "serde"] }
+thiserror = "2"
+tracing = "0.1"
+ts-rs = { version = "12", features = ["uuid-impl"] }
+tempfile = "3"
+insta = "1.49"
+rcgen = "0.14"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true

@@ -12,3 +12,5 @@ dist/
 .idea/
 Thumbs.db
 .DS_Store
+src-tauri/gen/
+*.json.tmp
