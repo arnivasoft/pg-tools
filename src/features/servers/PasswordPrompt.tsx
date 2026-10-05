@@ -13,9 +13,13 @@ export function createPasswordPrompt() {
   const [password, setPassword] = createSignal("");
   const [remember, setRemember] = createSignal(false);
 
+  let inputEl: HTMLInputElement | undefined;
+
   const ask = (node: TreeNode, retry: boolean) =>
     new Promise<PasswordAnswer | null>((resolve) => {
+      request()?.resolve(null);
       setPassword("");
+      setRemember(false);
       setRequest({ node, retry, resolve });
     });
 
@@ -33,6 +37,10 @@ export function createPasswordPrompt() {
       onOpenChange={(open) => !open && finish(null)}
       title={t.password.title(request()?.node.label ?? "")}
       width="360px"
+      onOpenAutoFocus={(e) => {
+        e.preventDefault();
+        inputEl?.focus();
+      }}
       footer={
         <>
           <Button onClick={() => finish(null)}>{t.server.cancel}</Button>
@@ -57,7 +65,7 @@ export function createPasswordPrompt() {
           <input
             type="password"
             class={inputClass}
-            autofocus
+            ref={inputEl}
             value={password()}
             onInput={(e) => setPassword(e.currentTarget.value)}
           />

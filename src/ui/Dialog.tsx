@@ -10,6 +10,7 @@ export function Dialog(props: {
   children: JSX.Element;
   footer?: JSX.Element;
   width?: string;
+  onOpenAutoFocus?: (e: Event) => void;
 }) {
   return (
     <K open={props.open} onOpenChange={props.onOpenChange} modal>
@@ -17,6 +18,7 @@ export function Dialog(props: {
         <K.Overlay class="fixed inset-0 z-40 bg-black/40" />
         <div class="fixed inset-0 z-50 flex items-center justify-center p-4">
           <K.Content
+            onOpenAutoFocus={props.onOpenAutoFocus}
             class="flex max-h-full flex-col rounded-md border border-border bg-bg shadow-xl"
             style={{ width: props.width ?? "480px" }}
           >

@@ -1,5 +1,5 @@
 import { createVirtualizer } from "@tanstack/solid-virtual";
-import { For, Show, createEffect } from "solid-js";
+import { For, Show, createEffect, createMemo, untrack } from "solid-js";
 import { t } from "../../app/strings";
 import type { Explorer } from "./explorer-store";
 import { ROW_HEIGHT, TreeRow, rowDomId } from "./TreeRow";
@@ -17,10 +17,11 @@ export function TreeView(props: { explorer: Explorer }) {
     overscan: 12,
   });
 
+  const selectedId = createMemo(() => ex.state().selected);
   createEffect(() => {
-    const selected = ex.state().selected;
+    const selected = selectedId();
     if (selected === null) return;
-    const index = ex.rows().findIndex((r) => r.id === selected);
+    const index = untrack(() => ex.rows().findIndex((r) => r.id === selected));
     if (index >= 0) virtualizer.scrollToIndex(index, { align: "auto" });
   });
 

@@ -16,8 +16,13 @@ export default function App() {
   const [notice, setNotice] = createSignal<string | null>(null);
 
   onMount(async () => {
-    await explorer.controller.load(ROOT);
-    setNotice(await commands.startupNotice().catch(() => null));
+    try {
+      await explorer.controller.load(ROOT);
+    } catch {
+      // load errors are surfaced on the tree node itself
+    } finally {
+      setNotice(await commands.startupNotice().catch(() => null));
+    }
   });
   onCleanup(watchSystemTheme(themePref));
 

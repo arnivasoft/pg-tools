@@ -34,6 +34,7 @@ export function TreeRow(props: {
     >
       <span
         class="flex w-4 shrink-0 justify-center text-muted"
+        onDblClick={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation();
           props.onSelect();
