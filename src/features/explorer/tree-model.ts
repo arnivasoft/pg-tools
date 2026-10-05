@@ -75,10 +75,17 @@ export function setChildren(s: TreeState, parentId: string, list: TreeNode[]): T
   const selectedBefore = s.selected;
   const keep = new Set(list.map((n) => n.id));
   for (const old of s.children.get(parentId) ?? []) {
-    if (!keep.has(old)) removeSubtreeMut(next, old);
+    // Düğüm bu arada başka bir ebeveyne taşınmış olabilir (ör. sunucunun grubu değişti);
+    // yalnızca hâlâ bu ebeveyne ait olanları sil.
+    if (!keep.has(old) && next.parent.get(old) === parentId) removeSubtreeMut(next, old);
   }
   for (const n of list) {
     const previous = s.nodes.get(n.id);
+    const previousParent = next.parent.get(n.id);
+    if (previousParent !== undefined && previousParent !== parentId) {
+      const siblings = next.children.get(previousParent);
+      if (siblings) next.children.set(previousParent, siblings.filter((c) => c !== n.id));
+    }
     if (previous?.flags.connected && !n.flags.connected) {
       removeChildrenMut(next, n.id);
       next.expanded.delete(n.id);

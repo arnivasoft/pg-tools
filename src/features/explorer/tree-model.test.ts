@@ -153,3 +153,54 @@ describe("tree-model selection and stale results", () => {
     expect(serverOf(s, null)).toBeNull();
   });
 });
+
+describe("tree-model reparenting servers between groups", () => {
+  const srv = (extra: Partial<TreeNode> = {}) => node("srv:X", { kind: "server", ...extra });
+  function grouped() {
+    let s = emptyTree();
+    s = setChildren(s, ROOT, [node("grp:A", { kind: "serverGroup" }), node("grp:B", { kind: "serverGroup" })]);
+    s = expand(s, "grp:A");
+    s = expand(s, "grp:B");
+    s = setChildren(s, "grp:A", [srv()]);
+    s = setChildren(s, "grp:B", []);
+    return s;
+  }
+
+  it("keeps a server moved from a loaded group to root (root reloaded first)", () => {
+    let s = grouped();
+    s = setChildren(s, ROOT, [node("grp:A", { kind: "serverGroup" }), node("grp:B", { kind: "serverGroup" }), srv()]);
+    s = setChildren(s, "grp:A", []);
+    s = setChildren(s, "grp:B", []);
+    expect(s.nodes.has("srv:X")).toBe(true);
+    expect(s.parent.get("srv:X")).toBe(ROOT);
+    expect(flatten(s).map((r) => r.id)).toEqual(["grp:A", "grp:B", "srv:X"]);
+  });
+
+  it("re-parenting removes the id from the previous parent's list", () => {
+    let s = grouped();
+    s = setChildren(s, ROOT, [node("grp:A", { kind: "serverGroup" }), node("grp:B", { kind: "serverGroup" }), srv()]);
+    expect(s.children.get("grp:A")).toEqual([]);
+    expect(flatten(s).map((r) => r.id)).toEqual(["grp:A", "grp:B", "srv:X"]);
+  });
+
+  it("moves a server between two loaded groups (target loaded first)", () => {
+    const on = { ...flags, connected: true };
+    let s = grouped();
+    s = setChildren(s, "grp:A", [srv({ flags: on })]);
+    s = expand(s, "srv:X");
+    s = setChildren(s, "srv:X", [node("dbs")]);
+    s = setChildren(s, "grp:B", [srv({ flags: on })]);
+    s = setChildren(s, "grp:A", []);
+    expect(s.parent.get("srv:X")).toBe("grp:B");
+    expect(s.children.get("srv:X")).toEqual(["dbs"]);
+    expect(flatten(s).map((r) => r.id)).toEqual(["grp:A", "grp:B", "srv:X", "dbs"]);
+  });
+
+  it("moves a server between two loaded groups (source loaded first)", () => {
+    let s = grouped();
+    s = setChildren(s, "grp:A", []);
+    s = setChildren(s, "grp:B", [srv()]);
+    expect(s.parent.get("srv:X")).toBe("grp:B");
+    expect(flatten(s).map((r) => r.id)).toEqual(["grp:A", "grp:B", "srv:X"]);
+  });
+});
