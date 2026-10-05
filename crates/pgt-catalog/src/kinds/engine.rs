@@ -8,7 +8,8 @@ use crate::Catalog;
 use crate::db::{p, query};
 use crate::node::{Coll, NodeFlags, NodeId, NodeKind, Seg, TreeNode};
 use crate::props::PropertySection;
-use super::registry::PropsDef;
+use super::registry::{DdlDef, PropsDef};
+use crate::ddl::{grants, header, join_blocks};
 use crate::version::VersionedSql;
 
 /// Sorgunun hangi bağlantıda çalışacağı.
@@ -113,4 +114,43 @@ pub(crate) async fn properties(
         sections.push(last.row_opt(label, value));
     }
     Ok(sections.into_iter().filter(|s| !s.rows.is_empty()).collect())
+}
+
+static ACL_RELATION: VersionedSql = VersionedSql(&[(10, include_str!("../sql/acl_relation.sql"))]);
+static ACL_PROC: VersionedSql = VersionedSql(&[(10, include_str!("../sql/acl_proc.sql"))]);
+static ACL_TYPE: VersionedSql = VersionedSql(&[(10, include_str!("../sql/acl_type.sql"))]);
+static ACL_TABLESPACE: VersionedSql = VersionedSql(&[(10, include_str!("../sql/acl_tablespace.sql"))]);
+
+fn acl_sql(catalog: &str) -> Result<&'static VersionedSql> {
+    match catalog {
+        "relation" => Ok(&ACL_RELATION),
+        "proc" => Ok(&ACL_PROC),
+        "type" => Ok(&ACL_TYPE),
+        "tablespace" => Ok(&ACL_TABLESPACE),
+        other => Err(Error::Invalid(format!("bilinmeyen ACL kataloğu: {other}"))),
+    }
+}
+
+/// DDL SQL'inin tek satırlık sonucunu pgAdmin biçimli metne çevirir.
+pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: Option<u32>, def: &DdlDef, oid: u32) -> Result<String> {
+    let target = target(def.level, db)?;
+    let rows = query(&cat.mgr, server, target, def.sql, p![oid]).await?;
+    let r = rows.first().ok_or_else(|| Error::NotFound(def.what.to_string()))?;
+    let text = |c: &str| r.get::<_, Option<String>>(c);
+    let acl = match text("acl_catalog") {
+        Some(name) => super::acl(cat, server, target, acl_sql(&name)?, oid).await?,
+        None => Vec::new(),
+    };
+    let grants_block = match (text("acl_kw"), text("acl_target")) {
+        (Some(kw), Some(target_name)) => grants(&kw, &target_name, &acl),
+        _ => String::new(),
+    };
+    let blocks = vec![
+        r.get::<_, String>("body"),
+        text("extra_stmt").unwrap_or_default(),
+        text("owner_stmt").unwrap_or_default(),
+        text("comment_stmt").unwrap_or_default(),
+        grants_block,
+    ];
+    Ok(header(&r.get::<_, String>("title"), &r.get::<_, String>("qname"), &r.get::<_, String>("drop_stmt")) + &join_blocks(blocks))
 }

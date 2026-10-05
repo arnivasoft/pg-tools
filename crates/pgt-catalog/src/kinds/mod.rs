@@ -180,7 +180,13 @@ pub(crate) async fn ddl(cat: &Catalog, id: &NodeId) -> Result<String> {
             let rel = parent_oid(path).ok_or_else(|| invalid(id))?;
             column::ddl(cat, server, db_req(db)?, rel, *c).await
         }
-        _ => Err(invalid(id)),
+        seg => match registry::ddl_def(*seg) {
+            Some(def) => {
+                let oid = seg.oid().ok_or_else(|| invalid(id))?;
+                engine::ddl(cat, server, db, def, oid).await
+            }
+            None => Err(invalid(id)),
+        },
     }
 }
 

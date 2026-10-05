@@ -277,3 +277,52 @@ pub(crate) fn props_def(seg: Seg) -> Option<&'static PropsDef> {
         Seg::Coll(_) | Seg::Db(_) | Seg::Schema(_) | Seg::Table(_) | Seg::Column(_) => return None,
     })
 }
+
+/// Bir nesne türünün DDL sorgusu.
+pub(crate) struct DdlDef {
+    pub level: Level,
+    pub sql: &'static VersionedSql,
+    pub what: &'static str,
+}
+
+macro_rules! ddl {
+    ($what:literal, $level:expr, $file:literal) => {
+        DdlDef { level: $level, sql: &VersionedSql(&[(10, sql!($file))]), what: $what }
+    };
+}
+
+static D_CONSTRAINT: DdlDef = ddl!("constraint", Level::Database, "ddl_constraint.sql");
+static D_INDEX: DdlDef = ddl!("index", Level::Database, "ddl_index.sql");
+static D_TRIGGER: DdlDef = ddl!("trigger", Level::Database, "ddl_trigger.sql");
+static D_POLICY: DdlDef = ddl!("policy", Level::Database, "ddl_policy.sql");
+static D_VIEW: DdlDef = ddl!("view", Level::Database, "ddl_view.sql");
+static D_SEQUENCE: DdlDef = ddl!("sequence", Level::Database, "ddl_sequence.sql");
+static D_FUNCTION: DdlDef = DdlDef {
+    level: Level::Database,
+    sql: &VersionedSql(&[(10, sql!("ddl_function.pg10.sql")), (11, sql!("ddl_function.sql"))]),
+    what: "fonksiyon",
+};
+static D_TYPE: DdlDef = ddl!("tip", Level::Database, "ddl_type.sql");
+static D_DOMAIN: DdlDef = ddl!("domain", Level::Database, "ddl_domain.sql");
+static D_EXTENSION: DdlDef = ddl!("extension", Level::Database, "ddl_extension.sql");
+static D_ROLE: DdlDef = ddl!("rol", Level::Server, "ddl_role.sql");
+static D_TABLESPACE: DdlDef = ddl!("tablespace", Level::Server, "ddl_tablespace.sql");
+
+/// Genel motorla yönetilen nesne türünün DDL kaydı.
+pub(crate) fn ddl_def(seg: Seg) -> Option<&'static DdlDef> {
+    Some(match seg {
+        Seg::Constraint(_) => &D_CONSTRAINT,
+        Seg::Index(_) => &D_INDEX,
+        Seg::Trigger(_) => &D_TRIGGER,
+        Seg::Policy(_) => &D_POLICY,
+        Seg::View(_) | Seg::MatView(_) => &D_VIEW,
+        Seg::Sequence(_) => &D_SEQUENCE,
+        Seg::Function(_) | Seg::Procedure(_) | Seg::TriggerFunction(_) => &D_FUNCTION,
+        Seg::Type(_) => &D_TYPE,
+        Seg::Domain(_) => &D_DOMAIN,
+        Seg::Extension(_) => &D_EXTENSION,
+        Seg::Role(_) => &D_ROLE,
+        Seg::Tablespace(_) => &D_TABLESPACE,
+        Seg::Coll(_) | Seg::Db(_) | Seg::Schema(_) | Seg::Table(_) | Seg::Column(_) => return None,
+    })
+}

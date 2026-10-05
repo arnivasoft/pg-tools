@@ -1,0 +1,14 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Type: app.int_span
+
+-- DROP TYPE IF EXISTS app.int_span;
+
+CREATE TYPE app.int_span AS RANGE (
+    SUBTYPE = integer
+);
+
+ALTER TYPE app.int_span
+    OWNER TO <owner>;
