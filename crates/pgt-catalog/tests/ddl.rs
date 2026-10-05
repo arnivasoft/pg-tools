@@ -156,6 +156,10 @@ async fn partitions_use_partition_of_and_skip_inherited_indexes() {
             assert_eq!(hash_parts.len(), 2);
             let hash_ddl = fx.catalog.ddl(&NodeId::parse(&hash_parts[0].id).unwrap()).await.unwrap();
             assert!(hash_ddl.contains("PARTITION OF extra.hits\n    FOR VALUES WITH (modulus 2, remainder 0);"), "{hash_ddl}");
+            // üst tablodaki satır trigger'ı partition'a klonlanır ama partition DDL'inde tekrar yazılmaz
+            let hits_ddl = fx.catalog.ddl(&hits).await.unwrap();
+            assert!(hits_ddl.contains("CREATE TRIGGER hits_audit AFTER INSERT ON extra.hits FOR EACH ROW"), "{hits_ddl}");
+            assert!(!hash_ddl.contains("CREATE TRIGGER"), "klonlanmış trigger partition DDL'inde tekrarlanmamalı:\n{hash_ddl}");
         }
     }
 }

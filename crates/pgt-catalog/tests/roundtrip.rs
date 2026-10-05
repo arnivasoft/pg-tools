@@ -7,6 +7,8 @@ use pgt_catalog::node::{Coll, NodeId, TreeNode};
 use pgt_core::testing::admin_client;
 
 const SIGNATURE_SQL: &str = include_str!("fixtures/signature.sql");
+/// PG 10–11: `pg_attribute.attgenerated` yok (PG 12+).
+const SIGNATURE_PG10_SQL: &str = include_str!("fixtures/signature.pg10.sql");
 const SCRATCH_DB: &str = "pgt_roundtrip";
 
 fn parse(node: &TreeNode) -> NodeId {
@@ -62,8 +64,9 @@ fn split_owned_by(ddl: &str) -> (String, Vec<String>) {
     (rest.join("\n\n"), owned.into_iter().map(str::to_string).collect())
 }
 
-async fn signature(db: &tokio_postgres::Client) -> BTreeSet<(String, String, String)> {
-    db.query(SIGNATURE_SQL, &[])
+async fn signature(db: &tokio_postgres::Client, major: u32) -> BTreeSet<(String, String, String)> {
+    let sql = if major >= 12 { SIGNATURE_SQL } else { SIGNATURE_PG10_SQL };
+    db.query(sql, &[])
         .await
         .unwrap()
         .iter()
@@ -123,7 +126,8 @@ async fn ddl_round_trip_reproduces_the_catalog() {
         }
 
         let source = admin_client(&fx.ts, common::FIXTURE_DB).await;
-        let (want, got) = (signature(&source).await, signature(&scratch).await);
+        let major = fx.major().await;
+        let (want, got) = (signature(&source, major).await, signature(&scratch, major).await);
         assert!(want.len() >= 60, "imza beklenenden küçük ({} satır); kapsam daraldı mı?", want.len());
         let missing: Vec<_> = want.difference(&got).take(20).collect();
         let extra: Vec<_> = got.difference(&want).take(20).collect();

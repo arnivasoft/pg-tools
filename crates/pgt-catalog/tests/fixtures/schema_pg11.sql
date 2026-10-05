@@ -5,3 +5,5 @@ CREATE INDEX orders_cover_idx ON app.orders (customer_id) INCLUDE (total);
 CREATE TABLE extra.hits (id bigint, bucket int) PARTITION BY HASH (id);
 CREATE TABLE extra.hits_0 PARTITION OF extra.hits FOR VALUES WITH (MODULUS 2, REMAINDER 0);
 CREATE TABLE extra.hits_1 PARTITION OF extra.hits FOR VALUES WITH (MODULUS 2, REMAINDER 1);
+-- partitioned tabloda satır trigger'ı: partition'lara klonlanır (PG 11–12 tgisinternal, PG 13+ tgparentid)
+CREATE TRIGGER hits_audit AFTER INSERT ON extra.hits FOR EACH ROW EXECUTE PROCEDURE app.touch_row();
