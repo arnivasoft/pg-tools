@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ImportItem } from "./bindings/ImportItem";
 import type { PropertySection } from "./bindings/PropertySection";
 import type { ServerConfig } from "./bindings/ServerConfig";
 import type { ServerInfo } from "./bindings/ServerInfo";
@@ -27,6 +28,8 @@ export const commands = {
   deleteServer: (serverId: string) => call<null>("delete_server", { serverId }),
   setShowSystem: (value: boolean) => call<null>("set_show_system", { value }),
   quoteIdentifiers: (serverId: string, names: string[]) => call<string[]>("quote_identifiers", { serverId, names }),
+  previewPgadminImport: (path: string) => call<ImportItem[]>("preview_pgadmin_import", { path }),
+  applyPgadminImport: (path: string, indices: number[]) => call<number>("apply_pgadmin_import", { path, indices }),
 };
 
 export type Api = typeof commands;

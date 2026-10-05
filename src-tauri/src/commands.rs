@@ -140,6 +140,19 @@ pub fn delete_server(state: State<'_, AppState>, server_id: Uuid) -> CmdResult<(
 }
 
 #[tauri::command]
+pub fn preview_pgadmin_import(state: State<'_, AppState>, path: String) -> CmdResult<Vec<pgt_core::import::ImportItem>> {
+    let text = pgt_core::import::read_file(std::path::Path::new(&path))?;
+    let existing = state.registry.read().unwrap().servers().to_vec();
+    Ok(pgt_core::import::preview(&text, &existing)?)
+}
+
+#[tauri::command]
+pub fn apply_pgadmin_import(state: State<'_, AppState>, path: String, indices: Vec<u32>) -> CmdResult<u32> {
+    let text = pgt_core::import::read_file(std::path::Path::new(&path))?;
+    Ok(pgt_core::import::apply(&mut state.registry.write().unwrap(), &text, &indices)?)
+}
+
+#[tauri::command]
 pub fn set_show_system(state: State<'_, AppState>, value: bool) {
     state.catalog.set_show_system(value);
 }

@@ -46,6 +46,8 @@ fn main() {
             commands::delete_server,
             commands::set_show_system,
             commands::quote_identifiers,
+            commands::preview_pgadmin_import,
+            commands::apply_pgadmin_import,
         ])
         .run(tauri::generate_context!())
         .expect("pg-tools başlatılamadı");
