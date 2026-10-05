@@ -46,10 +46,10 @@ pub const TX_FAILED_MESSAGE: &str = "Transaction hata durumunda; önce ROLLBACK 
 pub const BUSY_MESSAGE: &str = "Bu sekmede bir sorgu zaten çalışıyor.";
 pub const OPEN_TX_MESSAGE: &str = "Açık transaction var.";
 pub const MODE_IN_TX_MESSAGE: &str = "Açık transaction varken mod değiştirilemez.";
-/// Oturum bağlanırken sunucunun salt okunur kilidi ya da üretim etiketi değişti; bağlantı bırakıldı.
 /// Oturum durumu değiştirilmiş (SET, geçici tablo, advisory kilit…) bir oturumun bağlantısı koptu ve yeniden
 /// kuruldu: bu durum kaybolmuş olabilir. Bir kez döner; yeni bağlantı hazırdır, tekrar çalıştırma çalışır.
 pub const SESSION_RESET_MESSAGE: &str = "Bağlantı yeniden kuruldu; oturum durumu (SET ayarları, geçici tablolar, advisory kilitler) kaybolmuş olabilir. Sorguyu tekrar çalıştırın.";
+/// Oturum bağlanırken sunucunun salt okunur kilidi ya da üretim etiketi değişti; bağlantı bırakıldı.
 pub const SETTINGS_CHANGED_MESSAGE: &str =
     "Sunucunun salt okunur kilidi ya da üretim etiketi bağlanırken değişti; sekmeyi yeniden açın.";
 /// Kullanıcının iptal ettiği ifadenin `Failed` iletisi (zaman aşımından ayırt edilir; sunucu iletisi `detail`'de).
@@ -173,14 +173,17 @@ pub(crate) struct Planned {
     /// İfadenin `sql` içindeki bayt aralığı.
     pub(crate) range: Range<usize>,
     pub(crate) tx: Option<TxOp>,
+    /// `SELECT` ile oturum durumu oluşturan çağrı (oturum advisory kilidi, `set_config`): oturum durumlu sayılır.
+    pub(crate) creates_session_state: bool,
 }
 
-/// İfade sunucu tarafı kod çalıştıran `DO` ya da `CALL` mı.
+/// İfade sunucu tarafı kod çalıştıran `DO`, `CALL` ya da hazırlanmış ifadeyi çalıştıran `EXECUTE` mı
+/// (`PREPARE x AS DELETE …; EXECUTE x` gövdesi görünmez).
 fn runs_server_code(sql: &str) -> bool {
     crate::lex::lex(sql)
         .into_iter()
         .find(|t| t.kind == crate::lex::Kind::Word)
-        .is_some_and(|t| t.is_word(sql, "do") || t.is_word(sql, "call"))
+        .is_some_and(|t| t.is_word(sql, "do") || t.is_word(sql, "call") || t.is_word(sql, "execute"))
 }
 
 fn byte_at_char(sql: &str, ch: u32) -> usize {
@@ -242,6 +245,7 @@ pub(crate) fn plan_script(sql: &str, scope: Scope, guard: Guard) -> Result<Vec<P
             },
             range,
             tx: tx_op(text),
+            creates_session_state: a.creates_session_state,
         });
     }
     Ok(out)
@@ -471,7 +475,8 @@ struct Inner {
     cursor_timer: Option<JoinHandle<()>>,
     /// Her işlemde artar; boşta imleç zamanlayıcısı yalnızca kendi kuşağındaysa imleci kapatır.
     cursor_gen: u64,
-    /// Bağlantıya bağlı oturum durumu olabilir: `Select` dışında bir ifade başarıyla tamamlandı (SET, geçici
+    /// Bağlantıya bağlı oturum durumu olabilir: `Select` dışında bir ifade ya da oturum durumu oluşturan bir `SELECT`
+    /// (oturum düzeyi advisory kilit, `set_config`) başarıyla tamamlandı (SET, geçici
     /// tablo, advisory kilit, DO/CALL, transaction komutu…). Böyle bir oturum boşta uyutulmaz; bağlantısı koparsa
     /// yeniden bağlanırken bir kez `SESSION_RESET_MESSAGE` döner.
     dirty: bool,
@@ -742,9 +747,13 @@ impl QueryManager {
         let guard = self.current_guard(server)?;
         let profile = SessionProfile::Query { read_only: guard.locked, statement_timeout_ms: opts.statement_timeout_ms };
         let conn = self.mgr.open_dedicated(server, db, profile).await?;
-        // Bağlanırken kilit/etiket değişmiş ya da sunucu silinmiş olabilir (`close_sessions_of` henüz haritada
+        // Bağlanırken kilit/etiket değişmiş, sunucu silinmiş ya da bağlantısı kesilmiş (hedef değişikliği de
+        // bağlantıyı keser) olabilir (`close_sessions_of` henüz haritada
         // olmayan bu oturumu göremez): eski korumayla oturum açılmaz, bağlantı bırakılır.
-        if let Err(e) = self.guard_unchanged(server, guard) {
+        let checked = self.guard_unchanged(server, guard).and_then(|()| {
+            if self.mgr.is_connected(server) { Ok(()) } else { Err(Error::NotConnected) }
+        });
+        if let Err(e) = checked {
             drop(conn);
             return Err(e);
         }
@@ -892,6 +901,9 @@ impl QueryManager {
                 cancel_quietly(&handle).await;
             }
             let ok = outcome == StmtOutcome::Completed;
+            if ok && p.creates_session_state {
+                inner.dirty = true;
+            }
             if ok && p.plan.kind != StmtKind::Select {
                 // DDL, transaction komutları ve SET/DO/CALL… (arama yolu, katalog) önbelleği bayatlatabilir.
                 slot.invalidate_completions();
@@ -1318,6 +1330,9 @@ impl QueryManager {
                 })
             }
         };
+        if result.is_ok() && classify(text).creates_session_state {
+            inner.dirty = true;
+        }
         self.finish(&slot, &mut inner).await;
         if let Ok(s) = &result {
             tracing::debug!(rows = s.rows, bytes = s.bytes, elapsed_ms = s.elapsed_ms, "CSV dışa aktarma bitti");
@@ -1455,14 +1470,21 @@ mod tests {
         assert_eq!(invalid(gate("update t set a = 1 where id = 1", PROD, false)), CONFIRMATION_REQUIRED);
         assert!(gate("update t set a = 1 where id = 1", PROD, true).is_ok());
         assert!(gate("select 1", PROD, false).is_ok());
-        // DO / CALL gövdesi görünmez: üretimde onay ister, etiketsiz sunucuda istemez.
-        for sql in ["do $$ begin delete from t; end $$", "call p()", "/* c */ DO $$ begin null; end $$"] {
+        // DO / CALL / EXECUTE gövdesi görünmez: üretimde onay ister, etiketsiz sunucuda istemez.
+        for sql in [
+            "do $$ begin delete from t; end $$", "call p()", "/* c */ DO $$ begin null; end $$",
+            "EXECUTE x", "execute x(1, 2)",
+        ] {
             assert!(plans(sql, PROD)[0].production_write, "{sql}");
             assert_eq!(invalid(gate(sql, PROD, false)), CONFIRMATION_REQUIRED, "{sql}");
             assert!(gate(sql, PROD, true).is_ok());
             assert!(!plans(sql, PLAIN)[0].production_write, "{sql}");
             assert!(gate(sql, PLAIN, false).is_ok(), "{sql}");
         }
+        // Hazırlanmış ifade: PREPARE yazmaz ama EXECUTE onay ister.
+        let p = plans("prepare x as delete from t; execute x", PROD);
+        assert_eq!(p.iter().map(|p| p.production_write).collect::<Vec<_>>(), [false, true]);
+        assert_eq!(invalid(gate("prepare x as delete from t; execute x", PROD, false)), CONFIRMATION_REQUIRED);
         assert!(!plans("select f_that_writes()", PROD)[0].production_write, "belgelenmiş sınır");
 
         let p = plans("update t set a = 1", PLAIN);
@@ -1472,6 +1494,18 @@ mod tests {
         assert!(gate("update t set a = 1 where id = 1", PLAIN, false).is_ok());
         // Kilit onaydan önce gelir: onay kilidi aşmaz.
         assert_eq!(invalid(gate("delete from t", LOCKED, true)), LOCKED_WRITE_MESSAGE);
+    }
+
+    #[test]
+    fn select_session_state_calls_are_flagged_in_plan() {
+        let p = plan_script(
+            "select 1; select pg_advisory_lock(1); select set_config('a', 'b', false); select pg_advisory_xact_lock(1)",
+            Scope::All,
+            PLAIN,
+        )
+        .unwrap();
+        assert_eq!(p.iter().map(|p| p.creates_session_state).collect::<Vec<_>>(), [false, true, true, false]);
+        assert!(p.iter().all(|p| p.plan.kind == StmtKind::Select));
     }
 
     #[test]

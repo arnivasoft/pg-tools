@@ -724,3 +724,23 @@ async fn dirty_session_is_not_reaped_and_reports_reset_once() {
         fx.run_ok(clean, "select 1").await;
     }
 }
+
+/// `SELECT` ile oluşturulan oturum durumu (oturum düzeyi advisory kilit, `set_config`) da oturumu durumlu yapar;
+/// `_xact_` varyantı yapmaz.
+#[tokio::test]
+async fn select_created_session_state_makes_session_non_reapable() {
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        for (sql, keeps) in [
+            ("select pg_advisory_lock(7101)", true),
+            ("select set_config('search_path', 'pg_catalog', false)", true),
+            ("select pg_try_advisory_lock_shared(7102)", true),
+            ("select 1", false),
+        ] {
+            let s = fx.open(TxMode::Autocommit).await;
+            fx.run_ok(s, sql).await;
+            fx.qm.reap_idle(Duration::ZERO);
+            assert_eq!(!fx.qm.is_asleep(s).unwrap(), keeps, "{sql}");
+        }
+    }
+}
