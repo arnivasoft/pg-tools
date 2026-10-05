@@ -68,8 +68,13 @@ bağlantı kurucu bir kez `options`'sız yeniden bağlanır ve aynı üç ayarı
 ile uygular (tek `batch_execute`; başarısız olursa bağlantı kapatılır). Başka hatalar (parola, ağ, TLS, eksik
 veritabanı) yeniden denemeyi tetiklemez. Sınır: `SET` oturum düzeyindedir; **transaction pooling** modunda sunucu
 bağlantısı işlemler arasında değişebilir ve ayarlar sonraki işlemlere taşınmayabilir. Salt okunurluk güvencesi için
-session pooling (ya da doğrudan bağlantı) kullanın. Yedek yol `connect_once(.., with_options=false)` testiyle
-(`session_settings_are_applied_without_options_parameter`) her sürümde doğrulanır; gerçek pgbouncer gerekmez.
+session pooling (ya da doğrudan bağlantı) kullanın. `options`'ı reddetmek yerine sessizce yok sayan kurulumlar
+(pgbouncer `ignore_startup_parameters = extra_float_digits,options`) için her bağlantıda sürüm sorgusu üç ayarı da
+okur; biri eksikse aynı `SESSION_SETS` aynı istemcide uygulanır (ek gidiş-dönüş yalnızca o durumda). Yedek yol ve bu
+denetim `connect_once(.., with_options=false)` testiyle (`session_settings_are_applied_without_options_parameter`) her
+sürümde doğrulanır; `SET` hatasının bağlantı hatası olarak döndüğü `failing_session_set_is_a_connect_error`, tek yeniden
+deneme ise sahte bir havuzlayıcıyla (`options_rejection_retries_once_without_options`, `other_startup_errors_do_not_retry`)
+sınanır; gerçek pgbouncer gerekmez.
 
 ## TLS zincir testi (Docker)
     powershell -NoProfile -File scripts/tls-test.ps1              # postgres:16
