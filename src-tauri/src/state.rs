@@ -18,6 +18,7 @@ const NO_SECRET_STORE: &str =
     "Windows Kimlik Bilgisi Yöneticisi açılamadı; parolalar kaydedilemez, yalnızca bu oturumda bellekte tutulur.";
 
 impl AppState {
+    #[cfg(test)]
     pub fn with_store(config_dir: &Path, store: Arc<dyn SecretStore>) -> Self {
         Self::build(config_dir, Ok(store))
     }
