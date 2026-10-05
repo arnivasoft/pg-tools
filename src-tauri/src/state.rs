@@ -1,13 +1,23 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use pgt_catalog::Catalog;
 use pgt_core::connection::ConnectionManager;
 use pgt_core::credentials::{Credentials, MemorySecretStore, SecretStore};
 use pgt_core::registry::Registry;
+use pgt_core::store::{AppSettings, Drafts, History};
 use pgt_query::session::QueryManager;
 
+/// Sorgu geçmişi, taslaklar ve ayarlar (config dizini altında).
+pub struct PersistStore {
+    pub history: Mutex<History>,
+    pub drafts: Drafts,
+    pub settings: Mutex<AppSettings>,
+    pub settings_path: PathBuf,
+}
+
 pub struct AppState {
+    pub store: PersistStore,
     pub registry: Arc<RwLock<Registry>>,
     pub credentials: Credentials,
     pub manager: Arc<ConnectionManager>,
@@ -51,9 +61,27 @@ impl AppState {
             notices.push(NO_SECRET_STORE.to_string());
             Arc::new(MemorySecretStore::default())
         });
+        let settings_path = config_dir.join("settings.json");
+        let settings = AppSettings::load(&settings_path);
+        let history_path = config_dir.join("history.json");
+        let mut history = History::load(&history_path).unwrap_or_else(|e| {
+            tracing::error!(error = %e, "sorgu geçmişi okunamadı; boş geçmişle başlanıyor");
+            History::empty(&history_path)
+        });
+        if let Some(b) = history.recovered_backup() {
+            notices.push(format!("history.json okunamadı; {} olarak yedeklendi.", b.display()));
+        }
+        history.set_enabled(settings.history_enabled);
+        let persist = PersistStore {
+            history: Mutex::new(history),
+            drafts: Drafts::new(config_dir.join("query")),
+            settings: Mutex::new(settings),
+            settings_path,
+        };
         let registry = Arc::new(RwLock::new(registry));
         let manager = Arc::new(ConnectionManager::new());
         Self {
+            store: persist,
             catalog: Catalog::new(manager.clone(), registry.clone()),
             query: Arc::new(QueryManager::new(manager.clone(), registry.clone())),
             credentials: Credentials::new(store),

@@ -3,9 +3,9 @@ import type { TreeNode } from "../ipc/bindings/TreeNode";
 import { ROOT, emptyTree, setChildren, type TreeState } from "../features/explorer/tree-model";
 import { statusText } from "./status";
 
-const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false };
+const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false, locked: false };
 function node(id: string, kind: TreeNode["kind"], extra: Partial<TreeNode> = {}): TreeNode {
-  return { id, kind, label: id, detail: null, hasChildren: true, serverId: null, flags, ...extra };
+  return { id, kind, label: id, detail: null, hasChildren: true, serverId: null, flags, color: null, tag: null, ...extra };
 }
 
 function fixtureTree(): TreeState {

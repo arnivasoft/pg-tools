@@ -5,9 +5,9 @@ import {
   ROOT, ancestorOfKind, collapse, invalidate, emptyTree, expand, flatten, keyIntent, patchNode, rowLabel, select, serverOf, setChildren, setError, startLoading,
 } from "./tree-model";
 
-const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false };
+const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false, locked: false };
 function node(id: string, extra: Partial<TreeNode> = {}): TreeNode {
-  return { id, kind: "table", label: id, detail: null, hasChildren: true, serverId: null, flags, ...extra };
+  return { id, kind: "table", label: id, detail: null, hasChildren: true, serverId: null, flags, color: null, tag: null, ...extra };
 }
 
 function sample() {

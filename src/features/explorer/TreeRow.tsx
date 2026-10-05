@@ -1,5 +1,6 @@
-import { ChevronDown, ChevronRight, LoaderCircle } from "lucide-solid";
+import { ChevronDown, ChevronRight, Lock, LoaderCircle } from "lucide-solid";
 import { Show } from "solid-js";
+import { t } from "../../app/strings";
 import { ErrorBadge } from "./ErrorBadge";
 import { NodeIcon } from "./NodeIcon";
 import { rowLabel, type VisibleRow } from "./tree-model";
@@ -24,6 +25,7 @@ export function TreeRow(props: {
     <div
       id={rowDomId(r().id)}
       data-node-id={encodeURIComponent(r().id)}
+      title={r().node.kind === "server" ? (r().node.tag ?? undefined) : undefined}
       role="treeitem"
       aria-level={r().depth + 1}
       aria-setsize={r().setSize}
@@ -55,6 +57,12 @@ export function TreeRow(props: {
       </span>
       <NodeIcon node={r().node} />
       <span class="truncate">{rowLabel(r())}</span>
+      <Show when={r().node.kind === "server" && r().node.color}>
+        {(color) => <span class="h-2 w-2 shrink-0 rounded-full" style={{ background: `var(--srv-${color()})` }} aria-hidden="true" />}
+      </Show>
+      <Show when={r().node.kind === "server" && r().node.flags.locked}>
+        <Lock size={11} class="shrink-0 text-muted" aria-label={t.server.lockedTitle} />
+      </Show>
       <Show when={r().node.detail}>
         <span class="truncate text-xs text-muted">{r().node.detail}</span>
       </Show>

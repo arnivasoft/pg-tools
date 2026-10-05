@@ -2,4 +2,8 @@
 import type { NodeFlags } from "./NodeFlags";
 import type { NodeKind } from "./NodeKind";
 
-export type TreeNode = { id: string, kind: NodeKind, label: string, detail: string | null, hasChildren: boolean, serverId: string | null, flags: NodeFlags, };
+export type TreeNode = { id: string, kind: NodeKind, label: string, detail: string | null, hasChildren: boolean, serverId: string | null, flags: NodeFlags, 
+/**
+ * Yalnızca sunucu düğümlerinde: renk adı (`pgt_core::config::COLORS`) ve ortam etiketi.
+ */
+color: string | null, tag: string | null, };

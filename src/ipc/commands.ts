@@ -3,7 +3,10 @@ import type { ClosePolicy } from "./bindings/ClosePolicy";
 import type { CompletionItem } from "./bindings/CompletionItem";
 import type { CompletionRequest } from "./bindings/CompletionRequest";
 import type { CsvOptions } from "./bindings/CsvOptions";
+import type { AppSettings } from "./bindings/AppSettings";
+import type { DraftTab } from "./bindings/DraftTab";
 import type { ExportSummary } from "./bindings/ExportSummary";
+import type { HistoryEntry } from "./bindings/HistoryEntry";
 import type { ImportItem } from "./bindings/ImportItem";
 import type { PropertySection } from "./bindings/PropertySection";
 import type { QueryEvent } from "./bindings/QueryEvent";
@@ -65,6 +68,17 @@ export const commands = {
   qtComplete: (session: string, request: CompletionRequest) => call<CompletionItem[]>("qt_complete", { session, request }),
   qtExportCsv: (session: string, sql: string, path: string, options: CsvOptions, onProgress: (rows: number) => void) =>
     call<ExportSummary>("qt_export_csv", { session, sql, path, options, onProgress: channel(onProgress) }),
+
+  // Kalıcılık: geçmiş (≤500, arka uç hassas SQL'i ve kapalı geçmişi yazmaz → `false` döner), taslaklar, ayarlar.
+  qtHistoryPush: (entry: HistoryEntry) => call<boolean>("qt_history_push", { entry }),
+  qtHistoryList: (query: string | null, limit: number) => call<HistoryEntry[]>("qt_history_list", { query, limit }),
+  qtHistoryClear: () => call<null>("qt_history_clear"),
+  qtDraftsSave: (tab: DraftTab, sql: string) => call<null>("qt_drafts_save", { tab, sql }),
+  qtDraftsRemove: (id: string) => call<null>("qt_drafts_remove", { id }),
+  qtDraftsLoad: () => call<[DraftTab, string][]>("qt_drafts_load"),
+  qtDraftsClear: () => call<null>("qt_drafts_clear"),
+  settingsGet: () => call<AppSettings>("settings_get"),
+  settingsSetHistory: (enabled: boolean) => call<AppSettings>("settings_set_history", { enabled }),
 };
 
 export type Api = typeof commands;

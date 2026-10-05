@@ -4,6 +4,7 @@ pub mod credentials;
 pub mod error;
 pub mod import;
 pub mod registry;
+pub mod store;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub mod tls;

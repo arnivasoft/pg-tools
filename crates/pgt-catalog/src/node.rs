@@ -288,6 +288,8 @@ pub struct NodeFlags {
     pub primary_key: bool,
     pub not_null: bool,
     pub from_extension: bool,
+    /// Yalnızca sunucu düğümlerinde: salt okunur kilit açık.
+    pub locked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -301,6 +303,9 @@ pub struct TreeNode {
     pub has_children: bool,
     pub server_id: Option<Uuid>,
     pub flags: NodeFlags,
+    /// Yalnızca sunucu düğümlerinde: renk adı (`pgt_core::config::COLORS`) ve ortam etiketi.
+    pub color: Option<String>,
+    pub tag: Option<String>,
 }
 
 impl TreeNode {
@@ -313,6 +318,8 @@ impl TreeNode {
             has_children: true,
             server_id: None,
             flags: NodeFlags::default(),
+            color: None,
+            tag: None,
         }
     }
     pub fn with_detail(mut self, detail: Option<String>) -> Self {
@@ -325,6 +332,11 @@ impl TreeNode {
     }
     pub fn with_flags(mut self, flags: NodeFlags) -> Self {
         self.flags = flags;
+        self
+    }
+    pub fn with_marks(mut self, color: Option<String>, tag: Option<String>) -> Self {
+        self.color = color;
+        self.tag = tag;
         self
     }
     pub fn with_server(mut self, server: Uuid) -> Self {

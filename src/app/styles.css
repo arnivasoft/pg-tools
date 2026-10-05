@@ -18,6 +18,14 @@
   --syn-number: #b45309;
   --syn-comment: #6b7280;
   --syn-type: #1d4ed8;
+  --srv-red: #dc2626;
+  --srv-orange: #ea580c;
+  --srv-amber: #d97706;
+  --srv-green: #16a34a;
+  --srv-teal: #0d9488;
+  --srv-blue: #2563eb;
+  --srv-purple: #7c3aed;
+  --srv-gray: #6b7280;
   color-scheme: light;
 }
 
@@ -37,6 +45,14 @@
   --syn-number: #fbbf24;
   --syn-comment: #8b93a1;
   --syn-type: #93c5fd;
+  --srv-red: #f87171;
+  --srv-orange: #fb923c;
+  --srv-amber: #fbbf24;
+  --srv-green: #4ade80;
+  --srv-teal: #2dd4bf;
+  --srv-blue: #60a5fa;
+  --srv-purple: #a78bfa;
+  --srv-gray: #9ca3af;
   color-scheme: dark;
 }
 

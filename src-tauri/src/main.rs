@@ -4,6 +4,7 @@ mod commands;
 mod logging;
 mod query;
 mod state;
+mod store_cmds;
 
 use std::time::Duration;
 
@@ -71,6 +72,15 @@ fn main() {
             query::qt_close,
             query::qt_complete,
             query::qt_export_csv,
+            store_cmds::qt_history_push,
+            store_cmds::qt_history_list,
+            store_cmds::qt_history_clear,
+            store_cmds::qt_drafts_save,
+            store_cmds::qt_drafts_remove,
+            store_cmds::qt_drafts_load,
+            store_cmds::qt_drafts_clear,
+            store_cmds::settings_get,
+            store_cmds::settings_set_history,
         ])
         .build(tauri::generate_context!())
         .expect("pg-tools başlatılamadı")

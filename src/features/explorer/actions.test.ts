@@ -6,12 +6,12 @@ import { IpcError } from "../../ipc/errors";
 import { actionsFor, executeAction, qualifiedParts, type ActionDeps } from "./actions";
 import { ROOT, emptyTree, type TreeState } from "./tree-model";
 
-const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false };
+const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false, locked: false };
 
 function sampleTree(): TreeState {
   const s = emptyTree();
   const add = (id: string, parent: string, kind: NodeKind, label: string, extra: Partial<TreeNode> = {}) => {
-    s.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, ...extra });
+    s.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, color: null, tag: null, ...extra });
     s.parent.set(id, parent);
     s.children.set(parent, [...(s.children.get(parent) ?? []), id]);
   };

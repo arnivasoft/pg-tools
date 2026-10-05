@@ -15,7 +15,8 @@ async fn server_node(cat: &Catalog, s: &ServerConfig) -> TreeNode {
     TreeNode::new(&id, NodeKind::Server, s.name.clone())
         .with_detail(info.as_ref().map(|i| i.version.clone()))
         .with_server(s.id)
-        .with_flags(NodeFlags { connected: info.is_some(), ..NodeFlags::default() })
+        .with_flags(NodeFlags { connected: info.is_some(), locked: s.read_only_lock, ..NodeFlags::default() })
+        .with_marks(s.color.clone(), s.label.clone())
 }
 
 pub(crate) async fn root_children(cat: &Catalog) -> Result<Vec<TreeNode>> {
