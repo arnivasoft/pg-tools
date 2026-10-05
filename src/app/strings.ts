@@ -110,4 +110,13 @@ export const t = {
     gone: "Nesne artık mevcut değil.",
   },
   toast: { dismiss: "Kapat" },
+  query: {
+    hint: {
+      autocommit: "Bu ifade transaction bloğunda çalışamaz; sekmeyi autocommit kipine alın.",
+      rollback: "Transaction hata durumunda; yalnızca ROLLBACK yapılabilir.",
+      sessionReset:
+        "Bağlantı yeniden kuruldu; oturum durumu (SET, geçici tablolar, advisory kilitler) kaybolmuş olabilir. Sorguyu tekrar çalıştırın.",
+      locked: "Bu sunucu salt okunur kilitli.",
+    },
+  },
 } as const;
