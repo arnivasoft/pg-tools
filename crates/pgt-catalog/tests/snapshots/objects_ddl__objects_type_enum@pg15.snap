@@ -1,0 +1,19 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Type: app.order_status
+
+-- DROP TYPE IF EXISTS app.order_status;
+
+CREATE TYPE app.order_status AS ENUM (
+    'new',
+    'paid',
+    'shipped'
+);
+
+ALTER TYPE app.order_status
+    OWNER TO <owner>;
+
+COMMENT ON TYPE app.order_status
+    IS 'Sipariş durumu';

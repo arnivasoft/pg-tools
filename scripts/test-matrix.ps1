@@ -2,7 +2,7 @@
 .SYNOPSIS
   PostgreSQL sürüm matrisinde pg-tools entegrasyon testlerini çalıştırır.
 .PARAMETER Versions
-  Test edilecek ana sürümler (varsayılan: 10, 11, 12, 14, 16, 17, 18).
+  Test edilecek ana sürümler (varsayılan: 10–18 arası 9 sürüm: 10, 11, 12, 13, 14, 15, 16, 17, 18).
 .PARAMETER KeepContainers
   Testten sonra kapsayıcıları silme (hata ayıklama için).
 .PARAMETER SkipPerf
@@ -10,12 +10,14 @@
   çoğunu bu test oluşturur. Varsayılan: çalıştırılır.
 #>
 param(
-    [string[]]$Versions = @("10", "11", "12", "14", "16", "17", "18"),
+    [string[]]$Versions = @("10", "11", "12", "13", "14", "15", "16", "17", "18"),
     [switch]$KeepContainers,
     [switch]$SkipPerf
 )
 
 $ErrorActionPreference = "Stop"
+# `powershell -File ... -Versions 13,15` diziyi tek "13,15" dizesi olarak verir; virgüllerden böl.
+$Versions = @($Versions | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
 docker info *> $null

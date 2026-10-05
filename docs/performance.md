@@ -119,3 +119,43 @@ olarak tanımlandı:
 
 Karşılaştırma: pgAdmin4 masaüstü (Electron/NW.js kabuğu + Python sunucusu) Plan 1 notlarına göre boşta
 ~400 MB+ kullanır.
+
+## Plan 3 sonu (2026-10-05)
+
+Plan 3 (pgAdmin içe aktarma, filtre, sağ tık menüsü, hata rozeti, sistem nesneleri anahtarı, durum çubuğu,
+tembel yüklenen diyaloglar) sonrasında aynı makinede, Plan 2'de seçilen ayarlarla (B + R1) yeniden ölçüldü:
+
+    bun run build
+    cargo build --release -p pg-tools
+    powershell -NoProfile -File scripts/smoke-release.ps1     # BAŞARILI, çıkış kodu 0 (pencere 192 ms, 6 sn ayakta)
+    powershell -NoProfile -File scripts/measure.ps1 -Runs 5
+
+| Çalıştırma | Pencere (ms) | Toplam özel WS (MB) | Toplam WS (MB) | Rust özel WS (MB) | Süreç |
+|---|---|---|---|---|---|
+| 1 | 121 | 73,7 | 348,2 | 7,2 | 7 |
+| 2 | 43 | 73,4 | 347,7 | 7,3 | 7 |
+| 3 | 46 | 73,7 | 348,4 | 7,2 | 7 |
+| 4 | 30 | 73,3 | 347,9 | 7,2 | 7 |
+| 5 | 29 | 73,2 | 347,1 | 7,2 | 7 |
+| **Medyan** | **43** | **73,4** | 347,9 | **7,2** | 7 |
+
+Hedeflerin hepsi karşılandı (pencere < 1 sn, toplam özel WS < 150 MB, Rust < 30 MB); karar kuralının
+uygulanmasına gerek kalmadı. Plan 2 sonuna göre (76,1 / 7,5 MB) fark ölçüm gürültüsü düzeyindedir. `ImportDialog` ve
+`ServerDialog` Plan 3'te tembel yüklenen ayrı parçalara ayrıldı (`DdlView` Plan 1'den beri ayrı); yeni
+özellikler açılıştaki boşta belleği artırmadı.
+
+Boyutlar:
+
+| | Boyut |
+|---|---|
+| `dist` (ön yüz derlemesi, toplam) | 526 KB (538.567 bayt); en büyük parçalar `DdlView` 288 KB, `index` 184 KB, CSS 17 KB |
+| `target\release\pg-tools.exe` (`cargo build --release -p pg-tools`) | 12,4 MB (12.964.352 bayt) |
+| `target\release\pg-tools.exe` (`bun run tauri build`) | 12,5 MB (13.130.752 bayt) |
+| NSIS kurulum paketi `pg-tools_0.1.0_x64-setup.exe` (WebView2 gömülü değil) | **3,24 MB** (3.402.548 bayt) |
+
+NSIS paketi < 15 MB hedefinin (spec §1.3) altında. `tauri build` exe'si de `smoke-release.ps1` ile sınandı
+(BAŞARILI, pencere 186 ms).
+
+Filtre (Ctrl+F): `tree-model.test.ts` "filters 10,000 loaded nodes in under 50 ms" testi — 10.000 yüklenmiş
+tablo düğümünde filtreli düzleştirmenin 5 denemedeki en kısa süresi **0,93 ms** (3 ayrı çalıştırmada
+0,94 / 0,93 / 0,93 ms; bütçe 50 ms; vitest, Node, aynı makine).

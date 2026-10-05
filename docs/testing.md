@@ -22,7 +22,7 @@ hash partition, partitioned tabloda satır trigger'ı) PG 11+ ve `schema_pg12.sq
 sunucularda uygulanır. Sürüme bağlı test adımları `fx.major().await >= N` ile korunur.
 
 ## Sürüm matrisi (Docker)
-    ./scripts/test-matrix.ps1                       # PG 10, 11, 12, 14, 16, 17, 18
+    ./scripts/test-matrix.ps1                       # PG 10, 11, 12, 13, 14, 15, 16, 17, 18 (9 sürüm)
     ./scripts/test-matrix.ps1 -Versions 16,18
     ./scripts/test-matrix.ps1 -KeepContainers       # hata ayıklama için kapsayıcıları bırakır
     ./scripts/test-matrix.ps1 -SkipPerf             # 5.000 tablolu performans testini atlar
@@ -30,9 +30,11 @@ sunucularda uygulanır. Sürüme bağlı test adımları `fx.major().await >= N`
 Betik her sürüm için `postgres:NN` imajından `pgt-matrix-NN` kapsayıcısını `127.0.0.1:(55400+NN)` portunda
 başlatır, her çalıştırmada rastgele üretilen (hiçbir yere yazılmayan) bir parolayla `PGT_TEST_URLS`'i ayarlar,
 `cargo test --workspace --all-features` çalıştırır ve kapsayıcıları siler. Docker Desktop açık olmalıdır.
+Portlar 55410–55418'dir (sürüm başına bir port, çakışma yok). `powershell -File scripts/test-matrix.ps1 -Versions 13,15`
+biçiminde dışarıdan çağrıldığında liste tek dize olarak gelir; betik virgüllerden böler.
 
 Matris süresinin büyük kısmını tek başına performans testi (`five_thousand_tables_stay_within_budget`) oluşturur:
-her sunucuda 5.000 tablo kurar (7 sürümlük matriste ~215 s; geri kalan tüm testler toplamda ~45 s). Hızlı yineleme için
+her sunucuda 5.000 tablo kurar (7 sürümlük matriste ~215 s, 9 sürümde daha uzun; geri kalan tüm testler toplamda ~45 s). Hızlı yineleme için
 `-SkipPerf` bu testi `cargo test ... -- --skip five_thousand_tables_stay_within_budget` ile atlar; varsayılan
 davranış (test çalışır) değişmez. Birleştirmeden önceki doğrulama `-SkipPerf` olmadan yapılmalıdır.
 
@@ -48,10 +50,12 @@ Sürüme özel DDL snapshot'ları `tests/snapshots/*@pgNN.snap` olarak tutulur. 
 `INSTA_UPDATE=new` ile üretilip PG 18 ile karşılaştırılarak gözden geçirilir. Kabul edilen farklar yalnızca
 sunucunun kendi deparse çıktısından gelir: `POSITION(... IN ...)` / `"position"(...)`, `EXECUTE FUNCTION` /
 `EXECUTE PROCEDURE` (PG < 12 deparse'ı), view gövdesinde tablo adıyla nitelenmiş kolonlar (PG < 16), `MAINTAIN`
-yetkisi (PG 17+), pg_trgm sürümü (PG 10: 1.3, PG 11–12: 1.4, PG 14+: 1.6) ve PG 10'da olmayan nesneler
+yetkisi (PG 17+), pg_trgm sürümü (PG 10: 1.3, PG 11–12: 1.4, PG 13: 1.5, PG 14+: 1.6) ve PG 10'da olmayan nesneler
 (partitioned index, `INCLUDE`). PG 11 snapshot'ları sürüm sınırını doğrular: generated kolon / `tgparentid`
 öncesi yollar PG 10 ile, procedure / `INCLUDE` / hash partition / partitioned index yolları sonraki sürümlerle
-aynı çıktıyı verir.
+aynı çıktıyı verir. PG 13 ve 15 snapshot'ları Plan 3'te eklendi: PG 13, PG 14'ten yalnızca `"position"(...)`
+deparse'ı (2 snapshot) ve pg_trgm 1.5 ile; PG 15, PG 16'dan yalnızca matview gövdesindeki tablo adıyla nitelenmiş
+kolonlarla ayrılır (PG 15 = PG 14 birebir). Sürüm kapılamasında (`.pgNN.sql` / `VersionedSql`) değişiklik gerekmedi.
 
 Bir test her sunucuda döngüyle çalıştığı için ilk başarısız sunucuda durur; snapshot üretirken tüm sürümlerin
 `.snap.new` dosyalarını tek seferde almak için `INSTA_FORCE_PASS=1` de verilebilir (yalnızca snapshot üretimi
@@ -99,7 +103,7 @@ PGT_TEST_URLS="postgres://..." cargo test -p pgt-catalog --test roundtrip
 - partition'larda kolon düzeyi geçersiz kılmalar (varsayılan, NOT NULL vb.): partition DDL'i `PARTITION OF` biçimindedir
 - base (C) tipler; range tiplerinde `SUBTYPE` dışındaki seçenekler
 
-PG 10, 12, 14, 16, 17 ve 18 üzerinde sürüm matrisiyle doğrulanır (aşağıya bakın). PG 10–11'de
+PG 10–18 (9 sürüm) üzerinde sürüm matrisiyle doğrulanır (aşağıya bakın). PG 10–11'de
 `pg_attribute.attgenerated` olmadığı için imzanın `fixtures/signature.pg10.sql` varyantı kullanılır (generated
 kolon alanı boş yazılır); geri kalanı `signature.sql` ile aynıdır.
 
@@ -114,6 +118,28 @@ kolon alanı boş yazılır); geri kalanı `signature.sql` ile aynıdır.
   Triggers listesinde görünür ama `tgparentid <> 0` olduğundan partition DDL'inde tekrar yazılmaz. (Plan
   taslağında PG 11–12'de tekrar yazıldığı varsayılmıştı; PG 11 ve 12 üzerinde canlı doğrulamada böyle olmadığı görüldü
   ve `extra.hits` fixture'ı + gidiş-dönüş testi bunu her sürümde korur.)
+
+## Filtre performans testi
+`src/features/explorer/tree-model.test.ts` içindeki filtre testi 10.000 yüklenmiş düğümlü bir ağaçta filtreyi
+5 kez uygular (filtre `flatten` sırasında uygulanır) ve en kısa süreyi `filter 10k min ms: …` olarak yazdırır;
+bütçe **< 50 ms** (2026-10-05 ölçümü 0,93 ms; `docs/performance.md`). `bun run test`
+ile birlikte çalışır; ölçülen değeri görmek için
+`npx vitest run src/features/explorer/tree-model.test.ts -t "10,000" --silent=false`.
+
+## Yayın exe duman testi
+    bun run build
+    cargo build --release -p pg-tools               # ya da bun run tauri build
+    ./scripts/smoke-release.ps1                     # varsayılan: target\release\pg-tools.exe, 6 sn
+    ./scripts/smoke-release.ps1 -Exe C:\yol\pg-tools.exe -Seconds 10
+
+Betik exe'yi geçici, boş `APPDATA`/`LOCALAPPDATA` dizinleriyle başlatır (gerçek yapılandırmaya ve loglara
+dokunmaz, sunucuya bağlanmaz, parola kullanmaz), ana pencerenin 10 sn içinde oluşmasını bekler, süreci
+`-Seconds` boyunca izler, sonra uygulama + WebView2 süreç ağacını kapatır ve geçici
+`%LOCALAPPDATA%\pg-tools\logs` altında `panicked` / `stack overflow` arar. Çıkış kodu 0 = başarılı; ≠ 0 =
+exe yok, pencere oluşmadı, süre dolmadan çıktı (çıkış kodu yazdırılır) ya da logda panik var.
+Yalnızca debug derlemede görünmeyen hataları yakalamak içindir: Plan 2'de release exe açılıştan ~1 sn sonra
+ana iş parçacığında yığın taşmasıyla (`STATUS_STACK_OVERFLOW`) çöküyordu; varsayılan 6 sn bu tür bir
+gerilemeyi yakalayacak kadar uzundur. Her yayından önce çalıştırın.
 
 ## pgAdmin içe aktarma sınırı
 Dosya önizleme ile içe aktarma arasında değiştirilirse sonuç değişebilir (uygulama aynı yolu yeniden okur; indeksler kayabilir).

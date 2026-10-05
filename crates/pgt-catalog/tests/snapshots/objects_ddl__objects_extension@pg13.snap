@@ -1,0 +1,14 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Extension: pg_trgm
+
+-- DROP EXTENSION IF EXISTS pg_trgm;
+
+CREATE EXTENSION IF NOT EXISTS pg_trgm
+    SCHEMA extra
+    VERSION "1.5";
+
+COMMENT ON EXTENSION pg_trgm
+    IS 'text similarity measurement and index searching based on trigrams';
