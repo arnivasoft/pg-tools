@@ -1,10 +1,23 @@
 import type { Api } from "../../ipc/commands";
+import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { TreeNode } from "../../ipc/bindings/TreeNode";
 import { toPayload } from "../../ipc/errors";
 import {
-  ROOT, collapse, expand, flatten, keyIntent, patchNode, select, setChildren, setError, startLoading, stopLoading,
+  ROOT, collapse, expand, flatten, invalidate, keyIntent, patchNode, select, serverOf, setChildren, setError, startLoading, stopLoading,
   type Intent, type TreeState,
 } from "./tree-model";
+
+/** Arka uç oturumu yok/düşürdü: sunucu bağlantısız sayılmalı, sonraki açılış yeniden bağlanır. */
+const SESSION_GONE = new Set(["not_connected", "connection_lost"]);
+
+/** Sunucuyu bağlantısız işaretler, alt ağacını boşaltır ve hatayı sunucu düğümüne koyar. */
+function markDisconnected(s: TreeState, loadingId: string, serverId: string, error: ErrorPayload): TreeState {
+  const server = s.nodes.get(serverId);
+  if (!server) return s;
+  let next = patchNode(s, serverId, { detail: null, flags: { ...server.flags, connected: false } });
+  next = invalidate(stopLoading(next, loadingId), serverId);
+  return setError(next, serverId, error);
+}
 
 export type PasswordAnswer = { password: string; remember: boolean };
 
@@ -41,7 +54,10 @@ export class ExplorerController {
       const list = await this.deps.api.listChildren(id);
       this.update((s) => setChildren(s, id, list));
     } catch (e) {
-      this.update((s) => setError(s, id, toPayload(e)));
+      const error = toPayload(e);
+      const server = SESSION_GONE.has(error.code) ? serverOf(this.get(), id) : null;
+      if (server) this.update((s) => markDisconnected(s, id, server.id, error));
+      else this.update((s) => setError(s, id, error));
     }
   }
 

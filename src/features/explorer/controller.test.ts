@@ -197,3 +197,59 @@ describe("ExplorerController robustness", () => {
     expect(listChildren.mock.calls.some((call) => call[0] === "srv")).toBe(false);
   });
 });
+
+describe("ExplorerController lost sessions", () => {
+  const srv = n("srv", { kind: "server", serverId: "u1" });
+
+  for (const code of ["connection_lost", "not_connected"]) {
+    it(`${code} while loading marks the owning server disconnected and the next expand reconnects`, async () => {
+      let lost = false;
+      const listChildren = vi.fn(async (id: string) => {
+        if (id === ROOT) return [srv];
+        if (id === "srv") return [n("dbs", { kind: "databaseCollection" })];
+        if (lost) {
+          lost = false;
+          throw err(code);
+        }
+        return [n("db1", { kind: "database", hasChildren: false })];
+      });
+      const connectServer = vi.fn(async () => ({ versionNum: 180000, version: "18.0" }));
+      const { c, get } = setup({}, { api: { listChildren, connectServer } });
+      await c.load(ROOT);
+      await c.expand("srv");
+      await c.expand("dbs");
+      c.select("db1");
+      lost = true;
+      await c.refresh("dbs");
+
+      const server = get().nodes.get("srv")!;
+      expect([server.flags.connected, server.detail]).toEqual([false, null]);
+      expect(get().errors.get("srv")?.code).toBe(code);
+      expect(get().errors.has("dbs")).toBe(false);
+      expect(get().children.has("srv")).toBe(false);
+      expect(get().nodes.has("dbs")).toBe(false);
+      expect(get().selected).toBe("srv");
+      expect(flatten(get()).map((r) => r.id)).toEqual(["srv"]);
+
+      await c.expand("srv");
+      expect(connectServer).toHaveBeenCalledTimes(2);
+      expect(get().nodes.get("srv")!.flags.connected).toBe(true);
+      expect(get().errors.has("srv")).toBe(false);
+      expect(flatten(get()).map((r) => r.id)).toEqual(["srv", "dbs"]);
+    });
+  }
+
+  it("other load errors stay on the loading node", async () => {
+    const listChildren = vi.fn(async (id: string) => {
+      if (id === ROOT) return [srv];
+      if (id === "srv") return [n("dbs")];
+      throw err("query");
+    });
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(async () => ({ versionNum: 1, version: "1" })) } });
+    await c.load(ROOT);
+    await c.expand("srv");
+    await c.expand("dbs");
+    expect(get().errors.get("dbs")?.code).toBe("query");
+    expect(get().nodes.get("srv")!.flags.connected).toBe(true);
+  });
+});
