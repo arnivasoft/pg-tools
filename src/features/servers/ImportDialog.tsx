@@ -33,7 +33,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
     const gen = generation;
     setError(null);
     try {
-      const picked = await openFile({ multiple: false, filters: [{ name: "pgAdmin servers.json", extensions: ["json"] }] });
+      const picked = await openFile({ multiple: false, filters: [{ name: t.import.fileFilter, extensions: ["json"] }] });
       if (typeof picked !== "string" || gen !== generation) return;
       setReading(true);
       const list = await commands.previewPgadminImport(picked);
@@ -65,7 +65,6 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
     try {
       const valid = new Set(items().filter((i) => i.error === null).map((i) => i.index));
       const count = await commands.applyPgadminImport(p, [...selected()].filter((i) => valid.has(i)));
-      if (gen !== generation) return;
       toast.show(t.import.done(count), "success");
       props.onImported();
       props.onClose();
@@ -81,13 +80,13 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
   return (
     <Dialog
       open={props.open}
-      onOpenChange={(o) => !o && props.onClose()}
+      onOpenChange={(o) => !o && !busy() && props.onClose()}
       title={t.import.title}
       width="760px"
       footer={
         <>
-          <Button onClick={props.onClose}>{t.import.cancel}</Button>
-          <Button variant="primary" disabled={busy() || !canImport(items(), selected())} onClick={() => void apply()}>
+          <Button disabled={busy()} onClick={props.onClose}>{t.import.cancel}</Button>
+          <Button variant="primary" disabled={busy() || reading() || !canImport(items(), selected())} onClick={() => void apply()}>
             {t.import.doImport(count())}
           </Button>
         </>
@@ -157,7 +156,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
                             </Show>
                             <Show when={it.warnings.length > 0}>
                               <span class="ml-1 text-muted" title={`${t.import.warnings}:\n${it.warnings.join("\n")}`}>
-                                ⚠ {it.warnings.length}
+                                {t.import.warnBadge(it.warnings.length)}
                               </span>
                             </Show>
                           </>

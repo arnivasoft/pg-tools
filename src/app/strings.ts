@@ -13,6 +13,8 @@ export const t = {
     summary: (s: { total: number; importable: number; duplicates: number; errors: number }) =>
       `${s.total} kayıt · ${s.importable} aktarılabilir · ${s.duplicates} zaten var · ${s.errors} hatalı`,
     warnings: "Uyarılar",
+    warnBadge: (n: number) => `⚠ ${n}`,
+    fileFilter: "pgAdmin servers.json",
     colName: "Ad",
     colGroup: "Grup",
     colHost: "Host:Port",
