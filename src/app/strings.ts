@@ -128,5 +128,24 @@ export const t = {
         "Bağlantı yeniden kuruldu; oturum durumu (SET, geçici tablolar, advisory kilitler) kaybolmuş olabilir. Sorguyu tekrar çalıştırın.",
       locked: "Bu sunucu salt okunur kilitli.",
     },
+    confirm: {
+      title: "Çalıştırmayı onayla",
+      intro: "Aşağıdaki ifadeler onay gerektiriyor:",
+      run: "Çalıştır",
+      production: "Üretim sunucusunda yazma",
+      danger: {
+        updateWithoutWhere: "WHERE olmayan UPDATE: tablodaki tüm satırlar değişir.",
+        deleteWithoutWhere: "WHERE olmayan DELETE: tablodaki tüm satırlar silinir.",
+        truncate: "TRUNCATE: tablo verisi tamamen silinir.",
+        drop: "DROP: nesne kalıcı olarak silinir.",
+        dropColumn: "DROP COLUMN: sütun ve verisi silinir.",
+      },
+      locked: {
+        write: "Sunucu kilitli: yazma ifadesi reddedildi.",
+        ddl: "Sunucu kilitli: şema (DDL) ifadesi reddedildi.",
+        readOnlySetting: "Sunucu kilitli: salt okunur ayarını değiştiren ifade reddedildi.",
+      },
+      lockedSummary: "Sunucu salt okunur kilitli; betik çalıştırılmadı.",
+    },
   },
 } as const;
