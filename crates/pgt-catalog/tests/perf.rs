@@ -5,7 +5,7 @@ use pgt_catalog::Catalog;
 use pgt_catalog::node::{Coll, NodeId, Seg};
 use pgt_core::connection::ConnectionManager;
 use pgt_core::registry::Registry;
-use pgt_core::testing::{admin_client, test_servers};
+use pgt_core::testing::{admin_client, drop_database, test_servers};
 
 const PERF_DB: &str = "pgt_perf";
 const TABLES: usize = 5_000;
@@ -39,11 +39,7 @@ async fn five_thousand_tables_stay_within_budget() {
     }
     for ts in servers {
         let admin = admin_client(&ts, &ts.config.maintenance_db).await;
-        admin
-            .execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", &[&PERF_DB])
-            .await
-            .unwrap();
-        admin.batch_execute(&format!("DROP DATABASE IF EXISTS {PERF_DB}")).await.unwrap();
+        drop_database(&admin, PERF_DB).await;
         admin.batch_execute(&format!("CREATE DATABASE {PERF_DB} TEMPLATE template0 ENCODING 'UTF8'")).await.unwrap();
         let db = admin_client(&ts, PERF_DB).await;
         db.batch_execute("CREATE SCHEMA perf").await.unwrap();
@@ -101,10 +97,6 @@ async fn five_thousand_tables_stay_within_budget() {
 
         drop(db);
         mgr.disconnect(ts.config.id);
-        admin
-            .execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", &[&PERF_DB])
-            .await
-            .unwrap();
-        admin.batch_execute(&format!("DROP DATABASE {PERF_DB}")).await.unwrap();
+        drop_database(&admin, PERF_DB).await;
     }
 }

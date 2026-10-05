@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use common::{Fixture, fixtures};
 use pgt_catalog::node::{Coll, NodeId, TreeNode};
-use pgt_core::testing::admin_client;
+use pgt_core::testing::{admin_client, drop_database};
 
 const SIGNATURE_SQL: &str = include_str!("fixtures/signature.sql");
 /// PG 10–11: `pg_attribute.attgenerated` yok (PG 12+).
@@ -81,14 +81,7 @@ async fn ddl_round_trip_reproduces_the_catalog() {
         assert!(ddls.len() >= 25, "beklenenden az nesne toplandı: {}", ddls.len());
 
         let admin = admin_client(&fx.ts, &fx.ts.config.maintenance_db).await;
-        admin
-            .execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
-                &[&SCRATCH_DB],
-            )
-            .await
-            .unwrap();
-        admin.batch_execute(&format!("DROP DATABASE IF EXISTS {SCRATCH_DB}")).await.unwrap();
+        drop_database(&admin, SCRATCH_DB).await;
         admin.batch_execute(&format!("CREATE DATABASE {SCRATCH_DB} TEMPLATE template0 ENCODING 'UTF8'")).await.unwrap();
         let scratch = admin_client(&fx.ts, SCRATCH_DB).await;
 
@@ -139,13 +132,6 @@ async fn ddl_round_trip_reproduces_the_catalog() {
         );
 
         drop(scratch);
-        admin
-            .execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
-                &[&SCRATCH_DB],
-            )
-            .await
-            .unwrap();
-        admin.batch_execute(&format!("DROP DATABASE {SCRATCH_DB}")).await.unwrap();
+        drop_database(&admin, SCRATCH_DB).await;
     }
 }

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use pgt_core::config::ServerConfig;
 use pgt_core::connection::{ConnectionManager, Target};
-use pgt_core::testing::{TestServer, admin_client, test_servers};
+use pgt_core::testing::{TestServer, admin_client, drop_database, test_servers};
 use pgt_core::{ConnectErrorKind, Error};
 
 /// `PGT_TEST_URLS` içindeki her sunucu; test gövdesi her biri için ayrı çalışır (sürüm matrisi).
@@ -197,10 +197,7 @@ async fn dropped_database_keeps_session_connected() {
     for ts in servers() {
         let db = format!("pgt_dropme_{}", std::process::id());
         let admin = admin_client(&ts, &ts.config.maintenance_db).await;
-        // `DROP DATABASE ... WITH (FORCE)` PG 13+; eski sürümler için oturumlar önce sonlandırılır.
-        let terminate = "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()";
-        admin.execute(terminate, &[&db]).await.unwrap();
-        admin.batch_execute(&format!("DROP DATABASE IF EXISTS {db}")).await.unwrap();
+        drop_database(&admin, &db).await;
         admin.batch_execute(&format!("CREATE DATABASE {db} TEMPLATE template0 ENCODING 'UTF8'")).await.unwrap();
         let oid: u32 = admin.query_one("SELECT oid FROM pg_database WHERE datname = $1", &[&db]).await.unwrap().get(0);
         let mgr = ConnectionManager::new();
@@ -209,8 +206,7 @@ async fn dropped_database_keeps_session_connected() {
             c.client.query_one("SELECT 1", &[]).await.map(|r| r.get::<_, i32>(0))
         };
         assert_eq!(mgr.run(ts.config.id, Target::Database(oid), one).await.unwrap(), 1);
-        admin.execute(terminate, &[&db]).await.unwrap();
-        admin.batch_execute(&format!("DROP DATABASE {db}")).await.unwrap();
+        drop_database(&admin, &db).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         let err = mgr.run(ts.config.id, Target::Database(oid), one).await.unwrap_err();
         assert!(!matches!(err, Error::ConnectionLost(_) | Error::NotConnected), "{err:?}");

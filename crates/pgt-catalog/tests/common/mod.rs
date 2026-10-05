@@ -6,7 +6,7 @@ use pgt_catalog::Catalog;
 use pgt_catalog::node::{Coll, NodeId, Seg, TreeNode};
 use pgt_core::connection::ConnectionManager;
 use pgt_core::registry::Registry;
-use pgt_core::testing::{TestServer, admin_client, test_servers};
+use pgt_core::testing::{TestServer, admin_client, drop_database, test_servers};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
@@ -31,14 +31,7 @@ pub struct Fixture {
 async fn setup_all() {
     for ts in test_servers() {
         let admin = admin_client(&ts, &ts.config.maintenance_db).await;
-        admin
-            .execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
-                &[&FIXTURE_DB],
-            )
-            .await
-            .unwrap();
-        admin.batch_execute(&format!("DROP DATABASE IF EXISTS {FIXTURE_DB}")).await.unwrap();
+        drop_database(&admin, FIXTURE_DB).await;
         // template1 yerel eklentiler/nesneler içerebilir ve kodlaması sunucuya göre değişir;
         // fixture her sunucuda aynı, temiz ve UTF8 olsun.
         admin

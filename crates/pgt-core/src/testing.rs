@@ -43,6 +43,33 @@ fn parse(index: usize, url: &str) -> TestServer {
     TestServer { config, password }
 }
 
+/// Veritabanını (varsa) siler: önce oturumlarını sonlandırır. `pg_terminate_backend` yalnızca sinyal
+/// gönderdiği için oturumların gerçekten kapanması `pg_stat_activity` üzerinden beklenir (en çok ~5 sn) ve
+/// DROP, 55006 (object_in_use) hatasında birkaç kez yeniden denenir. `WITH (FORCE)` PG 13+ olduğundan
+/// kullanılmaz (sürüm matrisi PG 10'dan başlar). `name` güvenilir test adı olmalıdır (tırnaklanmaz).
+pub async fn drop_database(admin: &tokio_postgres::Client, name: &str) {
+    const TERMINATE: &str =
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()";
+    const REMAINING: &str = "SELECT count(*) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()";
+    for attempt in 0..5 {
+        admin.execute(TERMINATE, &[&name]).await.expect("oturumlar sonlandırılamadı");
+        for _ in 0..50 {
+            let left: i64 = admin.query_one(REMAINING, &[&name]).await.expect("pg_stat_activity").get(0);
+            if left == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        match admin.batch_execute(&format!("DROP DATABASE IF EXISTS {name}")).await {
+            Ok(()) => return,
+            Err(e) if attempt < 4 && e.code() == Some(&tokio_postgres::error::SqlState::OBJECT_IN_USE) => {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Err(e) => panic!("{name} silinemedi: {e}"),
+        }
+    }
+}
+
 /// Fixture kurulumu için yazılabilir (read-only olmayan) bağlantı.
 pub async fn admin_client(server: &TestServer, dbname: &str) -> tokio_postgres::Client {
     let mut pg = tokio_postgres::Config::new();
