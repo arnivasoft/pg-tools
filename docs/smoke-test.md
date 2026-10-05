@@ -68,9 +68,9 @@ Her satırda beklenen sonuç `→` ile verilir. Yayın exe'sinin otomatik açıl
 - [ ] Onayda "Vazgeç" → hiçbir şey değişmez, sunucu bağlı kalır
 
 ### Hata rozeti, Tekrar dene, NotFound
-- [ ] Sunucu kapalıyken genişlet → düğümde hata rozeti; rozete tıklama → hata kartı (Türkçe ileti) ve "Tekrar dene"
+- [ ] Sunucu kapalıyken genişlet → düğümde hata rozeti; rozetin **üzerine gelince** hata kartı (Türkçe ileti, ayrıntı, "Tekrar dene"); rozete **tıklama** doğrudan yeniden dener ve odak ağaca döner (ok tuşları hemen çalışır)
 - [ ] Sunucu yeniden açıldıktan sonra "Tekrar dene" → düğüm yüklenir, rozet kaybolur
-- [ ] Başka bir oturumda tabloyu `DROP` et → bu tabloyu yenile/DDL'ini kopyala → "Nesne artık mevcut değil." kartı ve "Üst düğümü yenile"; menü eyleminde "Bu öğe artık yok." bildirimi; üst düğüm yenilenince tablo listeden çıkar
+- [ ] Başka bir oturumda tabloyu `DROP` et → bu tabloyu yenile/DDL'ini kopyala → "Nesne artık mevcut değil: …" bildirimi görünür, satır hatalı işaretlenir; rozet kartında "Nesne artık mevcut değil." ve "Üst düğümü yenile"; üst düğüm yenilenince tablo listeden çıkar. ("Bu öğe artık yok." yalnızca menü açıkken düğüm ağaçtan kalktıysa görünür.)
 - [ ] Rozet düğmesi odaklıyken ok tuşları/Enter ağaç gezintisini tetiklemez
 
 ### Sistem nesneleri anahtarı

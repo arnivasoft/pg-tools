@@ -69,7 +69,20 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
       props.onImported();
       props.onClose();
     } catch (e) {
-      if (gen === generation) setError(toPayload(e).message);
+      if (gen !== generation) return;
+      setError(toPayload(e).message);
+      // Kayıtlar tek tek yazılır: hata öncesindekiler aktarılmış olabilir. Ağacı ve önizlemeyi
+      // yenile ki aktarılanlar "zaten var" olarak işaretlensin ve yeniden denemede kopya oluşmasın.
+      props.onImported();
+      try {
+        const list = await commands.previewPgadminImport(p);
+        if (gen === generation) {
+          setItems(list);
+          setSelected(defaultSelection(list));
+        }
+      } catch {
+        // önizleme yenilenemedi; ilk hata iletisi gösterilmeye devam eder
+      }
     } finally {
       if (gen === generation) setBusy(false);
     }
@@ -111,7 +124,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
             <span class="text-muted">{t.import.summary(summarize(items()))}</span>
             <div class="flex-1" />
             <Button variant="ghost" onClick={() => setSelected(defaultSelection(items()))}>
-              {t.import.selectAll}
+              {t.import.selectRecommended}
             </Button>
             <Button variant="ghost" onClick={() => setSelected(new Set<number>())}>
               {t.import.selectNone}

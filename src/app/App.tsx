@@ -69,7 +69,11 @@ export default function App() {
   };
 
   onMount(async () => {
-    await commands.setShowSystem(showSystem()).catch(() => {});
+    await commands.setShowSystem(showSystem()).catch(() => {
+      // Arka uç varsayılanı kapalıdır: anahtar ve kayıtlı tercih buna uysun.
+      setShowSystem(false);
+      writeStorage(SHOW_SYSTEM_KEY, "0");
+    });
     try {
       await explorer.controller.load(ROOT);
     } catch {
@@ -97,6 +101,8 @@ export default function App() {
   const onWindowKey = (e: KeyboardEvent) => {
     if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") {
       e.preventDefault();
+      // Kalıcı diyalog açıkken arkadaki filtre kutusuna odak taşınmaz.
+      if (document.querySelector('[role="dialog"]')) return;
       filterEl.focus();
       filterEl.select();
     }

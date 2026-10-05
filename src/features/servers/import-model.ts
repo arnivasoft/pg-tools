@@ -1,6 +1,7 @@
+import { t } from "../../app/strings";
 import type { ImportItem } from "../../ipc/bindings/ImportItem";
 
-export const UNGROUPED = "(grupsuz)";
+export const UNGROUPED: string = t.import.ungrouped;
 
 const importable = (i: ImportItem) => i.error === null;
 
