@@ -195,6 +195,20 @@ fn changes_read_only(s: &Scan) -> bool {
     if mentions && s.has_any(&["set", "set_config", "reset", "discard"]) {
         return true;
     }
+    // Unicode kaçışlı ad/dize (`U&"default_transaction_read_onl\0079"`) metinsel aramayı atlatır: her `U&"…"` /
+    // `U&'…'` şüpheli sayılır (kilitli oturumda yanlış pozitif kabul edilir).
+    let unicode_escape = s.toks.windows(3).any(|w| {
+        w[0].kind == Kind::Word
+            && w[0].text(s.sql).eq_ignore_ascii_case("u")
+            && w[1].kind == Kind::Punct
+            && w[1].text(s.sql) == "&"
+            && matches!(w[2].kind, Kind::Ident | Kind::Str)
+            && w[0].end == w[1].start
+            && w[1].end == w[2].start
+    });
+    if unicode_escape {
+        return true;
+    }
     // `set_config` herhangi bir ayarı hesaplanmış bir adla değiştirebilir ('default_transaction_' || 'read_only'):
     // her çağrısı işaretlenir (kilitli oturumda yanlış pozitif kabul edilir).
     if s.has("set_config") {
@@ -349,6 +363,9 @@ mod tests {
             ("select set_config('search_path','x',false)", true),
             ("do $$ begin perform set_config('a', 'b', false); end $$", true),
             ("select current_setting('x')", false),
+            (r#"SET U&"default_transaction_read_onl\0079" = off"#, true),
+            ("set u&\"x\" = 1", true),
+            ("select u & 1 from t", false),
             ("do $$ begin set default_transaction_read_only = off; end $$", true),
             ("alter role app set default_transaction_read_only = off", true),
             ("alter database d set default_transaction_read_only to off", true),
