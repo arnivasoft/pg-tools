@@ -1,0 +1,135 @@
+import { describe, expect, it, vi } from "vitest";
+import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
+import type { TreeNode } from "../../ipc/bindings/TreeNode";
+import { IpcError } from "../../ipc/errors";
+import { ExplorerController, type ExplorerDeps } from "./controller";
+import { ROOT, emptyTree, flatten, type TreeState } from "./tree-model";
+
+const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false };
+const n = (id: string, extra: Partial<TreeNode> = {}): TreeNode =>
+  ({ id, kind: "table", label: id, detail: null, hasChildren: true, serverId: null, flags, ...extra });
+const err = (code: string): IpcError => new IpcError({ code, message: code, detail: null, hint: null } as ErrorPayload);
+
+function setup(children: Record<string, TreeNode[]>, deps: Partial<ExplorerDeps> = {}) {
+  let state: TreeState = emptyTree();
+  const listChildren = vi.fn(async (id: string) => children[id] ?? []);
+  const connectServer = vi.fn(async (_serverId: string, _password: string | null, _remember: boolean) => ({
+    versionNum: 180000,
+    version: "18.0",
+  }));
+  const requestPassword = vi.fn(async () => null);
+  const c = new ExplorerController(
+    () => state,
+    (s) => (state = s),
+    { api: { listChildren, connectServer }, requestPassword, ...deps },
+  );
+  return { c, get: () => state, listChildren, connectServer, requestPassword };
+}
+
+describe("ExplorerController", () => {
+  it("loads children once and toggles expansion", async () => {
+    const { c, get, listChildren } = setup({ [ROOT]: [n("a")], a: [n("a1")] });
+    await c.load(ROOT);
+    await c.toggle("a");
+    expect(flatten(get()).map((r) => r.id)).toEqual(["a", "a1"]);
+    await c.toggle("a");
+    await c.toggle("a");
+    expect(listChildren).toHaveBeenCalledTimes(2);
+  });
+
+  it("connects a disconnected server before expanding", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1" });
+    const { c, get, connectServer } = setup({ [ROOT]: [srv], srv: [n("dbs")] });
+    await c.load(ROOT);
+    await c.expand("srv");
+    expect(connectServer).toHaveBeenCalledWith("u1", null, false);
+    const node = get().nodes.get("srv")!;
+    expect([node.flags.connected, node.detail]).toEqual([true, "18.0"]);
+    expect(flatten(get()).map((r) => r.id)).toEqual(["srv", "dbs"]);
+  });
+
+  it("asks for a password when required and remembers the choice", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1" });
+    const connectServer = vi
+      .fn()
+      .mockRejectedValueOnce(err("password_required"))
+      .mockResolvedValueOnce({ versionNum: 160004, version: "16.4" });
+    const requestPassword = vi.fn(async () => ({ password: "p", remember: true }));
+    const { c } = setup({ [ROOT]: [srv] }, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    await c.load(ROOT);
+    await c.expand("srv");
+    expect(requestPassword).toHaveBeenCalledWith(expect.objectContaining({ id: "srv" }), false);
+    expect(connectServer).toHaveBeenLastCalledWith("u1", "p", true);
+  });
+
+  it("auth error re-prompts and retries with new password", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1" });
+    const connectServer = vi
+      .fn()
+      .mockRejectedValueOnce(err("auth"))
+      .mockRejectedValueOnce(err("auth"))
+      .mockResolvedValueOnce({ versionNum: 180000, version: "18.0" });
+    const requestPassword = vi
+      .fn()
+      .mockResolvedValueOnce({ password: "yanlis", remember: false })
+      .mockResolvedValueOnce({ password: "dogru", remember: true });
+    const { c, get } = setup({ [ROOT]: [srv] }, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    await c.load(ROOT);
+    await c.expand("srv");
+    expect(requestPassword.mock.calls.map((call) => call[1])).toEqual([true, true]);
+    expect(connectServer).toHaveBeenLastCalledWith("u1", "dogru", true);
+    expect(get().nodes.get("srv")!.flags.connected).toBe(true);
+  });
+
+  it("cancelled prompt leaves the server collapsed without error", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1" });
+    const connectServer = vi.fn().mockRejectedValue(err("password_required"));
+    const { c, get } = setup({ [ROOT]: [srv] }, { api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    await c.load(ROOT);
+    await c.expand("srv");
+    const row = flatten(get())[0];
+    expect([row.expanded, row.loading, row.error]).toEqual([false, false, null]);
+  });
+
+  it("network error is shown on the server node", async () => {
+    const srv = n("srv", { kind: "server", serverId: "u1" });
+    const connectServer = vi.fn().mockRejectedValue(err("network"));
+    const { c, get } = setup({ [ROOT]: [srv] }, { api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    await c.load(ROOT);
+    await c.expand("srv");
+    expect(flatten(get())[0].error?.code).toBe("network");
+  });
+
+  it("load errors are attached to the parent and cleared by a successful reload", async () => {
+    const listChildren = vi.fn().mockRejectedValueOnce(err("query")).mockResolvedValueOnce([n("a")]);
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn() } });
+    await c.load(ROOT);
+    expect(get().errors.get(ROOT)?.code).toBe("query");
+    expect(get().loading.has(ROOT)).toBe(false);
+    await c.load(ROOT);
+    expect(get().errors.size).toBe(0);
+    expect(flatten(get()).map((r) => r.id)).toEqual(["a"]);
+  });
+
+  it("keyboard intents select, expand and refresh", async () => {
+    const { c, get, listChildren } = setup({ [ROOT]: [n("a"), n("b")], a: [n("a1")] });
+    await c.load(ROOT);
+    expect(c.handleKey("ArrowDown")).toBe(true);
+    expect(get().selected).toBe("a");
+    expect(c.handleKey("ArrowRight")).toBe(true);
+    await vi.waitFor(() => expect(get().expanded.has("a")).toBe(true));
+    expect(c.handleKey("q")).toBe(false);
+    c.handleKey("F5");
+    await vi.waitFor(() => expect(listChildren).toHaveBeenCalledTimes(3));
+  });
+
+  it("reloadServers refreshes root and loaded groups", async () => {
+    const group = n("grp:G", { kind: "serverGroup" });
+    const { c, listChildren } = setup({ [ROOT]: [group], "grp:G": [] });
+    await c.load(ROOT);
+    await c.expand("grp:G");
+    listChildren.mockClear();
+    await c.reloadServers();
+    expect(listChildren.mock.calls.map((call) => call[0])).toEqual([ROOT, "grp:G"]);
+  });
+});
