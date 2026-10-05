@@ -1,0 +1,15 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Policy: customers_own ON app.customers
+
+-- DROP POLICY IF EXISTS customers_own ON app.customers;
+
+CREATE POLICY customers_own
+    ON app.customers
+    AS RESTRICTIVE
+    FOR UPDATE
+    TO PUBLIC
+    USING (id > 0)
+    WITH CHECK (id > 0);

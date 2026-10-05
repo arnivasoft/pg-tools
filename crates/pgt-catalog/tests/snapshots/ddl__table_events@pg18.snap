@@ -16,3 +16,5 @@ PARTITION BY RANGE (happened_on);
 
 ALTER TABLE IF EXISTS app.events
     OWNER TO <owner>;
+
+CREATE INDEX events_day_idx ON ONLY app.events USING btree (happened_on);

@@ -1,8 +1,7 @@
 mod common;
 
 use common::fixtures;
-use pgt_catalog::node::{Coll, Seg};
-use pgt_core::testing::admin_client;
+use pgt_catalog::node::{Coll, NodeId, Seg};
 
 macro_rules! snapshot {
     ($fx:expr, $name:expr, $ddl:expr) => {{
@@ -54,44 +53,135 @@ async fn non_object_nodes_have_empty_ddl() {
     }
 }
 
-/// Üretilen DDL boş bir veritabanında hatasız çalışmalı ve aynı kolonları üretmeli.
 #[tokio::test]
-async fn ddl_executes_in_scratch_database() {
+async fn customers_ddl_has_rls_policies_indexes_triggers_and_column_grants() {
     for fx in fixtures().await {
-        let admin = admin_client(&fx.ts, &fx.ts.config.maintenance_db).await;
-        admin.batch_execute("DROP DATABASE IF EXISTS pgt_scratch").await.unwrap();
-        admin.batch_execute("CREATE DATABASE pgt_scratch TEMPLATE template0 ENCODING 'UTF8'").await.unwrap();
-        let scratch = admin_client(&fx.ts, "pgt_scratch").await;
-
-        let schema_ddl = fx.catalog.ddl(&fx.schema("app").await).await.unwrap();
-        scratch.batch_execute(&schema_ddl).await.unwrap_or_else(|e| panic!("{e}\n{schema_ddl}"));
-        // bigserial'ın sequence'i Plan 2'deki Sequence DDL'ine kadar elle oluşturulur.
-        scratch.batch_execute("CREATE SEQUENCE app.orders_id_seq").await.unwrap();
-
-        for name in ["customers", "orders", "Order Items", "events"] {
-            let ddl = fx.catalog.ddl(&fx.table("app", name).await).await.unwrap();
-            scratch.batch_execute(&ddl).await.unwrap_or_else(|e| panic!("{name}: {e}\n{ddl}"));
-            let expected: Vec<(String, String)> = scratch
-                .query(
-                    "SELECT a.attname::text, format_type(a.atttypid, a.atttypmod) FROM pg_attribute a \
-                     WHERE a.attrelid = $1::text::regclass AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum",
-                    &[&format!("app.\"{name}\"")],
-                )
-                .await
-                .unwrap()
-                .iter()
-                .map(|r| (r.get(0), r.get(1)))
-                .collect();
-            let table = fx.table("app", name).await;
-            let original = fx.catalog.list_children(&table.child(Seg::Coll(Coll::Columns))).await.unwrap();
-            let original: Vec<(String, String)> = original.iter().map(|n| (n.label.clone(), n.detail.clone().unwrap())).collect();
-            assert_eq!(expected, original, "{name}");
+        let ddl = fx.catalog.ddl(&fx.table("app", "customers").await).await.unwrap();
+        for part in [
+            "ALTER TABLE IF EXISTS app.customers ENABLE ROW LEVEL SECURITY;",
+            "CREATE POLICY customers_own\n    ON app.customers\n    AS RESTRICTIVE\n    FOR UPDATE\n    TO PUBLIC\n    USING (id > 0)\n    WITH CHECK (id > 0);",
+            "CREATE POLICY customers_select\n    ON app.customers\n    AS PERMISSIVE\n    FOR SELECT\n    TO pgt_reader\n    USING (true);",
+            "CREATE UNIQUE INDEX customers_lower_name_idx ON app.customers USING btree (lower((name)::text));",
+            "CREATE TRIGGER customers_touch BEFORE UPDATE ON app.customers FOR EACH ROW",
+            "GRANT SELECT (email) ON TABLE app.customers TO pgt_app;",
+        ] {
+            assert!(ddl.contains(part), "'{part}' eksik:\n{ddl}");
         }
-        drop(scratch);
-        admin
-            .execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'pgt_scratch' AND pid <> pg_backend_pid()", &[])
-            .await
-            .unwrap();
-        admin.batch_execute("DROP DATABASE pgt_scratch").await.unwrap();
+        // kısıta bağlı index'ler (customers_pkey, customers_email_key) ayrıca yazılmaz
+        assert!(!ddl.contains("CREATE UNIQUE INDEX customers_pkey"), "{ddl}");
+        assert!(!ddl.contains("CREATE UNIQUE INDEX customers_email_key"), "{ddl}");
+    }
+}
+
+/// Gidiş-dönüş testinde bulundu: Table DDL'i index ve trigger yorumlarını yazmıyordu.
+#[tokio::test]
+async fn table_ddl_keeps_index_and_trigger_comments() {
+    for fx in fixtures().await {
+        let customers = fx.catalog.ddl(&fx.table("app", "customers").await).await.unwrap();
+        let trigger_comment = "COMMENT ON TRIGGER customers_touch ON app.customers
+    IS 'Dokunma';";
+        assert!(customers.contains(trigger_comment), "{customers}");
+        let orders = fx.catalog.ddl(&fx.table("app", "orders").await).await.unwrap();
+        let index_comment = "COMMENT ON INDEX app.orders_customer_idx
+    IS 'Müşteri dizini';";
+        assert!(orders.contains(index_comment), "{orders}");
+        for part in [
+            "COMMENT ON CONSTRAINT customers_email_check ON app.customers\n    IS 'E-posta biçimi';",
+            "    USING (true);\nCOMMENT ON POLICY customers_select ON app.customers\n    IS 'Okuma politikası';",
+        ] {
+            assert!(customers.contains(part), "'{part}' eksik:\n{customers}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn unlogged_forced_rls_and_disabled_trigger() {
+    for fx in fixtures().await {
+        let log = fx.catalog.ddl(&fx.table("extra", "audit_log").await).await.unwrap();
+        assert!(log.contains("CREATE UNLOGGED TABLE IF NOT EXISTS extra.audit_log"), "{log}");
+        let secrets = fx.catalog.ddl(&fx.table("extra", "secrets").await).await.unwrap();
+        for part in [
+            "ALTER TABLE IF EXISTS extra.secrets ENABLE ROW LEVEL SECURITY;",
+            "ALTER TABLE IF EXISTS extra.secrets FORCE ROW LEVEL SECURITY;",
+            // PG 10'da EXECUTE PROCEDURE, 11+ EXECUTE FUNCTION yazılır
+            "CREATE TRIGGER secrets_touch BEFORE INSERT ON extra.secrets FOR EACH ROW EXECUTE",
+            "app.touch_row();\nALTER TABLE IF EXISTS extra.secrets DISABLE TRIGGER secrets_touch;",
+        ] {
+            assert!(secrets.contains(part), "'{part}' eksik:\n{secrets}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn inherited_table_lists_only_local_columns() {
+    for fx in fixtures().await {
+        let ddl = fx.catalog.ddl(&fx.table("extra", "audit_child").await).await.unwrap();
+        assert!(ddl.contains("extra_col integer"), "{ddl}");
+        assert!(!ddl.contains("note text") && !ddl.contains("id bigint"), "devralınan kolonlar yazılmamalı:\n{ddl}");
+        assert!(ddl.contains("INHERITS (extra.audit_base)"), "{ddl}");
+    }
+}
+
+#[tokio::test]
+async fn identity_options_are_kept() {
+    for fx in fixtures().await {
+        let ddl = fx.catalog.ddl(&fx.table("extra", "tickets").await).await.unwrap();
+        assert!(
+            ddl.contains("id integer NOT NULL GENERATED BY DEFAULT AS IDENTITY (START WITH 10 INCREMENT BY 2 MINVALUE 1 MAXVALUE 2147483647 CACHE 1)"),
+            "{ddl}"
+        );
+        // varsayılan seçenekli identity kolon (customers.id) seçenek yazmaz
+        let customers = fx.catalog.ddl(&fx.table("app", "customers").await).await.unwrap();
+        assert!(customers.contains("id bigint NOT NULL GENERATED ALWAYS AS IDENTITY,"), "{customers}");
+    }
+}
+
+#[tokio::test]
+async fn partitions_use_partition_of_and_skip_inherited_indexes() {
+    for fx in fixtures().await {
+        let events = fx.table("app", "events").await;
+        let parts = fx.nodes_of(&events, Coll::Partitions).await;
+        let part = NodeId::parse(&parts[0].id).unwrap();
+        let ddl = fx.catalog.ddl(&part).await.unwrap();
+        assert!(
+            ddl.contains("CREATE TABLE IF NOT EXISTS app.events_2026 PARTITION OF app.events (\n    CONSTRAINT events_2026_day_check CHECK (happened_on > '2025-12-31'::date)\n)\n    FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');"),
+            "{ddl}"
+        );
+        assert!(!ddl.contains("CREATE INDEX"), "üst tablodan gelen index'ler yazılmamalı:\n{ddl}");
+        if fx.major().await >= 11 {
+            let parent = fx.catalog.ddl(&events).await.unwrap();
+            assert!(parent.contains("CREATE INDEX events_day_idx ON ONLY app.events"), "{parent}");
+            let hits = fx.table("extra", "hits").await;
+            let hash_parts = fx.nodes_of(&hits, Coll::Partitions).await;
+            assert_eq!(hash_parts.len(), 2);
+            let hash_ddl = fx.catalog.ddl(&NodeId::parse(&hash_parts[0].id).unwrap()).await.unwrap();
+            assert!(hash_ddl.contains("PARTITION OF extra.hits\n    FOR VALUES WITH (modulus 2, remainder 0);"), "{hash_ddl}");
+            // üst tablodaki satır trigger'ı partition'a klonlanır ama partition DDL'inde tekrar yazılmaz
+            let hits_ddl = fx.catalog.ddl(&hits).await.unwrap();
+            assert!(hits_ddl.contains("CREATE TRIGGER hits_audit AFTER INSERT ON extra.hits FOR EACH ROW"), "{hits_ddl}");
+            assert!(!hash_ddl.contains("CREATE TRIGGER"), "klonlanmış trigger partition DDL'inde tekrarlanmamalı:\n{hash_ddl}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn generated_columns_on_pg12_and_newer() {
+    for fx in fixtures().await {
+        if fx.major().await < 12 {
+            continue;
+        }
+        let ddl = fx.catalog.ddl(&fx.table("extra", "line_items").await).await.unwrap();
+        // ifade biçimi (`(qty * price)` / `((qty)::numeric * price)`) sunucu sürümüne göre değişir
+        assert!(ddl.contains("total numeric(12,2) GENERATED ALWAYS AS (") && ddl.contains("price)) STORED"), "{ddl}");
+    }
+}
+
+#[tokio::test]
+async fn full_table_ddl_snapshots_for_new_tables() {
+    for fx in fixtures().await {
+        for (schema, table) in [("extra", "audit_child"), ("extra", "tickets")] {
+            let ddl = fx.catalog.ddl(&fx.table(schema, table).await).await.unwrap();
+            snapshot!(fx, format!("table_{schema}_{table}"), ddl);
+        }
     }
 }

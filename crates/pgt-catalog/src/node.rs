@@ -12,25 +12,53 @@ pub enum Coll {
     Schemas,
     Tables,
     Columns,
+    Views,
+    MatViews,
+    Functions,
+    Procedures,
+    TriggerFunctions,
+    Sequences,
+    Types,
+    Domains,
+    Constraints,
+    Indexes,
+    Triggers,
+    Policies,
+    Partitions,
+    Extensions,
+    Roles,
+    Tablespaces,
 }
+
+const COLL_TAGS: [(Coll, &str); 20] = [
+    (Coll::Databases, "dbs"),
+    (Coll::Schemas, "schemas"),
+    (Coll::Tables, "tables"),
+    (Coll::Columns, "columns"),
+    (Coll::Views, "views"),
+    (Coll::MatViews, "matviews"),
+    (Coll::Functions, "functions"),
+    (Coll::Procedures, "procedures"),
+    (Coll::TriggerFunctions, "trigfuncs"),
+    (Coll::Sequences, "sequences"),
+    (Coll::Types, "types"),
+    (Coll::Domains, "domains"),
+    (Coll::Constraints, "constraints"),
+    (Coll::Indexes, "indexes"),
+    (Coll::Triggers, "triggers"),
+    (Coll::Policies, "policies"),
+    (Coll::Partitions, "partitions"),
+    (Coll::Extensions, "extensions"),
+    (Coll::Roles, "roles"),
+    (Coll::Tablespaces, "tablespaces"),
+];
 
 impl Coll {
     fn tag(self) -> &'static str {
-        match self {
-            Coll::Databases => "dbs",
-            Coll::Schemas => "schemas",
-            Coll::Tables => "tables",
-            Coll::Columns => "columns",
-        }
+        COLL_TAGS.iter().find(|(c, _)| *c == self).map(|(_, t)| *t).expect("her Coll'un etiketi var")
     }
     fn from_tag(tag: &str) -> Option<Self> {
-        Some(match tag {
-            "dbs" => Coll::Databases,
-            "schemas" => Coll::Schemas,
-            "tables" => Coll::Tables,
-            "columns" => Coll::Columns,
-            _ => return None,
-        })
+        COLL_TAGS.iter().find(|(_, t)| *t == tag).map(|(c, _)| *c)
     }
 }
 
@@ -41,6 +69,77 @@ pub enum Seg {
     Schema(u32),
     Table(u32),
     Column(i16),
+    Constraint(u32),
+    Index(u32),
+    Trigger(u32),
+    Policy(u32),
+    View(u32),
+    MatView(u32),
+    Function(u32),
+    Procedure(u32),
+    TriggerFunction(u32),
+    Sequence(u32),
+    Type(u32),
+    Domain(u32),
+    Extension(u32),
+    Role(u32),
+    Tablespace(u32),
+}
+
+impl Seg {
+    /// OID taşıyan nesne parçaları için `(etiket, oid)`. `Column` (attnum, negatif olabilir) ve `Coll` hariç.
+    fn oid_tag(self) -> Option<(&'static str, u32)> {
+        Some(match self {
+            Seg::Db(o) => ("db", o),
+            Seg::Schema(o) => ("sch", o),
+            Seg::Table(o) => ("tbl", o),
+            Seg::Constraint(o) => ("con", o),
+            Seg::Index(o) => ("idx", o),
+            Seg::Trigger(o) => ("trg", o),
+            Seg::Policy(o) => ("pol", o),
+            Seg::View(o) => ("view", o),
+            Seg::MatView(o) => ("mv", o),
+            Seg::Function(o) => ("fn", o),
+            Seg::Procedure(o) => ("proc", o),
+            Seg::TriggerFunction(o) => ("tfn", o),
+            Seg::Sequence(o) => ("seq", o),
+            Seg::Type(o) => ("typ", o),
+            Seg::Domain(o) => ("dom", o),
+            Seg::Extension(o) => ("ext", o),
+            Seg::Role(o) => ("role", o),
+            Seg::Tablespace(o) => ("ts", o),
+            Seg::Column(_) | Seg::Coll(_) => return None,
+        })
+    }
+
+    fn from_oid_tag(tag: &str, oid: u32) -> Option<Seg> {
+        Some(match tag {
+            "db" => Seg::Db(oid),
+            "sch" => Seg::Schema(oid),
+            "tbl" => Seg::Table(oid),
+            "con" => Seg::Constraint(oid),
+            "idx" => Seg::Index(oid),
+            "trg" => Seg::Trigger(oid),
+            "pol" => Seg::Policy(oid),
+            "view" => Seg::View(oid),
+            "mv" => Seg::MatView(oid),
+            "fn" => Seg::Function(oid),
+            "proc" => Seg::Procedure(oid),
+            "tfn" => Seg::TriggerFunction(oid),
+            "seq" => Seg::Sequence(oid),
+            "typ" => Seg::Type(oid),
+            "dom" => Seg::Domain(oid),
+            "ext" => Seg::Extension(oid),
+            "role" => Seg::Role(oid),
+            "ts" => Seg::Tablespace(oid),
+            _ => return None,
+        })
+    }
+
+    /// Nesne parçalarının OID'i (`Column` ve `Coll` için `None`).
+    pub fn oid(self) -> Option<u32> {
+        self.oid_tag().map(|(_, o)| o)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -70,6 +169,16 @@ impl NodeId {
         }
     }
 
+    /// Son parçayı atar (koleksiyon düğümünün üst nesnesini bulmak için). Sunucu kimliğinde kendisini döndürür.
+    pub fn parent(&self) -> Self {
+        match self {
+            NodeId::Node { server, path } if !path.is_empty() => {
+                NodeId::Node { server: *server, path: path[..path.len() - 1].to_vec() }
+            }
+            other => other.clone(),
+        }
+    }
+
     pub fn parse(s: &str) -> Result<Self> {
         if s.is_empty() {
             return Ok(NodeId::Root);
@@ -86,11 +195,11 @@ impl NodeId {
         let mut path = Vec::new();
         for part in parts {
             let seg = match part.split_once(':') {
-                Some(("db", n)) => Seg::Db(n.parse().map_err(|_| invalid(s))?),
-                Some(("sch", n)) => Seg::Schema(n.parse().map_err(|_| invalid(s))?),
-                Some(("tbl", n)) => Seg::Table(n.parse().map_err(|_| invalid(s))?),
                 Some(("col", n)) => Seg::Column(n.parse().map_err(|_| invalid(s))?),
-                Some(_) => return Err(invalid(s)),
+                Some((tag, n)) => {
+                    let oid: u32 = n.parse().map_err(|_| invalid(s))?;
+                    Seg::from_oid_tag(tag, oid).ok_or_else(|| invalid(s))?
+                }
                 None => Seg::Coll(Coll::from_tag(part).ok_or_else(|| invalid(s))?),
             };
             path.push(seg);
@@ -109,10 +218,11 @@ impl fmt::Display for NodeId {
                 for seg in path {
                     match seg {
                         Seg::Coll(c) => write!(f, "/{}", c.tag())?,
-                        Seg::Db(o) => write!(f, "/db:{o}")?,
-                        Seg::Schema(o) => write!(f, "/sch:{o}")?,
-                        Seg::Table(o) => write!(f, "/tbl:{o}")?,
                         Seg::Column(n) => write!(f, "/col:{n}")?,
+                        other => {
+                            let (tag, oid) = other.oid_tag().expect("OID taşıyan parça");
+                            write!(f, "/{tag}:{oid}")?
+                        }
                     }
                 }
                 Ok(())
@@ -135,6 +245,37 @@ pub enum NodeKind {
     Table,
     ColumnCollection,
     Column,
+    ConstraintCollection,
+    Constraint,
+    IndexCollection,
+    Index,
+    TriggerCollection,
+    Trigger,
+    PolicyCollection,
+    Policy,
+    PartitionCollection,
+    ViewCollection,
+    View,
+    MaterializedViewCollection,
+    MaterializedView,
+    FunctionCollection,
+    Function,
+    ProcedureCollection,
+    Procedure,
+    TriggerFunctionCollection,
+    TriggerFunction,
+    SequenceCollection,
+    Sequence,
+    TypeCollection,
+    Type,
+    DomainCollection,
+    Domain,
+    ExtensionCollection,
+    Extension,
+    RoleCollection,
+    Role,
+    TablespaceCollection,
+    Tablespace,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
@@ -146,6 +287,7 @@ pub struct NodeFlags {
     pub system: bool,
     pub primary_key: bool,
     pub not_null: bool,
+    pub from_extension: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -251,5 +393,69 @@ mod tests {
         assert_eq!(v["serverId"], U);
         assert_eq!(v["flags"]["primaryKey"], false);
         assert_eq!(serde_json::to_value(NodeKind::TableCollection).unwrap(), "tableCollection");
+    }
+    #[test]
+    fn round_trips_new_shapes() {
+        let cases = [
+            format!("srv:{U}/roles"),
+            format!("srv:{U}/tablespaces"),
+            format!("srv:{U}/role:10"),
+            format!("srv:{U}/ts:1663"),
+            format!("srv:{U}/db:16384/extensions"),
+            format!("srv:{U}/db:16384/ext:9"),
+            format!("srv:{U}/db:16384/sch:2200/views"),
+            format!("srv:{U}/db:16384/sch:2200/matviews"),
+            format!("srv:{U}/db:16384/sch:2200/functions"),
+            format!("srv:{U}/db:16384/sch:2200/procedures"),
+            format!("srv:{U}/db:16384/sch:2200/trigfuncs"),
+            format!("srv:{U}/db:16384/sch:2200/sequences"),
+            format!("srv:{U}/db:16384/sch:2200/types"),
+            format!("srv:{U}/db:16384/sch:2200/domains"),
+            format!("srv:{U}/db:16384/sch:2200/view:30"),
+            format!("srv:{U}/db:16384/sch:2200/mv:31"),
+            format!("srv:{U}/db:16384/sch:2200/fn:32"),
+            format!("srv:{U}/db:16384/sch:2200/proc:33"),
+            format!("srv:{U}/db:16384/sch:2200/tfn:34"),
+            format!("srv:{U}/db:16384/sch:2200/seq:35"),
+            format!("srv:{U}/db:16384/sch:2200/typ:36"),
+            format!("srv:{U}/db:16384/sch:2200/dom:37"),
+            format!("srv:{U}/db:16384/sch:2200/tbl:24576/constraints"),
+            format!("srv:{U}/db:16384/sch:2200/tbl:24576/con:40"),
+            format!("srv:{U}/db:16384/sch:2200/tbl:24576/idx:41"),
+            format!("srv:{U}/db:16384/sch:2200/tbl:24576/trg:42"),
+            format!("srv:{U}/db:16384/sch:2200/tbl:24576/pol:43"),
+            format!("srv:{U}/db:16384/sch:2200/tbl:24576/partitions"),
+            format!("srv:{U}/db:16384/sch:2200/tbl:24576/tbl:24580"),
+            format!("srv:{U}/db:16384/sch:2200/view:30/col:-1"),
+        ];
+        for s in cases {
+            assert_eq!(NodeId::parse(&s).unwrap().to_string(), s);
+        }
+    }
+
+    #[test]
+    fn typed_segments_for_new_kinds() {
+        let id = NodeId::parse(&format!("srv:{U}/db:1/sch:2/tbl:3/con:4")).unwrap();
+        let NodeId::Node { path, .. } = id else { panic!() };
+        assert_eq!(path, vec![Seg::Db(1), Seg::Schema(2), Seg::Table(3), Seg::Constraint(4)]);
+        assert_eq!(Seg::Constraint(4).oid(), Some(4));
+        assert_eq!(Seg::Role(10).oid(), Some(10));
+        assert_eq!(Seg::Column(3).oid(), None);
+        assert_eq!(Seg::Coll(Coll::Views).oid(), None);
+    }
+
+    #[test]
+    fn rejects_new_garbage() {
+        for bad in [format!("srv:{U}/con:abc"), format!("srv:{U}/con:-5"), format!("srv:{U}/nope:1"), format!("srv:{U}/rolez")] {
+            assert!(matches!(NodeId::parse(&bad), Err(Error::Invalid(_))), "{bad}");
+        }
+    }
+
+    #[test]
+    fn new_kinds_and_flag_serialize_camel_case() {
+        assert_eq!(serde_json::to_value(NodeKind::MaterializedViewCollection).unwrap(), "materializedViewCollection");
+        assert_eq!(serde_json::to_value(NodeKind::TriggerFunction).unwrap(), "triggerFunction");
+        let f = serde_json::to_value(NodeFlags::default()).unwrap();
+        assert_eq!(f["fromExtension"], false);
     }
 }

@@ -1,0 +1,15 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Domain: app.positive_int
+
+-- DROP DOMAIN IF EXISTS app.positive_int;
+
+CREATE DOMAIN app.positive_int AS integer
+    DEFAULT 1
+    NOT NULL
+    CONSTRAINT positive_check CHECK (VALUE > 0);
+
+ALTER DOMAIN app.positive_int
+    OWNER TO <owner>;

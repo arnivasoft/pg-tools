@@ -10,6 +10,13 @@ use tauri::Manager;
 
 fn main() {
     let _log_guard = logging::init();
+    // Tauri'nin varsayılanı çekirdek sayısı kadar işçi iş parçacığıdır; katalog sorguları G/Ç beklediği için iki yeter.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio çalışma zamanı kurulamadı");
+    tauri::async_runtime::set(runtime.handle().clone());
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {

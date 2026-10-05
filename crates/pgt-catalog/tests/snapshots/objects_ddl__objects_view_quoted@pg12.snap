@@ -1,0 +1,14 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- View: app."Mixed View"
+
+-- DROP VIEW IF EXISTS app."Mixed View";
+
+CREATE OR REPLACE VIEW app."Mixed View"
+AS
+ SELECT 1 AS "Çok Kolon";
+
+ALTER TABLE app."Mixed View"
+    OWNER TO <owner>;

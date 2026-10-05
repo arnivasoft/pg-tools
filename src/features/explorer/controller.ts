@@ -10,6 +10,10 @@ import {
 /** Arka uç oturumu yok/düşürdü: sunucu bağlantısız sayılmalı, sonraki açılış yeniden bağlanır. */
 const SESSION_GONE = new Set(["not_connected", "connection_lost"]);
 
+export function isSessionGone(code: string): boolean {
+  return SESSION_GONE.has(code);
+}
+
 /** Sunucuyu bağlantısız işaretler, alt ağacını boşaltır ve hatayı sunucu düğümüne koyar. */
 function markDisconnected(s: TreeState, loadingId: string, serverId: string, error: ErrorPayload): TreeState {
   const server = s.nodes.get(serverId);
@@ -40,6 +44,18 @@ export class ExplorerController {
 
   private readonly connecting = new Map<string, Promise<boolean>>();
   private readonly loads = new Map<string, Promise<void>>();
+
+  /**
+   * Arka uç oturumunun düştüğü başka bir yoldan (ör. Inspector çağrısı) öğrenildiğinde çağrılır.
+   * `id` bir sunucunun altındaysa sunucuyu bağlantısız işaretler; aksi halde hiçbir şey yapmaz.
+   */
+  sessionLost(id: string, error: ErrorPayload): boolean {
+    if (!isSessionGone(error.code)) return false;
+    const server = serverOf(this.get(), id);
+    if (!server) return false;
+    this.update((s) => markDisconnected(s, id, server.id, error));
+    return true;
+  }
 
   load(id: string): Promise<void> {
     const pending = this.loads.get(id);

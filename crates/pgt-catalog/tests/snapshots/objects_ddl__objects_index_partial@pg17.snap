@@ -1,0 +1,12 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Index: app.orders_customer_idx
+
+-- DROP INDEX IF EXISTS app.orders_customer_idx;
+
+CREATE INDEX orders_customer_idx ON app.orders USING btree (customer_id, placed_on DESC) WHERE (total > (0)::numeric);
+
+COMMENT ON INDEX app.orders_customer_idx
+    IS 'Müşteri dizini';

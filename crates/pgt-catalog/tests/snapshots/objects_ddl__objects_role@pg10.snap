@@ -1,0 +1,19 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Role: pgt_app
+
+-- DROP ROLE IF EXISTS pgt_app;
+
+CREATE ROLE pgt_app WITH
+    LOGIN
+    NOSUPERUSER
+    INHERIT
+    NOCREATEDB
+    NOCREATEROLE
+    NOREPLICATION
+    NOBYPASSRLS
+    CONNECTION LIMIT 5;
+
+GRANT pgt_reader TO pgt_app;

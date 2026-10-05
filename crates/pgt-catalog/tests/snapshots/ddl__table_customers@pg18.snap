@@ -26,5 +26,35 @@ COMMENT ON TABLE app.customers
 COMMENT ON COLUMN app.customers.email
     IS 'E-posta';
 
+COMMENT ON CONSTRAINT customers_email_check ON app.customers
+    IS 'E-posta biçimi';
+
 GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER, MAINTAIN ON TABLE app.customers TO <owner>;
 GRANT SELECT, INSERT ON TABLE app.customers TO pgt_reader;
+
+GRANT SELECT (email) ON TABLE app.customers TO pgt_app;
+
+ALTER TABLE IF EXISTS app.customers ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY customers_own
+    ON app.customers
+    AS RESTRICTIVE
+    FOR UPDATE
+    TO PUBLIC
+    USING (id > 0)
+    WITH CHECK (id > 0);
+
+CREATE POLICY customers_select
+    ON app.customers
+    AS PERMISSIVE
+    FOR SELECT
+    TO pgt_reader
+    USING (true);
+COMMENT ON POLICY customers_select ON app.customers
+    IS 'Okuma politikası';
+
+CREATE UNIQUE INDEX customers_lower_name_idx ON app.customers USING btree (lower((name)::text));
+
+CREATE TRIGGER customers_touch BEFORE UPDATE ON app.customers FOR EACH ROW WHEN (old.email IS DISTINCT FROM new.email) EXECUTE FUNCTION app.touch_row();
+COMMENT ON TRIGGER customers_touch ON app.customers
+    IS 'Dokunma';

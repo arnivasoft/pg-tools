@@ -42,12 +42,14 @@ Referans makine: SSD'li ortalama iş dizüstü bilgisayarı, Windows 11, sunucul
 | Ölçüt | Hedef |
 |---|---|
 | Soğuk açılış → pencere kullanılabilir | < 1 sn |
-| Boşta toplam bellek (uygulama + WebView2 süreçleri) | < 150 MB; Rust süreci < 30 MB |
+| Boşta toplam bellek (uygulama + WebView2 süreçleri, **özel çalışma kümesi**) | < 150 MB; Rust süreci < 30 MB |
 | Kurulum paketi | < 15 MB (WebView2 gömülü Server varyantı ~150 MB) |
 | 5.000 tablolu "Tables" düğümünü açma | < 300 ms |
 | Ağaç kaydırma | 60 fps, düğüm sayısından bağımsız |
 | 10.000 yüklü düğümde filtreleme | < 50 ms |
 | Seçili tablonun DDL'i | < 200 ms |
+
+Metrik Plan 2'de çalışma kümesinden özel çalışma kümesine çevrildi; çalışma kümesi paylaşılan WebView2 sayfalarını çift sayar. Ayrıntı: docs/performance.md (Plan 2 ölçümü: 76 MB; Rust süreci 7,5 MB).
 
 ### 1.4 Kapsam dışı (bu alt proje)
 

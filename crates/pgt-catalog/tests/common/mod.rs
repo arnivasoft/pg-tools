@@ -6,12 +6,14 @@ use pgt_catalog::Catalog;
 use pgt_catalog::node::{Coll, NodeId, Seg, TreeNode};
 use pgt_core::connection::ConnectionManager;
 use pgt_core::registry::Registry;
-use pgt_core::testing::{TestServer, admin_client, test_servers};
+use pgt_core::testing::{TestServer, admin_client, drop_database, test_servers};
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 pub const FIXTURE_DB: &str = "pgt_fixture";
 const SCHEMA_SQL: &str = include_str!("../fixtures/schema.sql");
+const SCHEMA_PG11_SQL: &str = include_str!("../fixtures/schema_pg11.sql");
+const SCHEMA_PG12_SQL: &str = include_str!("../fixtures/schema_pg12.sql");
 
 static SETUP: OnceCell<()> = OnceCell::const_new();
 
@@ -29,14 +31,7 @@ pub struct Fixture {
 async fn setup_all() {
     for ts in test_servers() {
         let admin = admin_client(&ts, &ts.config.maintenance_db).await;
-        admin
-            .execute(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
-                &[&FIXTURE_DB],
-            )
-            .await
-            .unwrap();
-        admin.batch_execute(&format!("DROP DATABASE IF EXISTS {FIXTURE_DB}")).await.unwrap();
+        drop_database(&admin, FIXTURE_DB).await;
         // template1 yerel eklentiler/nesneler içerebilir ve kodlaması sunucuya göre değişir;
         // fixture her sunucuda aynı, temiz ve UTF8 olsun.
         admin
@@ -45,6 +40,17 @@ async fn setup_all() {
             .unwrap();
         let db = admin_client(&ts, FIXTURE_DB).await;
         db.batch_execute(SCHEMA_SQL).await.unwrap();
+        let version_num: i32 = db
+            .query_one("SELECT current_setting('server_version_num')::int4", &[])
+            .await
+            .unwrap()
+            .get(0);
+        if version_num / 10_000 >= 11 {
+            db.batch_execute(SCHEMA_PG11_SQL).await.unwrap();
+        }
+        if version_num / 10_000 >= 12 {
+            db.batch_execute(SCHEMA_PG12_SQL).await.unwrap();
+        }
         db.batch_execute("ANALYZE").await.unwrap();
     }
 }
@@ -100,6 +106,21 @@ impl Fixture {
         let schema = self.schema(schema).await;
         let list = self.catalog.list_children(&schema.child(Seg::Coll(Coll::Tables))).await.unwrap();
         NodeId::parse(&find(&list, name).id).unwrap()
+    }
+
+    /// `parent`'ın `coll` koleksiyonunun çocukları.
+    pub async fn nodes_of(&self, parent: &NodeId, coll: Coll) -> Vec<TreeNode> {
+        self.catalog.list_children(&parent.child(Seg::Coll(coll))).await.unwrap()
+    }
+
+    pub async fn labels_of(&self, parent: &NodeId, coll: Coll) -> Vec<String> {
+        self.nodes_of(parent, coll).await.into_iter().map(|n| n.label).collect()
+    }
+
+    /// Koleksiyonda etiketi bulur ve düğümün kimliğini döndürür.
+    pub async fn child_of(&self, parent: &NodeId, coll: Coll, label: &str) -> NodeId {
+        let list = self.nodes_of(parent, coll).await;
+        NodeId::parse(&find(&list, label).id).unwrap()
     }
 
     /// DDL snapshot'larını ortamdan bağımsız kılar: sahip rolü test kullanıcısıdır ve

@@ -1,0 +1,21 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Function: app.touch_row()
+
+-- DROP FUNCTION IF EXISTS app.touch_row();
+
+CREATE OR REPLACE FUNCTION app.touch_row()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+    NEW.name := coalesce(NEW.name, 'x');
+
+    RETURN NEW;
+END
+$function$;
+
+ALTER FUNCTION app.touch_row()
+    OWNER TO <owner>;

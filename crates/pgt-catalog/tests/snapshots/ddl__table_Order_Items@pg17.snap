@@ -1,0 +1,19 @@
+---
+source: crates/pgt-catalog/tests/ddl.rs
+expression: fx.normalize(& ddl)
+---
+-- Table: app."Order Items"
+
+-- DROP TABLE IF EXISTS app."Order Items";
+
+CREATE TABLE IF NOT EXISTS app."Order Items"
+(
+    "Line No" integer NOT NULL,
+    order_id bigint NOT NULL,
+    "Ürün Adı" text,
+    CONSTRAINT "Order Items_pkey" PRIMARY KEY (order_id, "Line No"),
+    CONSTRAINT "Order Items_order_id_fkey" FOREIGN KEY (order_id) REFERENCES app.orders(id)
+);
+
+ALTER TABLE IF EXISTS app."Order Items"
+    OWNER TO <owner>;

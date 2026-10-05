@@ -1,0 +1,16 @@
+---
+source: crates/pgt-catalog/tests/ddl.rs
+expression: fx.normalize(& ddl)
+---
+-- Table: extra.audit_child
+
+-- DROP TABLE IF EXISTS extra.audit_child;
+
+CREATE TABLE IF NOT EXISTS extra.audit_child
+(
+    extra_col integer
+)
+INHERITS (extra.audit_base);
+
+ALTER TABLE IF EXISTS extra.audit_child
+    OWNER TO <owner>;

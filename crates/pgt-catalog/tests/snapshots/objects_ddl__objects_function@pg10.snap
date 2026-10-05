@@ -1,0 +1,23 @@
+---
+source: crates/pgt-catalog/tests/objects_ddl.rs
+expression: ddl_text
+---
+-- Function: app.add_tax(amount numeric, rate numeric)
+
+-- DROP FUNCTION IF EXISTS app.add_tax(amount numeric, rate numeric);
+
+CREATE OR REPLACE FUNCTION app.add_tax(amount numeric, rate numeric DEFAULT 0.18)
+ RETURNS numeric
+ LANGUAGE sql
+ IMMUTABLE
+AS $function$ SELECT amount * (1 + rate) $function$;
+
+ALTER FUNCTION app.add_tax(amount numeric, rate numeric)
+    OWNER TO <owner>;
+
+COMMENT ON FUNCTION app.add_tax(amount numeric, rate numeric)
+    IS 'KDV ekler';
+
+GRANT EXECUTE ON FUNCTION app.add_tax(amount numeric, rate numeric) TO <owner>;
+GRANT EXECUTE ON FUNCTION app.add_tax(amount numeric, rate numeric) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION app.add_tax(amount numeric, rate numeric) TO pgt_reader;

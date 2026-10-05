@@ -23,7 +23,9 @@ pub const QUERY_DEADLINE: Duration = Duration::from_secs(35);
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEPALIVE_RETRIES: u32 = 3;
-const SESSION_OPTIONS: &str = "-c default_transaction_read_only=on -c statement_timeout=30000";
+/// `search_path=pg_catalog`: `pg_get_*def`, `format_type` ve `regclass` çıktısı yalnızca yolda görünmeyen
+/// adları şema ile niteler; rol/veritabanı düzeyindeki `search_path` ayarı üretilen DDL'i niteliksiz bırakmasın.
+const SESSION_OPTIONS: &str = "-c default_transaction_read_only=on -c statement_timeout=30000 -c search_path=pg_catalog";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
