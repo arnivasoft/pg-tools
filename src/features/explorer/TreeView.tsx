@@ -40,6 +40,8 @@ export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement
       tabIndex={0}
       class="relative h-full overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-accent"
       onKeyDown={(e) => {
+        // Rozet düğmesi gibi iç öğelerden gelen tuşlar (Enter/Boşluk) ağaç gezintisine karışmasın.
+        if (e.target !== e.currentTarget) return;
         const sel = ex.state().selected;
         if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c" && sel !== null && (window.getSelection()?.toString() ?? "") === "") {
           e.preventDefault();

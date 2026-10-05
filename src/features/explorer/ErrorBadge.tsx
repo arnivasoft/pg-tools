@@ -4,7 +4,7 @@ import { Show } from "solid-js";
 import { t } from "../../app/strings";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 
-export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; onRefreshParent?: () => void }) {
+export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; onRefreshParent?: () => void; onSelect?: () => void }) {
   const gone = () => props.error.code === "not_found";
   return (
     <HoverCard openDelay={150} closeDelay={100} placement="bottom-end">
@@ -15,6 +15,7 @@ export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; on
         class="ml-auto shrink-0 rounded text-danger outline-none focus-visible:ring-1 focus-visible:ring-accent"
         onClick={(e: MouseEvent) => {
           e.stopPropagation();
+          props.onSelect?.();
           if (gone()) props.onRefreshParent?.();
           else props.onRetry();
         }}

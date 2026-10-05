@@ -59,7 +59,7 @@ export function TreeRow(props: {
         <span class="truncate text-xs text-muted">{r().node.detail}</span>
       </Show>
       <Show when={r().error}>
-        {(error) => <ErrorBadge error={error()} onRetry={props.onRetry} onRefreshParent={props.onRefreshParent} />}
+        {(error) => <ErrorBadge error={error()} onRetry={props.onRetry} onRefreshParent={props.onRefreshParent} onSelect={props.onSelect} />}
       </Show>
     </div>
   );
