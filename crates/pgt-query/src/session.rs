@@ -46,6 +46,9 @@ pub const TX_FAILED_MESSAGE: &str = "Transaction hata durumunda; önce ROLLBACK 
 pub const BUSY_MESSAGE: &str = "Bu sekmede bir sorgu zaten çalışıyor.";
 pub const OPEN_TX_MESSAGE: &str = "Açık transaction var.";
 pub const MODE_IN_TX_MESSAGE: &str = "Açık transaction varken mod değiştirilemez.";
+/// Oturum bağlanırken sunucunun salt okunur kilidi ya da üretim etiketi değişti; bağlantı bırakıldı.
+pub const SETTINGS_CHANGED_MESSAGE: &str =
+    "Sunucunun salt okunur kilidi ya da üretim etiketi bağlanırken değişti; sekmeyi yeniden açın.";
 /// Kullanıcının iptal ettiği ifadenin `Failed` iletisi (zaman aşımından ayırt edilir; sunucu iletisi `detail`'de).
 pub const CANCELLED_MESSAGE: &str = "Sorgu kullanıcı tarafından iptal edildi.";
 /// `more()` almayan açık imlecin kapatılma süresi (varsayılan).
@@ -711,13 +714,15 @@ impl QueryManager {
         if !self.mgr.is_connected(server) {
             return Err(Error::NotConnected);
         }
-        let guard = {
-            let registry = self.registry.read().unwrap_or_else(PoisonError::into_inner);
-            let config = registry.get(server).ok_or(Error::UnknownServer(server))?;
-            Guard { locked: config.read_only_lock, production: config.is_production() }
-        };
+        let guard = self.current_guard(server)?;
         let profile = SessionProfile::Query { read_only: guard.locked, statement_timeout_ms: opts.statement_timeout_ms };
         let conn = self.mgr.open_dedicated(server, db, profile).await?;
+        // Bağlanırken kilit/etiket değişmiş ya da sunucu silinmiş olabilir (`close_sessions_of` henüz haritada
+        // olmayan bu oturumu göremez): eski korumayla oturum açılmaz, bağlantı bırakılır.
+        if let Err(e) = self.guard_unchanged(server, guard) {
+            drop(conn);
+            return Err(e);
+        }
         let id = Uuid::new_v4();
         let slot = Arc::new(SessionSlot {
             server,
@@ -738,6 +743,21 @@ impl QueryManager {
         self.map().insert(id, slot);
         tracing::debug!(%server, session = %id, locked = guard.locked, "sorgu oturumu açıldı");
         Ok(id)
+    }
+
+    fn current_guard(&self, server: Uuid) -> Result<Guard> {
+        let registry = self.registry.read().unwrap_or_else(PoisonError::into_inner);
+        let config = registry.get(server).ok_or(Error::UnknownServer(server))?;
+        Ok(Guard { locked: config.read_only_lock, production: config.is_production() })
+    }
+
+    /// Kayıttaki koruma hâlâ `guard` mı; sunucu silindiyse `UnknownServer`, değiştiyse `SETTINGS_CHANGED_MESSAGE`.
+    fn guard_unchanged(&self, server: Uuid, guard: Guard) -> Result<()> {
+        if self.current_guard(server)? != guard {
+            tracing::debug!(%server, "sunucu koruması bağlanırken değişti, oturum açılmadı");
+            return Err(Error::Invalid(SETTINGS_CHANGED_MESSAGE.into()));
+        }
+        Ok(())
     }
 
     /// Ağa gitmeden betiğin planı (kilit/onay bayrakları dahil).
@@ -1594,6 +1614,38 @@ mod tests {
         token.end();
         assert!(!token.request());
         assert_eq!(sent.load(Ordering::SeqCst), 2);
+    }
+
+    /// `open()` bağlantıdan sonra korumayı yeniden doğrular: kilit/etiket değiştiyse ya da sunucu silindiyse
+    /// eski korumayla oturum açılmaz.
+    #[test]
+    fn guard_is_revalidated_against_the_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = Registry::load(dir.path().join("servers.json")).unwrap().registry;
+        let config = registry.upsert(pgt_core::config::ServerConfig::new("s", "h", 5432, "u")).unwrap();
+        let registry = Arc::new(RwLock::new(registry));
+        let qm = QueryManager::new(Arc::new(ConnectionManager::new()), registry.clone());
+        let before = qm.current_guard(config.id).unwrap();
+        assert_eq!(before, PLAIN);
+        assert!(qm.guard_unchanged(config.id, before).is_ok());
+
+        type Change = fn(&mut pgt_core::config::ServerConfig);
+        let changes: [Change; 2] = [|c| c.read_only_lock = true, |c| c.label = Some("Üretim".into())];
+        for change in changes {
+            let mut changed = config.clone();
+            change(&mut changed);
+            registry.write().unwrap().upsert(changed).unwrap();
+            let err = qm.guard_unchanged(config.id, before).unwrap_err();
+            assert!(matches!(&err, Error::Invalid(m) if m == SETTINGS_CHANGED_MESSAGE), "{err:?}");
+            registry.write().unwrap().upsert(config.clone()).unwrap();
+        }
+        // Yalnızca ad/renk değişimi korumayı değiştirmez.
+        let mut renamed = config.clone();
+        renamed.name = "yeni".into();
+        registry.write().unwrap().upsert(renamed).unwrap();
+        assert!(qm.guard_unchanged(config.id, before).is_ok());
+        registry.write().unwrap().remove(config.id).unwrap();
+        assert!(matches!(qm.guard_unchanged(config.id, before), Err(Error::UnknownServer(_))));
     }
 
     #[test]

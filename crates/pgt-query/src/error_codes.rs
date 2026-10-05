@@ -7,8 +7,11 @@ use ts_rs::TS;
 
 use crate::session::{
     BUSY_MESSAGE, CONFIRMATION_REQUIRED, LOCKED_SETTING_MESSAGE, LOCKED_WRITE_MESSAGE, MODE_IN_TX_MESSAGE, OPEN_TX_MESSAGE,
-    TX_FAILED_MESSAGE,
+    SETTINGS_CHANGED_MESSAGE, TX_FAILED_MESSAGE,
 };
+
+/// Ayrı kodu olmayan ama "Geçersiz ayar:" önekiyle gösterilmemesi gereken işaretler (genel `invalid` kodu).
+const PLAIN_INVALID: [&str; 1] = [SETTINGS_CHANGED_MESSAGE];
 
 /// `QueryManager`'ın `Error::Invalid(<işaret>)` ile bildirdiği reddin kodu. `invalid` (diğer her geçersiz girdi)
 /// ve öteki genel kodlar (`query`, `not_found`, `not_connected`, …) `pgt_core::ErrorPayload`'dan gelir.
@@ -64,6 +67,11 @@ pub fn query_payload(e: &Error) -> ErrorPayload {
     {
         return ErrorPayload { code: code.as_str().to_string(), message: message.to_string(), detail: None, hint: None };
     }
+    if let Error::Invalid(m) = e
+        && PLAIN_INVALID.contains(&m.as_str())
+    {
+        return ErrorPayload { code: "invalid".into(), message: m.clone(), detail: None, hint: None };
+    }
     ErrorPayload::from(e)
 }
 
@@ -100,6 +108,8 @@ mod tests {
         assert_eq!(p.message, "Geçersiz ayar: açık imleç yok");
         assert_eq!(query_payload(&Error::NotConnected).code, "not_connected");
         assert_eq!(query_payload(&Error::NotFound("sorgu oturumu".into())).code, "not_found");
+        let p = query_payload(&Error::Invalid(SETTINGS_CHANGED_MESSAGE.into()));
+        assert_eq!((p.code.as_str(), p.message.as_str()), ("invalid", SETTINGS_CHANGED_MESSAGE));
     }
 
     #[test]
