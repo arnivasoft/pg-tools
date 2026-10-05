@@ -1,7 +1,9 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use pgt_core::config::ServerConfig;
-use pgt_core::connection::{ConnectionManager, Target, apply_session_sets, connect_once};
+use pgt_core::connection::{
+    ConnectionManager, DedicatedConn, SessionProfile, Target, apply_session_sets, connect_dedicated_once, connect_once,
+};
 use pgt_core::testing::{TestServer, admin_client, drop_database, test_servers};
 use pgt_core::{ConnectErrorKind, Error};
 
@@ -269,5 +271,164 @@ async fn login_not_permitted_is_not_an_auth_error() {
         let payload = pgt_core::ErrorPayload::from(&err);
         assert_eq!(payload.code, "connect");
         assert!(payload.message.contains("not permitted"), "{}", payload.message);
+    }
+}
+
+const QUERY_RW: SessionProfile = SessionProfile::Query { read_only: false, statement_timeout_ms: 0 };
+
+async fn show(conn: &DedicatedConn, setting: &str) -> String {
+    conn.client.query_one(&format!("SELECT current_setting('{setting}')"), &[]).await.unwrap().get(0)
+}
+
+async fn maintenance_oid(mgr: &ConnectionManager, server: uuid::Uuid) -> u32 {
+    mgr.run(server, Target::Maintenance, |c| async move {
+        c.client.query_one("SELECT oid FROM pg_database WHERE datname = current_database()", &[]).await.map(|r| r.get(0))
+    })
+    .await
+    .unwrap()
+}
+
+/// Yazılabilir sorgu oturumu: yazma serbest, `search_path` kullanıcınınki, süre sınırı yok.
+#[tokio::test]
+async fn dedicated_query_session_is_writable_with_user_search_path() {
+    for ts in servers() {
+        let mgr = ConnectionManager::new();
+        mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+        let conn = mgr.open_dedicated(ts.config.id, Target::Maintenance, QUERY_RW).await.unwrap();
+        assert_eq!(conn.info, mgr.info(ts.config.id).unwrap());
+        conn.client.batch_execute("CREATE TEMP TABLE t(i int)").await.unwrap();
+        assert_eq!(show(&conn, "default_transaction_read_only").await, "off");
+        assert_eq!(show(&conn, "statement_timeout").await, "0");
+        assert_eq!(show(&conn, "search_path").await, "\"$user\", public");
+        assert_eq!(show(&conn, "application_name").await, "pg-tools query");
+    }
+}
+
+#[tokio::test]
+async fn dedicated_read_only_query_session_rejects_writes() {
+    for ts in servers() {
+        let mgr = ConnectionManager::new();
+        mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+        let profile = SessionProfile::Query { read_only: true, statement_timeout_ms: 300_000 };
+        let conn = mgr.open_dedicated(ts.config.id, Target::Maintenance, profile).await.unwrap();
+        let err = conn.client.batch_execute("CREATE TEMP TABLE t(i int)").await.unwrap_err();
+        assert_eq!(err.code().map(|c| c.code()), Some("25006"), "{err:?}");
+        assert_eq!(show(&conn, "statement_timeout").await, "5min");
+        assert_eq!(show(&conn, "search_path").await, "\"$user\", public");
+    }
+}
+
+/// `options` gönderilmeyen sorgu oturumu (yedek yol): ayarlar `SET` ile uygulanır, `search_path`'e dokunulmaz.
+#[tokio::test]
+async fn dedicated_session_settings_are_applied_without_options_parameter() {
+    for ts in servers() {
+        let profile = SessionProfile::Query { read_only: true, statement_timeout_ms: 12_345 };
+        let conn = connect_dedicated_once(&ts.config, &ts.config.maintenance_db, ts.password.as_deref(), profile, false)
+            .await
+            .unwrap();
+        assert_eq!(show(&conn, "default_transaction_read_only").await, "on");
+        assert_eq!(show(&conn, "statement_timeout").await, "12345ms");
+        assert_eq!(show(&conn, "search_path").await, "\"$user\", public");
+        assert_eq!(show(&conn, "application_name").await, "pg-tools query");
+    }
+}
+
+#[tokio::test]
+async fn dedicated_session_forwards_notices() {
+    for ts in servers() {
+        let mgr = ConnectionManager::new();
+        mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+        let mut conn = mgr.open_dedicated(ts.config.id, Target::Maintenance, QUERY_RW).await.unwrap();
+        conn.client.batch_execute("DO $$ BEGIN RAISE NOTICE 'merhaba'; END $$").await.unwrap();
+        let notice = tokio::time::timeout(Duration::from_secs(5), conn.notices.recv()).await.unwrap().unwrap();
+        assert_eq!(notice.message, "merhaba");
+        assert_eq!(notice.code, "00000");
+        assert_eq!(notice.severity, "NOTICE");
+    }
+}
+
+#[tokio::test]
+async fn dedicated_session_query_can_be_cancelled() {
+    for ts in servers() {
+        let mgr = ConnectionManager::new();
+        mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+        let conn = mgr.open_dedicated(ts.config.id, Target::Maintenance, QUERY_RW).await.unwrap();
+        let started = Instant::now();
+        let query = conn.client.batch_execute("SELECT pg_sleep(30)");
+        let cancel = async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            conn.cancel.cancel().await
+        };
+        let (result, cancelled) = tokio::join!(query, cancel);
+        cancelled.unwrap();
+        let err = result.unwrap_err();
+        assert_eq!(err.code().map(|c| c.code()), Some("57014"), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        // Oturum iptalden sonra kullanılabilir kalır.
+        let one: i32 = conn.client.query_one("SELECT 1", &[]).await.unwrap().get(0);
+        assert_eq!(one, 1);
+    }
+}
+
+#[tokio::test]
+async fn open_dedicated_without_connect_is_not_connected() {
+    let mgr = ConnectionManager::new();
+    let err = mgr.open_dedicated(uuid::Uuid::new_v4(), Target::Maintenance, QUERY_RW).await.unwrap_err();
+    assert!(matches!(err, Error::NotConnected), "{err:?}");
+}
+
+/// Sorgu oturumu havuza girmez; `run` yolu etkilenmez. Veritabanı hedefi oid ile çözülür.
+#[tokio::test]
+async fn dedicated_session_is_outside_the_pool_and_resolves_database_oid() {
+    for ts in servers() {
+        let mgr = ConnectionManager::new();
+        mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+        let oid = maintenance_oid(&mgr, ts.config.id).await;
+        assert_eq!(mgr.pooled_connections(ts.config.id).await, 1);
+        let conn = mgr.open_dedicated(ts.config.id, Target::Database(oid), QUERY_RW).await.unwrap();
+        let db: String = conn.client.query_one("SELECT current_database()::text", &[]).await.unwrap().get(0);
+        assert_eq!(db, ts.config.maintenance_db);
+        let other = mgr.open_dedicated(ts.config.id, Target::Maintenance, QUERY_RW).await.unwrap();
+        assert_eq!(mgr.pooled_connections(ts.config.id).await, 1, "sorgu oturumları havuz bağlantısı açmamalı");
+        let pids: (i32, i32) = (
+            conn.client.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0),
+            other.client.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0),
+        );
+        let pool_pid: i32 = mgr
+            .run(ts.config.id, Target::Maintenance, |c| async move {
+                c.client.query_one("SELECT pg_backend_pid()", &[]).await.map(|r| r.get(0))
+            })
+            .await
+            .unwrap();
+        assert!(pids.0 != pool_pid && pids.1 != pool_pid && pids.0 != pids.1, "{pids:?} {pool_pid}");
+        let missing = mgr.open_dedicated(ts.config.id, Target::Database(4_000_000_000), QUERY_RW).await.unwrap_err();
+        assert!(matches!(missing, Error::NotFound(_)), "{missing:?}");
+        assert!(mgr.is_connected(ts.config.id));
+    }
+}
+
+/// İstemci düşünce sunucu oturumu kapanır ve sürücü görevi biter (NOTICE kanalı kapanır).
+#[tokio::test]
+async fn dropping_dedicated_client_closes_backend_and_driver() {
+    for ts in servers() {
+        let mgr = ConnectionManager::new();
+        mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+        let DedicatedConn { client, mut notices, .. } =
+            mgr.open_dedicated(ts.config.id, Target::Maintenance, QUERY_RW).await.unwrap();
+        let pid: i32 = client.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0);
+        drop(client);
+        let closed = tokio::time::timeout(Duration::from_secs(5), notices.recv()).await.expect("sürücü görevi bitmedi");
+        assert!(closed.is_none());
+        let admin = admin_client(&ts, &ts.config.maintenance_db).await;
+        let mut alive = true;
+        for _ in 0..50 {
+            let n: i64 = admin.query_one("SELECT count(*) FROM pg_stat_activity WHERE pid = $1", &[&pid]).await.unwrap().get(0);
+            if n == 0 {
+                alive = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(!alive, "sunucu oturumu kapanmadı");
     }
 }

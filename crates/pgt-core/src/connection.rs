@@ -1,15 +1,18 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
+use futures_util::{StreamExt, stream};
 use serde::Serialize;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
+use tokio_postgres::AsyncMessage;
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::config::ServerConfig;
+use crate::config::{ServerConfig, SslConfig};
 use crate::{ConnectErrorKind, Error, Result, tls};
 
 /// Bağlantı kurma (TCP + TLS + kimlik doğrulama + sürüm sorgusu) için üst sınır.
@@ -30,6 +33,116 @@ const SESSION_OPTIONS: &str = "-c default_transaction_read_only=on -c statement_
 /// bağlantı kurulduktan hemen sonra `SET` ile uygulanır. `SESSION_OPTIONS` ile aynı değerleri taşımalıdır.
 const SESSION_SETS: [&str; 3] =
     ["SET default_transaction_read_only = on", "SET statement_timeout = 30000", "SET search_path = pg_catalog"];
+/// Sorgu oturumlarının `application_name`'i: `pg_stat_activity`'de katalog oturumlarından ayırt edilsin.
+const QUERY_APPLICATION_NAME: &str = "pg-tools query";
+
+/// Oturum ayarları profili.
+/// - `Catalog`: havuzdaki salt okunur katalog oturumu (`SESSION_OPTIONS`/`SESSION_SETS`, 30 sn, `search_path=pg_catalog`).
+/// - `Query`: kullanıcının SQL'ini çalıştıran ayrı (havuzsuz) oturum. `search_path` **verilmez**: kullanıcının
+///   rol/veritabanı düzeyindeki yolu geçerli kalır. `statement_timeout_ms = 0` sınırsız demektir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionProfile {
+    Catalog,
+    Query { read_only: bool, statement_timeout_ms: u32 },
+}
+
+impl SessionProfile {
+    fn application_name(self) -> &'static str {
+        match self {
+            SessionProfile::Catalog => "pg-tools",
+            SessionProfile::Query { .. } => QUERY_APPLICATION_NAME,
+        }
+    }
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
+/// Profilin `options` başlangıç parametresi. `Catalog` için `SESSION_OPTIONS`'ın kendisi.
+fn profile_session_options(profile: SessionProfile) -> Cow<'static, str> {
+    match profile {
+        SessionProfile::Catalog => Cow::Borrowed(SESSION_OPTIONS),
+        SessionProfile::Query { read_only, statement_timeout_ms } => Cow::Owned(format!(
+            "-c default_transaction_read_only={} -c statement_timeout={statement_timeout_ms}",
+            on_off(read_only)
+        )),
+    }
+}
+
+/// `options` uygulanmadığında aynı ayarları kuran `SET` komutları (`profile_session_options` ile aynı değerler).
+fn profile_session_sets(profile: SessionProfile) -> Vec<Cow<'static, str>> {
+    match profile {
+        SessionProfile::Catalog => SESSION_SETS.iter().map(|s| Cow::Borrowed(*s)).collect(),
+        SessionProfile::Query { read_only, statement_timeout_ms } => vec![
+            Cow::Owned(format!("SET default_transaction_read_only = {}", on_off(read_only))),
+            Cow::Owned(format!("SET statement_timeout = {statement_timeout_ms}")),
+        ],
+    }
+}
+
+/// Sunucunun gönderdiği bir NOTICE/WARNING/INFO iletisi (sorgu oturumunda `RAISE NOTICE` vb.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+}
+
+impl From<&tokio_postgres::error::DbError> for Notice {
+    fn from(db: &tokio_postgres::error::DbError) -> Self {
+        Notice {
+            severity: db.severity().to_string(),
+            code: db.code().code().to_string(),
+            message: db.message().to_string(),
+            detail: db.detail().map(str::to_string),
+            hint: db.hint().map(str::to_string),
+        }
+    }
+}
+
+/// Sorgu oturumundaki çalışan sorguyu iptal eder. `CancelToken::cancel_query` yeni bir bağlantı açtığı için
+/// TLS bağlayıcısı gerekir: sunucunun TLS ayarı saklanır ve her iptalde bağlayıcı yeniden kurulur.
+#[derive(Clone)]
+pub struct CancelHandle {
+    token: tokio_postgres::CancelToken,
+    ssl: SslConfig,
+}
+
+impl CancelHandle {
+    /// İptal isteğini gönderir (en fazla `CONNECT_TIMEOUT` bekler). Başarı, sorgunun iptal edildiğini değil
+    /// isteğin iletildiğini gösterir; sorgu 57014 ile biter (ya da zaten bitmişse etkisizdir).
+    pub async fn cancel(&self) -> Result<()> {
+        let tls = tls::make_connector(&self.ssl)?;
+        match with_deadline(CONNECT_TIMEOUT, self.token.cancel_query(tls)).await {
+            Some(result) => result.map_err(Error::from_connect),
+            None => Err(Error::Connect { kind: ConnectErrorKind::Timeout, sqlstate: None, message: "zaman aşımı".into() }),
+        }
+    }
+}
+
+impl std::fmt::Debug for CancelHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancelHandle").finish_non_exhaustive()
+    }
+}
+
+/// Havuz dışı, tek sahipli bağlantı (Query Tool). `client` düşünce bağlantı kapanır, sürücü görevi biter ve
+/// `notices` kanalı kapanır (`recv()` → `None`).
+pub struct DedicatedConn {
+    pub client: tokio_postgres::Client,
+    pub info: ServerInfo,
+    pub notices: mpsc::UnboundedReceiver<Notice>,
+    pub cancel: CancelHandle,
+}
+
+impl std::fmt::Debug for DedicatedConn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DedicatedConn").field("info", &self.info).finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -205,6 +318,36 @@ impl ConnectionManager {
         }
     }
 
+    /// Bağlı sunucuda havuz dışı, tek sahipli bir bağlantı açar (Query Tool). Yapılandırma ve parola
+    /// oturumdan alınır; `Target::Database(oid)` adı önbellekten ya da bakım bağlantısıyla çözülür
+    /// (bilinmeyen oid → `NotFound`). Oturum kilidi yalnızca ad çözümü boyunca tutulur; yavaş bağlantı
+    /// kilitsiz kurulur, havuzdaki `run`'ları bekletmez. Havuz (`conns`) değişmez.
+    pub async fn open_dedicated(&self, server: Uuid, target: Target, profile: SessionProfile) -> Result<DedicatedConn> {
+        let session = self.session(server)?;
+        let (config, password, dbname) = {
+            let mut s = session.state.lock().await;
+            let dbname = match target {
+                Target::Maintenance => s.config.maintenance_db.clone(),
+                Target::Database(oid) => db_name_locked(&mut s, oid).await?,
+            };
+            (s.config.clone(), s.password.clone(), dbname)
+        };
+        let result = open_dedicated_conn(&config, &dbname, password.as_deref(), profile).await;
+        if let (Err(_), Target::Database(oid)) = (&result, target) {
+            // Veritabanı silinmiş ya da yeniden adlandırılmış olabilir: ad bir sonraki denemede yeniden çözülsün.
+            session.state.lock().await.db_names.remove(&oid);
+        }
+        result
+    }
+
+    /// Test yardımcısı: oturumun havuzundaki bağlantı sayısı (bağlı değilse 0).
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub async fn pooled_connections(&self, server: Uuid) -> usize {
+        let Ok(session) = self.session(server) else { return 0 };
+        session.state.lock().await.conns.len()
+    }
+
     /// `max_idle` süresinden uzun boşta kalan bağlantıları kapatır; oturumlar bağlı kalır.
     pub async fn reap_idle(&self, max_idle: Duration) {
         let sessions: Vec<_> = self.sessions.lock().unwrap().values().cloned().collect();
@@ -265,24 +408,27 @@ async fn conn_locked(s: &mut Session, target: Target) -> Result<Arc<PgConn>> {
     if let Some(c) = s.conns.get(&target).filter(|c| c.usable()) {
         return Ok(c.clone());
     }
-    let name = match s.db_names.get(&oid) {
-        Some(n) => n.clone(),
-        None => {
-            let m = maintenance_locked(s).await?;
-            let row = m
-                .client
-                .query_opt("SELECT datname::text FROM pg_database WHERE oid = $1", &[&oid])
-                .await
-                .map_err(Error::from_query)?
-                .ok_or_else(|| Error::NotFound(format!("veritabanı (oid {oid})")))?;
-            let name: String = row.get(0);
-            s.db_names.insert(oid, name.clone());
-            name
-        }
-    };
+    let name = db_name_locked(s, oid).await?;
     let conn = Arc::new(open(&s.config, &name, s.password.as_deref()).await?);
     s.conns.insert(target, conn.clone());
     Ok(conn)
+}
+
+/// Veritabanı adını önbellekten ya da bakım bağlantısıyla çözer ve önbelleğe yazar; yoksa `NotFound`.
+async fn db_name_locked(s: &mut Session, oid: u32) -> Result<String> {
+    if let Some(n) = s.db_names.get(&oid) {
+        return Ok(n.clone());
+    }
+    let m = maintenance_locked(s).await?;
+    let row = m
+        .client
+        .query_opt("SELECT datname::text FROM pg_database WHERE oid = $1", &[&oid])
+        .await
+        .map_err(Error::from_query)?
+        .ok_or_else(|| Error::NotFound(format!("veritabanı (oid {oid})")))?;
+    let name: String = row.get(0);
+    s.db_names.insert(oid, name.clone());
+    Ok(name)
 }
 
 async fn open(config: &ServerConfig, dbname: &str, password: Option<&str>) -> Result<PgConn> {
@@ -308,14 +454,37 @@ fn rejects_options(err: &Error) -> bool {
     matches!(err, Error::Connect { sqlstate, message, .. } if rejects_options_message(sqlstate.as_deref(), message))
 }
 
-async fn open_inner(config: &ServerConfig, dbname: &str, password: Option<&str>) -> Result<PgConn> {
-    match connect_once(config, dbname, password, true).await {
+/// `attempt(true)` (`options` ile) dener; sunucu `options`'ı reddettiyse bir kez `attempt(false)` dener.
+async fn with_options_fallback<T, F, Fut>(mut attempt: F) -> Result<T>
+where
+    F: FnMut(bool) -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    match attempt(true).await {
         Err(first) if rejects_options(&first) => {
             tracing::info!("sunucu `options` başlangıç parametresini reddetti, oturum ayarları SET ile uygulanıyor");
-            connect_once(config, dbname, password, false).await
+            attempt(false).await
         }
         other => other,
     }
+}
+
+async fn open_inner(config: &ServerConfig, dbname: &str, password: Option<&str>) -> Result<PgConn> {
+    with_options_fallback(|with_options| connect_once(config, dbname, password, with_options)).await
+}
+
+async fn open_dedicated_conn(
+    config: &ServerConfig,
+    dbname: &str,
+    password: Option<&str>,
+    profile: SessionProfile,
+) -> Result<DedicatedConn> {
+    let result =
+        with_options_fallback(|with_options| connect_dedicated_once(config, dbname, password, profile, with_options)).await;
+    if let Err(e) = &result {
+        tracing::warn!(server = %config.id, db = dbname, error = %e, "sorgu bağlantısı açılamadı");
+    }
+    result
 }
 
 /// `statement_timeout` değerini milisaniyeye çevirir (`SHOW`/`current_setting` biçimi: "30s", "30000ms",
@@ -336,10 +505,25 @@ fn timeout_ms(value: &str) -> Option<u64> {
     n.checked_mul(factor)
 }
 
-/// Oturumda gerekli üç ayar gerçekten etkin mi? (`options`'ı sessizce yok sayan havuzlayıcılar,
-/// ör. pgbouncer `ignore_startup_parameters = options`, bağlantıyı başarıyla kurar ama ayarları uygulamaz.)
+/// Katalog profilinin üç ayarı gerçekten etkin mi? (`settings_ok_for(Catalog, …)`.)
+#[cfg(test)]
 fn session_settings_ok(read_only: &str, statement_timeout: &str, search_path: &str) -> bool {
-    read_only.trim() == "on" && timeout_ms(statement_timeout) == Some(30_000) && search_path.trim() == "pg_catalog"
+    settings_ok_for(SessionProfile::Catalog, read_only, statement_timeout, search_path)
+}
+
+/// Profilin gerektirdiği oturum ayarları gerçekten etkin mi? (`options`'ı sessizce yok sayan havuzlayıcılar,
+/// ör. pgbouncer `ignore_startup_parameters = options`, bağlantıyı başarıyla kurar ama ayarları uygulamaz.)
+/// `Catalog`: salt okunur, 30 sn ve `search_path = pg_catalog`; `Query`: yalnızca salt okunurluk ve süre sınırı.
+fn settings_ok_for(profile: SessionProfile, read_only: &str, statement_timeout: &str, search_path: &str) -> bool {
+    match profile {
+        SessionProfile::Catalog => {
+            read_only.trim() == "on" && timeout_ms(statement_timeout) == Some(30_000) && search_path.trim() == "pg_catalog"
+        }
+        SessionProfile::Query { read_only: want_read_only, statement_timeout_ms } => {
+            read_only.trim() == on_off(want_read_only)
+                && timeout_ms(statement_timeout) == Some(u64::from(statement_timeout_ms))
+        }
+    }
 }
 
 /// `sets` komutlarını tek `batch_execute` ile uygular; hata bağlantı hatası (`kind = Other`) olarak döner.
@@ -352,17 +536,31 @@ pub async fn apply_session_sets(client: &tokio_postgres::Client, sets: &[&str]) 
     })
 }
 
+/// Bağlantı sürücüsü: havuz bağlantısı `connection.await` ile sürülür (iletiler yok sayılır); sorgu
+/// bağlantısı `poll_message` ile sürülür ve NOTICE'lar kanala iletilir.
+enum Driver {
+    Await,
+    Notices(mpsc::UnboundedSender<Notice>),
+}
+
 /// Tek bir bağlantı denemesi. `with_options=true`: oturum ayarları `options` başlangıç parametresiyle;
 /// `false`: `options` gönderilmez (pgbouncer yedek yolu). Her iki durumda da sürüm sorgusu ayarları okur;
-/// etkin değillerse (yedek yol ya da `options`'ı sessizce yok sayan havuzlayıcı) `SESSION_SETS` uygulanır.
-#[doc(hidden)]
-pub async fn connect_once(config: &ServerConfig, dbname: &str, password: Option<&str>, with_options: bool) -> Result<PgConn> {
+/// etkin değillerse (yedek yol ya da `options`'ı sessizce yok sayan havuzlayıcı) profilin `SET`'leri uygulanır.
+/// Hata olursa istemci düşer ve bağlantı kapanır; istenen ayarları taşımayan oturum asla dönmez.
+async fn connect_with(
+    config: &ServerConfig,
+    dbname: &str,
+    password: Option<&str>,
+    profile: SessionProfile,
+    with_options: bool,
+    driver: Driver,
+) -> Result<(tokio_postgres::Client, ServerInfo)> {
     let mut pg = tokio_postgres::Config::new();
     pg.host(&config.host)
         .port(config.port)
         .user(&config.username)
         .dbname(dbname)
-        .application_name("pg-tools")
+        .application_name(profile.application_name())
         .ssl_mode(tls::pg_ssl_mode(config.ssl.mode))
         .connect_timeout(CONNECT_TIMEOUT)
         .keepalives(true)
@@ -370,7 +568,7 @@ pub async fn connect_once(config: &ServerConfig, dbname: &str, password: Option<
         .keepalives_interval(KEEPALIVE_INTERVAL)
         .keepalives_retries(KEEPALIVE_RETRIES);
     if with_options {
-        pg.options(SESSION_OPTIONS);
+        pg.options(profile_session_options(profile).as_ref());
     }
     if let Some(p) = password {
         pg.password(p);
@@ -380,11 +578,35 @@ pub async fn connect_once(config: &ServerConfig, dbname: &str, password: Option<
     // sunucu bağlantıyı sonsuza dek bekletmesin.
     let establish = async {
         let (client, connection) = pg.connect(connector).await.map_err(Error::from_connect)?;
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                tracing::debug!(error = %e, "PostgreSQL bağlantısı kapandı");
+        match driver {
+            Driver::Await => {
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        tracing::debug!(error = %e, "PostgreSQL bağlantısı kapandı");
+                    }
+                });
             }
-        });
+            Driver::Notices(tx) => {
+                let mut connection = connection;
+                tokio::spawn(async move {
+                    // İstemci düşünce bağlantı kapanır, akış `None` verir ve görev (ile `tx`) biter.
+                    let mut messages = stream::poll_fn(move |cx| connection.poll_message(cx));
+                    while let Some(message) = messages.next().await {
+                        match message {
+                            Ok(AsyncMessage::Notice(db)) => {
+                                // Alıcı düşmüş olabilir; bağlantı yine de sürülmeye devam eder.
+                                let _ = tx.send(Notice::from(&db));
+                            }
+                            Ok(_) => {} // LISTEN/NOTIFY kapsam dışı
+                            Err(e) => {
+                                tracing::debug!(error = %e, "PostgreSQL sorgu bağlantısı kapandı");
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        }
         let row = client
             .query_one(
                 "SELECT current_setting('server_version_num')::int4, current_setting('server_version'), \
@@ -395,12 +617,14 @@ pub async fn connect_once(config: &ServerConfig, dbname: &str, password: Option<
             .await
             .map_err(Error::from_query)?;
         let (read_only, timeout, search_path): (String, String, String) = (row.get(2), row.get(3), row.get(4));
-        if !session_settings_ok(&read_only, &timeout, &search_path) {
+        if !settings_ok_for(profile, &read_only, &timeout, &search_path) {
             if with_options {
                 tracing::info!("sunucu `options` ayarlarını uygulamadı (havuzlayıcı yok saymış olabilir), oturum ayarları SET ile uygulanıyor");
             }
-            // Hata olursa `client` düşer ve bağlantı kapanır; salt okunur korumasız oturum asla dönmez.
-            apply_session_sets(&client, &SESSION_SETS).await?;
+            // Hata olursa `client` düşer ve bağlantı kapanır; istenen ayarları taşımayan oturum asla dönmez.
+            let sets = profile_session_sets(profile);
+            let sets: Vec<&str> = sets.iter().map(|s| s.as_ref()).collect();
+            apply_session_sets(&client, &sets).await?;
         }
         Ok::<_, Error>((client, row))
     };
@@ -413,7 +637,29 @@ pub async fn connect_once(config: &ServerConfig, dbname: &str, password: Option<
     let num: i32 = row.get(0);
     let full: String = row.get(1);
     let version = full.split_whitespace().next().unwrap_or(&full).to_string();
-    Ok(PgConn { client, info: ServerInfo { version_num: num as u32, version }, last_used: StdMutex::new(Instant::now()) })
+    Ok((client, ServerInfo { version_num: num as u32, version }))
+}
+
+/// Katalog profiliyle tek bir havuz bağlantısı denemesi (bkz. `connect_with`).
+#[doc(hidden)]
+pub async fn connect_once(config: &ServerConfig, dbname: &str, password: Option<&str>, with_options: bool) -> Result<PgConn> {
+    let (client, info) = connect_with(config, dbname, password, SessionProfile::Catalog, with_options, Driver::Await).await?;
+    Ok(PgConn { client, info, last_used: StdMutex::new(Instant::now()) })
+}
+
+/// Tek bir havuz dışı bağlantı denemesi (`options` yedek yolu olmadan; bkz. `connect_with`).
+#[doc(hidden)]
+pub async fn connect_dedicated_once(
+    config: &ServerConfig,
+    dbname: &str,
+    password: Option<&str>,
+    profile: SessionProfile,
+    with_options: bool,
+) -> Result<DedicatedConn> {
+    let (tx, notices) = mpsc::unbounded_channel();
+    let (client, info) = connect_with(config, dbname, password, profile, with_options, Driver::Notices(tx)).await?;
+    let cancel = CancelHandle { token: client.cancel_token(), ssl: config.ssl.clone() };
+    Ok(DedicatedConn { client, info, notices, cancel })
 }
 
 #[cfg(test)]
@@ -612,5 +858,82 @@ mod tests {
             })
             .collect();
         assert_eq!(from_options, SESSION_SETS);
+    }
+
+    const Q_RO: SessionProfile = SessionProfile::Query { read_only: true, statement_timeout_ms: 0 };
+    const Q_RW: SessionProfile = SessionProfile::Query { read_only: false, statement_timeout_ms: 300_000 };
+
+    #[test]
+    fn profile_session_options_per_profile() {
+        assert_eq!(profile_session_options(Q_RO), "-c default_transaction_read_only=on -c statement_timeout=0");
+        assert_eq!(profile_session_options(Q_RW), "-c default_transaction_read_only=off -c statement_timeout=300000");
+        assert_eq!(profile_session_options(SessionProfile::Catalog), SESSION_OPTIONS);
+        for p in [Q_RO, Q_RW] {
+            assert!(!profile_session_options(p).contains("search_path"), "{p:?}");
+            assert!(!profile_session_sets(p).iter().any(|s| s.contains("search_path")), "{p:?}");
+        }
+        assert_eq!(SessionProfile::Catalog.application_name(), "pg-tools");
+        assert_eq!(Q_RO.application_name(), "pg-tools query");
+    }
+
+    /// Her profilde `SET` yedeği `options` ile aynı ayarları taşır (Catalog: `SESSION_SETS`'in kendisi).
+    #[test]
+    fn profile_session_sets_match_profile_options() {
+        for p in [SessionProfile::Catalog, Q_RO, Q_RW] {
+            let from_options: Vec<String> = profile_session_options(p)
+                .split("-c ")
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(|p| {
+                    let (k, v) = p.split_once('=').unwrap();
+                    format!("SET {k} = {v}")
+                })
+                .collect();
+            let sets: Vec<String> = profile_session_sets(p).into_iter().map(Cow::into_owned).collect();
+            assert_eq!(from_options, sets, "{p:?}");
+        }
+        assert_eq!(profile_session_sets(SessionProfile::Catalog), SESSION_SETS);
+    }
+
+    #[test]
+    fn settings_ok_for_table() {
+        let five_min = SessionProfile::Query { read_only: false, statement_timeout_ms: 300_000 };
+        let cases: [(SessionProfile, &str, &str, &str, bool); 13] = [
+            (SessionProfile::Catalog, "on", "30s", "pg_catalog", true),
+            (SessionProfile::Catalog, "on", "30s", "\"$user\", public", false),
+            (SessionProfile::Catalog, "off", "30s", "pg_catalog", false),
+            (SessionProfile::Catalog, "on", "0", "pg_catalog", false),
+            // Query: search_path önemsiz, yalnızca salt okunurluk ve süre.
+            (Q_RO, "on", "0", "\"$user\", public", true),
+            (Q_RO, "on", "0", "pg_catalog", true),
+            (Q_RO, "off", "0", "\"$user\", public", false),
+            (Q_RO, "on", "30s", "\"$user\", public", false),
+            (five_min, "off", "5min", "x", true),
+            (five_min, "off", "300s", "x", true),
+            (five_min, "off", "300000", "x", true),
+            (five_min, "on", "5min", "x", false),
+            (SessionProfile::Query { read_only: true, statement_timeout_ms: 30_000 }, "on", "30s", "x", true),
+        ];
+        for (profile, ro, t, sp, want) in cases {
+            assert_eq!(settings_ok_for(profile, ro, t, sp), want, "{profile:?} {ro} {t} {sp}");
+        }
+        assert!(!settings_ok_for(Q_RO, "on", "garbage", "x"));
+    }
+
+    /// Sorgu bağlantısı da `options` reddinde tek bir yedek deneme yapar.
+    #[tokio::test]
+    async fn dedicated_options_rejection_retries_once_without_options() {
+        let (port, count) = fake_pooler("08P01", "unsupported startup parameter: options").await;
+        let config = ServerConfig::new("sahte", "127.0.0.1", port, "postgres");
+        let err = open_dedicated_conn(&config, "postgres", Some("x"), Q_RW).await.unwrap_err();
+        assert!(matches!(&err, Error::Connect { sqlstate: Some(c), .. } if c == "08P01"), "{err:?}");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2, "tek bir yeniden deneme bekleniyordu");
+    }
+
+    #[tokio::test]
+    async fn open_dedicated_requires_a_connected_server() {
+        let mgr = ConnectionManager::new();
+        let err = mgr.open_dedicated(Uuid::new_v4(), Target::Maintenance, Q_RO).await.unwrap_err();
+        assert!(matches!(err, Error::NotConnected), "{err:?}");
     }
 }

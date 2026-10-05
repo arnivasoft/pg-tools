@@ -12,6 +12,8 @@ pgt-core = { path = "crates/pgt-core" }
 pgt-catalog = { path = "crates/pgt-catalog" }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-postgres = "0.7.18"
+# Yalnızca `stream::poll_fn` + `StreamExt::next` (sorgu bağlantısı sürücüsü); tokio-postgres zaten çeker.
+futures-util = { version = "0.3", default-features = false }
 tokio-postgres-rustls = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.7"
