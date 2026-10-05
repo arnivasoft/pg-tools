@@ -93,21 +93,27 @@ Tüm sürümler için `scripts/test-matrix.ps1` (yukarıda) `pgt-query` testleri
 - **Salt okunur kilit bir güvenlik sınırı DEĞİLDİR.** Güçlü bir korumadır; kesin garanti için sunucuda **salt okunur
   bir veritabanı rolü kullanın.** Kilitli oturumda istemci şunları reddeder (`classify.rs` `changes_read_only`,
   testler `classify.rs` ve `session.rs`): `Write`/`Ddl` sınıfı ifadeler; `transaction_read_only` /
-  `default_transaction_read_only` içeren `SET`/`RESET`/`DISCARD`/`set_config`; `SET SESSION CHARACTERISTICS`;
-  `BEGIN`/`START TRANSACTION`/`SET TRANSACTION ... READ WRITE`; `RESET ALL` ve `DISCARD ALL`; ve **her**
-  `set_config` sözcüğü (hesaplanmış ad dahil, `DO` gövdesindeki dolar tırnaklı metin dahil; yanlış pozitif kabul
-  edilir). Oturum varsayılanı `default_transaction_read_only=on`'dır, ama bu yalnızca bir **varsayılandır**
+  `default_transaction_read_only` içeren `SET`/`RESET`/`DISCARD`/`set_config`;
+  `BEGIN`/`START TRANSACTION`/`SET TRANSACTION`/`SET SESSION CHARACTERISTICS AS TRANSACTION ... READ WRITE` (yalnızca
+  `READ WRITE` biçimi; `READ ONLY` serbest); `RESET ALL` ve `DISCARD ALL`; **her** `set_config` sözcüğü (hesaplanmış
+  ad dahil, `DO` gövdesindeki dolar tırnaklı metin dahil); ve **her** `U&"…"` / `U&'…'` Unicode kaçışlı ad ya da dize
+  (`SET U&"default_transaction_read_onl\0079" = off` metinsel taramayı atlatırdı). CSV dışa aktarma da aynı kapıdan
+  geçer (`select set_config(...)` bir SELECT'tir). Yanlış pozitifler kabul edilir: dize/dolar tırnaklı metin
+  içindeki `read write`, `reset all`, `discard all` ifadeleri de (ör. `select 'read write'`) reddedilir. Oturum varsayılanı `default_transaction_read_only=on`'dır, ama bu yalnızca bir **varsayılandır**
   (kullanıcı `SET`/`BEGIN READ WRITE` ile değiştirebilir; istemci bunları yakalar, sunucu yakalamaz).
-  Hâlâ atlatabilecekler (**ilkesel olarak; bir testle doğrulanmadı**): `DO`/fonksiyon içinde `EXECUTE` ile
-  ayar adını dize parçalarından kurmak (`'SET default_transaction_' || 'read_only = off'`: metinsel tarama
-  parçalanmış adı görmez); gövdesinde ayarı değiştiren veya yazan, `SELECT fonksiyon()` ile çağrılan fonksiyonlar
+  Hâlâ atlatabilecekler: `DO`/fonksiyon içinde `EXECUTE` ile ayar adını dize parçalarından kurmak
+  (`'SET default_transaction_' || 'read_only = off'`: metinsel tarama parçalanmış adı görmez; bu yol
+  `tests/session.rs` `lock_is_a_guard_not_a_security_boundary` ile **doğrulanmıştır**: ardından bir `DO` ile yazma
+  başarılı olur); gövdesinde ayarı değiştiren veya yazan, `SELECT fonksiyon()` ile çağrılan fonksiyonlar
   (özellikle `SECURITY DEFINER`; sınıflandırıcı yalnızca çağrı ifadesini görür, `set_config` sözcüğü fonksiyonun
   içinde kalır); sınıflandırıcının tanımadığı yazan ifade biçimleri.
 - **Onay kapısı arka uçta zorunludur**: tehlikeli ifadeler (`DROP`, `TRUNCATE`, `WHERE`'siz `UPDATE`/`DELETE` vb.)
   ve üretim etiketli sunucuda yazan ifadeler `confirmed = true` olmadan `qt_run` tarafından reddedilir
   (`confirmation_required`); arayüz yalnızca onay diyaloğunu gösterir, kuralı uygulamaz.
-- **Transaction durum makinesi** istemci tarafında ifade türlerinden izlenir ve her ifade sonrası sunucuya
-  `SELECT statement_timestamp() <> transaction_timestamp()` sondasıyla doğrulanır (sapma düzeltilir ve loglanır).
+- **Transaction durum makinesi** istemci tarafında ifade türlerinden izlenir ve **`Tx` sınıfı her ifadeden ve her
+  hatadan sonra** (ayrıca `qt_tx`, başarısız kapanış-COMMIT'i ve dışa aktarma hatasından sonra; başarılı `Select`/
+  `Write`/`Ddl` ifadelerinden sonra değil) sunucuya `SELECT statement_timestamp() <> transaction_timestamp()`
+  sondasıyla doğrulanır (sapma düzeltilir ve loglanır).
   Sınırları: fonksiyon/`DO` içinde dinamik `COMMIT`/`ROLLBACK` istemciye görünmez (sonda yine de düzeltir);
   sonda saatin ilerlemesine dayanır (transaction içinde ilk ifadede iki zaman damgası eşit olabilir, saat geri
   alınırsa yanlış sonuç mümkündür). `Failed` durumunda yalnızca `ROLLBACK`/`ROLLBACK TO` kabul edilir
