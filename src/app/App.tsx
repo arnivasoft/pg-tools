@@ -8,6 +8,7 @@ import { ServerDialog } from "../features/servers/ServerDialog";
 import { groupsOf } from "../features/servers/server-form";
 import type { ServerConfig } from "../ipc/bindings/ServerConfig";
 import { commands } from "../ipc/commands";
+import { toPayload } from "../ipc/errors";
 import { Button } from "../ui/Button";
 import { SplitPane } from "./SplitPane";
 import { StatusBar } from "./StatusBar";
@@ -27,11 +28,13 @@ export default function App() {
   const openDialog = async (serverId: string | null) => {
     try {
       const servers = await commands.listServers();
+      const target = serverId === null ? null : (servers.find((s) => s.id === serverId) ?? null);
+      if (serverId !== null && target === null) return;
       setGroups(groupsOf(servers));
-      setEditing(serverId === null ? null : (servers.find((s) => s.id === serverId) ?? null));
+      setEditing(target);
       setDialogOpen(true);
-    } catch {
-      // listing failures are surfaced via the tree; keep the dialog closed
+    } catch (e) {
+      setNotice(toPayload(e).message);
     }
   };
   const selectedServerId = () => {

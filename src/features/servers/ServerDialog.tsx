@@ -28,9 +28,15 @@ export function ServerDialog(props: {
   const [feedback, setFeedback] = createSignal<Feedback>(null);
   const [busy, setBusy] = createSignal(false);
   let nameEl: HTMLInputElement | undefined;
+  let generation = 0;
 
   createEffect(() => {
-    if (!props.open) return;
+    generation++;
+    if (!props.open) {
+      setForm(emptyForm());
+      setBusy(false);
+      return;
+    }
     setForm(props.editing ? formFromConfig(props.editing) : emptyForm());
     setTab("general");
     setFeedback(null);
@@ -58,15 +64,16 @@ export function ServerDialog(props: {
   const runTest = async () => {
     const r = validated();
     if (!r) return;
+    const gen = generation;
     setBusy(true);
     setFeedback(null);
     try {
       const info = await commands.testConnection(r.config, r.password);
-      setFeedback({ kind: "ok", text: t.server.testOk(info.version) });
+      if (gen === generation) setFeedback({ kind: "ok", text: t.server.testOk(info.version) });
     } catch (e) {
-      setFeedback({ kind: "error", error: toPayload(e) });
+      if (gen === generation) setFeedback({ kind: "error", error: toPayload(e) });
     } finally {
-      setBusy(false);
+      if (gen === generation) setBusy(false);
     }
   };
 
@@ -75,13 +82,18 @@ export function ServerDialog(props: {
     if (busy()) return;
     const r = validated();
     if (!r) return;
+    const gen = generation;
     setBusy(true);
     try {
-      props.onSaved(await commands.saveServer(r.config, r.password));
+      const saved = await commands.saveServer(r.config, r.password);
+      if (gen === generation) {
+        setForm(emptyForm());
+        props.onSaved(saved);
+      }
     } catch (err) {
-      setFeedback({ kind: "error", error: toPayload(err) });
+      if (gen === generation) setFeedback({ kind: "error", error: toPayload(err) });
     } finally {
-      setBusy(false);
+      if (gen === generation) setBusy(false);
     }
   };
 

@@ -1,6 +1,7 @@
 use pgt_catalog::node::{NodeId, TreeNode};
 use pgt_catalog::props::PropertySection;
 use pgt_core::config::ServerConfig;
+use pgt_core::credentials::Credentials;
 use pgt_core::connection::{ConnectionManager, ServerInfo};
 use pgt_core::{Error, ErrorPayload};
 use tauri::State;
@@ -27,11 +28,20 @@ pub fn save_server(state: State<'_, AppState>, config: ServerConfig, password: O
     Ok(saved)
 }
 
+/// Typed password wins; otherwise fall back to the stored/session one.
+fn effective_password(creds: &Credentials, id: Uuid, typed: Option<String>) -> Result<Option<String>, Error> {
+    match typed {
+        Some(p) => Ok(Some(p)),
+        None => creds.password(id),
+    }
+}
+
 #[tauri::command]
-pub async fn test_connection(config: ServerConfig, password: Option<String>) -> CmdResult<ServerInfo> {
+pub async fn test_connection(state: State<'_, AppState>, config: ServerConfig, password: Option<String>) -> CmdResult<ServerInfo> {
     let config = config.normalized();
     config.validate()?;
-    Ok(ConnectionManager::test(&config, password.as_deref()).await?)
+    let effective = effective_password(&state.credentials, config.id, password)?;
+    Ok(ConnectionManager::test(&config, effective.as_deref()).await?)
 }
 
 #[tauri::command]
@@ -76,4 +86,36 @@ pub async fn get_ddl(state: State<'_, AppState>, id: String) -> CmdResult<String
 #[tauri::command]
 pub fn startup_notice(state: State<'_, AppState>) -> Option<String> {
     state.startup_notice.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pgt_core::credentials::{Credentials, MemorySecretStore};
+    use std::sync::Arc;
+
+    fn creds() -> Credentials {
+        Credentials::new(Arc::new(MemorySecretStore::default()))
+    }
+
+    #[test]
+    fn typed_password_wins_over_stored() {
+        let c = creds();
+        let id = Uuid::new_v4();
+        c.remember(id, "stored", true).unwrap();
+        assert_eq!(effective_password(&c, id, Some("typed".into())).unwrap().as_deref(), Some("typed"));
+    }
+
+    #[test]
+    fn missing_password_falls_back_to_remembered() {
+        let c = creds();
+        let id = Uuid::new_v4();
+        c.remember(id, "stored", true).unwrap();
+        assert_eq!(effective_password(&c, id, None).unwrap().as_deref(), Some("stored"));
+    }
+
+    #[test]
+    fn nothing_stored_yields_none() {
+        assert_eq!(effective_password(&creds(), Uuid::new_v4(), None).unwrap(), None);
+    }
 }
