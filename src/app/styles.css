@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  --bg: #fbfbfc;
+  --panel: #f3f4f6;
+  --fg: #1f2328;
+  --muted: #6b7280;
+  --border: #e2e4e8;
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+  --selected: #dbe6fd;
+  --hover: #eceef2;
+  --danger: #c62828;
+  --syn-keyword: #7c3aed;
+  --syn-string: #0f766e;
+  --syn-number: #b45309;
+  --syn-comment: #6b7280;
+  --syn-type: #1d4ed8;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg: #16181d;
+  --panel: #1c1f26;
+  --fg: #e6e8eb;
+  --muted: #9aa1ac;
+  --border: #2b2f38;
+  --accent: #4c8dff;
+  --accent-fg: #0b1020;
+  --selected: #22324f;
+  --hover: #232731;
+  --danger: #ef5350;
+  --syn-keyword: #c4a7ff;
+  --syn-string: #5eead4;
+  --syn-number: #fbbf24;
+  --syn-comment: #8b93a1;
+  --syn-type: #93c5fd;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, monospace;
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-selected: var(--selected);
+  --color-hover: var(--hover);
+  --color-danger: var(--danger);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  overflow: hidden;
+}
