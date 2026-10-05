@@ -44,7 +44,7 @@ export function ServerDialog(props: {
   });
 
   const set = <K extends keyof ServerForm>(key: K, value: ServerForm[K]) => setForm((f) => ({ ...f, [key]: value }));
-  const text = (key: Exclude<keyof ServerForm, "savePassword" | "sslMode">) => ({
+  const text = (key: Exclude<keyof ServerForm, "savePassword" | "sslMode" | "color" | "readOnlyLock">) => ({
     get value() {
       return form()[key];
     },

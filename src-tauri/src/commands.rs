@@ -349,6 +349,9 @@ mod tests {
             username: "app".into(),
             save_password: true,
             ssl: Default::default(),
+            color: None,
+            label: None,
+            read_only_lock: false,
         }
     }
 

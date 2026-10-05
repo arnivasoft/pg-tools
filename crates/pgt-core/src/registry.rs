@@ -177,6 +177,21 @@ mod tests {
     }
 
     #[test]
+    fn color_label_and_lock_survive_save_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut reg = Registry::load(path(&dir)).unwrap().registry;
+        let mut c = ServerConfig::new("p", "h", 5432, "u");
+        c.color = Some("teal".into());
+        c.label = Some(" Üretim ".into());
+        c.read_only_lock = true;
+        let saved = reg.upsert(c).unwrap();
+        assert_eq!(saved.label.as_deref(), Some("Üretim"));
+        let again = Registry::load(path(&dir)).unwrap().registry;
+        let got = again.get(saved.id).unwrap();
+        assert_eq!((got.color.as_deref(), got.label.as_deref(), got.read_only_lock), (Some("teal"), Some("Üretim"), true));
+    }
+
+    #[test]
     fn upsert_replaces_existing_by_id() {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = Registry::load(path(&dir)).unwrap().registry;
