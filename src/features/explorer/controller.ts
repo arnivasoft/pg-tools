@@ -26,7 +26,7 @@ function markDisconnected(s: TreeState, loadingId: string, serverId: string, err
 export type PasswordAnswer = { password: string; remember: boolean };
 
 export interface ExplorerDeps {
-  api: Pick<Api, "listChildren" | "connectServer">;
+  api: Pick<Api, "listChildren" | "connectServer" | "disconnectServer">;
   /** `retry`: önceki parola reddedildi; `error` o reddin ayrıntısını (sunucunun mesajı) taşır. */
   requestPassword(node: TreeNode, retry: boolean, error: ErrorPayload | null): Promise<PasswordAnswer | null>;
 }
@@ -159,6 +159,21 @@ export class ExplorerController {
 
   async refresh(id: string): Promise<void> {
     if (id === ROOT || this.get().children.has(id)) await this.load(id);
+  }
+
+  disconnect(id: string): void {
+    const node = this.get().nodes.get(id);
+    if (node?.kind !== "server" || !node.serverId) return;
+    void Promise.resolve(this.deps.api.disconnectServer(node.serverId)).catch((e) => console.error("disconnect failed", e));
+    this.update((s) => {
+      const n = s.nodes.get(id);
+      return n ? invalidate(patchNode(s, id, { detail: null, flags: { ...n.flags, connected: false } }), id) : s;
+    });
+  }
+
+  /** Sunucu kaydı silindi: düğümü ve alt ağacını kaldırmak için sunucu listesini yeniden yükler. */
+  async serverRemoved(): Promise<void> {
+    await this.reloadServers();
   }
 
   async reloadServers(): Promise<void> {

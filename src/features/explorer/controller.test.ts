@@ -17,13 +17,14 @@ function setup(children: Record<string, TreeNode[]>, deps: Partial<ExplorerDeps>
     versionNum: 180000,
     version: "18.0",
   }));
+  const disconnectServer = vi.fn();
   const requestPassword = vi.fn(async () => null);
   const c = new ExplorerController(
     () => state,
     (s) => (state = s),
-    { api: { listChildren, connectServer }, requestPassword, ...deps },
+    { api: { listChildren, connectServer, disconnectServer }, requestPassword, ...deps },
   );
-  return { c, get: () => state, listChildren, connectServer, requestPassword };
+  return { c, get: () => state, listChildren, connectServer, disconnectServer, requestPassword };
 }
 
 describe("ExplorerController", () => {
@@ -55,7 +56,7 @@ describe("ExplorerController", () => {
       .mockRejectedValueOnce(err("password_required"))
       .mockResolvedValueOnce({ versionNum: 160004, version: "16.4" });
     const requestPassword = vi.fn(async () => ({ password: "p", remember: true }));
-    const { c } = setup({ [ROOT]: [srv] }, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c } = setup({ [ROOT]: [srv] }, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     expect(requestPassword).toHaveBeenCalledWith(expect.objectContaining({ id: "srv" }), false, null);
@@ -73,7 +74,7 @@ describe("ExplorerController", () => {
       .fn()
       .mockResolvedValueOnce({ password: "yanlis", remember: false })
       .mockResolvedValueOnce({ password: "dogru", remember: true });
-    const { c, get } = setup({ [ROOT]: [srv] }, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c, get } = setup({ [ROOT]: [srv] }, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     expect(requestPassword.mock.calls.map((call) => call[1])).toEqual([true, true]);
@@ -85,7 +86,7 @@ describe("ExplorerController", () => {
   it("cancelled prompt leaves the server collapsed without error", async () => {
     const srv = n("srv", { kind: "server", serverId: "u1" });
     const connectServer = vi.fn().mockRejectedValue(err("password_required"));
-    const { c, get } = setup({ [ROOT]: [srv] }, { api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c, get } = setup({ [ROOT]: [srv] }, { api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     const row = flatten(get())[0];
@@ -95,7 +96,7 @@ describe("ExplorerController", () => {
   it("network error is shown on the server node", async () => {
     const srv = n("srv", { kind: "server", serverId: "u1" });
     const connectServer = vi.fn().mockRejectedValue(err("network"));
-    const { c, get } = setup({ [ROOT]: [srv] }, { api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c, get } = setup({ [ROOT]: [srv] }, { api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     expect(flatten(get())[0].error?.code).toBe("network");
@@ -103,7 +104,7 @@ describe("ExplorerController", () => {
 
   it("load errors are attached to the parent and cleared by a successful reload", async () => {
     const listChildren = vi.fn().mockRejectedValueOnce(err("query")).mockResolvedValueOnce([n("a")]);
-    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn() } });
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(), disconnectServer: vi.fn() } });
     await c.load(ROOT);
     expect(get().errors.get(ROOT)?.code).toBe("query");
     expect(get().loading.has(ROOT)).toBe(false);
@@ -147,7 +148,7 @@ describe("ExplorerController robustness", () => {
       .mockRejectedValueOnce(err("password_required"))
       .mockResolvedValueOnce({ versionNum: 180000, version: "18.0" });
     const listChildren = vi.fn(async (id: string) => (id === ROOT ? [srv] : [n("dbs")]));
-    const { c } = setup({}, { requestPassword, api: { listChildren, connectServer } });
+    const { c } = setup({}, { requestPassword, api: { listChildren, connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     const p = Promise.all([c.expand("srv"), c.expand("srv")]);
     await vi.waitFor(() => expect(requestPassword).toHaveBeenCalledTimes(1));
@@ -165,7 +166,7 @@ describe("ExplorerController robustness", () => {
     });
     const { c, get } = setup(
       {},
-      { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } },
+      { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } },
     );
     await c.load(ROOT);
     await expect(c.ensureConnected("srv")).resolves.toBe(false);
@@ -181,7 +182,7 @@ describe("ExplorerController robustness", () => {
       .mockResolvedValue({ versionNum: 1, version: "1" });
     let rootList = [srv];
     const listChildren = vi.fn(async (id: string) => (id === ROOT ? rootList : [n("dbs")]));
-    const { c, get } = setup({}, { requestPassword, api: { listChildren, connectServer } });
+    const { c, get } = setup({}, { requestPassword, api: { listChildren, connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     const p = c.expand("srv");
     await vi.waitFor(() => expect(requestPassword).toHaveBeenCalled());
@@ -205,7 +206,7 @@ describe("ExplorerController password prompt details", () => {
     const auth = new IpcError({ code: "auth", message: "Parola hatalı", detail: "password authentication failed for user \"x\"", hint: null });
     const connectServer = vi.fn().mockRejectedValueOnce(auth).mockResolvedValueOnce({ versionNum: 1, version: "1" });
     const requestPassword = vi.fn(async () => ({ password: "p", remember: false }));
-    const { c } = setup({}, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c } = setup({}, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     expect(requestPassword).toHaveBeenCalledWith(expect.objectContaining({ id: "srv" }), true, auth.payload);
@@ -215,7 +216,7 @@ describe("ExplorerController password prompt details", () => {
     const srv = n("srv", { kind: "server", serverId: "u1" });
     const connectServer = vi.fn().mockRejectedValue(err("connect"));
     const requestPassword = vi.fn(async () => ({ password: "p", remember: false }));
-    const { c, get } = setup({}, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer } });
+    const { c, get } = setup({}, { requestPassword, api: { listChildren: async (id: string) => (id === ROOT ? [srv] : []), connectServer, disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     expect(requestPassword).not.toHaveBeenCalled();
@@ -239,7 +240,7 @@ describe("ExplorerController lost sessions", () => {
         return [n("db1", { kind: "database", hasChildren: false })];
       });
       const connectServer = vi.fn(async () => ({ versionNum: 180000, version: "18.0" }));
-      const { c, get } = setup({}, { api: { listChildren, connectServer } });
+      const { c, get } = setup({}, { api: { listChildren, connectServer, disconnectServer: vi.fn() } });
       await c.load(ROOT);
       await c.expand("srv");
       await c.expand("dbs");
@@ -270,7 +271,7 @@ describe("ExplorerController lost sessions", () => {
       if (id === "srv") return [n("dbs")];
       throw err("query");
     });
-    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(async () => ({ versionNum: 1, version: "1" })) } });
+    const { c, get } = setup({}, { api: { listChildren, connectServer: vi.fn(async () => ({ versionNum: 1, version: "1" })), disconnectServer: vi.fn() } });
     await c.load(ROOT);
     await c.expand("srv");
     await c.expand("dbs");
@@ -322,5 +323,33 @@ describe("ExplorerController lost sessions", () => {
     expect(flatten(get()).map((r) => r.id)).toEqual(["alpha"]);
     c.setFilter("");
     expect(flatten(get()).map((r) => r.id)).toEqual(["alpha", "beta"]);
+  });
+
+  describe("server actions", () => {
+    const srv = (connected: boolean) =>
+      n("srv", { kind: "server", serverId: "u1", detail: connected ? "18.0" : null, flags: { ...flags, connected } });
+
+    it("disconnect marks the server disconnected, clears its subtree and calls the api once", async () => {
+      const { c, get, disconnectServer } = setup({ [ROOT]: [srv(true)], srv: [n("dbs")] });
+      await c.load(ROOT);
+      await c.expand("srv");
+      c.select("dbs");
+      c.disconnect("srv");
+      expect(disconnectServer).toHaveBeenCalledExactlyOnceWith("u1");
+      expect(get().nodes.get("srv")!.flags.connected).toBe(false);
+      expect(get().children.has("srv")).toBe(false);
+      expect(get().selected).toBe("srv");
+    });
+
+    it("removed server clears the selection and its subtree", async () => {
+      const children: Record<string, TreeNode[]> = { [ROOT]: [srv(true)], srv: [n("dbs")] };
+      const { c, get } = setup(children);
+      await c.load(ROOT);
+      await c.expand("srv");
+      c.select("dbs");
+      children[ROOT] = [];
+      await c.serverRemoved();
+      expect([get().nodes.has("srv"), get().nodes.has("dbs"), get().selected]).toEqual([false, false, null]);
+    });
   });
 });

@@ -5,7 +5,7 @@ import type { Explorer } from "./explorer-store";
 import { ROW_HEIGHT, TreeRow, rowDomId } from "./TreeRow";
 import { ROOT } from "./tree-model";
 
-export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement) => void }) {
+export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement) => void; onCopyName?: (id: string) => void }) {
   const ex = props.explorer;
   let scrollEl!: HTMLDivElement;
   const virtualizer = createVirtualizer({
@@ -40,6 +40,12 @@ export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement
       tabIndex={0}
       class="relative h-full overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-accent"
       onKeyDown={(e) => {
+        const sel = ex.state().selected;
+        if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "c" && sel !== null && (window.getSelection()?.toString() ?? "") === "") {
+          e.preventDefault();
+          props.onCopyName?.(sel);
+          return;
+        }
         if (ex.controller.handleKey(e.key)) e.preventDefault();
       }}
     >

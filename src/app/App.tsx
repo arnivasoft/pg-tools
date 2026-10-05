@@ -1,7 +1,10 @@
 import { FileInput, Pencil, Plus } from "lucide-solid";
 import { createSignal, onCleanup, onMount } from "solid-js";
 import { createExplorer } from "../features/explorer/explorer-store";
-import { TreeView } from "../features/explorer/TreeView";
+import type { ActionDeps } from "../features/explorer/actions";
+import { ExplorerMenu } from "../features/explorer/ExplorerMenu";
+import { createDeleteConfirm } from "../ui/ConfirmDialog";
+import { copyText } from "./clipboard";
 import { Inspector } from "../features/inspector/Inspector";
 import { ROOT } from "../features/explorer/tree-model";
 import { createPasswordPrompt } from "../features/servers/PasswordPrompt";
@@ -40,6 +43,16 @@ export default function App() {
     } catch (e) {
       toast.show(toPayload(e).message, "error");
     }
+  };
+  const deleteConfirm = createDeleteConfirm();
+  const actionDeps: ActionDeps = {
+    state: explorer.state,
+    controller: explorer.controller,
+    api: commands,
+    copy: copyText,
+    notify: toast.show,
+    editServer: (serverId) => void openDialog(serverId),
+    confirmDelete: deleteConfirm.ask,
   };
   const selectedServerId = () => {
     const node = explorer.selectedNode();
@@ -113,11 +126,15 @@ export default function App() {
           </Button>
         </Toolbar>
       </header>
-      <SplitPane left={<TreeView explorer={explorer} treeRef={setTreeEl} />} right={<Inspector explorer={explorer} />} />
+      <SplitPane
+        left={<ExplorerMenu explorer={explorer} deps={actionDeps} treeRef={setTreeEl} />}
+        right={<Inspector explorer={explorer} />}
+      />
       <footer class="flex h-6 shrink-0 items-center border-t border-border bg-panel px-2 text-xs text-muted">
         <StatusBar explorer={explorer} />
       </footer>
       <prompt.View />
+      <deleteConfirm.View />
       <Toaster />
       <ImportDialog
         open={importOpen()}

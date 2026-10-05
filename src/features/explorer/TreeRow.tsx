@@ -20,6 +20,7 @@ export function TreeRow(props: {
   return (
     <div
       id={rowDomId(r().id)}
+      data-node-id={encodeURIComponent(r().id)}
       role="treeitem"
       aria-level={r().depth + 1}
       aria-setsize={r().setSize}

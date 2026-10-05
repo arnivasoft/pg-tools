@@ -1,5 +1,6 @@
 import { Copy } from "lucide-solid";
 import { Match, Show, Suspense, Switch, createResource, createSignal, lazy, onCleanup } from "solid-js";
+import { copyText } from "../../app/clipboard";
 import { createDebounced } from "../../app/debounce";
 import { t } from "../../app/strings";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
@@ -63,7 +64,7 @@ export function Inspector(props: { explorer: Explorer }) {
     const text = ddlText();
     if (!text) return;
     try {
-      await navigator.clipboard.writeText(text);
+      await copyText(text);
     } catch {
       return;
     }
