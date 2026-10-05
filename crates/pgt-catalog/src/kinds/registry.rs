@@ -233,3 +233,47 @@ pub(crate) fn schema_collections(version: PgVersion) -> Vec<&'static CollDef> {
         .filter(|d| version.major() >= d.min_version)
         .collect()
 }
+
+/// Bir nesne türünün Properties sorgusu.
+pub(crate) struct PropsDef {
+    pub level: Level,
+    pub sql: &'static VersionedSql,
+    /// `NotFound` iletisinde kullanılan ad.
+    pub what: &'static str,
+}
+
+macro_rules! props {
+    ($what:literal, $level:expr, $file:literal) => {
+        PropsDef { level: $level, sql: &VersionedSql(&[(10, sql!($file))]), what: $what }
+    };
+}
+
+static P_CONSTRAINT: PropsDef = props!("constraint", Level::Database, "props_constraint.sql");
+static P_INDEX: PropsDef = props!("index", Level::Database, "props_index.sql");
+static P_TRIGGER: PropsDef = props!("trigger", Level::Database, "props_trigger.sql");
+static P_POLICY: PropsDef = props!("policy", Level::Database, "props_policy.sql");
+static P_VIEW: PropsDef = props!("view", Level::Database, "props_view.sql");
+static P_SEQUENCE: PropsDef = props!("sequence", Level::Database, "props_sequence.sql");
+static P_FUNCTION: PropsDef = props!("fonksiyon", Level::Database, "props_function.sql");
+static P_TYPE: PropsDef = props!("tip", Level::Database, "props_type.sql");
+static P_EXTENSION: PropsDef = props!("extension", Level::Database, "props_extension.sql");
+static P_ROLE: PropsDef = props!("rol", Level::Server, "props_role.sql");
+static P_TABLESPACE: PropsDef = props!("tablespace", Level::Server, "props_tablespace.sql");
+
+/// Genel motorla yönetilen nesne türünün Properties kaydı (`Db`, `Schema`, `Table`, `Column` elle yazılmıştır).
+pub(crate) fn props_def(seg: Seg) -> Option<&'static PropsDef> {
+    Some(match seg {
+        Seg::Constraint(_) => &P_CONSTRAINT,
+        Seg::Index(_) => &P_INDEX,
+        Seg::Trigger(_) => &P_TRIGGER,
+        Seg::Policy(_) => &P_POLICY,
+        Seg::View(_) | Seg::MatView(_) => &P_VIEW,
+        Seg::Sequence(_) => &P_SEQUENCE,
+        Seg::Function(_) | Seg::Procedure(_) | Seg::TriggerFunction(_) => &P_FUNCTION,
+        Seg::Type(_) | Seg::Domain(_) => &P_TYPE,
+        Seg::Extension(_) => &P_EXTENSION,
+        Seg::Role(_) => &P_ROLE,
+        Seg::Tablespace(_) => &P_TABLESPACE,
+        Seg::Coll(_) | Seg::Db(_) | Seg::Schema(_) | Seg::Table(_) | Seg::Column(_) => return None,
+    })
+}

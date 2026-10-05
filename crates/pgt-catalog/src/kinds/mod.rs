@@ -147,7 +147,13 @@ pub(crate) async fn properties(cat: &Catalog, id: &NodeId) -> Result<Vec<crate::
             let rel = parent_oid(path).ok_or_else(|| invalid(id))?;
             column::properties(cat, server, db_req(db)?, rel, *c).await
         }
-        _ => Err(invalid(id)),
+        seg => match registry::props_def(*seg) {
+            Some(def) => {
+                let oid = seg.oid().ok_or_else(|| invalid(id))?;
+                engine::properties(cat, server, db, def, oid).await
+            }
+            None => Err(invalid(id)),
+        },
     }
 }
 

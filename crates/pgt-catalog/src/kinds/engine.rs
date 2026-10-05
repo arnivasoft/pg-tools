@@ -7,6 +7,8 @@ use uuid::Uuid;
 use crate::Catalog;
 use crate::db::{p, query};
 use crate::node::{Coll, NodeFlags, NodeId, NodeKind, Seg, TreeNode};
+use crate::props::PropertySection;
+use super::registry::PropsDef;
 use crate::version::VersionedSql;
 
 /// Sorgunun hangi bağlantıda çalışacağı.
@@ -85,4 +87,30 @@ pub(crate) async fn list(
         out.push(node);
     }
     Ok(out)
+}
+
+/// Properties SQL'inin `(section, label, value)` satırlarını bölümlere çevirir.
+pub(crate) async fn properties(
+    cat: &Catalog,
+    server: Uuid,
+    db: Option<u32>,
+    def: &PropsDef,
+    oid: u32,
+) -> Result<Vec<PropertySection>> {
+    let rows = query(&cat.mgr, server, target(def.level, db)?, def.sql, p![oid]).await?;
+    if rows.is_empty() {
+        return Err(Error::NotFound(def.what.to_string()));
+    }
+    let mut sections: Vec<PropertySection> = Vec::new();
+    for r in &rows {
+        let title: String = r.get("section");
+        let label: String = r.get("label");
+        let value: Option<String> = r.get("value");
+        if sections.last().is_none_or(|s| s.title != title) {
+            sections.push(PropertySection::new(title));
+        }
+        let last = sections.pop().expect("az önce eklendi");
+        sections.push(last.row_opt(label, value));
+    }
+    Ok(sections.into_iter().filter(|s| !s.rows.is_empty()).collect())
 }
