@@ -1,10 +1,11 @@
-import { Pencil, Plus } from "lucide-solid";
+import { FileInput, Pencil, Plus } from "lucide-solid";
 import { createSignal, onCleanup, onMount } from "solid-js";
 import { createExplorer } from "../features/explorer/explorer-store";
 import { TreeView } from "../features/explorer/TreeView";
 import { Inspector } from "../features/inspector/Inspector";
 import { ROOT } from "../features/explorer/tree-model";
 import { createPasswordPrompt } from "../features/servers/PasswordPrompt";
+import { ImportDialog } from "../features/servers/ImportDialog";
 import { ServerDialog } from "../features/servers/ServerDialog";
 import { groupsOf } from "../features/servers/server-form";
 import type { ServerConfig } from "../ipc/bindings/ServerConfig";
@@ -25,6 +26,7 @@ export default function App() {
   const [themePref, setThemePref] = createSignal(loadThemePreference());
   const [dialogOpen, setDialogOpen] = createSignal(false);
   const [editing, setEditing] = createSignal<ServerConfig | null>(null);
+  const [importOpen, setImportOpen] = createSignal(false);
   const [groups, setGroups] = createSignal<string[]>([]);
 
   const openDialog = async (serverId: string | null) => {
@@ -75,6 +77,9 @@ export default function App() {
           <Button variant="ghost" onClick={() => void openDialog(null)}>
             <Plus size={14} /> {t.toolbar.addServer}
           </Button>
+          <Button variant="ghost" title={t.import.title} aria-label={t.import.title} onClick={() => setImportOpen(true)}>
+            <FileInput size={14} /> {t.import.button}
+          </Button>
           <Button
             variant="ghost"
             disabled={selectedServerId() === null}
@@ -92,6 +97,13 @@ export default function App() {
       </footer>
       <prompt.View />
       <Toaster />
+      <ImportDialog
+        open={importOpen()}
+        onClose={() => setImportOpen(false)}
+        onImported={() => {
+          explorer.controller.reloadServers().catch(() => {});
+        }}
+      />
       <ServerDialog
         open={dialogOpen()}
         editing={editing()}

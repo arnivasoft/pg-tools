@@ -114,3 +114,6 @@ kolon alanı boş yazılır); geri kalanı `signature.sql` ile aynıdır.
   Triggers listesinde görünür ama `tgparentid <> 0` olduğundan partition DDL'inde tekrar yazılmaz. (Plan
   taslağında PG 11–12'de tekrar yazıldığı varsayılmıştı; PG 11 ve 12 üzerinde canlı doğrulamada böyle olmadığı görüldü
   ve `extra.hits` fixture'ı + gidiş-dönüş testi bunu her sürümde korur.)
+
+## pgAdmin içe aktarma sınırı
+Dosya önizleme ile içe aktarma arasında değiştirilirse sonuç değişebilir (uygulama aynı yolu yeniden okur; indeksler kayabilir).
