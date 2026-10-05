@@ -2,13 +2,17 @@
 .SYNOPSIS
   PostgreSQL sürüm matrisinde pg-tools entegrasyon testlerini çalıştırır.
 .PARAMETER Versions
-  Test edilecek ana sürümler (varsayılan: 10, 12, 14, 16, 17, 18).
+  Test edilecek ana sürümler (varsayılan: 10, 11, 12, 14, 16, 17, 18).
 .PARAMETER KeepContainers
   Testten sonra kapsayıcıları silme (hata ayıklama için).
+.PARAMETER SkipPerf
+  5.000 tablolu performans testini (five_thousand_tables_stay_within_budget) atla; matris süresinin
+  çoğunu bu test oluşturur. Varsayılan: çalıştırılır.
 #>
 param(
-    [string[]]$Versions = @("10", "12", "14", "16", "17", "18"),
-    [switch]$KeepContainers
+    [string[]]$Versions = @("10", "11", "12", "14", "16", "17", "18"),
+    [switch]$KeepContainers,
+    [switch]$SkipPerf
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,7 +56,11 @@ try {
     Start-Sleep -Seconds 3
 
     $env:PGT_TEST_URLS = ($urls -join ",")
-    cargo test --workspace --all-features
+    if ($SkipPerf) {
+        cargo test --workspace --all-features -- --skip five_thousand_tables_stay_within_budget
+    } else {
+        cargo test --workspace --all-features
+    }
     if ($LASTEXITCODE -ne 0) { throw "testler başarısız" }
 }
 finally {

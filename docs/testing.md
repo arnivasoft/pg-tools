@@ -22,20 +22,36 @@ hash partition, partitioned tabloda satır trigger'ı) PG 11+ ve `schema_pg12.sq
 sunucularda uygulanır. Sürüme bağlı test adımları `fx.major().await >= N` ile korunur.
 
 ## Sürüm matrisi (Docker)
-    ./scripts/test-matrix.ps1                       # PG 10, 12, 14, 16, 17, 18
+    ./scripts/test-matrix.ps1                       # PG 10, 11, 12, 14, 16, 17, 18
     ./scripts/test-matrix.ps1 -Versions 16,18
     ./scripts/test-matrix.ps1 -KeepContainers       # hata ayıklama için kapsayıcıları bırakır
+    ./scripts/test-matrix.ps1 -SkipPerf             # 5.000 tablolu performans testini atlar
 
 Betik her sürüm için `postgres:NN` imajından `pgt-matrix-NN` kapsayıcısını `127.0.0.1:(55400+NN)` portunda
 başlatır, her çalıştırmada rastgele üretilen (hiçbir yere yazılmayan) bir parolayla `PGT_TEST_URLS`'i ayarlar,
 `cargo test --workspace --all-features` çalıştırır ve kapsayıcıları siler. Docker Desktop açık olmalıdır.
 
+Matris süresinin büyük kısmını tek başına performans testi (`five_thousand_tables_stay_within_budget`) oluşturur:
+her sunucuda 5.000 tablo kurar (7 sürümlük matriste ~215 s; geri kalan tüm testler toplamda ~45 s). Hızlı yineleme için
+`-SkipPerf` bu testi `cargo test ... -- --skip five_thousand_tables_stay_within_budget` ile atlar; varsayılan
+davranış (test çalışır) değişmez. Birleştirmeden önceki doğrulama `-SkipPerf` olmadan yapılmalıdır.
+
+**PG 10–11 desteği bu matrisle gerçek oldu.** Matrisin ilk çalıştırmasında, `name` tipli katalog kolonlarına
+uygulanan `ORDER BY ... COLLATE "C"` ifadelerinin PG 10–11'de hata verdiği görüldü (`collations are not supported
+by type name`; `name` PG 12'den önce collatable değildir). Bu yalnızca Plan 2 sorgularını değil, Plan 1'in üretim
+SQL'ini de etkiliyordu: `databases.sql`, `schemas.sql`, `tables.sql`, `acl_database.sql`, `acl_namespace.sql`,
+`acl_relation.sql` — yani ağacın ilk düzeyleri (veritabanları, şemalar, tablolar) ve Database/Schema/Table
+DDL'i PG 10–11 sunucularda hiç çalışmıyordu. Düzeltme (`X::text COLLATE "C"`) tüm sürümlerde aynı C sıralamasını
+verir. Bu tarihten önceki "PG 10+ destekli" ifadeleri yalnızca PG 12+ için doğrulanmış sayılmalıdır.
+
 Sürüme özel DDL snapshot'ları `tests/snapshots/*@pgNN.snap` olarak tutulur. Yeni bir snapshot gerektiğinde
 `INSTA_UPDATE=new` ile üretilip PG 18 ile karşılaştırılarak gözden geçirilir. Kabul edilen farklar yalnızca
 sunucunun kendi deparse çıktısından gelir: `POSITION(... IN ...)` / `"position"(...)`, `EXECUTE FUNCTION` /
-`EXECUTE PROCEDURE` (PG < 11), view gövdesinde tablo adıyla nitelenmiş kolonlar (PG < 16), `MAINTAIN` yetkisi
-(PG 17+), pg_trgm sürümü (PG 10: 1.3, PG 12: 1.4, PG 14+: 1.6) ve PG 10'da olmayan nesneler (partitioned index,
-`INCLUDE`).
+`EXECUTE PROCEDURE` (PG < 12 deparse'ı), view gövdesinde tablo adıyla nitelenmiş kolonlar (PG < 16), `MAINTAIN`
+yetkisi (PG 17+), pg_trgm sürümü (PG 10: 1.3, PG 11–12: 1.4, PG 14+: 1.6) ve PG 10'da olmayan nesneler
+(partitioned index, `INCLUDE`). PG 11 snapshot'ları sürüm sınırını doğrular: generated kolon / `tgparentid`
+öncesi yollar PG 10 ile, procedure / `INCLUDE` / hash partition / partitioned index yolları sonraki sürümlerle
+aynı çıktıyı verir.
 
 Bir test her sunucuda döngüyle çalıştığı için ilk başarısız sunucuda durur; snapshot üretirken tüm sürümlerin
 `.snap.new` dosyalarını tek seferde almak için `INSTA_FORCE_PASS=1` de verilebilir (yalnızca snapshot üretimi
@@ -96,5 +112,5 @@ kolon alanı boş yazılır); geri kalanı `signature.sql` ile aynıdır.
 - partitioned tablodaki satır trigger'ları partition'lara klonlanır. PG 11–12'de klonlar `tgisinternal` olarak
   işaretlidir (partition'ın Triggers listesinde görünmez, DDL'de yazılmaz); PG 13+'da klonlar partition'ın
   Triggers listesinde görünür ama `tgparentid <> 0` olduğundan partition DDL'inde tekrar yazılmaz. (Plan
-  taslağında PG 11–12'de tekrar yazıldığı varsayılmıştı; PG 12 üzerinde canlı doğrulamada böyle olmadığı görüldü
+  taslağında PG 11–12'de tekrar yazıldığı varsayılmıştı; PG 11 ve 12 üzerinde canlı doğrulamada böyle olmadığı görüldü
   ve `extra.hits` fixture'ı + gidiş-dönüş testi bunu her sürümde korur.)
