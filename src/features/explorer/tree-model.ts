@@ -231,3 +231,14 @@ export function rowLabel(row: VisibleRow): string {
     ? `${row.node.label} (${numberFormat.format(row.childCount)})`
     : row.node.label;
 }
+
+export function serverOf(s: TreeState, id: string | null): TreeNode | null {
+  let current = id;
+  while (current !== null && current !== undefined && current !== ROOT) {
+    const node = s.nodes.get(current);
+    if (!node) return null;
+    if (node.kind === "server") return node;
+    current = s.parent.get(current) ?? null;
+  }
+  return null;
+}

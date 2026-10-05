@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "../../ipc/bindings/TreeNode";
 import {
-  ROOT, collapse, invalidate, emptyTree, expand, flatten, keyIntent, patchNode, rowLabel, select, setChildren, setError, startLoading,
+  ROOT, collapse, invalidate, emptyTree, expand, flatten, keyIntent, patchNode, rowLabel, select, serverOf, setChildren, setError, startLoading,
 } from "./tree-model";
 
 const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false };
@@ -138,5 +138,18 @@ describe("tree-model selection and stale results", () => {
     expect(s.selected).toBe("srv");
     expect(s.loading.has("srv")).toBe(false);
     expect(s.errors.has("srv")).toBe(false);
+  });
+
+  it("finds the server ancestor of a node", () => {
+    let s = emptyTree();
+    const on = { ...flags, connected: true };
+    s = setChildren(s, ROOT, [node("grp:G", { kind: "serverGroup" })]);
+    s = setChildren(s, "grp:G", [node("srv", { kind: "server", flags: on, detail: "18.0" })]);
+    s = setChildren(s, "srv", [node("dbs", { kind: "databaseCollection" })]);
+    s = setChildren(s, "dbs", [node("db", { kind: "database" })]);
+    expect(serverOf(s, "db")?.id).toBe("srv");
+    expect(serverOf(s, "srv")?.id).toBe("srv");
+    expect(serverOf(s, "grp:G")).toBeNull();
+    expect(serverOf(s, null)).toBeNull();
   });
 });
