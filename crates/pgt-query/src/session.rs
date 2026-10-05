@@ -747,9 +747,13 @@ impl QueryManager {
         let guard = self.current_guard(server)?;
         let profile = SessionProfile::Query { read_only: guard.locked, statement_timeout_ms: opts.statement_timeout_ms };
         let conn = self.mgr.open_dedicated(server, db, profile).await?;
-        // Bağlanırken kilit/etiket değişmiş ya da sunucu silinmiş olabilir (`close_sessions_of` henüz haritada
+        // Bağlanırken kilit/etiket değişmiş, sunucu silinmiş ya da bağlantısı kesilmiş (hedef değişikliği de
+        // bağlantıyı keser) olabilir (`close_sessions_of` henüz haritada
         // olmayan bu oturumu göremez): eski korumayla oturum açılmaz, bağlantı bırakılır.
-        if let Err(e) = self.guard_unchanged(server, guard) {
+        let checked = self.guard_unchanged(server, guard).and_then(|()| {
+            if self.mgr.is_connected(server) { Ok(()) } else { Err(Error::NotConnected) }
+        });
+        if let Err(e) = checked {
             drop(conn);
             return Err(e);
         }
