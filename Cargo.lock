@@ -2567,6 +2567,7 @@ version = "0.1.0"
 dependencies = [
  "pgt-catalog",
  "pgt-core",
+ "pgt-query",
  "serde",
  "tauri",
  "tauri-build",

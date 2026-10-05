@@ -20,13 +20,17 @@ pub fn list_servers(state: State<'_, AppState>) -> CmdResult<Vec<ServerConfig>> 
 }
 
 #[tauri::command]
-pub fn save_server(state: State<'_, AppState>, config: ServerConfig, password: Option<String>) -> CmdResult<ServerConfig> {
+pub async fn save_server(state: State<'_, AppState>, config: ServerConfig, password: Option<String>) -> CmdResult<ServerConfig> {
     let (saved, prev) = {
         let mut registry = state.registry.write().unwrap();
         let prev = registry.get(config.id).cloned();
         (registry.upsert(config)?, prev)
     };
     state.manager.disconnect(saved.id);
+    // Hedef, kilit ya da üretim etiketi değiştiyse sorgu oturumları eski ayarlarla açılmıştır: kapat (Plan 6 yeniden bağlanmayı sunar).
+    if should_close_query_sessions(prev.as_ref(), &saved) {
+        state.query.close_sessions_of(saved.id).await;
+    }
     let forget = should_forget_stored(prev.as_ref(), &saved, password.as_deref());
     match (password, saved.save_password) {
         (Some(p), true) => state.credentials.remember(saved.id, &p, true)?,
@@ -40,6 +44,18 @@ pub fn save_server(state: State<'_, AppState>, config: ServerConfig, password: O
 /// A stored password may only be used for the same host/port/user/maintenance db.
 fn same_target(a: &ServerConfig, b: &ServerConfig) -> bool {
     a.host == b.host && a.port == b.port && a.username == b.username && a.maintenance_db == b.maintenance_db
+}
+
+/// Kayıtlı sunucunun sorgu oturumlarının kapatılması gerekir mi: bağlantı hedefi (host/port/kullanıcı/bakım
+/// veritabanı/SSL), salt okunur kilit ya da etiketin üretim olup olmaması değiştiyse. Ad/grup/renk
+/// değişimi oturumları etkilemez.
+fn should_close_query_sessions(prev: Option<&ServerConfig>, new: &ServerConfig) -> bool {
+    prev.is_some_and(|p| {
+        !same_target(p, new)
+            || p.ssl != new.ssl
+            || p.read_only_lock != new.read_only_lock
+            || p.is_production() != new.is_production()
+    })
 }
 
 /// Typed password wins; otherwise fall back to the stored/session one,
@@ -114,8 +130,11 @@ fn remember_after_connect(registry: &RwLock<Registry>, creds: &Credentials, conf
 }
 
 #[tauri::command]
-pub fn disconnect_server(state: State<'_, AppState>, server_id: Uuid) {
+pub async fn disconnect_server(state: State<'_, AppState>, server_id: Uuid) -> CmdResult<()> {
+    // Önce sorgu oturumları (açık transaction'lar geri alınır), sonra katalog bağlantısı.
+    state.query.close_sessions_of(server_id).await;
     state.manager.disconnect(server_id);
+    Ok(())
 }
 
 // Katalog gelecekleri büyüktür (DDL ~70 KB); kutulanmazsa invoke işleyicisinin ana iş parçacığı
@@ -151,7 +170,9 @@ fn delete_registered(registry: &RwLock<Registry>, manager: &ConnectionManager, c
 
 #[tauri::command]
 pub async fn delete_server(state: State<'_, AppState>, server_id: Uuid) -> CmdResult<()> {
-    Ok(delete_registered(&state.registry, &state.manager, &state.credentials, server_id)?)
+    delete_registered(&state.registry, &state.manager, &state.credentials, server_id)?;
+    state.query.close_sessions_of(server_id).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -397,6 +418,44 @@ mod tests {
         let id = Uuid::new_v4();
         let cur = cfg(id);
         assert_eq!(effective_password(&creds(), Some(&cur), &cur, None).unwrap(), None);
+    }
+
+    #[test]
+    fn close_sessions_decision() {
+        let id = Uuid::new_v4();
+        let prev = cfg(id);
+        let changed: [fn(&mut ServerConfig); 8] = [
+            |x| x.host = "other".into(),
+            |x| x.port = 1,
+            |x| x.username = "u2".into(),
+            |x| x.maintenance_db = "d2".into(),
+            |x| x.ssl.mode = pgt_core::config::SslMode::Require,
+            |x| x.read_only_lock = true,
+            |x| x.label = Some("PROD".into()),
+            |x| x.ssl.root_cert = Some("ca.pem".into()),
+        ];
+        for f in changed {
+            let mut new = cfg(id);
+            f(&mut new);
+            assert!(should_close_query_sessions(Some(&prev), &new));
+        }
+        // Üretim etiketinin kalkması da bir değişimdir; üretim olmayan etiket değişimi değildir.
+        let mut prod = cfg(id);
+        prod.label = Some("prod".into());
+        assert!(should_close_query_sessions(Some(&prod), &prev));
+        let mut a = cfg(id);
+        a.label = Some("test".into());
+        let mut b = cfg(id);
+        b.label = Some("dev".into());
+        assert!(!should_close_query_sessions(Some(&a), &b));
+        // Yalnızca ad/grup/renk/parola saklama: kapatma yok.
+        let mut meta = cfg(id);
+        meta.name = "yeni ad".into();
+        meta.group = Some("g".into());
+        meta.color = Some("red".into());
+        meta.save_password = false;
+        assert!(!should_close_query_sessions(Some(&prev), &meta));
+        assert!(!should_close_query_sessions(None, &prev), "yeni kayıtta oturum yok");
     }
 
     #[test]

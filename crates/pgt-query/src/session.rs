@@ -1109,6 +1109,17 @@ impl QueryManager {
         }
     }
 
+    /// Uygulama kapanışı: tüm oturumları eşzamanlı kapatır (çalışanlar iptal edilir, açık transaction'lar geri
+    /// alınır). Oturum başına en çok ~5 sn beklenir; oturumlar paralel olduğundan toplam da o kadardır.
+    pub async fn close_all(&self) {
+        let slots: Vec<Arc<SessionSlot>> = self.map().drain().map(|(_, s)| s).collect();
+        let mut tasks = tokio::task::JoinSet::new();
+        for slot in slots {
+            tasks.spawn(async move { force_close(&slot).await });
+        }
+        while tasks.join_next().await.is_some() {}
+    }
+
     /// `max_idle` boyunca kullanılmayan, transaction dışındaki oturumların bağlantısını kapatır ("uyku");
     /// sonraki işlem sessizce yeniden bağlanır. Açık transaction'lı ya da meşgul oturumlara dokunmaz.
     pub fn reap_idle(&self, max_idle: Duration) {

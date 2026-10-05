@@ -5,12 +5,14 @@ use pgt_catalog::Catalog;
 use pgt_core::connection::ConnectionManager;
 use pgt_core::credentials::{Credentials, MemorySecretStore, SecretStore};
 use pgt_core::registry::Registry;
+use pgt_query::session::QueryManager;
 
 pub struct AppState {
     pub registry: Arc<RwLock<Registry>>,
     pub credentials: Credentials,
     pub manager: Arc<ConnectionManager>,
     pub catalog: Catalog,
+    pub query: Arc<QueryManager>,
     pub startup_notice: Option<String>,
 }
 
@@ -53,6 +55,7 @@ impl AppState {
         let manager = Arc::new(ConnectionManager::new());
         Self {
             catalog: Catalog::new(manager.clone(), registry.clone()),
+            query: Arc::new(QueryManager::new(manager.clone(), registry.clone())),
             credentials: Credentials::new(store),
             registry,
             manager,

@@ -2,6 +2,7 @@
 
 mod commands;
 mod logging;
+mod query;
 mod state;
 
 use std::time::Duration;
@@ -22,11 +23,13 @@ fn main() {
         .setup(|app| {
             let state = state::AppState::init();
             let manager = state.manager.clone();
+            let query = state.query.clone();
             tauri::async_runtime::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(60));
                 loop {
                     tick.tick().await;
                     manager.reap_idle(Duration::from_secs(600)).await;
+                    query.reap_idle(Duration::from_secs(30 * 60));
                 }
             });
             app.manage(state);
@@ -48,7 +51,25 @@ fn main() {
             commands::quote_identifiers,
             commands::preview_pgadmin_import,
             commands::apply_pgadmin_import,
+            query::qt_open,
+            query::qt_analyze,
+            query::qt_run,
+            query::qt_more,
+            query::qt_cancel,
+            query::qt_tx,
+            query::qt_tx_state,
+            query::qt_set_options,
+            query::qt_close,
+            query::qt_complete,
+            query::qt_export_csv,
         ])
-        .run(tauri::generate_context!())
-        .expect("pg-tools başlatılamadı");
+        .build(tauri::generate_context!())
+        .expect("pg-tools başlatılamadı")
+        .run(|app, event| {
+            // Kapanışta açık sorgu oturumları kapatılır: açık transaction'lar ROLLBACK edilir (en iyi çaba, sınırlı bekleme).
+            if let tauri::RunEvent::Exit = event {
+                let query = app.state::<state::AppState>().query.clone();
+                let _ = tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(7), query.close_all()));
+            }
+        });
 }

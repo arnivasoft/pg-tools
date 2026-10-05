@@ -2,6 +2,7 @@
 
 pub mod classify;
 pub mod complete;
+pub mod error_codes;
 pub mod events;
 pub mod exec;
 pub mod export;
