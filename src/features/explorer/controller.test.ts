@@ -314,4 +314,13 @@ describe("ExplorerController lost sessions", () => {
     expect(c.sessionLost("yok", lost)).toBe(false);
     expect(get().nodes.get("srv")!.flags.connected).toBe(true);
   });
+
+  it("setFilter filters flatten and blank restores", async () => {
+    const { c, get } = setup({ [ROOT]: [n("alpha"), n("beta")] });
+    await c.load(ROOT);
+    c.setFilter("alp");
+    expect(flatten(get()).map((r) => r.id)).toEqual(["alpha"]);
+    c.setFilter("");
+    expect(flatten(get()).map((r) => r.id)).toEqual(["alpha", "beta"]);
+  });
 });

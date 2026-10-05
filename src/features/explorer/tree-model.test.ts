@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { TreeNode } from "../../ipc/bindings/TreeNode";
+import type { TreeState } from "./tree-model";
 import {
-  ROOT, collapse, invalidate, emptyTree, expand, flatten, keyIntent, patchNode, rowLabel, select, serverOf, setChildren, setError, startLoading,
+  ROOT, ancestorOfKind, collapse, invalidate, emptyTree, expand, flatten, keyIntent, patchNode, rowLabel, select, serverOf, setChildren, setError, startLoading,
 } from "./tree-model";
 
 const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false };
@@ -202,5 +203,98 @@ describe("tree-model reparenting servers between groups", () => {
     s = setChildren(s, "grp:B", [srv()]);
     expect(s.parent.get("srv:X")).toBe("grp:B");
     expect(flatten(s).map((r) => r.id)).toEqual(["grp:A", "grp:B", "srv:X"]);
+  });
+});
+
+const kn = (id: string, kind: TreeNode["kind"], label: string, extra: Partial<TreeNode> = {}): TreeNode => node(id, { kind, label, ...extra });
+
+function chain(tableNodes: TreeNode[] | null) {
+  let s = emptyTree();
+  s = setChildren(s, ROOT, [kn("g", "serverGroup", "Üretim")]);
+  s = setChildren(s, "g", [kn("s1", "server", "pg-prod", { flags: { ...flags, connected: true } })]);
+  s = setChildren(s, "s1", [kn("dbs", "databaseCollection", "Databases")]);
+  s = setChildren(s, "dbs", [kn("db1", "database", "app")]);
+  s = setChildren(s, "db1", [kn("sch", "schemaCollection", "Schemas")]);
+  s = setChildren(s, "sch", [kn("pub", "schema", "public")]);
+  s = setChildren(s, "pub", [kn("tbls", "tableCollection", "Tables")]);
+  if (tableNodes) s = setChildren(s, "tbls", tableNodes);
+  for (const id of ["g", "s1", "dbs", "db1", "sch", "pub", "tbls"]) s = expand(s, id);
+  return s;
+}
+const tree = (labels: string[]) => chain(labels.map((l) => kn(`tbl-${l}`, "table", l, { hasChildren: false })));
+const treeWithUnloadedTables = () => chain(null);
+const withFilter = (s: TreeState, q: string): TreeState => ({ ...s, filter: q });
+
+describe("filterRows", () => {
+  it("shows matching nodes with their ancestors, expanded, and hides non-matching siblings", () => {
+    const s = withFilter(tree(["orders", "customers", "order_items"]), "ord");
+    const rows = flatten(s);
+    expect(rows.map((r) => r.node.label)).toEqual(["Üretim", "pg-prod", "Databases", "app", "Schemas", "public", "Tables", "orders", "order_items"]);
+    expect(rows.slice(0, -2).every((r) => r.expanded)).toBe(true);
+    expect(rows.at(-1)!.posInSet).toBe(2);
+    expect(rows.at(-1)!.setSize).toBe(2);
+  });
+  it("shows loaded total in collection count while filtered", () => {
+    const rows = flatten(withFilter(tree(["orders", "customers", "order_items"]), "ord"));
+    expect(rowLabel(rows.find((r) => r.id === "tbls")!)).toBe("Tables (3)");
+  });
+  it("is case-insensitive", () => {
+    expect(flatten(withFilter(tree(["Orders"]), "oRDERS")).map((r) => r.node.label)).toContain("Orders");
+  });
+  it("treats the query as a plain substring", () => {
+    const s = tree(["a.b", "axb", "100%", "c(d)", "back\\slash", "ÇOK", "İstanbul"]);
+    for (const [q, expected] of [["a.b", ["a.b"]], [".*", []], ["100%", ["100%"]], ["(d)", ["c(d)"]], ["\\", ["back\\slash"]], ["çok", ["ÇOK"]], ["İst", ["İstanbul"]]] as const) {
+      const labels = flatten(withFilter(s, q)).filter((r) => r.node.kind === "table").map((r) => r.node.label);
+      expect(labels, q).toEqual(expected);
+    }
+  });
+  it("blank query does not filter and keeps normal expansion", () => {
+    const base = tree(["a", "b"]);
+    expect(flatten(withFilter(base, "   "))).toEqual(flatten(base));
+  });
+  it("only searches loaded nodes", () => {
+    expect(flatten(withFilter(treeWithUnloadedTables(), "hidden"))).toEqual([]);
+  });
+  it("does not change expansion or selection", () => {
+    const base = { ...tree(["a"]), selected: "tbl-a" };
+    const filtered = withFilter(base, "zzz");
+    expect(filtered.selected).toBe("tbl-a");
+    expect(filtered.expanded).toEqual(base.expanded);
+  });
+  it("filters 10,000 loaded nodes in under 50 ms", () => {
+    const s = withFilter(tree(Array.from({ length: 10000 }, (_, i) => `table_${i}`)), "table_99");
+    const times = Array.from({ length: 5 }, () => {
+      const t = performance.now();
+      flatten(s);
+      return performance.now() - t;
+    });
+    console.log(`filter 10k min ms: ${Math.min(...times).toFixed(2)}`);
+    expect(Math.min(...times)).toBeLessThan(50);
+  });
+});
+
+describe("keyIntent while filtered", () => {
+  it("ArrowLeft goes to parent, ArrowRight descends, Enter does nothing", () => {
+    const s = withFilter(tree(["orders"]), "ord");
+    const rows = flatten(s);
+    expect(keyIntent(select(s, "tbls"), rows, "ArrowLeft")).toEqual({ select: "pub" });
+    expect(keyIntent(select(s, "tbls"), rows, "ArrowRight")).toEqual({ select: "tbl-orders" });
+    expect(keyIntent(select(s, "tbls"), rows, "Enter")).toBeNull();
+    expect(keyIntent(select(s, "tbl-orders"), rows, "ArrowLeft")).toEqual({ select: "tbls" });
+  });
+  it("ArrowRight on a matching node whose children are hidden does not expand", () => {
+    const base = chain([kn("tbl-x", "table", "xorders", { hasChildren: true })]);
+    const s = withFilter(base, "xorders");
+    expect(keyIntent(select(s, "tbl-x"), flatten(s), "ArrowRight")).toBeNull();
+  });
+});
+
+describe("ancestorOfKind", () => {
+  it("finds the nearest matching ancestor or self, else null", () => {
+    const s = tree(["a"]);
+    expect(ancestorOfKind(s, "tbl-a", ["schema"])?.id).toBe("pub");
+    expect(ancestorOfKind(s, "tbl-a", ["table"])?.id).toBe("tbl-a");
+    expect(ancestorOfKind(s, "tbl-a", ["function"])).toBeNull();
+    expect(ancestorOfKind(s, null, ["server"])).toBeNull();
   });
 });

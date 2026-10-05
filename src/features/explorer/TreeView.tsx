@@ -5,7 +5,7 @@ import type { Explorer } from "./explorer-store";
 import { ROW_HEIGHT, TreeRow, rowDomId } from "./TreeRow";
 import { ROOT } from "./tree-model";
 
-export function TreeView(props: { explorer: Explorer }) {
+export function TreeView(props: { explorer: Explorer; treeRef?: (el: HTMLElement) => void }) {
   const ex = props.explorer;
   let scrollEl!: HTMLDivElement;
   const virtualizer = createVirtualizer({
@@ -25,11 +25,15 @@ export function TreeView(props: { explorer: Explorer }) {
     if (index >= 0) virtualizer.scrollToIndex(index, { align: "auto" });
   });
 
-  const isEmpty = () => ex.rows().length === 0 && ex.state().children.has(ROOT);
+  const filtering = () => ex.state().filter.trim() !== "";
+  const isEmpty = () => ex.rows().length === 0 && (filtering() || ex.state().children.has(ROOT));
 
   return (
     <div
-      ref={scrollEl}
+      ref={(el) => {
+        scrollEl = el;
+        props.treeRef?.(el);
+      }}
       role="tree"
       aria-label={t.explorer.ariaLabel}
       aria-activedescendant={ex.state().selected !== null ? rowDomId(ex.state().selected!) : undefined}
@@ -39,7 +43,7 @@ export function TreeView(props: { explorer: Explorer }) {
         if (ex.controller.handleKey(e.key)) e.preventDefault();
       }}
     >
-      <Show when={!isEmpty()} fallback={<p class="p-4 text-muted">{t.explorer.empty}</p>}>
+      <Show when={!isEmpty()} fallback={<p class="p-4 text-muted">{filtering() ? t.explorer.noMatch : t.explorer.empty}</p>}>
         <div style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative" }}>
           <For each={virtualizer.getVirtualItems()}>
             {(item) => (

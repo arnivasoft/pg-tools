@@ -65,6 +65,22 @@ export default function App() {
     applyTheme(next);
   };
 
+  let filterEl!: HTMLInputElement;
+  const [treeEl, setTreeEl] = createSignal<HTMLElement | null>(null);
+  const clearFilter = () => {
+    explorer.controller.setFilter("");
+    treeEl()?.focus();
+  };
+  const onWindowKey = (e: KeyboardEvent) => {
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      filterEl.focus();
+      filterEl.select();
+    }
+  };
+  window.addEventListener("keydown", onWindowKey);
+  onCleanup(() => window.removeEventListener("keydown", onWindowKey));
+
   const refreshSelected = () => {
     const selected = explorer.state().selected;
     void (selected === null ? explorer.controller.reloadServers() : explorer.controller.refresh(selected));
@@ -73,7 +89,13 @@ export default function App() {
   return (
     <div class="flex h-full flex-col">
       <header class="flex h-9 shrink-0 items-center gap-1 border-b border-border bg-panel px-2">
-        <Toolbar onRefresh={refreshSelected} themePref={themePref()} onCycleTheme={cycleTheme}>
+        <Toolbar
+          onRefresh={refreshSelected}
+          filter={explorer.state().filter}
+          onFilter={(q) => explorer.controller.setFilter(q)}
+          onFilterEscape={clearFilter}
+          onFilterDown={() => treeEl()?.focus()}
+          filterRef={(el) => (filterEl = el)} themePref={themePref()} onCycleTheme={cycleTheme}>
           <Button variant="ghost" onClick={() => void openDialog(null)}>
             <Plus size={14} /> {t.toolbar.addServer}
           </Button>
@@ -91,7 +113,7 @@ export default function App() {
           </Button>
         </Toolbar>
       </header>
-      <SplitPane left={<TreeView explorer={explorer} />} right={<Inspector explorer={explorer} />} />
+      <SplitPane left={<TreeView explorer={explorer} treeRef={setTreeEl} />} right={<Inspector explorer={explorer} />} />
       <footer class="flex h-6 shrink-0 items-center border-t border-border bg-panel px-2 text-xs text-muted">
         <StatusBar explorer={explorer} />
       </footer>

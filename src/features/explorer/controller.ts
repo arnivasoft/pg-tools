@@ -149,6 +149,10 @@ export class ExplorerController {
     else await this.expand(id);
   }
 
+  setFilter(query: string): void {
+    this.update((s) => ({ ...s, filter: query }));
+  }
+
   select(id: string): void {
     this.update((s) => select(s, id));
   }

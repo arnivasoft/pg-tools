@@ -25,10 +25,13 @@ export const t = {
     addServer: "Sunucu ekle",
     editServer: "Sunucuyu düzenle",
     refresh: "Yenile (F5)",
+    filter: "Filtre…  (Ctrl+F)",
+    clearFilter: "Filtreyi temizle",
     theme: { system: "Tema: sistem", light: "Tema: açık", dark: "Tema: koyu" },
   },
   explorer: {
     ariaLabel: "Nesne gezgini",
+    noMatch: "Eşleşme yok. Filtre yalnızca yüklenmiş düğümlerde arar.",
     empty: "Henüz sunucu yok. Başlamak için “Sunucu ekle”ye tıklayın.",
   },
   inspector: {
