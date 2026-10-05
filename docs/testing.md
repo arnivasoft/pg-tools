@@ -61,6 +61,56 @@ Bir test her sunucuda döngüyle çalıştığı için ilk başarısız sunucuda
 `.snap.new` dosyalarını tek seferde almak için `INSTA_FORCE_PASS=1` de verilebilir (yalnızca snapshot üretimi
 sırasında; doğrulama çalıştırması bu değişken olmadan yapılmalıdır).
 
+## Query Tool arka ucu (`pgt-query`)
+Testler `crates/pgt-query/tests/` altındadır ve gerçek PostgreSQL ister (`PGT_TEST_URLS` yoksa atlanır; her test
+listedeki her sunucuda ayrı çalışır). Birim testleri (`lex`, `split`, `classify`, `error_codes`) sunucusuz çalışır.
+
+| Dosya | Kapsam |
+|---|---|
+| `exec.rs` | `Executor`: imleç/doğrudan yol, satır sınırı, `more()`, hata konumu, NOTICE, zaman aşımı |
+| `session.rs` | `QueryManager`: oturum yaşam döngüsü, transaction durum makinesi, kilit/onay kapıları, iptal, boşta imleç |
+| `complete.rs` | Katalog tamamlama sorguları, önbellek, 500 sonuç sınırı |
+| `export.rs` | CSV dışa aktarma: akış, biçim, hata/iptal temizliği, manuel transaction korunması |
+| `memory.rs` | Bellek sözleşmesi (1M satır): sayaçlar ve olay boyutları; yalnızca sayaç assert edilir, süre asla |
+
+Docker'lı tek sunucuyla çalıştırma (kapsayıcıyı işiniz bitince silin; URL'yi/parolayı çıktıya yazmayın):
+
+    docker run -d --name pgt-q -e POSTGRES_PASSWORD=PAROLA -e POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 `
+      -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 -p 127.0.0.1:55496:5432 postgres:18
+    $env:PGT_TEST_URLS = "postgres://postgres:PAROLA@127.0.0.1:55496/postgres"
+    cargo test -p pgt-query                          # ya da --workspace --all-features
+    docker rm -f pgt-q
+
+Tüm sürümler için `scripts/test-matrix.ps1` (yukarıda) `pgt-query` testlerini de PG 10–18'de koşar.
+
+`PGT_QUERY_BIG=1`: `memory.rs` içindeki ağır/bilgi amaçlı testleri açar — 1M satırlık CSV dışa aktarma
+(`csv_export_streams_one_million_rows`: ilerleme monoton, tampon <= `EXPORT_CHUNK`) ve tamamlama/iptal gecikmesi
+ölçümü (`measure_complete_and_cancel_latency`, `-- --nocapture` ile `MEASURE …` satırlarını yazar). Bu değişken yokken
+`row_budget_holds_for_one_million_rows` (10.000 satır sınırı, 1.000'lik parçalar, `more()` x3, kapatınca
+`idle in transaction` kalmaması) yine de çalışır. Süre assert edilmez; ölçümler `docs/performance.md`'dedir.
+
+### Query Tool güvenlik ve durum sınırları
+- **Salt okunur kilit bir güvenlik sınırı DEĞİLDİR.** Güçlü bir korumadır (oturum `default_transaction_read_only=on`,
+  istemci tarafında yazma ifadesi sınıflandırması, kilitli oturumda `SET default_transaction_read_only`/`transaction_read_only`,
+  `READ WRITE` ve `set_config(` çağrılarının reddi) ama kararlı bir kullanıcı aşabilir. Bilinen atlatmalar:
+  `DO` blokları ve `EXECUTE` ile dinamik SQL (içeride `SET`/`set_config`/DML), hesaplanmış adlı `set_config`
+  (yalnızca **sabit** `set_config(...)` çağrıları engellenir), yazan fonksiyonlar (sunucu `read only` transaction'ı
+  yine de çoğunu reddeder, ama transaction ayarı fonksiyon içinden değiştirilebilir). **Kesin garanti için sunucuda
+  salt okunur bir veritabanı rolü kullanın.**
+- **Onay kapısı arka uçta zorunludur**: tehlikeli ifadeler (`DROP`, `TRUNCATE`, `WHERE`'siz `UPDATE`/`DELETE` vb.)
+  ve üretim etiketli sunucuda yazan ifadeler `confirmed = true` olmadan `qt_run` tarafından reddedilir
+  (`confirmation_required`); arayüz yalnızca onay diyaloğunu gösterir, kuralı uygulamaz.
+- **Transaction durum makinesi** istemci tarafında ifade türlerinden izlenir ve her ifade sonrası sunucuya
+  `SELECT statement_timestamp() <> transaction_timestamp()` sondasıyla doğrulanır (sapma düzeltilir ve loglanır).
+  Sınırları: fonksiyon/`DO` içinde dinamik `COMMIT`/`ROLLBACK` istemciye görünmez (sonda yine de düzeltir);
+  sonda saatin ilerlemesine dayanır (transaction içinde ilk ifadede iki zaman damgası eşit olabilir, saat geri
+  alınırsa yanlış sonuç mümkündür). `Failed` durumunda yalnızca `ROLLBACK`/`ROLLBACK TO` kabul edilir
+  (`COMMIT` reddedilir).
+- **İmleç ve `idle in transaction`**: autocommit kipinde ızgara imleci açıkken (daha fazla satır alınabilir) sunucuda
+  transaction açık kalır (`idle in transaction`); imleç tükenince, yeni ifadede, `close`'ta ya da **5 dakika** boşta
+  kalınca (`DEFAULT_CURSOR_IDLE`) kapatılır. Sunucuda `idle_in_transaction_session_timeout` 5 dakikadan kısaysa
+  sunucu önce bağlantıyı keser. CSV dışa aktarma ayrı bir imleç kullanır (ızgara imlecini etkilemez).
+
 ## pgbouncer ve `options` yedek yolu
 Oturumun salt okunur/zaman aşımı/`search_path` ayarları normalde `options` başlangıç parametresiyle gönderilir.
 pgbouncer gibi havuzlayıcılar bunu `unsupported startup parameter: options` (SQLSTATE 08P01) ile reddeder; bu durumda
@@ -196,3 +246,5 @@ gerilemeyi yakalayacak kadar uzundur. Her yayından önce çalıştırın.
 
 ## pgAdmin içe aktarma sınırı
 Dosya önizleme ile içe aktarma arasında değiştirilirse sonuç değişebilir (uygulama aynı yolu yeniden okur; indeksler kayabilir).
+
+Query Tool arayüzü (Plan 6) için arka uç devir notları: `docs/query-tool-plan6-notes.md`.
