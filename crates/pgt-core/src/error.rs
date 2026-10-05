@@ -75,7 +75,7 @@ impl From<&Error> for ErrorPayload {
                 let friendly = sqlstate.as_deref().and_then(friendly_sqlstate);
                 let (code, text) = match kind {
                     ConnectErrorKind::Auth => ("auth", friendly.map(str::to_string).unwrap_or_else(|| message.clone())),
-                    ConnectErrorKind::Network => ("network", format!("Sunucuya ulaşılamadı: {message}")),
+                    ConnectErrorKind::Network => ("network", "Sunucuya ulaşılamadı.".to_string()),
                     ConnectErrorKind::Tls => ("tls", format!("TLS/sertifika hatası: {message}")),
                     ConnectErrorKind::Timeout => ("timeout", "Bağlantı zaman aşımına uğradı (10 sn).".to_string()),
                     ConnectErrorKind::Other => ("connect", friendly.map(str::to_string).unwrap_or_else(|| message.clone())),
@@ -187,11 +187,12 @@ mod tests {
     }
 
     #[test]
-    fn network_error_wraps_original_message() {
+    fn network_error_keeps_raw_text_only_in_detail() {
         let e = Error::Connect { kind: ConnectErrorKind::Network, sqlstate: None, message: "connection refused".into() };
         let p = ErrorPayload::from(&e);
         assert_eq!(p.code, "network");
-        assert_eq!(p.message, "Sunucuya ulaşılamadı: connection refused");
+        assert_eq!(p.message, "Sunucuya ulaşılamadı.");
+        assert_eq!(p.detail.as_deref(), Some("connection refused"), "ham sürücü/OS metni yalnızca detail'de");
     }
 
     #[test]
