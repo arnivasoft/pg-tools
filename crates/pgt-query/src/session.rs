@@ -183,7 +183,7 @@ fn runs_server_code(sql: &str) -> bool {
     crate::lex::lex(sql)
         .into_iter()
         .find(|t| t.kind == crate::lex::Kind::Word)
-        .is_some_and(|t| t.is_word(sql, "do") || t.is_word(sql, "call"))
+        .is_some_and(|t| t.is_word(sql, "do") || t.is_word(sql, "call") || t.is_word(sql, "execute"))
 }
 
 fn byte_at_char(sql: &str, ch: u32) -> usize {
@@ -1466,9 +1466,10 @@ mod tests {
         assert_eq!(invalid(gate("update t set a = 1 where id = 1", PROD, false)), CONFIRMATION_REQUIRED);
         assert!(gate("update t set a = 1 where id = 1", PROD, true).is_ok());
         assert!(gate("select 1", PROD, false).is_ok());
-        // DO / CALL gövdesi görünmez: üretimde onay ister, etiketsiz sunucuda istemez.
+        // DO / CALL / EXECUTE gövdesi görünmez: üretimde onay ister, etiketsiz sunucuda istemez.
         for sql in [
             "do $$ begin delete from t; end $$", "call p()", "/* c */ DO $$ begin null; end $$",
+            "EXECUTE x", "execute x(1, 2)",
         ] {
             assert!(plans(sql, PROD)[0].production_write, "{sql}");
             assert_eq!(invalid(gate(sql, PROD, false)), CONFIRMATION_REQUIRED, "{sql}");
@@ -1476,6 +1477,10 @@ mod tests {
             assert!(!plans(sql, PLAIN)[0].production_write, "{sql}");
             assert!(gate(sql, PLAIN, false).is_ok(), "{sql}");
         }
+        // Hazırlanmış ifade: PREPARE yazmaz ama EXECUTE onay ister.
+        let p = plans("prepare x as delete from t; execute x", PROD);
+        assert_eq!(p.iter().map(|p| p.production_write).collect::<Vec<_>>(), [false, true]);
+        assert_eq!(invalid(gate("prepare x as delete from t; execute x", PROD, false)), CONFIRMATION_REQUIRED);
         assert!(!plans("select f_that_writes()", PROD)[0].production_write, "belgelenmiş sınır");
 
         let p = plans("update t set a = 1", PLAIN);
