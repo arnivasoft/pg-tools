@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   PostgreSQL sürüm matrisinde pg-tools entegrasyon testlerini çalıştırır.
 .PARAMETER Versions
