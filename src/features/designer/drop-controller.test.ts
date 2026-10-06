@@ -281,7 +281,7 @@ describe("drop-controller kapı ve uygulama", () => {
     expect(s.api.ddlPreview).toHaveBeenCalledTimes(before);
   });
 
-  it("uygulama sırasında kapatma: ddl_cancel; geç başarı diyalog durumu yazmaz ama Gezgin/sekme güncellenir", async () => {
+  it("uygulama sırasında kapatma: ddl_cancel; geç başarı diyalog durumu yazmaz ama Gezgin/sekme güncellenir ve bildirilir", async () => {
     const s = setup();
     await s.ctl.openAlter({ tabId: "T1", serverId: "S1", databaseOid: 5, object: OBJ, refreshNodeId: null });
     await ready(s);
@@ -294,7 +294,7 @@ describe("drop-controller kapı ve uygulama", () => {
     d.resolve(applied());
     await p;
     expect(s.drop.state()).toBeNull();
-    expect(s.notify).not.toHaveBeenCalled();
+    expect(s.notify).toHaveBeenCalledExactlyOnceWith(tdes.drop.done("app"), "success");
     expect(s.refreshNode).toHaveBeenCalledExactlyOnceWith("N-coll");
     expect(s.ctl.model("T1")!.status).toBe("gone");
 
@@ -308,6 +308,56 @@ describe("drop-controller kapı ve uygulama", () => {
     e.reject(err("query", "x"));
     await q;
     expect(s.drop.state()).toBeNull();
+  });
+
+  it("geç başarı yeni açılan diyaloğu kapatmaz; yine bildirilir", async () => {
+    const s = setup();
+    await ready(s);
+    s.drop.setConfirm({ checked: true });
+    const d = deferred<ApplyOutcome>();
+    s.api.ddlApply.mockReturnValueOnce(d.promise);
+    const p = s.drop.apply();
+    s.drop.close();
+    await ready(s, { ...INPUT, object: { kind: "schema", oid: 200 }, name: "diger" });
+    d.resolve(applied());
+    await p;
+    expect(s.notify).toHaveBeenCalledExactlyOnceWith(tdes.drop.done("app"), "success");
+    expect(s.drop.state()).toMatchObject({ phase: "ready", input: { name: "diger" } });
+  });
+
+  it("stale ve kısmi silme Gezgini yeniler: plan_changed, not_found (yükleme/önizleme), committed > 0", async () => {
+    const s = setup();
+    await ready(s);
+    s.drop.setConfirm({ checked: true });
+    s.api.ddlApply.mockRejectedValueOnce(err("plan_changed"));
+    await s.drop.apply();
+    expect(s.refreshNode).toHaveBeenCalledTimes(1);
+
+    s.api.ddlLoad.mockRejectedValueOnce(err("not_found"));
+    s.drop.open(INPUT);
+    await flush();
+    expect(s.refreshNode).toHaveBeenCalledTimes(2);
+
+    s.api.ddlPreview.mockRejectedValueOnce(err("not_found"));
+    s.drop.open(INPUT);
+    await flush();
+    expect(s.drop.state()!.phase).toBe("error");
+    expect(s.refreshNode).toHaveBeenCalledTimes(3);
+
+    await ready(s);
+    s.drop.setConfirm({ checked: true });
+    s.api.ddlApply.mockResolvedValueOnce({ outcome: "failed", failedIndex: 1, committed: 1, sqlstate: "XX000", position: null, error: err("query", "x") });
+    await s.drop.apply();
+    expect(s.drop.state()).toMatchObject({ phase: "error", status: { kind: "stale" } });
+    expect(s.refreshNode).toHaveBeenCalledTimes(4);
+    expect(s.refreshNode).toHaveBeenLastCalledWith("N-coll");
+
+    // Genel hata ve 2BP01 yenilemez.
+    await ready(s);
+    s.drop.setConfirm({ checked: true });
+    s.api.ddlApply.mockRejectedValueOnce(err("query", "y"));
+    await s.drop.apply();
+    expect(s.refreshNode).toHaveBeenCalledTimes(4);
   });
 
   it("cancelApply yalnızca uçuşta ddl_cancel ister", async () => {

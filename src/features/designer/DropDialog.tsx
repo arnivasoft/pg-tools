@@ -23,6 +23,16 @@ export default function DropDialog(props: { drop: DropController }) {
   const locked = () => s()?.locked ?? false;
   const view = () => s()?.view ?? null;
   const needsConfirm = () => gate().kind === "needsConfirm" || gate().kind === "needsProductionName";
+  /**
+   * Onay kutusu görünür mü: kapı onay istiyorsa; ayrıca önizleme beklerken son görünüm yıkıcıysa (kutu soluk
+   * ve kapalı kalır; CASCADE aç/kapa sırasında yerleşim sıçramaz).
+   */
+  const showConfirm = () => {
+    if (needsConfirm()) return true;
+    const cur = s();
+    const r = cur?.pending ? cur.view?.risk : undefined;
+    return r === "destructive" || r === "data_loss";
+  };
   const expectedName = () => {
     const g = gate();
     return g.kind === "needsProductionName" ? g.expected : null;
@@ -34,10 +44,12 @@ export default function DropDialog(props: { drop: DropController }) {
   /** Sil kapalıyken gerekçe. */
   const submitTitle = () => {
     if (locked()) return b.lockedTitle;
+    // Uç durumda gerekçe şeritte yazılıdır ("Tanım yükleniyor" yanıltıcı olurdu).
+    if (s()?.phase === "error") return undefined;
     const g = gate();
     if (g.kind === "blocked") return b.blocked[g.reason];
     if (submittable()) return undefined;
-    return g.kind === "needsProductionName" ? b.needsName : b.needsConfirm;
+    return g.kind === "needsProductionName" ? d.needsName : d.needsConfirm;
   };
 
   return (
@@ -53,18 +65,14 @@ export default function DropDialog(props: { drop: DropController }) {
       }}
       footer={
         <>
-          <Show
-            when={applying()}
-            fallback={
-              <Button ref={cancelEl} onClick={() => props.drop.close()}>
-                {s()?.phase === "error" ? d.close : d.cancel}
-              </Button>
-            }
+          {/* Tek düğme: uçuşta "İptal" (`ddl_cancel`), aksi halde Vazgeç/Kapat; odak uygulama başlarken kaybolmaz. */}
+          <Button
+            ref={cancelEl}
+            title={applying() ? b.cancelTitle : undefined}
+            onClick={() => (applying() ? props.drop.cancelApply() : props.drop.close())}
           >
-            <Button title={b.cancelTitle} onClick={() => props.drop.cancelApply()}>
-              {d.cancelApply}
-            </Button>
-          </Show>
+            {applying() ? d.cancelApply : s()?.phase === "error" ? d.close : d.cancel}
+          </Button>
           <Button
             variant="primary"
             class="!bg-danger !text-danger-fg"
@@ -172,13 +180,13 @@ export default function DropDialog(props: { drop: DropController }) {
                   {d.cascadeHint}
                 </p>
               </div>
-              <Show when={needsConfirm() && !cur().locked}>
+              <Show when={showConfirm() && !cur().locked}>
                 <div class="flex flex-col gap-1.5 border-t border-border pt-2">
                   <label class="flex items-center gap-2">
                     <input
                       type="checkbox"
                       checked={cur().confirm.checked}
-                      disabled={applying()}
+                      disabled={applying() || !needsConfirm()}
                       onChange={(ev) => props.drop.setConfirm({ checked: ev.currentTarget.checked })}
                     />
                     {b.confirm}

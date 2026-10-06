@@ -129,6 +129,8 @@ export const tdes = {
     dependents: "Bağımlı nesneler var; CASCADE ile silin ya da bağımlıları kaldırın.",
     dependentsDetail: "Bağımlı nesneler",
     stale: "Nesne değişti ya da artık yok; Gezgini yenileyin.",
+    needsConfirm: "Silmek için 'Etkisini anladım'ı işaretleyin",
+    needsName: "Silmek için sunucu adını yazın",
     submit: "Sil",
     submitting: "Siliniyor…",
     cancel: "Vazgeç",

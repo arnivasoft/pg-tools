@@ -90,6 +90,12 @@ export function createDropController(deps: DropControllerDeps) {
     }
   };
 
+  /** Gezgin düğümü yenilenir (silme, nesne değişti/yok, kısmi silme); hata yutulur. */
+  function refreshTree(input: DropInput) {
+    const id = input.refreshNodeId;
+    if (id !== null) quiet(() => void Promise.resolve(deps.refreshNode(id)).catch(() => {}));
+  }
+
   const onPreview = (r: PreviewOk) => {
     const s = state();
     if (!s || r.gen !== gen) return;
@@ -106,7 +112,10 @@ export function createDropController(deps: DropControllerDeps) {
     const st = dropStatusText(toPayload(x.error));
     if (!st) return;
     if (st.kind === "disconnected") return closeWith(st.text);
-    if (st.kind === "stale") return patch({ phase: "error", status: st, pending: false, view: null, viewFor: -1, canReload: false });
+    if (st.kind === "stale") {
+      refreshTree(s.input);
+      return patch({ phase: "error", status: st, pending: false, view: null, viewFor: -1, canReload: false });
+    }
     if (x.version === s.version) patch({ pending: false, previewError: st.text });
   };
   const previewer = createPreviewer<PreviewOk>(deps.previewDeps, onPreview, onPreviewError, 0);
@@ -157,6 +166,7 @@ export function createDropController(deps: DropControllerDeps) {
       if (isConnectionCode(p.code)) return closeWith(errorText(p));
       const st = dropStatusText(p);
       const general = st?.kind === "other";
+      if (st?.kind === "stale") refreshTree(s.input);
       patch({ phase: "error", status: general ? { kind: "other", text: errorText(p), detail: null } : st, canReload: general });
     }
   };
@@ -202,10 +212,7 @@ export function createDropController(deps: DropControllerDeps) {
 
   /** Silindi: Gezgin düğümü yenilenir, aynı nesnenin alter sekmeleri `gone` (hataları yutulur). */
   const succeeded = (input: DropInput) => {
-    if (input.refreshNodeId !== null) {
-      const id = input.refreshNodeId;
-      quiet(() => void Promise.resolve(deps.refreshNode(id)).catch(() => {}));
-    }
+    refreshTree(input);
     quiet(() => deps.objectDropped(input.serverId, input.databaseOid, input.object));
   };
 
@@ -231,23 +238,27 @@ export function createDropController(deps: DropControllerDeps) {
       applyId = null;
       const st = dropStatusText(toPayload(err))!;
       if (st.kind === "disconnected") return closeWith(st.text);
+      if (st.kind === "stale") refreshTree(input);
       // Görünüm (hash) tüketildi; onay sıfırlanır.
       patch({ phase: st.kind === "stale" ? "error" : "ready", status: st, view: null, viewFor: -1, confirm: emptyConfirm(), locked: st.kind === "locked" || s.locked, canReload: false });
       if (st.kind === "other") preview();
       return;
     }
     if (out.outcome === "applied") {
-      // Kapatılmış diyalogun geç başarısı da Gezgini ve sekmeleri günceller (nesne silindi); bildirim yalnız açıkken.
+      // Kapatılmış diyalogun geç başarısı da Gezgini ve sekmeleri günceller ve bildirilir (nesne silindi);
+      // diyalog yalnızca hâlâ aynı kuşaktaysa kapatılır (yeni açılan diyaloğa dokunulmaz).
       succeeded(input);
+      notify(tdes.drop.done(input.name), "success");
       if (g !== gen) return;
       applyId = null;
-      notify(tdes.drop.done(input.name), "success");
       close();
       return;
     }
     if (g !== gen) return;
     applyId = null;
     const st = dropStatusText(null, out)!;
+    // Kısmi silme (committed > 0): nesne değişmiş olabilir; Gezgin yenilenir.
+    if (st.kind === "stale") refreshTree(input);
     patch({ phase: st.kind === "stale" ? "error" : "ready", status: st, view: null, viewFor: -1, confirm: emptyConfirm(), canReload: false });
     if (st.kind !== "stale") preview();
   };
