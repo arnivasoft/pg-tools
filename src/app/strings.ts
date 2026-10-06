@@ -335,4 +335,14 @@ export const t = {
       lockedSummary: "Sunucu salt okunur kilitli; betik çalıştırılmadı.",
     },
   },
+  dashboard: {
+    signal: {
+      sent: (kind: "cancel" | "terminate") =>
+        kind === "cancel" ? "İptal isteği gönderildi." : "Sonlandırma isteği gönderildi.",
+      notFound: "Oturum artık yok.",
+      changed: "Bu pid artık başka bir oturuma ait; işlem yapılmadı.",
+      noPrivilege: "Bu oturumu durdurma yetkiniz yok (yalnızca kendi oturumlarınız ya da pg_signal_backend üyeliği).",
+      ownSession: "Kendi dashboard oturumunuzu durduramazsınız.",
+    },
+  },
 } as const;

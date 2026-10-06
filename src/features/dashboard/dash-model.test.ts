@@ -72,6 +72,25 @@ describe("SampleRing", () => {
   });
 });
 
+describe("SampleRing anlık görüntü", () => {
+  it("push ve clear yeni dizi döndürür; önceki görüntü değişmez", () => {
+    const ring = new SampleRing();
+    ring.push(smp(1));
+    const a = ring.samples();
+    expect(ring.samples()).toBe(a); // push olmadan aynı başvuru
+    ring.push(smp(2));
+    const b = ring.samples();
+    expect(b).not.toBe(a);
+    expect(a.map((s) => s.at)).toEqual([1]);
+    expect(b.map((s) => s.at)).toEqual([1, 2]);
+    for (let i = 3; i < 400; i++) ring.push(smp(i));
+    expect(b.map((s) => s.at)).toEqual([1, 2]);
+    ring.clear();
+    expect(ring.samples()).toHaveLength(0);
+    expect(b).toHaveLength(2);
+  });
+});
+
 describe("formatDuration", () => {
   it("süre biçimleri", () => {
     expect(formatDuration(null)).toBe("—");

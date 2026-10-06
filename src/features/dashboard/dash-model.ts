@@ -10,12 +10,15 @@ export interface RateSeries {
   ret: RatePoint[]; fetched: RatePoint[]; read: RatePoint[]; hit: RatePoint[];
 }
 
-/** Bellekte en çok `MAX_SAMPLES` örnek tutar; dolunca en eski düşer. */
+/**
+ * Bellekte en çok `MAX_SAMPLES` örnek tutar; dolunca en eski düşer. Her `push`/`clear` yeni bir dizi kurar: `samples()`
+ * değişmez bir anlık görüntüdür (Solid tüketicileri başvuru değişimini görür; eski görüntü sonradan değişmez).
+ */
 export class SampleRing {
-  private buf: Sample[] = [];
+  private buf: readonly Sample[] = [];
   push(s: Sample): void {
-    this.buf.push(s);
-    if (this.buf.length > MAX_SAMPLES) this.buf.splice(0, this.buf.length - MAX_SAMPLES);
+    const next = [...this.buf, s];
+    this.buf = next.length > MAX_SAMPLES ? next.slice(next.length - MAX_SAMPLES) : next;
   }
   clear(): void {
     this.buf = [];
