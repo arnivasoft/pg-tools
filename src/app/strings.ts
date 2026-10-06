@@ -275,6 +275,7 @@ export const t = {
     },
     format: {
       failed: "Biçimlendirilemedi; metin değiştirilmedi.",
+      unsafeSelection: "Seçim bir dize, yorum ya da ad içinde başlıyor/bitiyor; biçimlendirilmedi.",
     },
     editorSettings: {
       title: "Editör",

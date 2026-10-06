@@ -4,6 +4,7 @@
 
 import { isolateHistory } from "@codemirror/commands";
 import type { EditorState, TransactionSpec } from "@codemirror/state";
+import { analyzeBefore, statementBounds } from "./completion";
 
 const WS = /\s/;
 
@@ -77,4 +78,40 @@ export function formatTransaction(state: EditorState, expectDoc: string, from: n
     userEvent: "input.format",
     annotations: isolateHistory.of("full"),
   };
+}
+
+const WORD_CH = /[\p{L}\p{N}_$]/u;
+const OP_CH = /[+\-*/<>=~!@#%^&|`?:]/;
+
+/** `p` bir belirtecin ortası mı (iki yanı aynı sınıf ya da önek/sayı bitişikliği). */
+function midToken(doc: string, p: number): boolean {
+  if (p <= 0 || p >= doc.length) return false;
+  const a = doc[p - 1]!;
+  const b = doc[p]!;
+  if (WORD_CH.test(a) && (WORD_CH.test(b) || b === "'")) return true; // ad ortası, `E'…'`/`B'…'` öneki
+  if (a === "&" && (b === "'" || b === '"')) return true; // `U&'…'`
+  if (OP_CH.test(a) && OP_CH.test(b)) return true; // `--`, `/*`, `::`, `->>` …
+  if ((a === "." && /\d/.test(b)) || (/\d/.test(a) && b === ".")) return true; // `1.5`
+  return false;
+}
+
+/** `p` kodda mı: yorum, dize, dolar gövdesi ya da tırnaklı ad içinde değil ve bir belirtecin ortasında değil. */
+function inCode(doc: string, p: number): boolean {
+  if (p <= 0 || p >= doc.length) return true; // belge uçlarında parça ile belge aynı sözcüklenir
+  const a = analyzeBefore(doc.slice(0, p));
+  return a.context.kind !== "none" && !a.partial.startsWith('"') && !midToken(doc, p);
+}
+
+/**
+ * Seçim biçimlendirmesinin güvenli aralığı (tasarım §5.2 belge düzeyinde). Seçimin ucu bir dize/yorum/dolar
+ * gövdesi/tırnaklı ad içinde ya da belirteç ortasındaysa, biçimlendirici o metni kod sanıp değiştirebilirdi; uç
+ * çevreleyen ifadenin sınırına genişletilir (`statementBounds`). Genişletme de güvenli değilse `null` (reddet).
+ */
+export function safeFormatSelection(doc: string, from: number, to: number): { from: number; to: number; snapped: boolean } | null {
+  let a = from;
+  let b = to;
+  if (!inCode(doc, a)) a = statementBounds(doc, a).from;
+  if (!inCode(doc, b)) b = statementBounds(doc, Math.max(a, b - 1)).to;
+  if (!inCode(doc, a) || !inCode(doc, b) || a >= b) return null;
+  return { from: a, to: b, snapped: a !== from || b !== to };
 }

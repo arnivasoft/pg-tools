@@ -28,7 +28,7 @@ import { EditorSettings } from "./EditorSettings";
 import { hintFor } from "./errors";
 import { exportSql, exportTarget } from "./export";
 import { createExportUi } from "./ExportUi";
-import { formatRange, formatReplacement } from "./format-edit";
+import { formatRange, formatReplacement, safeFormatSelection } from "./format-edit";
 import { historyEntriesFor, insertAt } from "./history-model";
 import { HistorySettings, HistoryView } from "./HistoryView";
 import { MessagesView } from "./MessagesView";
@@ -473,7 +473,16 @@ export default function QueryTab(props: { ctl: QueryController }) {
     const state = editor.getState();
     const doc = state.doc.toString();
     const sel = state.selection.main;
-    const range = formatRange(doc.length, sel.from, sel.to);
+    let range = formatRange(doc.length, sel.from, sel.to);
+    if (!range.whole) {
+      // Seçimin ucu dize/yorum/tırnaklı ad içinde ya da belirteç ortasındaysa çevreleyen ifadeye genişletilir.
+      const safe = safeFormatSelection(doc, range.from, range.to);
+      if (!safe) {
+        notify(t.query.format.unsafeSelection, "info");
+        return;
+      }
+      range = { ...range, from: safe.from, to: safe.to };
+    }
     const original = doc.slice(range.from, range.to);
     if (original.trim() === "") return;
     try {

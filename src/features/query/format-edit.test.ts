@@ -1,7 +1,7 @@
 import { history, undo, undoDepth } from "@codemirror/commands";
 import { EditorState, type Transaction } from "@codemirror/state";
 import { describe, expect, it } from "vitest";
-import { formatRange, formatReplacement, formatTransaction, mapCursor } from "./format-edit";
+import { formatRange, formatReplacement, formatTransaction, mapCursor, safeFormatSelection } from "./format-edit";
 
 describe("formatRange", () => {
   it("boş seçimde tüm belge, aksi halde seçim (ters seçim dahil)", () => {
@@ -86,5 +86,65 @@ describe("formatTransaction", () => {
     const insert = formatReplacement(doc.slice(from, to), "SELECT a, b\nFROM t", false)!;
     const next = state.update(formatTransaction(state, doc, from, to, insert)!).state;
     expect(next.doc.toString()).toBe("select 1;\nSELECT a, b\nFROM t;\n");
+  });
+});
+
+describe("safeFormatSelection", () => {
+  const sel = (doc: string, part: string, occurrence = 0) => {
+    let from = -1;
+    for (let i = 0; i <= occurrence; i++) from = doc.indexOf(part, from + 1);
+    return [from, from + part.length] as const;
+  };
+  it("kodda başlayıp biten seçim aynen kalır", () => {
+    const doc = "select 1;\nselect a,b from t;\n";
+    const [f, t] = sel(doc, "select a,b from t");
+    expect(safeFormatSelection(doc, f, t)).toEqual({ from: f, to: t, snapped: false });
+  });
+  it("dize içindeki seçim çevreleyen ifadeye genişler (dize kod sanılmaz)", () => {
+    const doc = "select 1;\ninsert into t values ('select  a  from b');\nselect 2;";
+    const [f, t] = sel(doc, "select  a  from b");
+    const r = safeFormatSelection(doc, f, t)!;
+    expect(doc.slice(r.from, r.to)).toBe("\ninsert into t values ('select  a  from b')");
+    expect(r.snapped).toBe(true);
+  });
+  it("çok satırlı dizenin içinde üç tıkla seçilmiş satır ifadeye genişler", () => {
+    const doc = "select 'first\n  two  spaces  here\nlast' as x;\nselect 3;";
+    const [f, t] = sel(doc, "  two  spaces  here\n");
+    const r = safeFormatSelection(doc, f, t)!;
+    expect(doc.slice(r.from, r.to)).toBe("select 'first\n  two  spaces  here\nlast' as x");
+  });
+  it("tırnaklı ad, yorum ve dolar gövdesi içinde başlayan seçim genişler", () => {
+    const quoted = 'select * from "My  Table" t;';
+    const [f1, t1] = sel(quoted, "  Table");
+    expect(safeFormatSelection(quoted, f1, t1)).toMatchObject({ from: 0, to: quoted.length - 1 });
+    const comment = "select 1 /* select  a  from b */ + 2;";
+    const [f2, t2] = sel(comment, "select  a");
+    expect(safeFormatSelection(comment, f2, t2)).toMatchObject({ from: 0, to: comment.length - 1 });
+    const dollar = "do $$ begin perform  1; end $$;";
+    const [f3] = sel(dollar, "begin");
+    expect(safeFormatSelection(dollar, f3, f3 + 5)).toMatchObject({ from: 0, to: dollar.length - 1 });
+  });
+  it("belirteç ortasında başlayan ya da biten seçim genişler", () => {
+    const doc = "select customer from orders;";
+    const [f] = sel(doc, "tomer");
+    expect(safeFormatSelection(doc, f, doc.indexOf(" from"))).toEqual({ from: 0, to: doc.indexOf(" from"), snapped: true });
+    const cast = "select x::int from t;";
+    expect(safeFormatSelection(cast, cast.indexOf("::") + 1, cast.length - 1)).toMatchObject({ from: 0 });
+    const prefixed = "select E'a\\'b' from t;";
+    expect(safeFormatSelection(prefixed, prefixed.indexOf("'"), prefixed.length - 1)).toMatchObject({ from: 0 });
+    const ends = "select a from orders where x = 1;";
+    expect(safeFormatSelection(ends, 0, ends.indexOf("ders"))).toMatchObject({ from: 0, to: ends.length - 1 });
+  });
+  it("dize içinde biten seçim ifade sonuna genişler; belge uçları her zaman güvenli", () => {
+    const doc = "select 'a  b' as x; select 2";
+    expect(safeFormatSelection(doc, 0, doc.indexOf("  b"))).toEqual({ from: 0, to: doc.indexOf(";"), snapped: true });
+    const tail = "select 1 -- son";
+    expect(safeFormatSelection(tail, 0, tail.length)).toEqual({ from: 0, to: tail.length, snapped: false });
+  });
+  it("kapanmamış dize belge sonuna kadar sürer: seçim belge sonuna genişler", () => {
+    const doc = "select 1; select 'open  text\nmore";
+    const [f, t] = sel(doc, "open");
+    const r = safeFormatSelection(doc, f, t);
+    expect(r).toEqual({ from: doc.indexOf(" select 'open"), to: doc.length, snapped: true });
   });
 });
