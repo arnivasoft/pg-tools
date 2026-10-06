@@ -13,6 +13,8 @@ SELECT n.nspname::text AS schema,
        on_.nspname::text AS owned_schema,
        oc.relname::text AS owned_table,
        oa.attname::text AS owned_column,
+       EXISTS (SELECT 1 FROM pg_depend di WHERE di.classid = 'pg_class'::regclass AND di.objid = c.oid
+               AND di.refclassid = 'pg_class'::regclass AND di.deptype = 'i') AS is_identity,
        obj_description(c.oid, 'pg_class') AS comment,
        (left(n.nspname, 3) = 'pg_' OR n.nspname = 'information_schema') AS is_system
 FROM pg_class c

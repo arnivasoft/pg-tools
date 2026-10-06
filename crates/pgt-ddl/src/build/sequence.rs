@@ -13,6 +13,11 @@ const OWNER_MATCH_WARNING: &str =
 const START_NOTE: &str =
     "Başlangıç değeri yalnızca bir sonraki RESTART için kaydedilir; mevcut sayaç değişmez";
 
+const RESTART_NOTE: &str =
+    "Sayaç sıfırlanır: yeni başlangıç değerinden devam eder; tekrarlı değer üretilebilir";
+const TIGHTEN_WARNING: &str =
+    "Mevcut sayaç değeri yeni sınırların dışındaysa sunucu işlemi reddeder";
+
 fn type_sql(t: SeqType) -> &'static str {
     match t {
         SeqType::Smallint => "smallint",
@@ -28,6 +33,13 @@ fn type_bounds(t: SeqType) -> (i64, i64) {
         SeqType::Integer => (i32::MIN as i64, i32::MAX as i64),
         SeqType::Bigint => (i64::MIN, i64::MAX),
     }
+}
+
+/// Örtük sınırlar uygulanmış etkin `(min, max)` (artan: 1..tür üst; azalan: tür alt..-1).
+fn effective_bounds(d: &SequenceDef) -> (i64, i64) {
+    let (lo, hi) = type_bounds(d.data_type);
+    let (dmin, dmax) = if d.increment > 0 { (1, hi) } else { (lo, -1) };
+    (d.min_value.unwrap_or(dmin), d.max_value.unwrap_or(dmax))
 }
 
 fn column_sql(c: &ColumnRef) -> String {
@@ -212,10 +224,28 @@ pub fn alter(old: &SequenceDef, new: &SequenceDef) -> Plan {
         parts.push(cycle_sql(new.cycle).to_string());
     }
     if !parts.is_empty() {
+        // Artış işareti değişince PG, mevcut sayaç yeni sınırların dışında kaldığı için RESTART'sız ALTER'ı reddeder;
+        // bu yüzden sayaç yeni başlangıçtan yeniden başlatılır (tekrarlı değer üretebilir → Destructive).
+        if sign_changed {
+            parts.push(format!("RESTART WITH {}", new.start));
+        }
         let sql = format!("ALTER SEQUENCE {old_q} {}", parts.join(" "));
-        statements.push(stmt(sql, Risk::Safe, start_changed.then_some(START_NOTE)));
-        if start_changed {
+        let (risk, note) = if sign_changed {
+            (Risk::Destructive, Some(RESTART_NOTE))
+        } else {
+            (Risk::Safe, start_changed.then_some(START_NOTE))
+        };
+        statements.push(stmt(sql, risk, note));
+        if sign_changed {
+            warnings.push(RESTART_NOTE.to_string());
+        } else if start_changed {
             warnings.push(START_NOTE.to_string());
+        }
+        // Yön aynı kalıp sınırlar daralıyorsa saf üretici sayaç değerini bilemez: RESTART üretilmez, uyarılır.
+        let (olo, ohi) = effective_bounds(old);
+        let (nlo, nhi) = effective_bounds(new);
+        if !sign_changed && (nlo > olo || nhi < ohi) {
+            warnings.push(TIGHTEN_WARNING.to_string());
         }
     }
 
@@ -457,7 +487,8 @@ mod tests {
                 "ALTER SEQUENCE public.s AS integer INCREMENT BY 5 NO MINVALUE MAXVALUE 1000 CACHE 10 CYCLE"
             ]
         );
-        assert!(p.warnings.is_empty() && p.statements[0].note.is_none());
+        assert!(p.statements[0].note.is_none());
+        assert_eq!(p.warnings, [TIGHTEN_WARNING]); // üst sınır 1000'e daralıyor
         assert_eq!(p.risk(), Risk::Safe);
     }
 
@@ -480,12 +511,12 @@ mod tests {
         let p = balter(&o(desc.clone()), &o(asc.clone()), &ctx()).unwrap();
         assert_eq!(
             sqls(&p),
-            ["ALTER SEQUENCE public.s INCREMENT BY 1 NO MINVALUE NO MAXVALUE START WITH 1"]
+            ["ALTER SEQUENCE public.s INCREMENT BY 1 NO MINVALUE NO MAXVALUE START WITH 1 RESTART WITH 1"]
         );
         let p = balter(&o(asc), &o(desc), &ctx()).unwrap();
         assert_eq!(
             sqls(&p),
-            ["ALTER SEQUENCE public.s INCREMENT BY -1 NO MINVALUE NO MAXVALUE START WITH -1"]
+            ["ALTER SEQUENCE public.s INCREMENT BY -1 NO MINVALUE NO MAXVALUE START WITH -1 RESTART WITH -1"]
         );
         // İşaret aynı kalıyorsa sınırlar yeniden yazılmaz.
         let p = balter(
@@ -498,6 +529,46 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sqls(&p), ["ALTER SEQUENCE public.s INCREMENT BY 5"]);
+        assert!(p.warnings.is_empty());
+    }
+
+    #[test]
+    fn sign_change_restarts_counter_and_is_destructive() {
+        let new = SequenceDef {
+            increment: -1,
+            min_value: None,
+            max_value: None,
+            start: -1,
+            ..base()
+        };
+        let p = balter(&o(base()), &o(new), &ctx()).unwrap();
+        assert_eq!(p.statements.len(), 1);
+        let s = &p.statements[0];
+        assert!(s.sql.ends_with("START WITH -1 RESTART WITH -1"), "{}", s.sql);
+        assert_eq!(s.risk, Risk::Destructive);
+        assert_eq!(s.note.as_deref(), Some(RESTART_NOTE));
+        assert_eq!(p.risk(), Risk::Destructive);
+        assert!(p.warnings.contains(&RESTART_NOTE.to_string()));
+        assert!(!p.warnings.contains(&TIGHTEN_WARNING.to_string()));
+        assert_single_statements(&p);
+    }
+
+    #[test]
+    fn tightening_bounds_without_sign_change_warns_but_never_restarts() {
+        let cases = [
+            SequenceDef { min_value: Some(10), start: 10, ..base() },
+            SequenceDef { max_value: Some(1000), ..base() },
+            SequenceDef { data_type: SeqType::Smallint, max_value: None, ..base() },
+        ];
+        for new in cases {
+            let p = balter(&o(base()), &o(new), &ctx()).unwrap();
+            assert!(!p.statements.iter().any(|s| s.sql.contains("RESTART")), "{:?}", sqls(&p));
+            assert!(p.warnings.contains(&TIGHTEN_WARNING.to_string()), "{:?}", p.warnings);
+            assert_eq!(p.risk(), Risk::Safe);
+        }
+        // Genişleyen sınırlarda uyarı yok.
+        let p = balter(&o(SequenceDef { max_value: Some(1000), ..base() }), &o(base()), &ctx()).unwrap();
+        assert!(!p.warnings.contains(&TIGHTEN_WARNING.to_string()));
     }
 
     #[test]

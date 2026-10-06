@@ -124,6 +124,12 @@ async fn alter_and_check(env: &Env, old: &ObjectDef, new: ObjectDef, concurrentl
     loaded
 }
 
+/// Yüklenen tanımı kendisiyle karşılaştıran alter boş plan üretir (yükleyici/üretici normalleştirmesi tutarlı).
+fn assert_noop(env: &Env, loaded: &ObjectDef) {
+    let p = build::alter(loaded, loaded, &env.ctx(false)).unwrap();
+    assert!(p.statements.is_empty(), "boş plan bekleniyordu: {:?}", p.statements.iter().map(|s| &s.sql).collect::<Vec<_>>());
+}
+
 fn as_seq(d: &ObjectDef) -> SequenceDef {
     match d {
         ObjectDef::Sequence(s) => s.clone(),
@@ -289,6 +295,7 @@ async fn alter_body(ts: TestServer) {
 
     // --- Schema: rename + owner + yorum, sonra yorumu kaldırma ---
     let old = create_and_check(&env, ObjectDef::Schema(schema("al s0"))).await;
+    assert_noop(&env, &old);
     let mut n = as_schema(&old);
     n.name = "Al \"S\" 1".into();
     n.owner = Some(role.clone());
@@ -309,6 +316,7 @@ async fn alter_body(ts: TestServer) {
     env.sql(&format!(r#"ALTER TABLE "rt s2".tb3 OWNER TO {role}"#)).await;
     let first = SequenceDef { owned_by: Some(colref("rt s1", "tb1", "id")), ..seq("rt s1", "seq a", SeqType::Bigint, 1, None, None, 1) };
     let mut cur = create_and_check(&env, ObjectDef::Sequence(first)).await;
+    assert_noop(&env, &cur);
     // 1) parametreler
     let mut n = as_seq(&cur);
     (n.increment, n.min_value, n.max_value, n.start, n.cache, n.cycle, n.comment) = (5, Some(-10), Some(5000), 10, 3, true, Some("c1".into()));
@@ -323,16 +331,12 @@ async fn alter_body(ts: TestServer) {
     let mut n = as_seq(&cur);
     (n.data_type, n.max_value) = (SeqType::Bigint, Some(1_000_000_000_000));
     cur = alter_and_check(&env, &cur, ObjectDef::Sequence(n), false).await;
-    // azalan yöne geçiş (varsayılan sınırlar yön değiştirir). PG, mevcut değer yeni sınırların dışında kalıyorsa
-    // RESTART olmadan ALTER etmez (üretici sayacı bilmez/sıfırlamaz); bu yüzden sayaç önce elle sınırların içine alınır.
-    env.sql(r#"ALTER SEQUENCE "rt s1"."seq a" MINVALUE -1000 RESTART WITH -1"#).await;
-    cur = load_named(&env, &cur).await;
+    // azalan yöne geçiş: artış işareti değişince üretici RESTART WITH ekler (sayaç yeni sınırların dışında kalamaz).
     let mut n = as_seq(&cur);
     (n.increment, n.min_value, n.max_value, n.start) = (-1, None, None, -1);
     cur = alter_and_check(&env, &cur, ObjectDef::Sequence(n), false).await;
+    assert_noop(&env, &cur); // azalan, varsayılan sınırlı dizi: boş plan
     let mut n = as_seq(&cur);
-    env.sql(r#"ALTER SEQUENCE "rt s1"."seq a" MAXVALUE 1000 RESTART WITH 1"#).await;
-    cur = load_named(&env, &cur).await;
     (n.increment, n.min_value, n.max_value, n.start) = (1, None, None, 1);
     cur = alter_and_check(&env, &cur, ObjectDef::Sequence(n), false).await;
     // 3) ad + şema + OWNED BY hedefi birlikte (NONE → rename → set schema → OWNED BY)
@@ -363,10 +367,23 @@ async fn alter_body(ts: TestServer) {
     assert_eq!(as_seq(&cur).owner.as_deref(), Some(me.as_str()));
 
     // --- Extension: sürüm güncelleme + şema taşıma ---
+    let mut schema_done = false;
     for ext in ["citext", "pgcrypto"] {
         if !env.has_extension(ext).await {
             eprintln!("{ext} yok, eklenti alter testi atlandı");
             continue;
+        }
+        if !schema_done {
+            // Yalnız şema taşıma (sürüm yolundan bağımsız; PG 10'da da koşar) + boş plan.
+            let def = ExtensionDef { name: ext.into(), schema: Some("public".into()), version: None, cascade: false };
+            let old = create_and_check(&env, ObjectDef::Extension(def)).await;
+            assert_noop(&env, &old);
+            let mut n = as_ext(&old);
+            n.schema = Some("rt s1".into());
+            let moved = alter_and_check(&env, &old, ObjectDef::Extension(n), false).await;
+            assert_eq!(as_ext(&moved).schema.as_deref(), Some("rt s1"));
+            env.sql(&format!("DROP EXTENSION {ext}")).await;
+            schema_done = true;
         }
         let row = env
             .admin
@@ -548,6 +565,12 @@ async fn system_body(ts: TestServer) {
     assert!(matches!(try_load(ObjectKind::Index, table).await.unwrap_err(), Error::NotFound(_)));
     assert!(matches!(try_load(ObjectKind::Sequence, table).await.unwrap_err(), Error::NotFound(_)));
     assert!(try_load(ObjectKind::Sequence, env.class_oid("public", "sq").await).await.is_ok());
+    // Kimlik (identity) dizisi tablo tanımından yönetilir; serial dizisi (OWNED BY) ise düzenlenebilir.
+    env.sql("CREATE TABLE idt (id int GENERATED ALWAYS AS IDENTITY, s serial)").await;
+    let err = try_load(ObjectKind::Sequence, env.class_oid("public", "idt_id_seq").await).await.unwrap_err();
+    assert!(matches!(&err, Error::Invalid(m) if m.contains("identity")), "{err:?}");
+    let serial = try_load(ObjectKind::Sequence, env.class_oid("public", "idt_s_seq").await).await.unwrap();
+    assert!(matches!(&serial, ObjectDef::Sequence(s) if s.owned_by.is_some()));
 }
 
 // ---- açılır liste verileri ----

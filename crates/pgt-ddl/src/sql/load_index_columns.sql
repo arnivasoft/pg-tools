@@ -1,6 +1,8 @@
 -- İndeks kolonları (anahtar + INCLUDE), sırayla. $1 = indeks oid'i.
 -- key_text: düz kolonda ad, ifadede pg_get_indexdef(.., k, true). opclass yalnızca varsayılan DEĞİLSE;
 -- collation yalnızca kolonun/ifadenin doğal collation'ından FARKLIysa (100 = "default").
+-- NOT: opclass ve collation şema niteliksiz ad olarak yüklenir; ifade kolonlarında collation normalleştirmesi
+-- yaklaşıktır (ifadenin gerçek doğal collation'ı yerine yalnız "default" ile karşılaştırılır).
 SELECT k.n::int4 AS pos,
        i.indkey[k.n - 1]::int4 AS attnum,
        CASE WHEN i.indkey[k.n - 1] = 0 THEN pg_get_indexdef(i.indexrelid, k.n, true) ELSE a.attname::text END AS key_text,

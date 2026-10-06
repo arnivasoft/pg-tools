@@ -104,6 +104,9 @@ async fn load_sequence(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32)
     let rows = fetch(mgr, server, db, &SEQUENCE_SQL, oid).await?;
     let r = rows.first().ok_or_else(|| not_found("sequence"))?;
     refuse_system(r)?;
+    if r.get::<_, bool>("is_identity") {
+        return Err(Error::Invalid("kimlik (identity) dizisi tablo tanımından yönetilir".to_string()));
+    }
     let data_type = match r.get::<_, String>("data_type").as_str() {
         "smallint" => SeqType::Smallint,
         "integer" => SeqType::Integer,
