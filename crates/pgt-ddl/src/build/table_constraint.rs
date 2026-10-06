@@ -21,6 +21,7 @@
 //! - Başka tablolardaki bağımlı FK'ler yerelde bilinmez: DROP notu 2BP01'i anlatır, CASCADE sunulmaz. FK hedefinin
 //!   varlığı sunucuda denetlenir (uygulama transaction içinde, hata geri alınır).
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use super::table::constraint_sql;
@@ -40,14 +41,15 @@ pub(crate) const ADD_NOT_VALID_NOTE: &str =
     "NOT VALID: mevcut satırlar denetlenmez, yalnızca yeni satırlar; sonra VALIDATE CONSTRAINT ile doğrulanabilir";
 pub(crate) const VALIDATE_NOTE: &str =
     "Tabloyu tarar (yazmaları engellemeyen SHARE UPDATE EXCLUSIVE kilidiyle); kurala uymayan satır varsa başarısız olur";
-pub(crate) const PK_DROP_WARNING: &str = "Birincil anahtar düşürülüyor: başka tablolardaki yabancı anahtarlar ona bağlıysa uygulama 2BP01 hatasıyla durur; önce bağımlı yabancı anahtarları kaldırın";
+pub(crate) const PK_DROP_WARNING: &str = "Birincil anahtar düşürülüyor: ona bağlı yabancı anahtarlar (başka tablolardaki ya da bu tablodaki, planda yeniden kurulmayan) varsa uygulama 2BP01 hatasıyla durur; önce bağımlı yabancı anahtarları kaldırın. Bu tablonun aynı kolon kümesine başvuran kendi yabancı anahtarları planda otomatik olarak düşürülüp yeniden eklenir";
 pub(crate) const ADD_CONSTRAINT_WARNING: &str = "Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır";
 const REVALIDATE_MSG: &str =
     "Doğrulanmış kısıt tekrar NOT VALID yapılamaz; kısıtı değiştirmeden NOT VALID işaretini kaldırın.";
 const KEPT_NAME_MSG: &str = "Mevcut kısıtın adı boş bırakılamaz.";
 
 /// Eski tanımın kısıtları: yalnızca SQL'e giren ad (DROP/RENAME) ve eşleme anahtarı `oid` doğrulanır; kısıt gövdesi
-/// SQL'e girmez (yalnızca karşılaştırılır).
+/// SQL'e girmez (yalnızca karşılaştırılır). Tek gövde kuralı: PK/UNIQUE `notValid` olamaz (PG'de hep doğrulanmıştır;
+/// böylece `VALIDATE CONSTRAINT` yalnızca FK/CHECK için üretilir).
 pub(crate) fn validate_old_constraints(old: &TableDef, e: &mut Vec<FieldError>) {
     let mut seen = HashSet::new();
     for (i, c) in old.constraints.iter().enumerate() {
@@ -55,6 +57,13 @@ pub(crate) fn validate_old_constraints(old: &TableDef, e: &mut Vec<FieldError>) 
         match &c.name {
             Some(n) => check_ident(&np, n, e),
             None => e.push(err(&np, "Yüklenmiş kısıtın adı yok; tanımı yeniden yükleyin.")),
+        }
+        // PK/UNIQUE her zaman doğrulanmıştır; NOT VALID işaretli yüklenmiş PK/UNIQUE tanımın oynandığını gösterir.
+        if c.not_valid && matches!(c.kind, ConstraintKind::PrimaryKey { .. } | ConstraintKind::Unique { .. }) {
+            e.push(err(
+                &format!("old.constraints[{i}].notValid"),
+                "Yüklenmiş PRIMARY KEY/UNIQUE kısıtı NOT VALID olamaz; tanımı yeniden yükleyin.",
+            ));
         }
         let p = format!("old.constraints[{i}].oid");
         match c.oid {
@@ -94,7 +103,7 @@ pub(crate) struct ConstraintDiff<'a> {
     /// Adım 9: yalnızca adı değişen kısıtlar (konum, eski ad, yeni ad).
     pub renames: Vec<(usize, &'a str, &'a str)>,
     /// Adım 10: yeni ve yapısal değişen kısıtlar (YENİ tanım; FK'ler sonda).
-    pub adds: Vec<(usize, &'a ConstraintDef)>,
+    pub adds: Vec<(usize, Cow<'a, ConstraintDef>)>,
     /// Adım 10'dan sonra: doğrulanacak kısıtların (yeni) adları.
     pub validates: Vec<&'a str>,
     /// Yerinde kalan (yeniden kurulmayan) mevcut kısıtlar (yeni tanım): tip değişimi uyarısı için.
@@ -163,35 +172,95 @@ fn map_kind(k: &ConstraintKind, m: &HashMap<&str, &str>, self_ref: Option<(&str,
     })
 }
 
+/// Eski FK tablonun kendisine mi başvuruyor (hedef = eski şema + eski ad).
+fn self_ref(old: &TableDef, oc: &ConstraintDef) -> bool {
+    matches!(&oc.kind, ConstraintKind::ForeignKey { ref_schema, ref_table, .. }
+        if *ref_schema == old.schema && *ref_table == old.name)
+}
+
 /// Yapısal olarak aynı mı (ad ve `not_valid` hariç tüm alanlar, eski taraf eşlemeden geçmiş).
 fn same_structure(old: &TableDef, new: &TableDef, oc: &ConstraintDef, c: &ConstraintDef, m: &HashMap<&str, &str>) -> bool {
     if oc.deferrable != c.deferrable || oc.initially_deferred != c.initially_deferred {
         return false;
     }
+    let self_ref = self_ref(old, oc);
     if map_kind(&oc.kind, m, None).as_ref() == Some(&c.kind) {
-        return true;
+        // Kendine başvuran FK'nin ham (yayılmamış) hedef kolonu, yeniden adlandırılmış bir kolonun ESKİ adıysa ve bu
+        // ad yeni tanımda BAŞKA bir kolona aitse, ham biçim artık o başka kolonu gösterir: değişmemiş sayılmaz.
+        let raw_ok = !self_ref
+            || match &oc.kind {
+                ConstraintKind::ForeignKey { ref_columns, .. } => ref_columns.iter().all(|rc| {
+                    m.get(rc.as_str()) == Some(&rc.as_str()) || !new.columns.iter().any(|nc| nc.name == *rc)
+                }),
+                _ => true,
+            };
+        if raw_ok {
+            return true;
+        }
     }
-    let self_ref = matches!(&oc.kind, ConstraintKind::ForeignKey { ref_schema, ref_table, .. }
-        if *ref_schema == old.schema && *ref_table == old.name);
     self_ref && map_kind(&oc.kind, m, Some((&new.schema, &new.name))).as_ref() == Some(&c.kind)
+}
+
+/// Kolon kümesi (sırasız): FK hedefi ile PK/UNIQUE kolonlarını karşılaştırmak için.
+fn col_set(cols: &[String]) -> Vec<&str> {
+    let mut v: Vec<&str> = cols.iter().map(String::as_str).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 /// Kısıt farkı. `col_map`: korunan kolonların eski adı → yeni adı (silinen kolonlar yok). Ön koşul: eski taraf
 /// `validate_old_constraints`, yeni oid'ler `check_new_oids` geçti (arama her zaman başarılı).
+///
+/// Kendine başvuran, yapısal olarak değişmeyen FK iki ek kurala tabidir: hedef kolonu yeni tanımda silinmişse
+/// doğrulama hatası (`constraints[i].refColumns[j]`); hedef kolon kümesi silinen ya da yeniden kurulan bir PK/UNIQUE'in
+/// kolon kümesine eşitse FK de yeniden kurulur (adım 3'te önce düşer, adım 10'da yeni anahtardan sonra eklenir —
+/// aksi hâlde PK/UNIQUE DROP'u 2BP01 ile durur). Yeniden kurulan FK, hedefi yeni tablo adı ve yeni kolon adlarıyla
+/// (eşlenmiş biçim) eklenir.
 pub(crate) fn diff<'a>(old: &'a TableDef, new: &'a TableDef, col_map: &HashMap<&str, &str>) -> ConstraintDiff<'a> {
     let mut d = ConstraintDiff::default();
     let by_oid: HashMap<u32, &ConstraintDef> = old.constraints.iter().filter_map(|c| c.oid.map(|n| (n, c))).collect();
-    let mut keep: HashSet<u32> = HashSet::new();
-    let mut adds = vec![];
+    // 1. geçiş: yeni ya da yapısal değişen (DROP + ADD) / yerinde kalan aday.
+    let mut adds: Vec<(usize, Cow<'a, ConstraintDef>)> = vec![];
+    let mut kept: Vec<(usize, &'a ConstraintDef, &'a ConstraintDef)> = vec![];
     for (i, c) in new.constraints.iter().enumerate() {
-        let Some(oc) = c.oid.and_then(|n| by_oid.get(&n).copied()) else {
-            adds.push((i, c));
-            continue;
-        };
-        if !same_structure(old, new, oc, c, col_map) {
-            // Yapısal değişim: eski adla DROP + yeni tanımla ADD (NOT VALID yeniden eklemede serbest).
-            adds.push((i, c));
-            continue;
+        match c.oid.and_then(|n| by_oid.get(&n).copied()) {
+            Some(oc) if same_structure(old, new, oc, c, col_map) => kept.push((i, oc, c)),
+            // Yeni ya da yapısal değişim: eski adla DROP + yeni tanımla ADD (NOT VALID yeniden eklemede serbest).
+            _ => adds.push((i, Cow::Borrowed(c))),
+        }
+    }
+    // Düşürülecek PK/UNIQUE'lerin (eski) kolon kümeleri.
+    let kept_oids: HashSet<u32> = kept.iter().filter_map(|(_, oc, _)| oc.oid).collect();
+    let dropped_keys: Vec<Vec<&str>> = old
+        .constraints
+        .iter()
+        .filter(|c| c.oid.is_some_and(|n| !kept_oids.contains(&n)))
+        .filter_map(|c| match &c.kind {
+            ConstraintKind::PrimaryKey { columns, .. } | ConstraintKind::Unique { columns, .. } => Some(col_set(columns)),
+            _ => None,
+        })
+        .collect();
+    // 2. geçiş: kendine başvuran FK kuralları, sonra yerinde kalanların ad/doğrulama farkı.
+    let mut keep: HashSet<u32> = HashSet::new();
+    for (i, oc, c) in kept {
+        if self_ref(old, oc)
+            && let ConstraintKind::ForeignKey { ref_columns, .. } = &oc.kind
+        {
+            if let Some(j) = ref_columns.iter().position(|rc| !col_map.contains_key(rc.as_str())) {
+                d.errs.push(err(
+                    &format!("constraints[{i}].refColumns[{j}]"),
+                    format!("'{}' kolonu silindiği için bu yabancı anahtar kalamaz; kısıtı da kaldırın.", ref_columns[j]),
+                ));
+                continue;
+            }
+            if dropped_keys.contains(&col_set(ref_columns))
+                && let Some(kind) = map_kind(&oc.kind, col_map, Some((&new.schema, &new.name)))
+            {
+                // Hedef anahtar yeniden kuruluyor: FK de (eşlenmiş biçimle) yeniden kurulur.
+                adds.push((i, Cow::Owned(ConstraintDef { kind, ..c.clone() })));
+                continue;
+            }
         }
         keep.extend(c.oid);
         d.kept.push(c);
@@ -204,7 +273,8 @@ pub(crate) fn diff<'a>(old: &'a TableDef, new: &'a TableDef, col_map: &HashMap<&
             d.renames.push((i, from, to));
         }
         match (oc.not_valid, c.not_valid) {
-            (true, false) => d.validates.push(to),
+            // Yalnızca FK/CHECK doğrulanmamış olabilir (eski tarafta PK/UNIQUE NOT VALID reddedilir).
+            (true, false) if is_fk(c) || matches!(c.kind, ConstraintKind::Check { .. }) => d.validates.push(to),
             (false, true) => d.errs.push(err(&format!("constraints[{i}].notValid"), REVALIDATE_MSG)),
             _ => {}
         }
@@ -212,8 +282,9 @@ pub(crate) fn diff<'a>(old: &'a TableDef, new: &'a TableDef, col_map: &HashMap<&
     let dropped = |c: &&ConstraintDef| c.oid.is_some_and(|n| !keep.contains(&n));
     d.drops = old.constraints.iter().filter(|c| is_fk(c)).filter(dropped).collect();
     d.drops.extend(old.constraints.iter().filter(|c| !is_fk(c)).filter(dropped));
-    d.adds = adds.iter().filter(|(_, c)| !is_fk(c)).copied().collect();
-    d.adds.extend(adds.iter().filter(|(_, c)| is_fk(c)).copied());
+    // Yeni tanımdaki sırayla: FK dışındakiler, sonra FK'ler.
+    adds.sort_by_key(|(i, c)| (is_fk(c), *i));
+    d.adds = adds;
     d
 }
 
@@ -558,10 +629,15 @@ mod tests {
             ("FK ad", t.clone(), with(&t, |d| cm(d, "t_org_fkey").name = Some("org_ref".into())), vec!["ALTER TABLE public.t RENAME CONSTRAINT t_org_fkey TO org_ref"]),
             // --- yapısal: DROP (eski ad) + ADD (yeni tanım)
             (
-                "PK kolonları",
+                "PK kolonları (ona başvuran kendi FK'si de yeniden kurulur)",
                 t.clone(),
                 with(&t, |d| cols_mut(cm(d, "t_pkey")).push("code".into())),
-                vec!["ALTER TABLE public.t DROP CONSTRAINT t_pkey", "ALTER TABLE public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id, code)"],
+                vec![
+                    "ALTER TABLE public.t DROP CONSTRAINT t_parent_fkey",
+                    "ALTER TABLE public.t DROP CONSTRAINT t_pkey",
+                    "ALTER TABLE public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id, code)",
+                    "ALTER TABLE public.t ADD CONSTRAINT t_parent_fkey FOREIGN KEY (parent_id) REFERENCES public.t (id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+                ],
             ),
             (
                 "UNIQUE kolonları",
@@ -1350,6 +1426,8 @@ mod tests {
             "information_schema",
             "qty) NOT VALID",
             "true) NO INHERIT; --",
+            "qty > 1) , DROP COLUMN qty, ADD CHECK (true",
+            "qty > 1)) NOT VALID, DROP COLUMN p, ADD CHECK ((true",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -1391,5 +1469,165 @@ mod tests {
             }
         }
         assert!(accepted > 40, "{accepted}");
+    }
+
+    /// Kendine başvuran FK'li küçük tablo: id (PK), p (FK → t(id)), x.
+    fn selfref() -> TableDef {
+        TableDef {
+            columns: vec![
+                ColumnDef { not_null: true, ..lc(1, "id", "bigint") },
+                lc(2, "p", "bigint"),
+                ColumnDef { not_null: true, ..lc(3, "x", "bigint") },
+            ],
+            constraints: vec![
+                con(Some(1), Some("t_pkey"), pk(&["id"])),
+                con(Some(2), Some("t_p_fkey"), fk(&["p"], "t", &["id"])),
+            ],
+            ..tbl()
+        }
+    }
+
+    /// İnceleme sondası A: hedef PK yeniden kurulur, FK değişmez → FK de düşürülüp en sonda yeniden eklenir.
+    #[test]
+    fn self_fk_is_rebuilt_with_its_rebuilt_key() {
+        let old = selfref();
+        let new = with(&old, |d| {
+            cols_mut(cm(d, "t_pkey")).push("x".into());
+            d.constraints.push(con(None, Some("t_id_key"), uq(&["id"], &[])));
+        });
+        let p = ok(&old, &new);
+        assert_eq!(
+            sqls(&p),
+            [
+                "ALTER TABLE public.t DROP CONSTRAINT t_p_fkey",
+                "ALTER TABLE public.t DROP CONSTRAINT t_pkey",
+                "ALTER TABLE public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id, x)",
+                "ALTER TABLE public.t ADD CONSTRAINT t_id_key UNIQUE (id)",
+                "ALTER TABLE public.t ADD CONSTRAINT t_p_fkey FOREIGN KEY (p) REFERENCES public.t (id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+            ]
+        );
+        assert_eq!(p.warnings[0], PK_DROP_WARNING);
+        // Tablo da yeniden adlandırılır, FK hedefi yayılmaz: yeniden ekleme yeni tablo adını kullanır (eşlenmiş biçim).
+        let p = ok(&old, &with(&new, |d| d.name = "t2".into()));
+        assert_eq!(
+            p.statements.last().unwrap().sql,
+            "ALTER TABLE public.t2 ADD CONSTRAINT t_p_fkey FOREIGN KEY (p) REFERENCES public.t2 (id) ON UPDATE NO ACTION ON DELETE NO ACTION"
+        );
+        // Hedef anahtar yalnızca yeniden adlandırılırsa FK'ye dokunulmaz.
+        let p = ok(&old, &with(&old, |d| cm(d, "t_pkey").name = Some("pk".into())));
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t RENAME CONSTRAINT t_pkey TO pk"]);
+        // Başka bir kolon kümesine başvuran FK'ye dokunulmaz.
+        let other = with(&old, |d| {
+            d.constraints.push(con(Some(3), Some("t_x_key"), uq(&["x"], &[])));
+            d.constraints.push(con(Some(4), Some("t_px_fkey"), fk(&["p"], "t", &["x"])));
+        });
+        let p = ok(&other, &with(&other, |d| cols_mut(cm(d, "t_pkey")).push("x".into())));
+        assert!(!p.statements.iter().any(|s| s.sql.contains("t_px_fkey")), "{}", render(&p));
+        // Hedef UNIQUE silinir, FK kalır: FK de yeniden kurulur (sunucu yeni hedef anahtar olmadığından reddeder).
+        let p = ok(&other, &with(&other, |d| d.constraints.retain(|c| c.oid != Some(3))));
+        assert_eq!(
+            sqls(&p),
+            [
+                "ALTER TABLE public.t DROP CONSTRAINT t_px_fkey",
+                "ALTER TABLE public.t DROP CONSTRAINT t_x_key",
+                "ALTER TABLE public.t ADD CONSTRAINT t_px_fkey FOREIGN KEY (p) REFERENCES public.t (x) ON UPDATE NO ACTION ON DELETE NO ACTION",
+            ]
+        );
+    }
+
+    /// İnceleme sondası B: FK'nin hedef kolonu (ve onu taşıyan UNIQUE) silinir, FK kalır → doğrulama hatası.
+    #[test]
+    fn self_fk_on_dropped_referenced_column_is_rejected() {
+        let old = TableDef {
+            constraints: vec![
+                con(Some(1), Some("t_x_key"), uq(&["x"], &[])),
+                con(Some(2), Some("t_p_fkey"), fk(&["p"], "t", &["x"])),
+            ],
+            ..selfref()
+        };
+        let new = with(&old, |d| {
+            d.columns.retain(|c| c.name != "x");
+            d.constraints.retain(|c| c.oid != Some(1));
+        });
+        let e = errs(&old, &new);
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(e[0].path, "constraints[0].refColumns[0]");
+        assert!(e[0].message.contains("'x'"), "{e:?}");
+        // FK de kaldırılırsa geçerli: FK → UNIQUE → kolon.
+        let p = ok(&old, &with(&new, |d| d.constraints.clear()));
+        assert_eq!(
+            sqls(&p),
+            [
+                "ALTER TABLE public.t DROP CONSTRAINT t_p_fkey",
+                "ALTER TABLE public.t DROP CONSTRAINT t_x_key",
+                "ALTER TABLE public.t DROP COLUMN x",
+            ]
+        );
+    }
+
+    /// İnceleme örneği: hedef kolon yeniden adlandırılır, eski adı yeni bir kolona verilir, FK hedefi yayılmaz →
+    /// ham biçim artık YENİ kolonu gösterir: yapısal (DROP + ADD), yerel kolonlardaki kuralla tutarlı.
+    #[test]
+    fn self_fk_raw_ref_to_reused_column_name_is_structural() {
+        let old = selfref();
+        let renamed = with(&old, |d| {
+            colm(d, "id").name = "id_old".into();
+            *cols_mut(cm(d, "t_pkey")) = s(&["id_old"]);
+            d.columns.push(ColumnDef { not_null: true, ..col("id", "bigint") });
+            d.constraints.push(con(None, Some("t_id_key"), uq(&["id"], &[])));
+        });
+        let p = ok(&old, &renamed);
+        assert_eq!(
+            sqls(&p),
+            [
+                "ALTER TABLE public.t DROP CONSTRAINT t_p_fkey",
+                "ALTER TABLE public.t RENAME COLUMN id TO id_old",
+                "ALTER TABLE public.t ADD COLUMN id bigint NOT NULL",
+                "ALTER TABLE public.t ADD CONSTRAINT t_id_key UNIQUE (id)",
+                "ALTER TABLE public.t ADD CONSTRAINT t_p_fkey FOREIGN KEY (p) REFERENCES public.t (id) ON UPDATE NO ACTION ON DELETE NO ACTION",
+            ]
+        );
+        // Hedef yayılırsa (id_old) FK değişmemiştir.
+        let p = ok(&old, &with(&renamed, |d| *fk_mut(cm(d, "t_p_fkey")).3 = s(&["id_old"])));
+        assert!(!p.statements.iter().any(|s| s.sql.contains("t_p_fkey")), "{}", render(&p));
+        // Eski ad kimseye verilmezse ham biçim hâlâ değişmemiş sayılır (yayılmamış hedef).
+        let p = ok(
+            &old,
+            &with(&old, |d| {
+                colm(d, "id").name = "key2".into();
+                *cols_mut(cm(d, "t_pkey")) = s(&["key2"]);
+            }),
+        );
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t RENAME COLUMN id TO key2"]);
+    }
+
+    #[test]
+    fn validate_is_only_for_fk_and_check() {
+        let t = tbl();
+        // Eski tarafta NOT VALID işaretli PK/UNIQUE: eski kimlik doğrulaması hatası (VALIDATE üretilmez).
+        for (i, name) in [(0, "t_pkey"), (1, "t_code_key")] {
+            let e = errs(&with(&t, |d| cm(d, name).not_valid = true), &t);
+            assert_eq!(e[0].path, format!("old.constraints[{i}].notValid"), "{e:?}");
+        }
+        // FK/CHECK için VALIDATE.
+        for name in ["t_org_fkey", "t_qty_check"] {
+            let p = ok(&with(&t, |d| cm(d, name).not_valid = true), &t);
+            assert_eq!(sqls(&p), [format!("ALTER TABLE public.t VALIDATE CONSTRAINT {name}")]);
+        }
+    }
+
+    /// Virgülle bağlam kaçışı (ALTER TABLE'a ek eylem sokma) CHECK ifadesinde alan kapısında reddedilir.
+    #[test]
+    fn check_comma_breakout_is_rejected() {
+        let t = tbl();
+        for payload in [
+            "qty > 1) , DROP COLUMN qty, ADD CHECK (true",
+            "qty > 1)) NOT VALID, DROP COLUMN p, ADD CHECK ((true",
+        ] {
+            let e = errs(&t, &with(&t, |d| *expr_mut(cm(d, "t_qty_check")) = payload.into()));
+            assert_eq!(e[0].path, "constraints[2].expr", "{payload}");
+            let e = errs(&t, &with(&t, |d| d.constraints.push(con(None, Some("c"), ck(payload)))));
+            assert_eq!(e[0].path, "constraints[5].expr", "{payload}");
+        }
     }
 }

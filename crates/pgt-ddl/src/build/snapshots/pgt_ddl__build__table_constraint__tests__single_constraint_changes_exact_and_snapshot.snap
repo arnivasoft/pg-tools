@@ -63,7 +63,7 @@ WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bek
 ## PK + ona bağlı kendi FK'si sil (FK önce)
 [Destructive] ALTER TABLE public.t DROP CONSTRAINT t_parent_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
 [Destructive] ALTER TABLE public.t DROP CONSTRAINT t_pkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
-WARN: Birincil anahtar düşürülüyor: başka tablolardaki yabancı anahtarlar ona bağlıysa uygulama 2BP01 hatasıyla durur; önce bağımlı yabancı anahtarları kaldırın
+WARN: Birincil anahtar düşürülüyor: ona bağlı yabancı anahtarlar (başka tablolardaki ya da bu tablodaki, planda yeniden kurulmayan) varsa uygulama 2BP01 hatasıyla durur; önce bağımlı yabancı anahtarları kaldırın. Bu tablonun aynı kolon kümesine başvuran kendi yabancı anahtarları planda otomatik olarak düşürülüp yeniden eklenir
 
 ## PK ad
 [Safe] ALTER TABLE public.t RENAME CONSTRAINT t_pkey TO t_pk  -- Kısıtın indeksi de aynı adla yeniden adlandırılır; kısıta/indekse adla başvuran betikler etkilenir
@@ -77,10 +77,12 @@ WARN: Birincil anahtar düşürülüyor: başka tablolardaki yabancı anahtarlar
 ## FK ad
 [Safe] ALTER TABLE public.t RENAME CONSTRAINT t_org_fkey TO org_ref  -- Kısıta adla başvuran betikler etkilenir
 
-## PK kolonları
+## PK kolonları (ona başvuran kendi FK'si de yeniden kurulur)
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_parent_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
 [Destructive] ALTER TABLE public.t DROP CONSTRAINT t_pkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
 [Safe] ALTER TABLE public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id, code)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
-WARN: Birincil anahtar düşürülüyor: başka tablolardaki yabancı anahtarlar ona bağlıysa uygulama 2BP01 hatasıyla durur; önce bağımlı yabancı anahtarları kaldırın
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_parent_fkey FOREIGN KEY (parent_id) REFERENCES public.t (id) ON UPDATE NO ACTION ON DELETE NO ACTION  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+WARN: Birincil anahtar düşürülüyor: ona bağlı yabancı anahtarlar (başka tablolardaki ya da bu tablodaki, planda yeniden kurulmayan) varsa uygulama 2BP01 hatasıyla durur; önce bağımlı yabancı anahtarları kaldırın. Bu tablonun aynı kolon kümesine başvuran kendi yabancı anahtarları planda otomatik olarak düşürülüp yeniden eklenir
 WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
 WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
 
