@@ -59,7 +59,7 @@ pub fn wrap(sql: &str) -> String {
 /// Birleşmiş nihai ifade: dış `;` yok, kapanmamış bölge yok, parantezler dengeli (ifade sonunda `;` yoktur).
 pub fn composed_is_clean(sql: &str) -> bool {
     let r = scan_semicolons(sql);
-    r.is_clean() && r.parens_balanced() && !r.backslash_in_plain_string
+    r.is_clean() && r.parens_balanced() && !r.backslash_in_plain_string && !r.digit_adjacent_quote
 }
 
 #[cfg(test)]

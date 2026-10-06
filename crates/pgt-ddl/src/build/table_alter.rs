@@ -180,10 +180,9 @@ fn drop_untouched_errors(
                     "name" => oc.name == c.name,
                     "dataType" => oc.data_type == c.data_type,
                     "collation" => oc.collation == c.collation,
-                    "default" => oc.default == c.default,
-                    "generated" => oc.generated == c.generated,
+                    "default" => oc.default == c.default && oc.identity == c.identity && oc.generated == c.generated,
+                    "generated" => oc.generated == c.generated && oc.identity == c.identity,
                     "comment" => oc.comment == c.comment,
-                    "using" => oc.using == c.using,
                     _ => false,
                 };
                 return !(same && !dup(&x.message));
@@ -2709,5 +2708,25 @@ mod tests {
         assert!(p.warnings.iter().any(|w| w.contains("desteklenmeyen")), "{:?}", p.warnings);
         let p = ok(&ex, &with(&ex, |d| d.comment = None), &ctx());
         assert!(!p.warnings.iter().any(|w| w.contains("desteklenmeyen")));
+    }
+
+    #[test]
+    fn cross_field_errors_on_untouched_loaded_fields_are_kept() {
+        // Kimlik eklenen kolon varsayılan değerli kalamaz (varsayılan metni değişmemiş olsa da).
+        let mut l = loaded();
+        colm(&mut l, "amount").default = Some("nextval('s'::regclass)".into());
+        let e = errs(&l, &with(&l, |d| colm(d, "amount").identity = Some(IdentityKind::Always)), &ctx());
+        assert!(e.iter().any(|x| x.path == "columns[5].default" && x.message.contains("Kimlik kolonu")), "{e:?}");
+        // Üretilmiş kolona kimlik eklenemez.
+        let e = errs(&l, &with(&l, |d| colm(d, "total").identity = Some(IdentityKind::Always)), &ctx());
+        assert!(e.iter().any(|x| x.path == "columns[3].generated" && x.message.contains("hem kimlik")), "{e:?}");
+    }
+
+    #[test]
+    fn using_is_always_validated_even_when_equal_on_both_sides() {
+        let old = with(&loaded(), |d| colm(d, "amount").using = Some("x'".into()));
+        let new = with(&old, |d| colm(d, "amount").data_type = "bigint".into());
+        let e = errs(&old, &new, &ctx());
+        assert!(e.iter().any(|x| x.path == "columns[5].using"), "{e:?}");
     }
 }
