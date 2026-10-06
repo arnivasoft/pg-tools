@@ -190,6 +190,7 @@ fn string_continuation_keeps_its_newline() {
         "select f('a'\n'b')",
         "select case when a then 'x'\n'y' else 'z' end",
         "select E'a'\n  'b'",
+        "select 'a'\r'b'",
     ] {
         let out = f(sql);
         assert_tokens_preserved(sql, &out);

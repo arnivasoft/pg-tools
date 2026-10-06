@@ -152,6 +152,11 @@ fn is_punct(t: &Token, sql: &str, set: &[&str]) -> bool {
     t.kind == Kind::Punct && set.contains(&t.text(sql))
 }
 
+/// Dize devamı için satır sonu: PostgreSQL'in sözcük çözümleyicisi yalın `\r`'yi de satır sonu sayar.
+fn has_newline(gap: &str) -> bool {
+    gap.contains(['\n', '\r'])
+}
+
 /// Belirteç dizileri eşdeğer mi: tür + metin (harfi değişebilen sözcükler harfe duyarsız) ve anlamlı bitişiklikler.
 /// Bitişikliği serbest olanlar: `( ) , ;` komşulukları, yorumlar ve harfi değişebilen sözcükler.
 pub fn tokens_equivalent(a: &str, b: &str) -> bool {
@@ -171,7 +176,7 @@ pub fn tokens_equivalent(a: &str, b: &str) -> bool {
             if let Some(j) = prev_sig
                 && x.kind == Kind::Str
                 && ta[j].kind == Kind::Str
-                && a[ta[j].end..x.start].contains('\n') != b[tb[j].end..y.start].contains('\n')
+                && has_newline(&a[ta[j].end..x.start]) != has_newline(&b[tb[j].end..y.start])
             {
                 return false;
             }
@@ -745,7 +750,7 @@ impl<'a> Builder<'a> {
             return None;
         }
         let j = (0..i).rev().find(|&j| self.toks[j].kind != Kind::Comment)?;
-        (self.toks[j].kind == Kind::Str).then(|| self.sql[self.toks[i - 1].end..self.toks[i].start].contains('\n'))
+        (self.toks[j].kind == Kind::Str).then(|| has_newline(&self.sql[self.toks[i - 1].end..self.toks[i].start]))
     }
 
     /// Sig konumu `p`'deki belirteci yazar (öncesindeki yorumlar ve bekleyen aralıkla).
@@ -1188,6 +1193,7 @@ mod tests {
         assert!(tokens_equivalent("select a,b from t", "SELECT a, b\nFROM t"));
         assert!(tokens_equivalent("select (1)", "select ( 1 )"));
         assert!(tokens_equivalent("select 'a'\n'b'", "SELECT 'a'\n  'b'"));
+        assert!(tokens_equivalent("select 'a'\r'b'", "SELECT 'a'\n  'b'"));
         for (a, b) in [
             ("select name", "select NAME"),           // tanımlayıcı harfi
             ("select 'a  b'", "select 'a b'"),        // dize içi
@@ -1202,6 +1208,7 @@ mod tests {
             ("select 'a'\n'b'", "select 'a' 'b'"),    // dize devamı birleşti → sözdizimi hatası
             ("select 'a' 'b'", "select 'a'\n'b'"),    // sözdizimi hatası sessizce devama döndü
             ("select E'a'\n'b'", "select E'a' 'b'"),  // önekli dize devamı
+            ("select 'a'\r'b'", "select 'a' 'b'"),    // yalın CR de satır sonudur
         ] {
             assert!(!tokens_equivalent(a, b), "{a:?} ≈ {b:?}");
         }
