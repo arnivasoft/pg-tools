@@ -181,10 +181,11 @@ export function formatRatio(r: number | null): string {
 /** Milisaniye: < 1 sn → "0,42 ms" / "12,3 ms" / "850 ms"; ≥ 1 sn → `formatDuration` ("12 sn", "3 dk 05 sn"). Geçersiz → "—". */
 export function formatMs(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return "—";
-  if (ms >= 1000) return formatDuration(ms / 1000);
+  // Önce yuvarla, sonra karşılaştır: 999,5 ms "1000 ms" değil, "1 sn" olur.
   const digits = ms < 10 ? 2 : ms < 100 ? 1 : 0;
-  const text = String(Math.round(ms * 10 ** digits) / 10 ** digits).replace(".", ",");
-  return `${text} ms`;
+  const r = Math.round(ms * 10 ** digits) / 10 ** digits;
+  if (r >= 1000) return formatDuration(r / 1000);
+  return `${String(r).replace(".", ",")} ms`;
 }
 
 /** Ayar değeri + birim ("128 MB"); `value == null` (yetkisiz) → "—". */

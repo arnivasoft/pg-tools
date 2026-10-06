@@ -224,6 +224,10 @@ describe("formatMs", () => {
     expect(formatMs(850.4)).toBe("850 ms");
     expect(formatMs(0)).toBe("0 ms");
     expect(formatMs(12_000)).toBe("12 sn");
+    // yuvarlama sınırı: önce yuvarlanır, sonra birim seçilir
+    expect(formatMs(999.4)).toBe("999 ms");
+    expect(formatMs(999.5)).toBe("1 sn");
+    expect(formatMs(9.996)).toBe("10 ms");
     expect(formatMs(185_000)).toBe("3 dk 05 sn");
     expect(formatMs(-1)).toBe("—");
     expect(formatMs(Number.NaN)).toBe("—");
