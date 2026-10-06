@@ -15,6 +15,7 @@ pub mod sequence;
 mod sqlscan;
 pub mod table;
 pub mod table_alter;
+pub mod type_canon;
 pub mod type_syntax;
 
 pub use sqlscan::{ScanResult, scan_semicolons};
@@ -311,11 +312,14 @@ mod tests {
     #[test]
     fn table_is_wired() {
         let t = table();
-        // create/drop/validate/alter tablo üreticisine bağlı (kolonsuz tablo: "columns" hatası; alter yeni tarafı
-        // tam doğrular).
-        assert_eq!(validate(&t, &ctx())[0].path, "columns");
+        // create/drop/validate/alter tablo üreticisine bağlı. Kolonsuz tablo: create reddeder ("columns"); PG kolonsuz
+        // tabloya izin verdiğinden paylaşılan doğrulama ve alter kabul eder (boş değişiklik → boş plan).
+        assert!(validate(&t, &ctx()).is_empty());
         assert_eq!(create(&t, &ctx()).unwrap_err()[0].path, "columns");
-        assert_eq!(alter(&t, &t, &ctx()).unwrap_err()[0].path, "columns");
+        assert!(alter(&t, &t, &ctx()).unwrap().statements.is_empty());
+        let ObjectDef::Table(mut named) = t.clone() else { unreachable!() };
+        named.name = String::new();
+        assert_eq!(alter(&t, &ObjectDef::Table(named), &ctx()).unwrap_err()[0].path, "name");
         assert!(drop(&t, false, &ctx()).is_ok());
         // Kimlik doğrulaması tablo için de çalışır (eski taraf/drop).
         assert!(validate_identity(&t).is_empty());

@@ -8,7 +8,12 @@
 //!   (4) `DROP COLUMN`, (5) `ALTER COLUMN … TYPE`, (6) `RENAME COLUMN`, (7) `ADD COLUMN`, (8) nullability/varsayılan/
 //!   kimlik/üretilmiş ifade, [(9–10) kısıtlar — Task 4], (11) sahip, tablespace, kalıcılık, fillfactor, yorumlar.
 //!   Adım 2'den sonra her ifade YENİ nitelikli tablo adını kullanır. `TYPE` (5) yeniden adlandırmadan (6) önce
-//!   çalıştığından ESKİ kolon adını, adım 8 ve sonrası YENİ kolon adını kullanır.
+//!   çalıştığından ESKİ kolon adını (USING ifadesi de eski adları görür), adım 8 ve sonrası YENİ kolon adını kullanır.
+//! - Tip değişen kolonun eski varsayılanı varsa adım 5'te `TYPE`'tan hemen önce `DROP DEFAULT` üretilir (PG eski
+//!   varsayılanı yeni tipe dönüştürmeye çalışır ve çoğu zaman başarısız olur); yeni varsayılan varsa adım 8'de metni
+//!   eskisiyle aynı olsa bile `SET DEFAULT` ile yeniden kurulur.
+//! - "Tip değişti mi" kararı `canonical_type` ile verilir (takma ad `varchar(20)` = `character varying(20)`);
+//!   üretilen SQL kullanıcının tip metnini kullanır.
 //! - Adım 8'de her kolonun ifadeleri birlikte, şu sırayla üretilir: `DROP IDENTITY`, `DROP EXPRESSION`,
 //!   `SET|DROP DEFAULT`, `SET|DROP NOT NULL`, `ADD GENERATED … AS IDENTITY` / `SET GENERATED`, `SET EXPRESSION`.
 //!   Gerekçe: PG kimlik eklemeden önce kolonun NOT NULL olmasını ve varsayılansız olmasını ister; kimlikli kolonda
@@ -17,9 +22,10 @@
 //!   `wrap` ile yerleşir ve serbest SQL içeren her NİHAİ ifade ayrıca `composed_is_clean` ile taranır.
 //! - Kolon sırası değiştirilemez: fark yalnızca ekleme/silme/değişim üzerinden üretilir, sıra farkı uyarıdır.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::freesql::{composed_is_clean, wrap};
+use super::type_canon::canonical_type;
 use super::table::{column_comment_sql, column_sql, has_comment, table_comment_sql, validate_table, version_err};
 use super::{BuildCtx, check_ident, check_schema_ident, err, stmt};
 use crate::model::{ColumnDef, FieldError, IdentityKind, Persistence, TableDef};
@@ -31,13 +37,15 @@ const SET_SCHEMA_NOTE: &str =
     "Tablonun indeksleri, kısıtları ve kolonlarına bağlı diziler de taşınır; adla başvuran bağımlılar etkilenir";
 const DROP_COLUMN_NOTE: &str = "Kolondaki veri kalıcı silinir";
 const TYPE_NOTE: &str = "Tabloyu yeniden yazar; bağlı indeks/kısıtlar yeniden oluşturulur";
-const TYPE_USING_HINT: &str = "; otomatik dönüşüm yoksa USING gerekir";
+const TYPE_USING_HINT: &str = "; otomatik dönüşüm yoksa USING gerekir (USING ifadesi eski kolon adlarını kullanır)";
+const TYPE_USING_NOTE: &str = "; USING ifadesi eski kolon adlarını kullanır";
+const TYPE_DROP_DEFAULT_NOTE: &str =
+    "Tip değişiminden önce varsayılan kaldırılır (PG eski varsayılanı yeni tipe dönüştüremeyebilir); yeni varsayılan sonra kurulur";
 const RENAME_COLUMN_NOTE: &str = "Kolona adla başvuran fonksiyonlar ve uygulama sorguları etkilenir";
 const ADD_NOT_NULL_NOTE: &str = "Mevcut satırlar varsa başarısız olur";
 const ADD_GENERATED_NOT_NULL_NOTE: &str = "İfade mevcut bir satırda NULL üretirse başarısız olur";
 const SET_NOT_NULL_NOTE: &str = "Tabloyu tarar; NULL değer içeren satır varsa başarısız olur";
-const ADD_IDENTITY_NOTE: &str =
-    "Kimlik kolonu NOT NULL olmalıdır; yeni değerler kolona bağlı yeni bir diziden üretilir";
+const ADD_IDENTITY_NOTE: &str = "Kimlik kolonu NOT NULL olmalıdır; değerler kolona bağlı yeni bir diziden üretilir; yeni dizi 1'den başlar ve mevcut değerlerle çakışabilir (RESTART WITH gerekebilir)";
 const DROP_IDENTITY_NOTE: &str = "Kimliğe bağlı dizi silinir; mevcut değerler korunur";
 const DROP_EXPRESSION_NOTE: &str = "Kolon sıradan kolona dönüşür; mevcut değerler korunur";
 const SET_EXPRESSION_NOTE: &str = "Tüm satırlar için değer yeni ifadeyle yeniden hesaplanır";
@@ -96,7 +104,7 @@ pub fn alter(old: &TableDef, new: &TableDef, ctx: &BuildCtx) -> Result<Plan, Vec
     if !e.is_empty() {
         return Err(e);
     }
-    build(old, new, &matched)
+    build(old, new, &matched, ctx)
 }
 
 /// Eski tanım: yalnızca SQL'e giren kimlik alanları (şema, ad, kolon adları) ve eşleme anahtarı `attnum`.
@@ -105,8 +113,14 @@ fn validate_old(old: &TableDef) -> Vec<FieldError> {
     check_schema_ident("old.schema", &old.schema, &mut e);
     check_ident("old.name", &old.name, &mut e);
     let mut seen = HashSet::new();
+    let mut names = HashSet::new();
     for (i, c) in old.columns.iter().enumerate() {
-        check_ident(&format!("old.columns[{i}].name"), &c.name, &mut e);
+        let np = format!("old.columns[{i}].name");
+        let before = e.len();
+        check_ident(&np, &c.name, &mut e);
+        if e.len() == before && !names.insert(c.name.as_str()) {
+            e.push(err(&np, "Kolon adı eski tanımda birden fazla; tanımı yeniden yükleyin."));
+        }
         let p = format!("old.columns[{i}].attnum");
         match c.attnum {
             None => e.push(err(
@@ -141,10 +155,20 @@ fn check_new_attnums(old: &TableDef, new: &TableDef, e: &mut Vec<FieldError>) {
     }
 }
 
+/// Tip metni kanonik biçimde farklı mı (bkz. `canonical_type`).
+fn type_changed(a: &ColumnDef, b: &ColumnDef) -> bool {
+    canonical_type(&a.data_type) != canonical_type(&b.data_type)
+}
+
+/// TYPE ifadesi gerekir mi: tip (kanonik) ya da collation değişti.
+fn retyped(oc: &ColumnDef, c: &ColumnDef) -> bool {
+    type_changed(oc, c) || oc.collation != c.collation
+}
+
 /// Kolon yorum dışı (ve `using` dışı) alanlarda değişmedi mi.
 fn same_shape(a: &ColumnDef, b: &ColumnDef) -> bool {
     a.name == b.name
-        && a.data_type == b.data_type
+        && !type_changed(a, b)
         && a.not_null == b.not_null
         && a.default == b.default
         && a.identity == b.identity
@@ -283,7 +307,7 @@ impl Out {
     }
 }
 
-fn build(old: &TableDef, new: &TableDef, matched: &Matched) -> Result<Plan, Vec<FieldError>> {
+fn build(old: &TableDef, new: &TableDef, matched: &Matched, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     let mut out = Out::default();
     let mut warnings = vec![];
     if order_changed(old, new) {
@@ -330,7 +354,14 @@ fn build(old: &TableDef, new: &TableDef, matched: &Matched) -> Result<Plan, Vec<
 
     // (5) tip/collation değişimi: yeniden adlandırmadan önce, ESKİ kolon adıyla.
     for (i, oc, c) in &kept {
-        if oc.data_type != c.data_type || oc.collation != c.collation {
+        if retyped(oc, c) {
+            if oc.default.is_some() {
+                out.push(
+                    format!("ALTER TABLE {q} ALTER COLUMN {} DROP DEFAULT", quote_ident(&oc.name)),
+                    Risk::Safe,
+                    Some(TYPE_DROP_DEFAULT_NOTE),
+                );
+            }
             // Tip metni `validate_type` ile doğrulandı; collation yalnızca TYPE ifadesinin parçası olarak değişir
             // (COLLATE yoksa yeni tipin varsayılan collation'ı).
             let mut sql = format!(
@@ -344,7 +375,7 @@ fn build(old: &TableDef, new: &TableDef, matched: &Matched) -> Result<Plan, Vec<
             let note = match &c.using {
                 Some(u) => {
                     sql.push_str(&format!(" USING {}", wrap(u)));
-                    TYPE_NOTE.to_string()
+                    format!("{TYPE_NOTE}{TYPE_USING_NOTE}")
                 }
                 None => format!("{TYPE_NOTE}{TYPE_USING_HINT}"),
             };
@@ -359,23 +390,23 @@ fn build(old: &TableDef, new: &TableDef, matched: &Matched) -> Result<Plan, Vec<
     }
 
     // (6) kolon adları: zincirler (a→b, b→c) hedef adı boşalan sırayla; döngü (a↔b) doğrulama hatası.
-    let mut pending: Vec<(usize, &str, &str)> = kept
+    // Doğrusal: bekleyen kaynak adları kümesi + hedef ad → kayıt eşlemesi; bir yeniden adlandırma çıkınca kaynak
+    // adını hedefleyen (hedefler benzersiz olduğundan en çok bir) kayıt hazır olur.
+    let renames: Vec<(usize, &str, &str)> = kept
         .iter()
         .filter(|(_, oc, c)| oc.name != c.name)
         .map(|(i, oc, c)| (*i, oc.name.as_str(), c.name.as_str()))
         .collect();
-    while !pending.is_empty() {
-        let free = pending
-            .iter()
-            .position(|(_, _, to)| !pending.iter().any(|(_, from, _)| from == to));
-        let Some(k) = free else {
-            out.errs.push(err(
-                &format!("columns[{}].name", pending[0].0),
-                "Kolon adları döngüsel olarak değiştirilemez (ör. a↔b takası); önce ara bir adla kaydedin.",
-            ));
-            break;
-        };
-        let (_, from, to) = pending.remove(k);
+    let mut pending_from: HashSet<&str> = renames.iter().map(|(_, from, _)| *from).collect();
+    let by_target: HashMap<&str, usize> = renames.iter().enumerate().map(|(k, (_, _, to))| (*to, k)).collect();
+    let mut done = vec![false; renames.len()];
+    let mut ready: VecDeque<usize> = (0..renames.len())
+        .filter(|&k| !pending_from.contains(renames[k].2))
+        .collect();
+    while let Some(k) = ready.pop_front() {
+        let (_, from, to) = renames[k];
+        done[k] = true;
+        pending_from.remove(from);
         out.push(
             format!(
                 "ALTER TABLE {q} RENAME COLUMN {} TO {}",
@@ -385,6 +416,17 @@ fn build(old: &TableDef, new: &TableDef, matched: &Matched) -> Result<Plan, Vec<
             Risk::Safe,
             Some(RENAME_COLUMN_NOTE),
         );
+        if let Some(&next) = by_target.get(from)
+            && !done[next]
+        {
+            ready.push_back(next);
+        }
+    }
+    if let Some(k) = done.iter().position(|d| !d) {
+        out.errs.push(err(
+            &format!("columns[{}].name", renames[k].0),
+            "Kolon adları döngüsel olarak değiştirilemez (ör. a↔b takası); önce ara bir adla kaydedin.",
+        ));
     }
 
     // (7) eklenen kolonlar (create'teki kolon biçimi; tabloya sona eklenir).
@@ -407,6 +449,14 @@ fn build(old: &TableDef, new: &TableDef, matched: &Matched) -> Result<Plan, Vec<
         } else {
             (Risk::Destructive, Some(ADD_NOT_NULL_NOTE))
         };
+        // Tabloyu yeniden yazan eklemeler: kimlik, STORED üretilmiş, PG 11 öncesinde varsayılanlı kolon (değişken
+        // varsayılan PG 11+'da da yeniden yazar ama yerelde anlaşılamaz).
+        if c.identity.is_some()
+            || c.generated.as_ref().is_some_and(|g| g.stored)
+            || (c.default.is_some() && ctx.version_num < 110000)
+        {
+            out.rewrite = true;
+        }
         out.push_free(
             &format!("columns[{i}]"),
             format!("ALTER TABLE {q} ADD COLUMN {}", column_sql(c)),
@@ -424,7 +474,17 @@ fn build(old: &TableDef, new: &TableDef, matched: &Matched) -> Result<Plan, Vec<
         if oc.generated.is_some() && c.generated.is_none() {
             out.push(ac("DROP EXPRESSION"), Risk::Safe, Some(DROP_EXPRESSION_NOTE));
         }
-        if oc.default != c.default {
+        // Tip değişiminde eski varsayılan adım 5'te kaldırıldı: yeni varsayılan (aynı metin olsa da) yeniden kurulur.
+        if retyped(oc, c) && oc.default.is_some() {
+            if let Some(d) = &c.default {
+                out.push_free(
+                    &format!("columns[{i}].default"),
+                    ac(&format!("SET DEFAULT {}", wrap(d))),
+                    Risk::Safe,
+                    None,
+                );
+            }
+        } else if oc.default != c.default {
             match &c.default {
                 Some(d) => out.push_free(
                     &format!("columns[{i}].default"),
@@ -1444,6 +1504,7 @@ mod tests {
         assert_eq!(
             sqls(&p),
             [
+                "ALTER TABLE public.t ALTER COLUMN a DROP DEFAULT",
                 "ALTER TABLE public.t ALTER COLUMN a TYPE integer",
                 "ALTER TABLE public.t ALTER COLUMN id SET NOT NULL",
                 "ALTER TABLE public.t ALTER COLUMN a SET DEFAULT (0\n)",
@@ -1462,6 +1523,7 @@ mod tests {
             (TableDef { columns: vec![lc(1, "i\0d", "integer")], ..base() }, "old.columns[0].name"),
             (TableDef { columns: vec![lc(1, "", "integer")], ..base() }, "old.columns[0].name"),
             (TableDef { columns: vec![lc(1, "a\u{202e}", "integer")], ..base() }, "old.columns[0].name"),
+            (TableDef { columns: vec![lc(1, "a", "integer"), lc(2, "a", "text")], ..base() }, "old.columns[1].name"),
         ] {
             let e = errs(&bad, &base(), &ctx());
             assert_eq!(e[0].path, path, "{e:?}");
@@ -1633,7 +1695,7 @@ mod tests {
                 }),
                 120000
             ),
-            TYPE_NOTE
+            format!("{TYPE_NOTE}{TYPE_USING_NOTE}")
         );
         assert_eq!(
             note(&l, &with(&l, |d| d.columns.push(ColumnDef { not_null: true, ..col("x", "text") })), 120000),
@@ -1695,6 +1757,9 @@ mod tests {
             ("columns[5].using", K::Free, "amount::bigint", |d, v| d.columns[5].using = Some(v)),
             ("columns[3].generated", K::Free, "qty * 3", |d, v| {
                 d.columns[3].generated.as_mut().unwrap().expr = v
+            }),
+            ("columns[7].generated", K::Free, "qty + 1", |d, v| {
+                d.columns[7].generated = Some(GeneratedDef { expr: v, stored: true })
             }),
             ("columns[1].collation", K::Name, "POSIX", |d, v| d.columns[1].collation = Some(v)),
             ("columns[4].comment", K::Comment, "c", |d, v| d.columns[4].comment = Some(v)),
@@ -1820,5 +1885,194 @@ mod tests {
         // Alan içi dengesizlik birleşik ifadede dengeli görünebilir: alan kapısı yakalar.
         let e = errs(&l, &with(&l, |d| colm(d, "note").default = Some("1) , (2".into())), &ctx());
         assert_eq!(e[0].path, "columns[4].default");
+    }
+
+    #[test]
+    fn type_aliases_are_not_changes() {
+        // Yüklemedeki `format_type` çıktısı ile istemcinin takma adı eşit sayılır: boş plan.
+        let old = TableDef {
+            columns: vec![
+                lc(1, "a", "character varying(20)"),
+                lc(2, "b", "integer"),
+                lc(3, "c", "timestamp(3) with time zone"),
+                lc(4, "d", "numeric(10,2)"),
+                lc(5, "e", "integer[]"),
+                lc(6, "f", "character(1)"),
+            ],
+            ..base()
+        };
+        let draft = with(&old, |d| {
+            d.columns[0].data_type = "varchar(20)".into();
+            d.columns[1].data_type = "INT4".into();
+            d.columns[2].data_type = "timestamptz(3)".into();
+            d.columns[3].data_type = "decimal(10, 2)".into();
+            d.columns[4].data_type = "int[][]".into();
+            d.columns[5].data_type = "char".into();
+        });
+        assert!(ok(&old, &draft, &ctx()).statements.is_empty());
+        // Bölüm/kalıtımlı tabloda da kolon farkı sayılmaz (MANAGED hatası yok).
+        for flag in [0, 1] {
+            let set = |d: &mut TableDef| {
+                if flag == 0 {
+                    d.is_partition = true
+                } else {
+                    d.inherits = true
+                }
+            };
+            let p = ok(&with(&old, set), &with(&draft, set), &ctx());
+            assert!(p.statements.is_empty() && p.warnings.is_empty(), "{}", render(&p));
+        }
+        // Gerçek değişimde SQL kullanıcının metnini taşır; değiştirici anlamlıdır.
+        let p = ok(&old, &with(&old, |d| d.columns[0].data_type = "varchar(30)".into()), &ctx());
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t ALTER COLUMN a TYPE varchar(30)"]);
+        let p = ok(&old, &with(&old, |d| d.columns[2].data_type = "timestamptz".into()), &ctx());
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t ALTER COLUMN c TYPE timestamptz"]);
+    }
+
+    #[test]
+    fn serial_types_are_rejected() {
+        let l = loaded();
+        for t in ["serial", "bigserial", "pg_catalog.serial4"] {
+            let e = errs(&l, &with(&l, |d| colm(d, "note").data_type = t.into()), &ctx());
+            assert_eq!(e[0].path, "columns[4].dataType", "{t}");
+            let e = errs(&l, &with(&l, |d| d.columns.push(col("x", t))), &ctx());
+            assert_eq!(e[0].path, "columns[7].dataType", "{t}");
+        }
+    }
+
+    #[test]
+    fn type_change_drops_and_restores_default() {
+        let l = loaded();
+        // Eski varsayılan + tip değişimi + aynı yeni varsayılan: DROP DEFAULT (TYPE'tan önce, eski adla) → TYPE →
+        // yeniden adlandırma → SET DEFAULT (yeni adla).
+        let p = ok(
+            &l,
+            &with(&l, |d| {
+                let c = colm(d, "qty");
+                c.data_type = "bigint".into();
+                c.name = "quantity".into();
+            }),
+            &ctx(),
+        );
+        assert_eq!(
+            sqls(&p),
+            [
+                "ALTER TABLE public.t ALTER COLUMN qty DROP DEFAULT",
+                "ALTER TABLE public.t ALTER COLUMN qty TYPE bigint",
+                "ALTER TABLE public.t RENAME COLUMN qty TO quantity",
+                "ALTER TABLE public.t ALTER COLUMN quantity SET DEFAULT (0\n)",
+            ]
+        );
+        assert_eq!(p.statements[0].risk, Risk::Safe);
+        assert_eq!(p.statements[0].note.as_deref(), Some(TYPE_DROP_DEFAULT_NOTE));
+        // Eski varsayılan + tip değişimi + farklı yeni varsayılan.
+        let p = ok(
+            &l,
+            &with(&l, |d| {
+                let c = colm(d, "qty");
+                c.data_type = "text".into();
+                c.default = Some("'yok'".into());
+            }),
+            &ctx(),
+        );
+        assert_eq!(
+            sqls(&p),
+            [
+                "ALTER TABLE public.t ALTER COLUMN qty DROP DEFAULT",
+                "ALTER TABLE public.t ALTER COLUMN qty TYPE text",
+                "ALTER TABLE public.t ALTER COLUMN qty SET DEFAULT ('yok'\n)",
+            ]
+        );
+        // Eski varsayılan + tip değişimi + yeni varsayılan yok: tek DROP DEFAULT (adım 8'de tekrar yok).
+        let p = ok(
+            &l,
+            &with(&l, |d| {
+                let c = colm(d, "qty");
+                c.data_type = "bigint".into();
+                c.default = None;
+            }),
+            &ctx(),
+        );
+        assert_eq!(
+            sqls(&p),
+            ["ALTER TABLE public.t ALTER COLUMN qty DROP DEFAULT", "ALTER TABLE public.t ALTER COLUMN qty TYPE bigint"]
+        );
+        // Varsayılansız kolonda tip değişimi: DROP DEFAULT yok; yalnız collation değişimi de TYPE sayılır.
+        let p = ok(&l, &with(&l, |d| colm(d, "note").data_type = "integer".into()), &ctx());
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t ALTER COLUMN note TYPE integer"]);
+        // Takma adla "tip değişimi" değişim değildir: varsayılan da dokunulmaz.
+        assert!(ok(&l, &with(&l, |d| colm(d, "qty").data_type = "int4".into()), &ctx()).statements.is_empty());
+    }
+
+    #[test]
+    fn add_column_rewrite_warnings() {
+        let l = loaded();
+        let add = |c: ColumnDef| with(&l, |d| d.columns.push(c));
+        let both = [REWRITE_WARNING, LOCK_TIMEOUT_WARNING];
+        let cases: Vec<(TableDef, u32, bool)> = vec![
+            (add(ColumnDef { not_null: true, identity: Some(IdentityKind::Always), ..col("x", "bigint") }), 120000, true),
+            (
+                add(ColumnDef { generated: Some(GeneratedDef { expr: "qty + 1".into(), stored: true }), ..col("x", "integer") }),
+                120000,
+                true,
+            ),
+            (
+                add(ColumnDef { generated: Some(GeneratedDef { expr: "qty + 1".into(), stored: false }), ..col("x", "integer") }),
+                180000,
+                false,
+            ),
+            (add(ColumnDef { default: Some("1".into()), ..col("x", "integer") }), 120000, false),
+            (add(col("x", "integer")), 120000, false),
+        ];
+        for (new, ver, rewrite) in cases {
+            let p = ok(&l, &new, &v(ver));
+            if rewrite {
+                assert_eq!(p.warnings, both, "{}", render(&p));
+            } else {
+                assert!(p.warnings.is_empty(), "{}", render(&p));
+            }
+        }
+        // PG 10: varsayılanlı ekleme tabloyu yeniden yazar.
+        let plain = TableDef { columns: vec![lc(1, "a", "integer")], ..base() };
+        let p = ok(&plain, &with(&plain, |d| d.columns.push(ColumnDef { default: Some("1".into()), ..col("x", "integer") })), &v(100000));
+        assert_eq!(p.warnings, both);
+    }
+
+    #[test]
+    fn long_rename_chain_is_linear() {
+        // 1.600 kolonluk zincir (c0→c1, c1→c2, …): her adım bir sonrakini serbest bırakır.
+        const N: i16 = 1600;
+        let old = TableDef { columns: (0..N).map(|i| lc(i + 1, &format!("c{i}"), "integer")).collect(), ..base() };
+        let new = with(&old, |d| {
+            for (i, c) in d.columns.iter_mut().enumerate() {
+                c.name = format!("c{}", i + 1);
+            }
+        });
+        let started = std::time::Instant::now();
+        let p = ok(&old, &new, &ctx());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+        assert_eq!(p.statements.len(), N as usize);
+        assert_eq!(p.statements[0].sql, "ALTER TABLE public.t RENAME COLUMN c1599 TO c1600");
+        assert_eq!(p.statements[N as usize - 1].sql, "ALTER TABLE public.t RENAME COLUMN c0 TO c1");
+    }
+
+    #[test]
+    fn zero_column_tables() {
+        let empty = TableDef { columns: vec![], ..base() };
+        // Kolonsuz tablo düzenlenebilir: boş değişiklik boş plan, ad değişimi çalışır.
+        assert!(ok(&empty, &empty, &ctx()).statements.is_empty());
+        let p = ok(&empty, &with(&empty, |d| d.name = "t2".into()), &ctx());
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t RENAME TO t2"]);
+        // Son kolonu silmek geçerli (DataLoss).
+        let one = base();
+        let p = ok(&one, &empty, &ctx());
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t DROP COLUMN id"]);
+        assert_eq!(p.risk(), Risk::DataLoss);
+        // Kolonsuz tabloya kolon eklemek.
+        let p = ok(&empty, &with(&empty, |d| d.columns.push(col("a", "text"))), &ctx());
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t ADD COLUMN a text"]);
+        // Create hâlâ en az bir kolon ister.
+        let e = crate::build::create(&o(TableDef { columns: vec![], ..base() }), &ctx()).unwrap_err();
+        assert_eq!(e[0].path, "columns");
     }
 }

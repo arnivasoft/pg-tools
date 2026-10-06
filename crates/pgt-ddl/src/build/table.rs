@@ -535,9 +535,8 @@ pub fn validate_table(d: &TableDef, ctx: &BuildCtx) -> Vec<FieldError> {
     if let Some(c) = &d.comment {
         check_text("comment", c, &mut e);
     }
-    if d.columns.is_empty() {
-        e.push(err("columns", "En az bir kolon gerekli."));
-    }
+    // "En az bir kolon" yalnızca create kuralıdır (`validate_create`): PG kolonsuz tabloya izin verir ve bir tablo
+    // alter ile tüm kolonlarını kaybedebilir.
     let mut seen_cols = HashSet::new();
     for (i, c) in d.columns.iter().enumerate() {
         validate_column(i, c, ctx, &mut e);
@@ -615,6 +614,10 @@ pub fn validate_table(d: &TableDef, ctx: &BuildCtx) -> Vec<FieldError> {
 /// Oluşturma doğrulaması: ortak kurallar + yalnızca yeni tanıma özgü kurallar + nihai ifade taraması.
 pub(crate) fn validate_create(d: &TableDef, ctx: &BuildCtx) -> Vec<FieldError> {
     let mut e = validate_table(d, ctx);
+    if d.columns.is_empty() {
+        // Ortak hataların önüne: kolonsuz tanımda ilk hata budur.
+        e.insert(0, err("columns", "En az bir kolon gerekli."));
+    }
     const LOADED: &str = "Yüklenmiş tanım yeniden oluşturulamaz; oluşturma yalnızca yeni tablo içindir.";
     if d.is_partition {
         e.push(err("isPartition", LOADED));
