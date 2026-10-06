@@ -19,7 +19,7 @@ expression: render(&p)
 [Safe] ALTER TABLE s2.t2 ALTER COLUMN seq SET GENERATED ALWAYS
 [Safe] ALTER TABLE s2.t2 OWNER TO bob
 [Safe] ALTER TABLE s2.t2 SET TABLESPACE slow  -- Tabloyu yeniden yazar; ACCESS EXCLUSIVE kilidi alır
-[Safe] ALTER TABLE s2.t2 SET UNLOGGED  -- Tabloyu yeniden yazar; ACCESS EXCLUSIVE kilidi alır
+[Destructive] ALTER TABLE s2.t2 SET UNLOGGED  -- Tabloyu yeniden yazar; ACCESS EXCLUSIVE kilidi alır
 [Safe] ALTER TABLE s2.t2 SET (fillfactor = 80)  -- Yalnızca yeni yazılan sayfaları etkiler; mevcut sayfalar için VACUUM FULL gerekir
 [Safe] COMMENT ON TABLE s2.t2 IS 'Yeni'
 [Safe] COMMENT ON COLUMN s2.t2.full_name IS 'isim'

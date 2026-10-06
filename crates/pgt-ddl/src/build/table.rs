@@ -690,7 +690,7 @@ pub(crate) fn has_comment(c: &Option<String>) -> bool {
 }
 
 /// Sıra: CREATE TABLE, sahip, tablo yorumu, kolon yorumları (yalnızca dolu olanlar, kolon sırasıyla). Hepsi Safe.
-pub fn create(d: &TableDef) -> Plan {
+pub(crate) fn create(d: &TableDef) -> Plan {
     let q = qualified(&d.schema, &d.name);
     let mut statements = vec![stmt(create_sql(d), Risk::Safe, None)];
     if let Some(o) = &d.owner {
@@ -718,7 +718,7 @@ pub fn create(d: &TableDef) -> Plan {
     }
 }
 
-pub fn drop(d: &TableDef, cascade: bool) -> Plan {
+pub(crate) fn drop(d: &TableDef, cascade: bool) -> Plan {
     let q = qualified(&d.schema, &d.name);
     let mut notes: Vec<&str> = vec![];
     if cascade {
@@ -735,7 +735,7 @@ pub fn drop(d: &TableDef, cascade: bool) -> Plan {
     let (sql, risk) = if cascade {
         (format!("DROP TABLE {q} CASCADE"), Risk::DataLoss)
     } else {
-        (format!("DROP TABLE {q}"), Risk::Destructive)
+        (format!("DROP TABLE {q}"), Risk::DataLoss)
     };
     Plan {
         statements: vec![stmt(sql, risk, note.as_deref())],
@@ -2175,7 +2175,8 @@ mod tests {
                     assert_eq!(p.warnings, [CASCADE_WARNING]);
                 } else {
                     assert!(!s.sql.contains("CASCADE"));
-                    assert_eq!(s.risk, Risk::Destructive);
+                    // Tablo silme satırları da siler: CASCADE'siz de DataLoss (üretimde sunucu adı onayı).
+                    assert_eq!(s.risk, Risk::DataLoss);
                     assert!(p.warnings.is_empty());
                 }
                 out.push_str(&format!("## {label} cascade={cascade}\n{}\n", render(&p)));

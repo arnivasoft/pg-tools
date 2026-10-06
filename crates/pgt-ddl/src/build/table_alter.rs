@@ -47,7 +47,9 @@ use super::table_constraint::{
     rename_sql, validate_old_constraints, validate_sql,
 };
 use super::type_canon::canonical_type;
-use super::{BuildCtx, check_ident, check_schema_ident, err, stmt};
+use super::freesql::check_free_sql;
+use super::type_syntax::validate_type;
+use super::{BuildCtx, check_old_ident, err, stmt};
 use crate::load::is_unsupported_check;
 use crate::model::{ColumnDef, ConstraintKind, FieldError, IdentityKind, Persistence, TableDef};
 use crate::plan::{Plan, Risk, Statement};
@@ -96,22 +98,15 @@ type Matched<'a> = Vec<(usize, Option<&'a ColumnDef>, &'a ColumnDef)>;
 /// ifade taraması).
 pub fn alter(old: &TableDef, new: &TableDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     let e = validate_table(new, ctx);
-    if !e.is_empty() {
-        return Err(e);
-    }
-    let e = validate_old(old);
-    if !e.is_empty() {
-        return Err(e);
-    }
+    let old_errs = validate_old(old);
     // Eşleme tutarlılığı iki taraf da kendi başına geçerliyken denetlenir (bozuk eski tanım "bayat" sanılmasın).
-    let mut e = vec![];
-    check_new_attnums(old, new, &mut e);
-    check_new_oids(old, new, &mut e);
-    if !e.is_empty() {
-        return Err(e);
+    let mut map_errs = vec![];
+    check_new_attnums(old, new, &mut map_errs);
+    check_new_oids(old, new, &mut map_errs);
+    if !old_errs.is_empty() || !map_errs.is_empty() {
+        // Eşleme kurulamıyor: hata önceliği yeni tanım → eski tanım → eşleme.
+        return Err([e, old_errs, map_errs].into_iter().find(|v| !v.is_empty()).unwrap_or_default());
     }
-    // Eşleme: eski tarafta attnum'lar benzersiz ve dolu (validate_old), yeni taraftakiler eskide var
-    // (check_new_attnums) → arama her zaman başarılı.
     let by_attnum: HashMap<i16, &ColumnDef> = old
         .columns
         .iter()
@@ -129,6 +124,13 @@ pub fn alter(old: &TableDef, new: &TableDef, ctx: &BuildCtx) -> Result<Plan, Vec
         .filter_map(|(_, oc, c)| oc.map(|oc| (oc.name.as_str(), c.name.as_str())))
         .collect();
     let cons = constraint_diff(old, new, &col_map);
+    // Dokunulmamış yüklü alanlar create-time dilbilgisinden/kapılarından geçirilmez (örn. `geometry(Point,4326)`
+    // tip metni ya da biçim karakterli bir ad, tablonun yeniden adlandırılmasını/yorumunu engellemesin); yalnızca
+    // değişen ya da ifadeye yazılan alanlar doğrulanır (yazım anı doğrulaması `build` içinde).
+    let e = drop_untouched_errors(e, old, new, &matched, &cons);
+    if !e.is_empty() {
+        return Err(e);
+    }
     let e = check_alter_rules(old, new, &matched, &cons, ctx);
     if !e.is_empty() {
         return Err(e);
@@ -136,18 +138,89 @@ pub fn alter(old: &TableDef, new: &TableDef, ctx: &BuildCtx) -> Result<Plan, Vec
     build(old, new, &matched, &cons, ctx)
 }
 
+/// `validate_table(new)` hatalarından, dokunulmamış YÜKLÜ alanlara ait olanları atar: aynı değerle korunan kolon
+/// alanları (ad, tip, collation, varsayılan, üretilmiş ifade, yorum, using), korunan ve yeniden kurulmayan
+/// kısıtların (ad dışı) alanları ve eski değerle aynı tablo alanları. Yinelenen ad hataları (başka bir
+/// satırın değişikliğinden doğar) ve satır düzeyi hatalar korunur.
+fn drop_untouched_errors(
+    errs: Vec<FieldError>,
+    old: &TableDef,
+    new: &TableDef,
+    matched: &Matched,
+    cons: &ConstraintDiff,
+) -> Vec<FieldError> {
+    if errs.is_empty() {
+        return errs;
+    }
+    let by_oid: HashMap<u32, &crate::model::ConstraintDef> =
+        old.constraints.iter().filter_map(|c| c.oid.map(|n| (n, c))).collect();
+    let added: HashSet<usize> = cons.adds.iter().map(|(i, _)| *i).collect();
+    let dup = |m: &str| m.contains("birden fazla");
+    errs.into_iter()
+        .filter(|x| {
+            let path = x.path.as_str();
+            // Tablo düzeyi alanlar: eski değerle aynıysa yüklüdür.
+            let same_table_field = match path {
+                "name" => new.name == old.name,
+                "schema" => new.schema == old.schema,
+                "owner" => new.owner == old.owner,
+                "tablespace" => new.tablespace == old.tablespace,
+                "comment" => new.comment == old.comment,
+                _ => false,
+            };
+            if same_table_field {
+                return false;
+            }
+            if let Some(rest) = path.strip_prefix("columns[")
+                && let Some((idx, field)) = rest.split_once("].")
+                && let Ok(i) = idx.parse::<usize>()
+                && let Some((_, Some(oc), c)) = matched.get(i)
+            {
+                let same = match field {
+                    "name" => oc.name == c.name,
+                    "dataType" => oc.data_type == c.data_type,
+                    "collation" => oc.collation == c.collation,
+                    "default" => oc.default == c.default,
+                    "generated" => oc.generated == c.generated,
+                    "comment" => oc.comment == c.comment,
+                    "using" => oc.using == c.using,
+                    _ => false,
+                };
+                return !(same && !dup(&x.message));
+            }
+            if let Some(rest) = path.strip_prefix("constraints[")
+                && let Some((idx, field)) = rest.split_once("].")
+                && let Ok(i) = idx.parse::<usize>()
+                && !added.contains(&i)
+                && let Some(c) = new.constraints.get(i)
+                && let Some(oc) = c.oid.and_then(|n| by_oid.get(&n).copied())
+            {
+                if field == "name" {
+                    return !(oc.name == c.name && !dup(&x.message));
+                }
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
 /// Eski tanım: yalnızca SQL'e giren kimlik alanları (şema, ad, kolon ve kısıt adları) ve eşleme anahtarları
 /// `attnum`/`oid`.
 fn validate_old(old: &TableDef) -> Vec<FieldError> {
     let mut e = vec![];
-    check_schema_ident("old.schema", &old.schema, &mut e);
-    check_ident("old.name", &old.name, &mut e);
+    let before = e.len();
+    check_old_ident("old.schema", &old.schema, &mut e);
+    if e.len() == before && super::is_system_schema(&old.schema) {
+        e.push(err("old.schema", "Sistem şemalarındaki tablolar düzenlenemez (pg_*, information_schema)."));
+    }
+    check_old_ident("old.name", &old.name, &mut e);
     let mut seen = HashSet::new();
     let mut names = HashSet::new();
     for (i, c) in old.columns.iter().enumerate() {
         let np = format!("old.columns[{i}].name");
         let before = e.len();
-        check_ident(&np, &c.name, &mut e);
+        check_old_ident(&np, &c.name, &mut e);
         if e.len() == before && !names.insert(c.name.as_str()) {
             e.push(err(&np, "Kolon adı eski tanımda birden fazla; tanımı yeniden yükleyin."));
         }
@@ -513,6 +586,32 @@ fn build(
 
     // (4) silinen kolonlar (eski sırayla).
     let kept_attnums: HashSet<i16> = kept.iter().filter_map(|(_, oc, _)| oc.attnum).collect();
+    // PG, silinen kolona başvuran tablo kısıtlarını (CHECK, EXCLUDE) CASCADE'siz de kendiliğinden düşürür: planda
+    // görünmez ve yeniden yüklenen tanım yeni tanımdan farklı olur → uyarı.
+    let dropped_cols: Vec<&ColumnDef> = old
+        .columns
+        .iter()
+        .filter(|oc| oc.attnum.is_some_and(|n| !kept_attnums.contains(&n)))
+        .collect();
+    for dc in &dropped_cols {
+        for k in &cons.kept {
+            if let ConstraintKind::Check { expr, .. } = &k.kind
+                && expr_mentions(expr, &dc.name)
+            {
+                warnings.push(format!(
+                    "'{}' kolonu silindiğinde ona başvuran '{}' CHECK kısıtı PostgreSQL tarafından kendiliğinden düşürülür; kısıtı yeni tanımdan da kaldırın ya da kolonu koruyun.",
+                    dc.name,
+                    k.name.as_deref().unwrap_or("?")
+                ));
+            }
+        }
+    }
+    if !dropped_cols.is_empty() && !old.unsupported.is_empty() {
+        warnings.push(
+            "Tabloda desteklenmeyen kısıtlar var (EXCLUDE, tetikleyici vb.); silinen kolona başvuranlar PostgreSQL tarafından kendiliğinden düşürülür ve burada görünmez."
+                .to_string(),
+        );
+    }
     for oc in &old.columns {
         if oc.attnum.is_some_and(|n| !kept_attnums.contains(&n)) {
             out.push(
@@ -533,8 +632,12 @@ fn build(
                     Some(TYPE_DROP_DEFAULT_NOTE),
                 );
             }
-            // Tip metni `validate_type` ile doğrulandı; collation yalnızca TYPE ifadesinin parçası olarak değişir
-            // (COLLATE yoksa yeni tipin varsayılan collation'ı).
+            // Tip metni ham yerleşir: değişmemiş yüklü metin (yalnızca collation değişimi) yazım anında doğrulanır.
+            // Collation yalnızca TYPE ifadesinin parçası olarak değişir (COLLATE yoksa yeni tipin varsayılan collation'ı).
+            if let Err(m) = validate_type(&c.data_type) {
+                out.errs.push(err(&format!("columns[{i}].dataType"), m));
+                continue;
+            }
             let mut sql = format!(
                 "ALTER TABLE {q} ALTER COLUMN {} TYPE {}",
                 quote_ident(&oc.name),
@@ -634,12 +737,17 @@ fn build(
         // Tip değişiminde eski varsayılan adım 5'te kaldırıldı: yeni varsayılan (aynı metin olsa da) yeniden kurulur.
         if retyped(oc, c) && oc.default.is_some() {
             if let Some(d) = &c.default {
-                out.push_free(
-                    &format!("columns[{i}].default"),
-                    ac(&format!("SET DEFAULT {}", wrap(d))),
-                    Risk::Safe,
-                    None,
-                );
+                // Varsayılan metin değişmemiş olabilir (yüklü): yazım anında doğrulanır.
+                let before = out.errs.len();
+                check_free_sql(&format!("columns[{i}].default"), d, &mut out.errs);
+                if out.errs.len() == before {
+                    out.push_free(
+                        &format!("columns[{i}].default"),
+                        ac(&format!("SET DEFAULT {}", wrap(d))),
+                        Risk::Safe,
+                        None,
+                    );
+                }
             }
         } else if oc.default != c.default {
             match &c.default {
@@ -737,7 +845,9 @@ fn build(
             Persistence::Permanent => "LOGGED",
             Persistence::Unlogged => "UNLOGGED",
         };
-        out.push(format!("ALTER TABLE {q} SET {what}"), Risk::Safe, Some(REWRITE_NOTE));
+        // UNLOGGED: WAL'a yazılmaz (kilit/çökmede tablo boşalır, yedek sunucularda veri yok) → Destructive.
+        let risk = if new.persistence == Persistence::Unlogged { Risk::Destructive } else { Risk::Safe };
+        out.push(format!("ALTER TABLE {q} SET {what}"), risk, Some(REWRITE_NOTE));
         out.rewrite = true;
     }
     if old.fillfactor != new.fillfactor {
@@ -1737,11 +1847,10 @@ mod tests {
         // Eski tarafın SQL'e giren alanları doğrulanır (`old.` önekiyle).
         for (bad, path) in [
             (TableDef { schema: "pg_catalog".into(), ..base() }, "old.schema"),
-            (TableDef { name: "t\n".into(), ..base() }, "old.name"),
-            (TableDef { name: "a".repeat(64), ..base() }, "old.name"),
+            (TableDef { name: "t\0".into(), ..base() }, "old.name"),
+            (TableDef { name: String::new(), ..base() }, "old.name"),
             (TableDef { columns: vec![lc(1, "i\0d", "integer")], ..base() }, "old.columns[0].name"),
             (TableDef { columns: vec![lc(1, "", "integer")], ..base() }, "old.columns[0].name"),
-            (TableDef { columns: vec![lc(1, "a\u{202e}", "integer")], ..base() }, "old.columns[0].name"),
             (TableDef { columns: vec![lc(1, "a", "integer"), lc(2, "a", "text")], ..base() }, "old.columns[1].name"),
         ] {
             let e = errs(&bad, &base(), &ctx());
@@ -1869,7 +1978,7 @@ mod tests {
             ),
             (" OWNER TO ", l.clone(), with(&l, |d| d.owner = Some("b".into())), 120000, Risk::Safe),
             (" SET TABLESPACE ", l.clone(), with(&l, |d| d.tablespace = Some("s".into())), 120000, Risk::Safe),
-            (" SET UNLOGGED", l.clone(), unlogged.clone(), 120000, Risk::Safe),
+            (" SET UNLOGGED", l.clone(), unlogged.clone(), 120000, Risk::Destructive),
             (" SET LOGGED", unlogged, l.clone(), 120000, Risk::Safe),
             (" SET (fillfactor", l.clone(), with(&l, |d| d.fillfactor = Some(50)), 120000, Risk::Safe),
             (" RESET (fillfactor)", l.clone(), with(&l, |d| d.fillfactor = None), 120000, Risk::Safe),
@@ -2498,5 +2607,107 @@ mod tests {
         assert!(!expr_mentions("'qty' || x", "qty"));
         assert!(!expr_mentions("qty2 + 1", "qty"));
         assert!(!expr_mentions("'it''s qty' || x", "qty"));
+    }
+
+    /// Yükleyicinin döndürüp create dilbilgisinin reddettiği alanlar: PostGIS tip metni, 128 karakter üstü tip, biçim
+    /// karakterli ad, `$`-bitişik tanımlayıcı içeren varsayılan/CHECK.
+    fn weird() -> TableDef {
+        TableDef {
+            columns: vec![
+                ColumnDef { not_null: true, ..lc(1, "id", "integer") },
+                lc(2, "geom", "public.geometry(Point,4326)"),
+                lc(3, "wide", &format!("\"{}\".\"{}\"", "a".repeat(60), "b".repeat(60))),
+                ColumnDef { default: Some("x1$".into()), ..lc(4, "dflt", "integer") },
+                lc(5, "a\u{200c}b", "text"),
+            ],
+            constraints: vec![ConstraintDef {
+                oid: Some(300),
+                name: Some("ck\u{202e}".into()),
+                kind: ConstraintKind::Check { expr: "x1$ > 0".into(), no_inherit: false },
+                deferrable: false,
+                initially_deferred: false,
+                not_valid: false,
+            }],
+            comment: Some("eski".into()),
+            ..base()
+        }
+    }
+
+    #[test]
+    fn untouched_loaded_fields_are_not_revalidated() {
+        let w = weird();
+        // Salt tablo düzeyi değişiklikler: yeniden adlandırma, şema, sahip, yorum.
+        for (label, new) in [
+            ("yorum", with(&w, |d| d.comment = Some("yeni".into()))),
+            ("ad", with(&w, |d| d.name = "t2".into())),
+            ("şema", with(&w, |d| d.schema = "s2".into())),
+            ("sahip", with(&w, |d| d.owner = Some("app".into()))),
+        ] {
+            let p = ok(&w, &new, &ctx());
+            assert_eq!(p.statements.len(), 1, "{label}: {}", render(&p));
+            for s in &p.statements {
+                assert!(!s.sql.contains("geometry"), "{label}: {}", s.sql);
+            }
+        }
+        // Dokunulmamış tanım: boş plan.
+        assert!(ok(&w, &w, &ctx()).statements.is_empty());
+        // Kolon yorumu/yeni kolon eklemek de weird alanlara dokunmaz.
+        let p = ok(&w, &with(&w, |d| d.columns.push(col("extra", "text"))), &ctx());
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t ADD COLUMN extra text"]);
+        // Biçim karakterli kolon yeniden adlandırılabilir (yeni ad doğrulanır), CHECK'e dokunulmaz.
+        let p = ok(&w, &with(&w, |d| d.columns[4].name = "plain".into()), &ctx());
+        assert_eq!(sqls(&p).len(), 1, "{}", render(&p));
+    }
+
+    #[test]
+    fn changed_or_written_loaded_fields_are_validated() {
+        let w = weird();
+        // Değişen alan create kurallarıyla doğrulanır.
+        let e = errs(&w, &with(&w, |d| d.columns[1].data_type = "public.geometry(Point,3857)".into()), &ctx());
+        assert_eq!(e[0].path, "columns[1].dataType");
+        let e = errs(&w, &with(&w, |d| d.columns[3].default = Some("x1$ + 1".into())), &ctx());
+        assert_eq!(e[0].path, "columns[3].default");
+        let e = errs(&w, &with(&w, |d| d.columns[4].name = "a\nb".into()), &ctx());
+        assert_eq!(e[0].path, "columns[4].name");
+        let e = errs(&w, &with(&w, |d| d.name = "t\n".into()), &ctx());
+        assert_eq!(e[0].path, "name");
+        // Yinelenen ad (değişmeyen kolonun adıyla çakışma) yine yakalanır.
+        let e = errs(&w, &with(&w, |d| d.columns[3].name = "id".into()), &ctx());
+        assert!(e.iter().any(|x| x.message.contains("birden fazla")), "{e:?}");
+        // Yalnızca collation değişimi TYPE'ı aynı (yüklü) tip metniyle yeniden yazar: yazım anında doğrulanır, hata verir.
+        let e = errs(&w, &with(&w, |d| d.columns[1].collation = Some("C".into())), &ctx());
+        assert_eq!(e[0].path, "columns[1].dataType");
+        // Tip değişiminde değişmemiş (yüklü) varsayılan yeniden yazılır: o da yazım anında doğrulanır.
+        let e = errs(&w, &with(&w, |d| d.columns[3].data_type = "bigint".into()), &ctx());
+        assert_eq!(e[0].path, "columns[3].default");
+    }
+
+    #[test]
+    fn dropping_a_column_warns_about_checks_that_pg_drops_silently() {
+        let l = with(&loaded(), |d| {
+            d.constraints.push(ConstraintDef {
+                oid: Some(110),
+                name: Some("ck_amount".into()),
+                kind: ConstraintKind::Check { expr: "amount > 0 OR note IS NOT NULL".into(), no_inherit: false },
+                deferrable: false,
+                initially_deferred: false,
+                not_valid: false,
+            })
+        });
+        let p = ok(&l, &with(&l, |d| d.columns.retain(|c| c.name != "amount")), &ctx());
+        assert!(
+            p.warnings.iter().any(|w| w.contains("'amount'") && w.contains("ck_amount") && w.contains("CHECK")),
+            "{:?}",
+            p.warnings
+        );
+        // Başvurmayan kolon silinince uyarı yok.
+        let p = ok(&l, &with(&l, |d| d.columns.retain(|c| c.name != "seq")), &ctx());
+        assert!(!p.warnings.iter().any(|w| w.contains("CHECK")), "{:?}", p.warnings);
+        // Desteklenmeyen kısıt (EXCLUDE) varken kolon silme: genel uyarı.
+        let ex = with(&loaded(), |d| d.unsupported = vec!["EXCLUDE ex".into()]);
+        let p = ok(&ex, &with(&ex, |d| d.columns.retain(|c| c.name != "note")), &ctx());
+        assert!(p.warnings.iter().any(|w| w.contains("desteklenmeyen")), "{:?}", p.warnings);
+        let p = ok(&ex, &with(&ex, |d| d.comment = None), &ctx());
+        assert!(!p.warnings.iter().any(|w| w.contains("desteklenmeyen")));
     }
 }

@@ -25,7 +25,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use super::table::constraint_sql;
-use super::{check_ident, err};
+use super::{check_old_ident, err};
 use crate::model::{ConstraintDef, ConstraintKind, FieldError, TableDef};
 use crate::quote::quote_ident;
 
@@ -55,7 +55,7 @@ pub(crate) fn validate_old_constraints(old: &TableDef, e: &mut Vec<FieldError>) 
     for (i, c) in old.constraints.iter().enumerate() {
         let np = format!("old.constraints[{i}].name");
         match &c.name {
-            Some(n) => check_ident(&np, n, e),
+            Some(n) => check_old_ident(&np, n, e),
             None => e.push(err(&np, "Yüklenmiş kısıtın adı yok; tanımı yeniden yükleyin.")),
         }
         // PK/UNIQUE her zaman doğrulanmıştır; NOT VALID işaretli yüklenmiş PK/UNIQUE tanımın oynandığını gösterir.
@@ -1188,7 +1188,7 @@ mod tests {
             (with(&t, |d| d.constraints[1].oid = None), "old.constraints[1].oid"),
             (with(&t, |d| d.constraints[2].oid = Some(100)), "old.constraints[2].oid"),
             (with(&t, |d| d.constraints[3].name = None), "old.constraints[3].name"),
-            (with(&t, |d| d.constraints[3].name = Some("a\nb".into())), "old.constraints[3].name"),
+            (with(&t, |d| d.constraints[3].name = Some("a\0b".into())), "old.constraints[3].name"),
             (with(&t, |d| d.constraints[3].name = Some(String::new())), "old.constraints[3].name"),
         ] {
             let e = errs(&old, &bare());

@@ -163,7 +163,7 @@ WARN: Tablo yeniden yazılır: işlem boyunca ACCESS EXCLUSIVE kilidi alınır v
 WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
 
 ## UNLOGGED @120000
-[Safe] ALTER TABLE public.t SET UNLOGGED  -- Tabloyu yeniden yazar; ACCESS EXCLUSIVE kilidi alır
+[Destructive] ALTER TABLE public.t SET UNLOGGED  -- Tabloyu yeniden yazar; ACCESS EXCLUSIVE kilidi alır
 WARN: Tablo yeniden yazılır: işlem boyunca ACCESS EXCLUSIVE kilidi alınır ve tablo okuma ve yazmaya kapalı kalır; büyük tablolarda uzun sürer
 WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
 

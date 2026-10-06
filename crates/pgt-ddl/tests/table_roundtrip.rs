@@ -1243,7 +1243,7 @@ async fn drop_body(ts: TestServer) {
     for name in ["plain", "Odd \"T\""] {
         let d = tload(&env, "public", name).await;
         let p = build::drop(&t(&d), false, &ctx).unwrap();
-        assert_eq!(p.statements[0].risk, Risk::Destructive);
+        assert_eq!(p.statements[0].risk, Risk::DataLoss);
         env.exec_tx(&p).await;
         assert!(!exists(&env, &format!("SELECT 1 FROM pg_class WHERE relname = {}", quote_literal(name))).await);
     }

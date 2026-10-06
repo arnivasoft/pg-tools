@@ -31,7 +31,12 @@ pub fn check_free_sql(path: &str, sql: &str, errs: &mut Vec<FieldError>) {
     } else if r.digit_adjacent_quote {
         errs.push(err(
             path,
-            "SQL'de rakamın hemen ardından ' ya da $ gelemez; araya boşluk koyun.",
+            "SQL'de rakamın (ya da sayı/$ ile başlayan belirtecin) hemen ardından ' ya da $ gelemez; araya boşluk koyun.",
+        ));
+    } else if r.backslash_in_plain_string {
+        errs.push(err(
+            path,
+            "SQL'de sıradan '…' dizesi içinde \\ kullanılamaz; kaçış gerekiyorsa E'…' biçimini kullanın.",
         ));
     } else if r.outer_semicolons > 0 {
         errs.push(err(
@@ -54,7 +59,7 @@ pub fn wrap(sql: &str) -> String {
 /// Birleşmiş nihai ifade: dış `;` yok, kapanmamış bölge yok, parantezler dengeli (ifade sonunda `;` yoktur).
 pub fn composed_is_clean(sql: &str) -> bool {
     let r = scan_semicolons(sql);
-    r.is_clean() && r.parens_balanced()
+    r.is_clean() && r.parens_balanced() && !r.backslash_in_plain_string
 }
 
 #[cfg(test)]
@@ -154,5 +159,60 @@ mod tests {
         assert!(!composed_is_clean("CREATE INDEX i ON t ((a -- )"));
         assert!(!composed_is_clean("SELECT 'x"));
         assert!(!composed_is_clean("SELECT 1)"));
+    }
+
+    #[test]
+    fn freesql_rejects_backslash_in_plain_string() {
+        for a in [r"'\'", r"'a\'b' || 'c'", r"x = 'a\b'", r"U&'\0041'"] {
+            let e = check(a);
+            assert_eq!(e.len(), 1, "{a:?}: {e:?}");
+        }
+        // E'…' ve diğer bölgelerde `\` serbest.
+        for a in [r"x = E'a\\b'", r"x = E'\''", r#"x = "a\b""#, r"x = $$a\b$$"] {
+            assert!(check(a).is_empty(), "{a:?}: {:?}", check(a));
+        }
+        assert!(!composed_is_clean(r"SELECT 'a\b'"));
+        assert!(composed_is_clean(r"SELECT E'a\\b'"));
+    }
+
+    #[test]
+    fn freesql_rejects_hex_literal_dollar_quote_and_lone_dollar_prefix() {
+        for a in ["0xAF$$ x $$", r"$e'\' ; x'"] {
+            let e = check(a);
+            assert_eq!(e.len(), 1, "{a:?}: {e:?}");
+        }
+    }
+
+    /// Kabul edilen her alan tek başına ve `(<f>\n)` sarmalıyla (farklı bağlam öneklerinde) aynı temizlik sonucunu verir.
+    #[test]
+    fn freesql_wrap_context_parity() {
+        let fields = [
+            "x > 1",
+            "a = ';'",
+            "a = E'\\'; x'",
+            "a = $$;)$$",
+            "f(g(x), (y))",
+            "a /* ; ) */ > 1",
+            "a -- c\n> 1",
+            "c > 0 -- k\n",
+            "x'",
+            "1'x'",
+            "a; b",
+            "(a",
+            "a)",
+            "$a$ x",
+            "a --",
+            "'\\'",
+        ];
+        for f in fields {
+            let alone_ok = check(f).is_empty();
+            for ctx in ["DEFAULT ", "CHECK ", "USING ", "AS ", "ADD COLUMN x int GENERATED ALWAYS AS "] {
+                let wrapped = format!("{ctx}{}", wrap(f));
+                // Kapı kabul ettiyse nihai ifade temiz olmalı.
+                if alone_ok {
+                    assert!(composed_is_clean(&wrapped), "{ctx}{f:?}");
+                }
+            }
+        }
     }
 }

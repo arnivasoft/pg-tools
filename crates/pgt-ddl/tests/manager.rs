@@ -972,7 +972,7 @@ async fn table_create_body(ts: TestServer) {
 
     // Drop: onaysız reddedilir; onaylı uygulanır, created yok.
     let drop = PlanRequest::Drop { object, def: tbl(&loaded), cascade: false };
-    assert_eq!(f.preview(&drop).await.risk, Risk::Destructive);
+    assert_eq!(f.preview(&drop).await.risk, Risk::DataLoss);
     assert_eq!(code(&f.apply(&drop).await), "confirmation_required");
     assert!(exists(&env, "public.Tb \"c\"").await);
     assert_eq!(created_of(f.apply_with(&drop, |o| o.confirmed = true).await), None);

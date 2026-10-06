@@ -373,4 +373,4 @@ Notlar: Birimler — Plan 2, Plan 6 ve Plan 7 satırlarının bellek ve exe/pake
 
 ## Nesne diyalogları: Table arka ucu (Plan 12)
 
-Plan 12 yalnızca arka uçtur; GUI maddeleri Plan 13'te eklenecek. Docker doğrulaması: `scripts/test-matrix.ps1 -Versions 10,11,12,13,15,17,18 -SkipPerf` (Table gidiş-dönüş + yönetici testleri dahil). Menüde tablo eylemi henüz yoktur; designer'da `table` türü açılırsa "Bu tür için form henüz yok." görünür.
+Plan 12 yalnızca arka uçtur; GUI maddeleri Plan 13'te eklenecek. Docker doğrulaması: `scripts/test-matrix.ps1 -SkipPerf` (varsayılan: PG 10–18 tümü; Table gidiş-dönüş + yönetici testleri dahil). Menüde tablo eylemi henüz yoktur; designer'da `table` türü açılırsa "Bu tür için form henüz yok." görünür.
