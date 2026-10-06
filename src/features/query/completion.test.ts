@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  completionWaitMs,
   createCompletionSource,
   contextAt,
   matchItems,
@@ -227,10 +228,45 @@ describe("createCompletionSource", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("`.` hemen sonrası (üye bağlamı, kısmi ad boş) beklemeden ister; kısmi adda 150 ms beklenir", async () => {
+    const fetch = vi.fn(async () => [item("id", "column")]);
+    const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
+    const p = run(src, ctx("select * from app."));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetch).toHaveBeenCalledWith({ type: "relations", schema: "app" });
+    await p;
+    fetch.mockClear();
+    const p2 = run(src, ctx("select o."));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetch).toHaveBeenCalledWith(expect.objectContaining({ type: "scoped", prefix: "o" }));
+    await p2;
+    fetch.mockClear();
+    const p3 = run(src, ctx("select o.i"));
+    await vi.advanceTimersByTimeAsync(149);
+    expect(fetch).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await p3;
+    expect(fetch).toHaveBeenCalled();
+    fetch.mockClear();
+    const p4 = run(src, ctx("select "));
+    await vi.advanceTimersByTimeAsync(149);
+    expect(fetch).not.toHaveBeenCalled(); // select listesi debounce'lu kalır
+    await vi.advanceTimersByTimeAsync(1);
+    await p4;
+  });
+
+  it("completionWaitMs", () => {
+    expect(completionWaitMs({ kind: "relationMember", relation: "o" }, "", 150)).toBe(0);
+    expect(completionWaitMs({ kind: "schemaMember", schema: "app" }, "", 150)).toBe(0);
+    expect(completionWaitMs({ kind: "relationMember", relation: "o" }, "i", 150)).toBe(150);
+    expect(completionWaitMs({ kind: "relation" }, "", 150)).toBe(150);
+    expect(completionWaitMs({ kind: "selectList" }, "", 150)).toBe(150);
+  });
+
   it("debounce sırasında iptal: istek yok, sonuç yok", async () => {
     const fetch = vi.fn(async () => [item("x")]);
     const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
-    const c = ctx("select * from app.");
+    const c = ctx("select * from app.or");
     const p = run(src, c);
     c.abort();
     await vi.advanceTimersByTimeAsync(150);

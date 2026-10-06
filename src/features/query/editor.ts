@@ -245,7 +245,7 @@ export function createQueryEditor(parent: HTMLElement, doc: string, handlers: Qu
     indentOnInput(),
     bracketMatching(),
     closeBrackets(),
-    autocompletion({ override: [handlers.complete], icons: false }),
+    autocompletion({ override: [handlers.complete], icons: false, activateOnTypingDelay: 50 }),
     keymap.of([
       ...closeBracketsKeymap,
       ...defaultKeymap,

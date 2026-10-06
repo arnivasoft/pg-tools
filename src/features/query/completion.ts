@@ -340,6 +340,11 @@ export function matchItems(items: CompletionItem[], partial: string): Completion
   return [...prefix, ...rest];
 }
 
+/** İstekten önceki bekleme: `x.`/`şema.` hemen sonrası 0, kısmi ad ve select listesi için `debounceMs`. */
+export function completionWaitMs(context: CompletionContextKind, partial: string, debounceMs: number): number {
+  return partial === "" && (context.kind === "relationMember" || context.kind === "schemaMember") ? 0 : debounceMs;
+}
+
 export function createCompletionSource(deps: CompletionSourceDeps): CompletionSource {
   const keywords = deps.keywords ?? keywordCompletionSource(PostgreSQL, true);
   const debounceMs = deps.debounceMs ?? 150;
@@ -354,14 +359,19 @@ export function createCompletionSource(deps: CompletionSourceDeps): CompletionSo
 
     if (context.kind === "keyword" || deps.isBusy()) return kwFallback();
 
-    // Yazarken debounce: bu sürede iptal geldiyse (yeni tuş vuruşu) hiç istek atma.
+    // Yazarken debounce: bu sürede iptal geldiyse (yeni tuş vuruşu) hiç istek atma. `.`'nın hemen ardında (üye
+    // bağlamı, kısmi ad boş) bekleme yok: nokta başına tek istek; CodeMirror kaynak başına aynı anda tek sorgu
+    // çalıştırdığından istekler gidiş-dönüşle sınırlıdır (bkz. `completionWaitMs`).
     let aborted = c.aborted;
     c.addEventListener("abort", () => {
       aborted = true;
     });
-    await new Promise<void>((r) => setTimeout(r, debounceMs));
-    if (aborted || c.aborted) return null;
-    if (deps.isBusy()) return kwFallback(); // beklerken çalıştırma başladı
+    const wait = completionWaitMs(context, partial, debounceMs);
+    if (wait > 0) {
+      await new Promise<void>((r) => setTimeout(r, wait));
+      if (aborted || c.aborted) return null;
+      if (deps.isBusy()) return kwFallback(); // beklerken çalıştırma başladı
+    }
 
     let items: CompletionItem[];
     try {
