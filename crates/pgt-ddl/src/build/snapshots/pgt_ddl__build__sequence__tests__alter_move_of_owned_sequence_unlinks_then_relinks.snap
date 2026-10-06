@@ -1,0 +1,6 @@
+---
+source: crates/pgt-ddl/src/build/sequence.rs
+expression: render(&p)
+---
+[Safe] ALTER SEQUENCE public.s SET SCHEMA other
+[Safe] ALTER SEQUENCE other.s OWNED BY other.t.c

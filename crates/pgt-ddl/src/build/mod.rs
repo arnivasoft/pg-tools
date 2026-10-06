@@ -2,13 +2,17 @@
 //!
 //! Sözleşme: her `Statement.sql` **tek** ifadedir ve sonda `;` taşımaz (çalıştırıcı gerekirse ekler);
 //! çıktı deterministiktir (aynı girdi → aynı metin ve sıra).
+//!
+//! Serbest SQL alanları (Task 4): her alan `scan_semicolons` ile taranır ve `!is_clean()` ise (dış `;` ya da
+//! kapanmamış tırnak/yorum) REDDEDİLİR; ayrıca alanlar birleştirildikten sonra **nihai ifade** de taranmalıdır
+//! (alan sınırlarında kapanma/açılma kaymasını yakalamak için). Tarayıcı `standard_conforming_strings = on` varsayar.
 
 pub mod extension;
 pub mod schema;
 pub mod sequence;
 mod sqlscan;
 
-pub use sqlscan::outer_semicolon_count;
+pub use sqlscan::{ScanResult, scan_semicolons};
 
 use crate::model::{FieldError, ObjectDef, ObjectKind};
 use crate::plan::{Plan, Risk, Statement};
@@ -26,7 +30,10 @@ pub struct BuildCtx {
 }
 
 pub(crate) fn err(path: &str, message: impl Into<String>) -> FieldError {
-    FieldError { path: path.to_string(), message: message.into() }
+    FieldError {
+        path: path.to_string(),
+        message: message.into(),
+    }
 }
 
 /// Ad kuralları: boş değil, NUL yok, en çok 63 bayt.
@@ -36,7 +43,13 @@ pub(crate) fn check_ident(path: &str, value: &str, errs: &mut Vec<FieldError>) {
     } else if value.contains('\0') {
         errs.push(err(path, "Ad NUL karakteri içeremez."));
     } else if value.len() > MAX_IDENT_BYTES {
-        errs.push(err(path, format!("Ad en çok {MAX_IDENT_BYTES} bayt olabilir (şu an {} bayt).", value.len())));
+        errs.push(err(
+            path,
+            format!(
+                "Ad en çok {MAX_IDENT_BYTES} bayt olabilir (şu an {} bayt).",
+                value.len()
+            ),
+        ));
     }
 }
 
@@ -45,13 +58,16 @@ pub(crate) fn check_schema_ident(path: &str, value: &str, errs: &mut Vec<FieldEr
     let before = errs.len();
     check_ident(path, value, errs);
     if errs.len() == before && is_system_schema(value) {
-        errs.push(err(path, "Sistem şemaları (pg_*, information_schema) kullanılamaz."));
+        errs.push(err(
+            path,
+            "Sistem şemaları (pg_*, information_schema) kullanılamaz.",
+        ));
     }
 }
 
 pub(crate) fn is_system_schema(name: &str) -> bool {
-    let l = name.to_ascii_lowercase();
-    l.starts_with("pg_") || l == "information_schema"
+    // PG'nin ayrılmış ad kuralı büyük/küçük harfe duyarlıdır ("PG_Data" geçerli kullanıcı şemasıdır).
+    name.starts_with("pg_") || name == "information_schema"
 }
 
 /// Serbest metin değeri (yorum, sürüm): NUL yasak.
@@ -63,7 +79,12 @@ pub(crate) fn check_text(path: &str, value: &str, errs: &mut Vec<FieldError>) {
 
 /// Transaction içinde çalışabilir ifade.
 pub(crate) fn stmt(sql: String, risk: Risk, note: Option<&str>) -> Statement {
-    Statement { sql, risk, transactional: true, note: note.map(str::to_string) }
+    Statement {
+        sql,
+        risk,
+        transactional: true,
+        note: note.map(str::to_string),
+    }
 }
 
 fn unsupported(kind: ObjectKind) -> Vec<FieldError> {
@@ -71,7 +92,10 @@ fn unsupported(kind: ObjectKind) -> Vec<FieldError> {
 }
 
 fn mismatch(old: &ObjectDef, new: &ObjectDef) -> Vec<FieldError> {
-    vec![err("kind", format!("Tür uyuşmazlığı: {:?} → {:?}.", old.kind(), new.kind()))]
+    vec![err(
+        "kind",
+        format!("Tür uyuşmazlığı: {:?} → {:?}.", old.kind(), new.kind()),
+    )]
 }
 
 /// Alan düzeyi doğrulama; boş liste = geçerli.
@@ -138,7 +162,12 @@ pub fn drop(def: &ObjectDef, cascade: bool, ctx: &BuildCtx) -> Result<Plan, Vec<
 pub(crate) fn render(plan: &Plan) -> String {
     let mut out = String::new();
     for s in &plan.statements {
-        out.push_str(&format!("[{:?}{}] {}", s.risk, if s.transactional { "" } else { " non-tx" }, s.sql));
+        out.push_str(&format!(
+            "[{:?}{}] {}",
+            s.risk,
+            if s.transactional { "" } else { " non-tx" },
+            s.sql
+        ));
         if let Some(n) = &s.note {
             out.push_str(&format!("  -- {n}"));
         }
@@ -154,7 +183,11 @@ pub(crate) fn render(plan: &Plan) -> String {
 #[cfg(test)]
 pub(crate) fn assert_single_statements(plan: &Plan) {
     for s in &plan.statements {
-        assert_eq!(outer_semicolon_count(&s.sql), 0, "dış ';' var: {}", s.sql);
+        assert!(
+            scan_semicolons(&s.sql).is_clean(),
+            "dış ';' ya da kapanmamış bölge var: {}",
+            s.sql
+        );
         assert!(!s.sql.trim_end().ends_with(';'), "sonda ';' var: {}", s.sql);
         assert!(!s.sql.contains('\0'));
     }
@@ -166,7 +199,10 @@ mod tests {
     use crate::model::*;
 
     fn ctx() -> BuildCtx {
-        BuildCtx { version_num: 160000, ..Default::default() }
+        BuildCtx {
+            version_num: 160000,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -190,7 +226,11 @@ mod tests {
             comment: None,
             constraint: None,
         });
-        for r in [validate(&d, &ctx()), create(&d, &ctx()).unwrap_err(), drop(&d, false, &ctx()).unwrap_err()] {
+        for r in [
+            validate(&d, &ctx()),
+            create(&d, &ctx()).unwrap_err(),
+            drop(&d, false, &ctx()).unwrap_err(),
+        ] {
             assert_eq!(r.len(), 1);
             assert!(r[0].message.contains("henüz desteklenmiyor"));
         }
@@ -199,8 +239,17 @@ mod tests {
 
     #[test]
     fn alter_rejects_kind_mismatch() {
-        let s = ObjectDef::Schema(SchemaDef { name: "a".into(), owner: None, comment: None });
-        let e = ObjectDef::Extension(ExtensionDef { name: "a".into(), schema: None, version: None, cascade: false });
+        let s = ObjectDef::Schema(SchemaDef {
+            name: "a".into(),
+            owner: None,
+            comment: None,
+        });
+        let e = ObjectDef::Extension(ExtensionDef {
+            name: "a".into(),
+            schema: None,
+            version: None,
+            cascade: false,
+        });
         let errs = alter(&s, &e, &ctx()).unwrap_err();
         assert_eq!(errs[0].path, "kind");
         assert!(errs[0].message.contains("uyuşmazlığı"));
@@ -238,10 +287,18 @@ mod tests {
 
     #[test]
     fn system_schema_detection() {
-        for s in ["pg_catalog", "pg_toast", "pg_temp_3", "information_schema", "PG_CATALOG", "Information_Schema"] {
+        for s in ["pg_catalog", "pg_toast", "pg_temp_3", "information_schema"] {
             assert!(is_system_schema(s), "{s}");
         }
-        for s in ["public", "pgx", "pg", "my_pg_schema", "information_schemas"] {
+        for s in [
+            "public",
+            "pgx",
+            "pg",
+            "my_pg_schema",
+            "information_schemas",
+            "PG_Data",
+            "Information_Schema",
+        ] {
             assert!(!is_system_schema(s), "{s}");
         }
     }

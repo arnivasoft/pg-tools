@@ -19,15 +19,34 @@ fn dollar_tag_len(b: &[u8], i: usize) -> Option<usize> {
     (j < b.len() && b[j] == b'$').then(|| j + 1 - i)
 }
 
+/// Tarama sonucu. Çağıran `unterminated`'ı **RED** sayar: kapanmamış tırnak/yorum, sonraki parçalarla
+/// birleşince ifade sınırlarını değiştirir (ör. alanda `'; DROP TABLE t; --'` tek başına kapanmamış dizedir).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanResult {
+    /// Tırnak/yorum bölgeleri dışındaki `;` sayısı.
+    pub outer_semicolons: usize,
+    /// Kapanmamış tek tırnaklı dize, çift tırnaklı tanımlayıcı, dolar tırnak ya da blok yorum var.
+    /// (Satır sonuna kadar süren `--` yorumu kapanmamış sayılmaz.)
+    pub unterminated: bool,
+}
+
+impl ScanResult {
+    /// Dış `;` yok ve kapanmamış bölge yok.
+    pub fn is_clean(&self) -> bool {
+        self.outer_semicolons == 0 && !self.unterminated
+    }
+}
+
 /// Tek tırnaklı dize, çift tırnaklı tanımlayıcı, dolar tırnaklı dize, `--` satır yorumu ve (iç içe) `/* */` yorumu
-/// **dışındaki** `;` sayısı. Kapanmamış bölge sonuna kadar sürer (içindeki `;` sayılmaz).
-/// `E'…'` dizelerinde `\` sonraki karakteri kaçırır; sıradan `'…'` içinde `\` sıradan karakterdir
-/// (`standard_conforming_strings = on`, PG 10+ varsayılanı); `''` her ikisinde de tırnak çiftleme.
-pub fn outer_semicolon_count(sql: &str) -> usize {
+/// **dışındaki** `;` sayısını ve kapanmamış bölge olup olmadığını verir.
+/// `E'…'` dizelerinde `\` sonraki karakteri kaçırır; sıradan `'…'` içinde `\` sıradan karakterdir:
+/// tarayıcı `standard_conforming_strings = on` varsayar (Ddl oturum profili bunu sabitler); `''` her ikisinde de çiftleme.
+pub fn scan_semicolons(sql: &str) -> ScanResult {
     let b = sql.as_bytes();
     let n = b.len();
     let mut i = 0;
     let mut count = 0;
+    let mut unterminated = false;
     while i < n {
         match b[i] {
             b';' => {
@@ -36,8 +55,11 @@ pub fn outer_semicolon_count(sql: &str) -> usize {
             }
             b'\'' => {
                 // E'…' mi: önceki bayt e/E ve ondan önceki bayt tanımlayıcı parçası değil.
-                let escape = i >= 1 && matches!(b[i - 1], b'e' | b'E') && (i < 2 || !is_ident_byte(b[i - 2]));
+                let escape = i >= 1
+                    && matches!(b[i - 1], b'e' | b'E')
+                    && (i < 2 || !is_ident_byte(b[i - 2]));
                 i += 1;
+                let mut closed = false;
                 while i < n {
                     if escape && b[i] == b'\\' {
                         i += 2;
@@ -46,27 +68,32 @@ pub fn outer_semicolon_count(sql: &str) -> usize {
                             i += 2;
                         } else {
                             i += 1;
+                            closed = true;
                             break;
                         }
                     } else {
                         i += 1;
                     }
                 }
+                unterminated |= !closed;
             }
             b'"' => {
                 i += 1;
+                let mut closed = false;
                 while i < n {
                     if b[i] == b'"' {
                         if i + 1 < n && b[i + 1] == b'"' {
                             i += 2;
                         } else {
                             i += 1;
+                            closed = true;
                             break;
                         }
                     } else {
                         i += 1;
                     }
                 }
+                unterminated |= !closed;
             }
             b'$' if i == 0 || !is_ident_byte(b[i - 1]) => match dollar_tag_len(b, i) {
                 Some(len) => {
@@ -74,7 +101,10 @@ pub fn outer_semicolon_count(sql: &str) -> usize {
                     i += len;
                     match b[i.min(n)..].windows(len).position(|w| w == tag) {
                         Some(p) => i += p + len,
-                        None => i = n,
+                        None => {
+                            unterminated = true;
+                            i = n;
+                        }
                     }
                 }
                 None => i += 1,
@@ -98,16 +128,28 @@ pub fn outer_semicolon_count(sql: &str) -> usize {
                         i += 1;
                     }
                 }
+                unterminated |= depth > 0;
             }
             _ => i += 1,
         }
     }
-    count
+    ScanResult {
+        outer_semicolons: count,
+        unterminated,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::outer_semicolon_count as c;
+    use super::scan_semicolons;
+
+    /// Dış `;` sayısı; kapanmamış bölge varsa ayrıca `u` testleri bakar.
+    fn c(s: &str) -> usize {
+        scan_semicolons(s).outer_semicolons
+    }
+    fn u(s: &str) -> bool {
+        scan_semicolons(s).unterminated
+    }
 
     #[test]
     fn plain_semicolons() {
@@ -190,5 +232,43 @@ mod tests {
     #[test]
     fn mixed_and_unicode() {
         assert_eq!(c("SELECT 'ş;ğ', \"ü;\" ; -- ö;\n"), 1);
+    }
+
+    #[test]
+    fn unterminated_regions_are_reported() {
+        for s in [
+            "a'",
+            "'",
+            "\"abc",
+            "$$x",
+            "$t$ x $u$",
+            "/* x",
+            "/* a /* b */",
+            r"E'a\'",
+            "x; 'y",
+        ] {
+            assert!(u(s), "{s}");
+            assert!(!scan_semicolons(s).is_clean(), "{s}");
+        }
+        // Alanda tek başına duran enjeksiyon biçimi kapanmamış dizedir.
+        let r = scan_semicolons("x'; DROP TABLE t; --");
+        assert!(r.unterminated && r.outer_semicolons == 0);
+        let r = scan_semicolons("'; DROP TABLE t; --");
+        assert!(r.unterminated && !r.is_clean());
+        // Kapalı bölgeler ve satır yorumu kapanmamış sayılmaz.
+        for s in [
+            "'a'",
+            "\"a\"",
+            "$$a$$",
+            "$t$a$t$",
+            "/* a */",
+            "/* a /* b */ c */",
+            "a -- x",
+            r"E'a\''",
+        ] {
+            assert!(!u(s), "{s}");
+            assert!(scan_semicolons(s).is_clean(), "{s}");
+        }
+        assert!(!scan_semicolons("a;").is_clean());
     }
 }

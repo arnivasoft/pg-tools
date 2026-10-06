@@ -89,7 +89,7 @@ fn profile_session_options(profile: SessionProfile) -> Cow<'static, str> {
             Cow::Borrowed("-c default_transaction_read_only=on -c statement_timeout=10000 -c lock_timeout=2000")
         }
         SessionProfile::Ddl { lock_timeout_ms } => Cow::Owned(format!(
-            "-c default_transaction_read_only=off -c statement_timeout=0 -c lock_timeout={lock_timeout_ms}"
+            "-c default_transaction_read_only=off -c statement_timeout=0 -c lock_timeout={lock_timeout_ms} -c standard_conforming_strings=on"
         )),
     }
 }
@@ -111,6 +111,8 @@ fn profile_session_sets(profile: SessionProfile) -> Vec<Cow<'static, str>> {
             Cow::Borrowed("SET default_transaction_read_only = off"),
             Cow::Borrowed("SET statement_timeout = 0"),
             Cow::Owned(format!("SET lock_timeout = {lock_timeout_ms}")),
+            // Üreticiler/tarayıcı `\` kaçışını yalnızca E'…' için varsayar; oturum bunu sabitler.
+            Cow::Borrowed("SET standard_conforming_strings = on"),
         ],
     }
 }
@@ -1052,11 +1054,13 @@ mod tests {
         assert!(opts.contains("default_transaction_read_only=off"));
         assert!(opts.contains("statement_timeout=0"));
         assert!(opts.contains("lock_timeout=5000"));
+        assert!(opts.contains("standard_conforming_strings=on"));
         assert!(!opts.contains("search_path"));
         let sets: Vec<String> = profile_session_sets(p).iter().map(|s| s.to_string()).collect();
         assert!(sets.contains(&"SET default_transaction_read_only = off".to_string()));
         assert!(sets.contains(&"SET statement_timeout = 0".to_string()));
         assert!(sets.contains(&"SET lock_timeout = 5000".to_string()));
+        assert!(sets.contains(&"SET standard_conforming_strings = on".to_string()));
     }
 
     #[test]

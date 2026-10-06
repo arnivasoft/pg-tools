@@ -8,6 +8,8 @@ expression: out
 
 [Safe] CREATE SEQUENCE public.s AS smallint INCREMENT BY -2 MINVALUE -32768 MAXVALUE -1 START WITH -1 CACHE 20 CYCLE OWNED BY NONE
 
-[Safe] CREATE SEQUENCE "My Schema"."order" AS integer INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1 NO CYCLE OWNED BY "My Schema"."t;x"."Id"
+[Safe] CREATE SEQUENCE "My Schema"."order" AS integer INCREMENT BY 1 MINVALUE 1 MAXVALUE 2147483647 START WITH 1 CACHE 1 NO CYCLE OWNED BY NONE
 [Safe] ALTER SEQUENCE "My Schema"."order" OWNER TO "Owner X"
+[Safe] ALTER SEQUENCE "My Schema"."order" OWNED BY "My Schema"."t;x"."Id"
 [Safe] COMMENT ON SEQUENCE "My Schema"."order" IS E'it''s \\ fine'
+WARN: OWNED BY hedefi olan tablonun sahibi, dizinin sahibiyle aynı olmalı
