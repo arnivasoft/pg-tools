@@ -80,3 +80,79 @@ export function filterSettings(rows: readonly Setting[], f: SettingsFilter): Set
     return true;
   });
 }
+
+// ---- Görünüm yardımcıları (saf)
+
+export type StateTone = "active" | "idle" | "warn" | "danger" | "muted";
+
+/** Durum rozeti tonu: etkin → vurgu, boşta → soluk, boşta-tx → uyarı, iptal edilmiş tx/devre dışı → tehlike. */
+export function stateTone(state: string | null): StateTone {
+  if (state == null) return "muted";
+  if (state === "active") return "active";
+  if (state === "idle") return "idle";
+  if (state.startsWith("idle in transaction")) return state.includes("aborted") ? "danger" : "warn";
+  if (state === "disabled") return "danger";
+  return "muted"; // fastpath function call, vb.
+}
+
+export type DurationTone = "none" | "normal" | "warn" | "danger";
+export const DURATION_WARN_SECS = 30;
+export const DURATION_DANGER_SECS = 300;
+
+/** Süre kovası: null → none; < 30 sn normal; < 5 dk uyarı; üstü tehlike. */
+export function durationTone(secs: number | null): DurationTone {
+  if (secs == null || !Number.isFinite(secs) || secs < 0) return "none";
+  if (secs < DURATION_WARN_SECS) return "normal";
+  return secs < DURATION_DANGER_SECS ? "warn" : "danger";
+}
+
+/** Boşluklar tek boşluğa; en çok `max` karakter (taşarsa "…"). null → "". */
+export function oneLine(q: string | null, max = 240): string {
+  if (q == null) return "";
+  const s = q.replace(/\s+/g, " ").trim();
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/** Sorgunun ilk `n` satırı (boş satırlar atlanır); kesildiyse `truncated`. */
+export function firstLines(q: string | null, n: number): { text: string; truncated: boolean } {
+  if (q == null) return { text: "", truncated: false };
+  const lines = q.split(/\r?\n/).filter((l) => l.trim() !== "");
+  return { text: lines.slice(0, n).join("\n"), truncated: lines.length > n };
+}
+
+export type NavKey = "ArrowUp" | "ArrowDown" | "Home" | "End" | "PageUp" | "PageDown";
+const NAV = new Set<string>(["ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
+export const isNavKey = (k: string): k is NavKey => NAV.has(k);
+
+/** Klavyeyle satır seçimi: yeni dizin. `cur` −1 = seçim yok. Sınırda durur; boş listede −1. */
+export function navIndex(cur: number, key: NavKey, count: number, page = 10): number {
+  if (count <= 0) return -1;
+  const last = count - 1;
+  const from = cur < 0 || cur > last ? -1 : cur;
+  const step = Math.max(1, page);
+  switch (key) {
+    case "ArrowDown": return from < 0 ? 0 : Math.min(last, from + 1);
+    case "ArrowUp": return from < 0 ? last : Math.max(0, from - 1);
+    case "PageDown": return from < 0 ? 0 : Math.min(last, from + step);
+    case "PageUp": return from < 0 ? last : Math.max(0, from - step);
+    case "Home": return 0;
+    case "End": return last;
+  }
+}
+
+export interface SortState<K extends string = string> { key: K; dir: SortDir }
+
+/** Başlığa tıklama: aynı sütun → yön çevrilir; yeni sütun → artan. */
+export function nextSort<K extends string>(cur: SortState<K> | null, key: K): SortState<K> {
+  return cur && cur.key === key ? { key, dir: cur.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" };
+}
+
+/** `aria-sort` değeri. */
+export function ariaSort(cur: SortState | null, key: string): "ascending" | "descending" | "none" {
+  return cur && cur.key === key ? (cur.dir === "asc" ? "ascending" : "descending") : "none";
+}
+
+/** Bekleme: "Lock:relation"; yalnızca biri varsa o; ikisi de yoksa "". */
+export function waitLabel(r: Pick<ActivityRow, "waitEventType" | "waitEvent">): string {
+  return [r.waitEventType, r.waitEvent].filter((x) => x != null && x !== "").join(":");
+}

@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ActivityRow } from "../../ipc/bindings/ActivityRow";
 import type { Setting } from "../../ipc/bindings/Setting";
-import { filterActivity, filterSettings, sortActivity, type ActivityFilter } from "./table-model";
+import {
+  ariaSort, durationTone, filterActivity, filterSettings, firstLines, navIndex, nextSort, oneLine, sortActivity, stateTone,
+  waitLabel, type ActivityFilter,
+} from "./table-model";
 
 const row = (pid: number, p: Partial<ActivityRow> = {}): ActivityRow => ({
   pid, leaderPid: null, database: "db", user: "alice", application: "psql", clientAddr: null, backendType: "client backend",
@@ -131,5 +134,59 @@ describe("filterSettings", () => {
   it("süzgeçler AND", () => {
     expect(names(filterSettings(rows, { search: "mem", modifiedOnly: true, pendingRestartOnly: false }))).toEqual(["work_mem"]);
     expect(filterSettings(rows, { search: "", modifiedOnly: true, pendingRestartOnly: true })).toEqual([]);
+  });
+});
+
+describe("görünüm yardımcıları", () => {
+  it("stateTone", () => {
+    expect(stateTone("active")).toBe("active");
+    expect(stateTone("idle")).toBe("idle");
+    expect(stateTone("idle in transaction")).toBe("warn");
+    expect(stateTone("idle in transaction (aborted)")).toBe("danger");
+    expect(stateTone(null)).toBe("muted");
+    expect(stateTone("fastpath function call")).toBe("muted");
+  });
+  it("durationTone sınırları", () => {
+    expect(durationTone(null)).toBe("none");
+    expect(durationTone(-1)).toBe("none");
+    expect(durationTone(29.9)).toBe("normal");
+    expect(durationTone(30)).toBe("warn");
+    expect(durationTone(299)).toBe("warn");
+    expect(durationTone(300)).toBe("danger");
+  });
+  it("oneLine ve firstLines", () => {
+    expect(oneLine("select  1\n  from t", 100)).toBe("select 1 from t");
+    expect(oneLine(null)).toBe("");
+    expect(oneLine("abcdef", 3)).toBe("abc…");
+    expect(firstLines("a\n\nb\r\nc\nd", 3)).toEqual({ text: "a\nb\nc", truncated: true });
+    expect(firstLines("a\nb", 3)).toEqual({ text: "a\nb", truncated: false });
+    expect(firstLines(null, 3)).toEqual({ text: "", truncated: false });
+  });
+  it("navIndex: sınırda durur, seçim yoksa uçlardan başlar, boş listede -1", () => {
+    expect(navIndex(-1, "ArrowDown", 5)).toBe(0);
+    expect(navIndex(-1, "ArrowUp", 5)).toBe(4);
+    expect(navIndex(2, "ArrowDown", 5)).toBe(3);
+    expect(navIndex(4, "ArrowDown", 5)).toBe(4);
+    expect(navIndex(0, "ArrowUp", 5)).toBe(0);
+    expect(navIndex(2, "Home", 5)).toBe(0);
+    expect(navIndex(2, "End", 5)).toBe(4);
+    expect(navIndex(1, "PageDown", 50, 10)).toBe(11);
+    expect(navIndex(3, "PageUp", 50, 10)).toBe(0);
+    expect(navIndex(9, "ArrowDown", 5)).toBe(0);
+    expect(navIndex(0, "End", 0)).toBe(-1);
+  });
+  it("nextSort / ariaSort", () => {
+    expect(nextSort(null, "pid")).toEqual({ key: "pid", dir: "asc" });
+    expect(nextSort({ key: "pid", dir: "asc" }, "pid")).toEqual({ key: "pid", dir: "desc" });
+    expect(nextSort({ key: "pid", dir: "desc" }, "user")).toEqual({ key: "user", dir: "asc" });
+    expect(ariaSort({ key: "pid", dir: "desc" }, "pid")).toBe("descending");
+    expect(ariaSort({ key: "pid", dir: "asc" }, "pid")).toBe("ascending");
+    expect(ariaSort({ key: "pid", dir: "asc" }, "user")).toBe("none");
+    expect(ariaSort(null, "pid")).toBe("none");
+  });
+  it("waitLabel", () => {
+    expect(waitLabel({ waitEventType: "Lock", waitEvent: "relation" })).toBe("Lock:relation");
+    expect(waitLabel({ waitEventType: null, waitEvent: "x" })).toBe("x");
+    expect(waitLabel({ waitEventType: null, waitEvent: null })).toBe("");
   });
 });

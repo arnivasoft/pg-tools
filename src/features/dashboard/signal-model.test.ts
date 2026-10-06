@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ActivityRow } from "../../ipc/bindings/ActivityRow";
-import { revalidate, signalWarnings } from "./signal-model";
+import type { BlockSession } from "../../ipc/bindings/BlockSession";
+import { minimalRow, resolveSignalRow, revalidate, signalWarnings } from "./signal-model";
 
 const row = (p: Partial<ActivityRow> = {}): ActivityRow => ({
   pid: 10, leaderPid: null, database: "db", user: "alice", application: "psql", clientAddr: null, backendType: "client backend",
@@ -49,5 +50,23 @@ describe("revalidate", () => {
   });
   it("aynı kimlik → ok; durum/sorgu değişse de", () => {
     expect(revalidate(row(), [row({ pid: 1 }), row({ state: "idle", query: "x" })])).toEqual({ ok: true });
+  });
+});
+
+describe("minimalRow / resolveSignalRow", () => {
+  const bs: BlockSession = { pid: 7, user: "alice", application: "psql", state: "active", query: "select 1", blockedBy: [], waitSecs: 4 };
+  it("BlockSession alanlarını taşır, isSelf false", () => {
+    expect(minimalRow(bs)).toMatchObject({ pid: 7, user: "alice", application: "psql", state: "active", query: "select 1", isSelf: false });
+  });
+  it("gerçek satır varsa onu, yoksa asgariyi seçer", () => {
+    const real = row({ pid: 7 });
+    expect(resolveSignalRow(bs, [row({ pid: 1 }), real])).toBe(real);
+    expect(resolveSignalRow(bs, [row({ pid: 1 })]).backendType).toBe("");
+    expect(resolveSignalRow(bs, null).pid).toBe(7);
+  });
+  it("asgari satır backendType yüzünden yanlış 'changed' vermez (autovacuum worker); user/app değişirse verir", () => {
+    const shown = minimalRow(bs);
+    expect(revalidate(shown, [row({ pid: 7, user: "alice", application: "psql", backendType: "autovacuum worker" })])).toEqual({ ok: true });
+    expect(revalidate(shown, [row({ pid: 7, user: "bob", application: "psql" })])).toEqual({ ok: false, reason: "changed" });
   });
 });

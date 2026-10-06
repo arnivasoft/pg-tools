@@ -5,6 +5,7 @@ import { For, Show, Suspense, lazy, type Component } from "solid-js";
 import { td } from "../../app/strings-dashboard";
 import { Button } from "../../ui/Button";
 import { TabPanel, Tabs } from "../../ui/Tabs";
+import SignalDialog from "./SignalDialog";
 import type { DashController, DashModel, Section } from "./dash-controller";
 
 export interface SectionProps {
@@ -12,9 +13,11 @@ export interface SectionProps {
   model: DashModel;
 }
 
-/** Görünen bölümler, sekme sırasıyla. Diğer bölümler (Oturumlar, Kilitler, …) dosyaları eklendikçe buraya girer. */
+/** Görünen bölümler, sekme sırasıyla. Diğer bölümler (Yapılandırma, …) dosyaları eklendikçe buraya girer. */
 const SECTIONS: { value: Section; view: Component<SectionProps> }[] = [
   { value: "overview", view: lazy(() => import("./OverviewView")) },
+  { value: "sessions", view: lazy(() => import("./SessionsView")) },
+  { value: "locks", view: lazy(() => import("./LocksView")) },
 ];
 
 /** Yenileme aralığı seçenekleri (sn). */
@@ -118,6 +121,7 @@ export default function DashboardView(props: { dash: DashController; tabId: stri
                 )}
               </For>
             </Tabs>
+            <SignalDialog dash={props.dash} tabId={props.tabId} />
           </div>
         );
       }}
