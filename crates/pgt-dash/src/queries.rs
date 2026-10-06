@@ -4,12 +4,30 @@
 use pgt_core::{Error, Result};
 use tokio_postgres::Client;
 
-use crate::types::{ActivityRow, Overview, Sample};
+use crate::types::{
+    ActivityRow, BlockSession, LockReport, LockRow, Overview, PreparedXact, Sample, Setting, StatementRow, Statements,
+    StatementsOrder,
+};
 
 const SAMPLE: &str = include_str!("sql/sample.sql");
 const OVERVIEW: &str = include_str!("sql/overview.sql");
 const ACTIVITY_PG10: &str = include_str!("sql/activity.sql");
 const ACTIVITY_PG13: &str = include_str!("sql/activity.pg13.sql");
+const LOCKS_SESSIONS: &str = include_str!("sql/locks_sessions.sql");
+const LOCKS: &str = include_str!("sql/locks.sql");
+const SETTINGS: &str = include_str!("sql/settings.sql");
+const PREPARED: &str = include_str!("sql/prepared.sql");
+const STATEMENTS_EXT: &str = include_str!("sql/statements_ext.sql");
+const STATEMENTS_PG10: &str = include_str!("sql/statements.sql");
+const STATEMENTS_PG13: &str = include_str!("sql/statements.pg13.sql");
+
+/// Oturum listesinde gösterilecek en çok satır. SQL bir fazla (`LIMIT 5001`) satır getirir; dönen
+/// liste bu sınırı aşıyorsa liste kırpılmıştır ve üst katman fazlalığı atıp "kırpıldı" bilgisini verir.
+pub const ACTIVITY_LIMIT: usize = 5000;
+/// Kilit listesinde tutulan en çok satır (SQL `LIMIT 1001`); aşım `LockReport::truncated` ile bildirilir.
+pub const LOCKS_LIMIT: usize = 1000;
+/// `pg_stat_statements` sonucunda en çok satır (sabit).
+const STATEMENTS_LIMIT: usize = 50;
 
 /// Yetkisiz kullanıcıya PostgreSQL'in verdiği sabit (yerelleştirilmeyen) metin.
 const NO_PRIVILEGE: &str = "<insufficient privilege>";
@@ -54,7 +72,7 @@ pub async fn overview(c: &Client, db: Option<&str>) -> Result<Overview> {
     })
 }
 
-/// Oturum listesi (en çok 5001 satır; üst katman kırpmayı belirler).
+/// Oturum listesi (en çok `ACTIVITY_LIMIT + 1` satır; `len() > ACTIVITY_LIMIT` ise kırpılmıştır, fazlayı üst katman atar).
 pub async fn activity(c: &Client, version_num: u32, db: Option<&str>) -> Result<Vec<ActivityRow>> {
     let sql = pick(version_num, &[(10, ACTIVITY_PG10), (13, ACTIVITY_PG13)]);
     let rows = c.query(sql, &[&db]).await.map_err(Error::from_query)?;
@@ -81,9 +99,129 @@ pub async fn activity(c: &Client, version_num: u32, db: Option<&str>) -> Result<
         .collect())
 }
 
+/// Engelleme ilişkisindeki oturumlar ve kilitler; `db` verilirse yalnızca o veritabanının oturumları.
+pub async fn locks(c: &Client, db: Option<&str>) -> Result<LockReport> {
+    let sessions = c.query(LOCKS_SESSIONS, &[&db]).await.map_err(Error::from_query)?;
+    let sessions = sessions
+        .iter()
+        .map(|r| BlockSession {
+            pid: r.get("pid"),
+            user: r.get("user"),
+            application: r.get::<_, Option<String>>("application").unwrap_or_default(),
+            state: r.get("state"),
+            query: r.get::<_, Option<String>>("query").filter(|q| q != NO_PRIVILEGE),
+            blocked_by: r.get::<_, Option<Vec<i32>>>("blocked_by").unwrap_or_default(),
+            wait_secs: r.get("wait_secs"),
+        })
+        .collect();
+    let rows = c.query(LOCKS, &[&db]).await.map_err(Error::from_query)?;
+    let truncated = rows.len() > LOCKS_LIMIT;
+    let locks = rows
+        .iter()
+        .take(LOCKS_LIMIT)
+        .map(|r| LockRow {
+            pid: r.get("pid"),
+            locktype: r.get("locktype"),
+            mode: r.get("mode"),
+            granted: r.get("granted"),
+            object: r.get("object"),
+            database_oid: r.get::<_, Option<i64>>("database_oid").and_then(|v| u32::try_from(v).ok()),
+        })
+        .collect();
+    Ok(LockReport { sessions, locks, truncated })
+}
+
+/// Tüm yapılandırma parametreleri (`pending_restart` PG 10+'da vardır).
+pub async fn settings(c: &Client) -> Result<Vec<Setting>> {
+    let rows = c.query(SETTINGS, &[]).await.map_err(Error::from_query)?;
+    Ok(rows
+        .iter()
+        .map(|r| Setting {
+            name: r.get("name"),
+            value: r.get("value"),
+            unit: r.get("unit"),
+            category: r.get::<_, Option<String>>("category").unwrap_or_default(),
+            description: r.get::<_, Option<String>>("description").unwrap_or_default(),
+            source: r.get::<_, Option<String>>("source").unwrap_or_default(),
+            context: r.get::<_, Option<String>>("context").unwrap_or_default(),
+            boot_value: r.get("boot_value"),
+            pending_restart: r.get("pending_restart"),
+        })
+        .collect())
+}
+
+/// Hazırlanmış (two-phase) transaction'lar.
+pub async fn prepared(c: &Client) -> Result<Vec<PreparedXact>> {
+    let rows = c.query(PREPARED, &[]).await.map_err(Error::from_query)?;
+    Ok(rows
+        .iter()
+        .map(|r| PreparedXact {
+            gid: r.get("gid"),
+            transaction: r.get::<_, Option<String>>("transaction").unwrap_or_default(),
+            owner: r.get::<_, Option<String>>("owner").unwrap_or_default(),
+            database: r.get::<_, Option<String>>("database").unwrap_or_default(),
+            age_secs: r.get::<_, Option<f64>>("age_secs").unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// Sıralama ifadesi: yalnızca üç sabit dizeden biri (kullanıcı metni asla girmez). PG 13'te sütunlar
+/// `*_exec_time` olarak yeniden adlandırıldı. Eşitlikte kararlı sıra için `queryid` eklenir.
+fn order_clause(order: StatementsOrder, pg13: bool) -> &'static str {
+    match (order, pg13) {
+        (StatementsOrder::TotalTime, true) => "total_exec_time DESC, queryid",
+        (StatementsOrder::MeanTime, true) => "mean_exec_time DESC, queryid",
+        (StatementsOrder::TotalTime, false) => "total_time DESC, queryid",
+        (StatementsOrder::MeanTime, false) => "mean_time DESC, queryid",
+        (StatementsOrder::Calls, _) => "calls DESC, queryid",
+    }
+}
+
+/// `pg_stat_statements` en çok 50 satır. Eklenti kurulu değilse ya da yüklenmemişse `Unavailable`.
+/// Sorgu metni günlüğe/hata mesajına asla girmez.
+pub async fn statements(c: &Client, version_num: u32, db: Option<&str>, order: StatementsOrder) -> Result<Statements> {
+    let installed = c.query_opt(STATEMENTS_EXT, &[]).await.map_err(Error::from_query)?;
+    if installed.is_none() {
+        return Ok(Statements::Unavailable { reason: "pg_stat_statements eklentisi bu veritabanında kurulu değil.".into() });
+    }
+    let pg13 = version_num / 10_000 >= 13;
+    let base = pick(version_num, &[(10, STATEMENTS_PG10), (13, STATEMENTS_PG13)]);
+    let sql = format!("{base}\nORDER BY {} LIMIT {STATEMENTS_LIMIT}", order_clause(order, pg13));
+    let rows = match c.query(sql.as_str(), &[&db]).await.map_err(Error::from_query) {
+        Ok(rows) => rows,
+        // 55000: kitaplık shared_preload_libraries'te değil; 42P01: görünüm yok.
+        Err(Error::Query { sqlstate: Some(code), .. }) if code == "55000" || code == "42P01" => {
+            return Ok(Statements::Unavailable { reason: "pg_stat_statements yüklenmemiş (shared_preload_libraries).".into() });
+        }
+        Err(e) => return Err(e),
+    };
+    let rows = rows
+        .iter()
+        .map(|r| StatementRow {
+            query_id: r.get("query_id"),
+            query: r.get::<_, Option<String>>("query").filter(|q| q != NO_PRIVILEGE),
+            calls: r.get("calls"),
+            total_ms: r.get("total_ms"),
+            mean_ms: r.get("mean_ms"),
+            rows: r.get("rows"),
+            shared_blks_hit: r.get("shared_blks_hit"),
+            shared_blks_read: r.get("shared_blks_read"),
+        })
+        .collect();
+    Ok(Statements::Available { rows })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::pick;
+    use super::{order_clause, pick};
+    use crate::types::StatementsOrder::*;
+
+    #[test]
+    fn order_clauses_are_fixed_per_version() {
+        assert_eq!(order_clause(TotalTime, true), "total_exec_time DESC, queryid");
+        assert_eq!(order_clause(MeanTime, false), "mean_time DESC, queryid");
+        assert_eq!(order_clause(Calls, true), order_clause(Calls, false));
+    }
 
     #[test]
     fn picks_by_major_version() {

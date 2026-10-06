@@ -3,4 +3,7 @@
 pub mod queries;
 pub mod types;
 
-pub use types::{ActivityRow, Overview, Sample};
+pub use types::{
+    ActivityRow, BlockSession, LockReport, LockRow, Overview, PreparedXact, Sample, Setting, StatementRow, Statements,
+    StatementsOrder,
+};
