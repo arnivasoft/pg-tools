@@ -47,6 +47,10 @@ use crate::split::split;
 /// Sözleşme bozulduğunda dönen `Error::Invalid` işareti.
 pub const FORMAT_FAILED: &str = "biçimlendirilemedi";
 
+/// Biçimlendirilebilecek en büyük metin.
+pub const MAX_FORMAT_BYTES: usize = 5 * 1024 * 1024;
+pub const FORMAT_TOO_LARGE: &str = "biçimlendirilecek metin 5 MB'tan büyük";
+
 /// Bu derinliği (parantez ya da iç içe `CASE`) aşan ifadeler yalnız boşluk sadeleştirmesi alır (yığın güvenliği).
 const MAX_DEPTH: u32 = 100;
 
@@ -103,6 +107,9 @@ impl FormatOptions {
 /// sağlanamazsa `Err(Invalid)`.
 pub fn format(sql: &str, opts: &FormatOptions) -> Result<String> {
     opts.validate()?;
+    if sql.len() > MAX_FORMAT_BYTES {
+        return Err(Error::Invalid(FORMAT_TOO_LARGE.into()));
+    }
     let out = format_unchecked(sql, opts);
     if !tokens_equivalent(sql, &out) || format_unchecked(&out, opts) != out {
         return Err(Error::Invalid(FORMAT_FAILED.into()));
@@ -152,10 +159,23 @@ pub fn tokens_equivalent(a: &str, b: &str) -> bool {
     if ta.len() != tb.len() {
         return false;
     }
+    let mut prev_sig: Option<usize> = None;
     for i in 0..ta.len() {
         let (x, y) = (&ta[i], &tb[i]);
         if x.kind != y.kind {
             return false;
+        }
+        if x.kind != Kind::Comment {
+            // Dize devamı: `'a'` + (satır sonu içeren boşluk) + `'b'` tek bir literaldir, yalnız boşlukla sözdizimi
+            // hatasıdır. Ardışık iki dize arasındaki satır sonu varlığı iki tarafta aynı olmalı.
+            if let Some(j) = prev_sig
+                && x.kind == Kind::Str
+                && ta[j].kind == Kind::Str
+                && a[ta[j].end..x.start].contains('\n') != b[tb[j].end..y.start].contains('\n')
+            {
+                return false;
+            }
+            prev_sig = Some(i);
         }
         let (xs, ys) = (x.text(a), y.text(b));
         let recasable = x.kind == Kind::Word && is_recasable(xs);
@@ -502,6 +522,8 @@ struct Builder<'a> {
     frames: Vec<(Frame, Vec<Doc>)>,
     pending: Gap,
     force_hard: bool,
+    /// Son `tok` çağrısı belirteci yeni satıra mı koydu.
+    last_gap_hard: bool,
     /// Son yazılan belirtecin (yorum dahil) `toks` dizini.
     last: Option<usize>,
 }
@@ -521,9 +543,9 @@ impl<'a> Builder<'a> {
                 close[o] = Some(p);
             }
         }
+        // Nitelikli ad parçası (`t.from`, `t . select`): boşluktan bağımsız olarak anahtar sözcük sayılmaz.
         let dot_adjacent = |p: usize| {
-            (p > 0 && is_punct(t(p - 1), sql, &["."]) && t(p - 1).end == t(p).start)
-                || (p + 1 < n && is_punct(t(p + 1), sql, &["."]) && t(p).end == t(p + 1).start)
+            (p > 0 && is_punct(t(p - 1), sql, &["."])) || (p + 1 < n && is_punct(t(p + 1), sql, &["."]))
         };
         let lw: Vec<String> = (0..n)
             .map(|p| {
@@ -542,6 +564,7 @@ impl<'a> Builder<'a> {
             frames: vec![(Frame::Root, Vec::new())],
             pending: Gap::Default,
             force_hard: false,
+            last_gap_hard: false,
             last: None,
         };
         b.recase = (0..n).map(|p| b.recase_at(p)).collect();
@@ -559,6 +582,10 @@ impl<'a> Builder<'a> {
     fn recase_at(&self, p: usize) -> bool {
         let w = self.w(p);
         if w.is_empty() {
+            return false;
+        }
+        // `set = 1`, `update = 3`: `=`'den önceki sözcük kolon adıdır (değişmez sabitler hariç).
+        if p + 1 < self.sig.len() && self.text(p + 1) == "=" && !matches!(w, "true" | "false" | "null") {
             return false;
         }
         if ALWAYS.contains(&w) {
@@ -711,18 +738,34 @@ impl<'a> Builder<'a> {
         if prev.end == cur.start { Gap::Default } else { Gap::Space }
     }
 
+    /// `i` bir dize ve kendisinden önceki yorum olmayan belirteç de dize ise: hemen önceki aralıkta satır sonu var mı
+    /// (PostgreSQL dize devamı; bkz. `tokens_equivalent`).
+    fn str_continuation(&self, i: usize) -> Option<bool> {
+        if i == 0 || self.toks[i].kind != Kind::Str {
+            return None;
+        }
+        let j = (0..i).rev().find(|&j| self.toks[j].kind != Kind::Comment)?;
+        (self.toks[j].kind == Kind::Str).then(|| self.sql[self.toks[i - 1].end..self.toks[i].start].contains('\n'))
+    }
+
     /// Sig konumu `p`'deki belirteci yazar (öncesindeki yorumlar ve bekleyen aralıkla).
     fn tok(&mut self, p: usize) {
         let i = self.sig[p];
         self.flush_trailing();
         self.flush_own_line(i);
-        let g = if self.force_hard {
+        let mut g = if self.force_hard {
             Gap::Hard
         } else if self.pending == Gap::Default {
             self.default_gap(i)
         } else {
             self.pending
         };
+        match self.str_continuation(i) {
+            Some(true) => g = Gap::Hard,
+            Some(false) if matches!(g, Gap::Line | Gap::Soft) => g = Gap::Space,
+            _ => {}
+        }
+        self.last_gap_hard = g == Gap::Hard;
         self.emit_gap(g);
         let raw = self.text(p);
         let text = if self.recase[p] {
@@ -754,7 +797,8 @@ impl<'a> Builder<'a> {
 
     fn clause_at(&self, p: usize, lo: usize, hi: usize, cur: Option<Clause>) -> Option<(Clause, usize)> {
         let w = self.w(p);
-        if w.is_empty() {
+        if w.is_empty() || p + 1 < hi && self.text(p + 1) == "=" {
+            // `SET set = 1`, `WHERE update = 3`: anahtar sözcük adlı kolon, yan tümce başı değil.
             return None;
         }
         let prev = if p > lo { self.w(p - 1) } else { "" };
@@ -955,7 +999,14 @@ impl<'a> Builder<'a> {
             if k > 0 {
                 let c = commas[k - 1];
                 match self.opts.comma {
+                    // Virgül bir yorum yüzünden satır başına düştüyse (`a -- c` / `, b`) öğe aynı satırda sürer;
+                    // virgül yalnız kalmaz.
                     CommaStyle::Trailing => {
+                        self.tok(c);
+                        self.pending = if self.last_gap_hard { Gap::Space } else { Gap::Line };
+                    }
+                    // Virgülün ardındaki aynı satır yorumu (`a, -- c`) virgülle birlikte öğenin satırında kalır.
+                    CommaStyle::Leading if self.comment_follows_on_same_line(c) => {
                         self.tok(c);
                         self.pending = Gap::Line;
                     }
@@ -970,6 +1021,13 @@ impl<'a> Builder<'a> {
         }
         self.close();
         self.close();
+    }
+
+    fn comment_follows_on_same_line(&self, p: usize) -> bool {
+        let i = self.sig[p];
+        i + 1 < self.toks.len()
+            && self.toks[i + 1].kind == Kind::Comment
+            && !self.sql[self.toks[i].end..self.toks[i + 1].start].contains('\n')
     }
 
     fn cond(&mut self, a: usize, b: usize) {
@@ -1127,21 +1185,23 @@ mod tests {
 
     #[test]
     fn equivalence_check_catches_corruption() {
-        assert!(tokens_equivalent("select a,b from t", "SELECT a, b
-FROM t"));
+        assert!(tokens_equivalent("select a,b from t", "SELECT a, b\nFROM t"));
         assert!(tokens_equivalent("select (1)", "select ( 1 )"));
+        assert!(tokens_equivalent("select 'a'\n'b'", "SELECT 'a'\n  'b'"));
         for (a, b) in [
-            ("select name", "select NAME"),          // tanımlayıcı harfi
+            ("select name", "select NAME"),           // tanımlayıcı harfi
             ("select 'a  b'", "select 'a b'"),        // dize içi
             ("select a-b", "select a - b"),           // operatör bitişikliği ayrıldı
             ("select x::int", "select x: :int"),      // `::` bölündü
             ("select a - -b", "select a --b"),        // yorum oluştu
             ("select B'01'", "select B '01'"),        // bit dizesi öneki
-            ("select 1 -- c
-, 2", "select 1 -- c, 2"), // satır yorumu kodu yuttu
+            ("select 1 -- c\n, 2", "select 1 -- c, 2"), // satır yorumu kodu yuttu
             ("select $1", "select $ 1"),
             ("select 1.5", "select 1 . 5"),
             ("select /* a */ 1", "select /* A */ 1"),
+            ("select 'a'\n'b'", "select 'a' 'b'"),    // dize devamı birleşti → sözdizimi hatası
+            ("select 'a' 'b'", "select 'a'\n'b'"),    // sözdizimi hatası sessizce devama döndü
+            ("select E'a'\n'b'", "select E'a' 'b'"),  // önekli dize devamı
         ] {
             assert!(!tokens_equivalent(a, b), "{a:?} ≈ {b:?}");
         }

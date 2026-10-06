@@ -144,10 +144,14 @@ pub async fn qt_check(
 }
 
 /// SQL biçimlendirme (saf; oturum gerektirmez, SQL günlüğe yazılmaz). Belirteç eşitliği ya da eşkuvvetlilik
-/// sağlanamazsa `invalid` kodlu "biçimlendirilemedi"; geçersiz seçenek `invalid`.
+/// sağlanamazsa `invalid` kodlu "biçimlendirilemedi"; geçersiz seçenek ya da 5 MB üstü metin `invalid`.
+/// CPU işi olduğundan engelleyici iş parçacığında çalışır (Tokio işçisini meşgul etmez).
 #[tauri::command]
 pub async fn qt_format(sql: String, options: FormatOptions) -> CmdResult<String> {
-    Box::pin(async move { pgt_query::format::format(&sql, &options) }).await.map_err(|e| query_payload(&e))
+    Box::pin(tokio::task::spawn_blocking(move || pgt_query::format::format(&sql, &options)))
+        .await
+        .map_err(|_| query_payload(&pgt_core::Error::Invalid(pgt_query::format::FORMAT_FAILED.into())))?
+        .map_err(|e| query_payload(&e))
 }
 
 /// İlerleme kanalı kapanırsa (gönderim hatası) dışa aktarma iptal edilir.

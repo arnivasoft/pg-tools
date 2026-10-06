@@ -181,6 +181,47 @@ fn line_comments_always_end_their_line() {
     }
 }
 
+#[test]
+fn string_continuation_keeps_its_newline() {
+    for sql in [
+        "select 'a'\n'b'",
+        "select x from t where s = 'a'\n'b' and y = 1",
+        "values (1, 'a'\n'b')",
+        "select f('a'\n'b')",
+        "select case when a then 'x'\n'y' else 'z' end",
+        "select E'a'\n  'b'",
+    ] {
+        let out = f(sql);
+        assert_tokens_preserved(sql, &out);
+        let strs: Vec<_> = lex(&out).into_iter().filter(|t| t.kind == Kind::Str).collect();
+        for w in strs.windows(2) {
+            let gap = &out[w[0].end..w[1].start];
+            if gap.trim().is_empty() {
+                assert!(gap.contains('\n'), "{sql:?} → {out:?}");
+            }
+        }
+    }
+    // Yalnız boşlukla ayrılmış dizeler (sözdizimi hatası) satıra bölünmez.
+    assert_eq!(f("select 'a' 'b'"), "SELECT 'a' 'b'");
+}
+
+#[test]
+fn commas_next_to_comments() {
+    let trailing = f("select a -- c\n, b, c from t");
+    assert!(!trailing.lines().any(|l| l.trim() == ","), "{trailing}");
+    let leading = format("select a, -- c\nb, c from t", &FormatOptions { comma: CommaStyle::Leading, ..opts() }).unwrap();
+    assert!(leading.contains("a, -- c"), "{leading}");
+}
+
+#[test]
+fn oversized_input_is_rejected() {
+    let big = "select 1;\n".repeat(600_000);
+    match format(&big, &opts()) {
+        Err(Error::Invalid(m)) => assert_eq!(m, pgt_query::format::FORMAT_TOO_LARGE),
+        other => panic!("{other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Fuzz
 
@@ -266,6 +307,10 @@ const FRAGS: &[&str] = &[
     "not exists (select 1 from u where u.id = t.id)",
     "is distinct from",
     "for update skip locked",
+    "'a'\n'b'",
+    "'x' 'y'",
+    "E'p'\n  'q'",
+    "'s' -- c\n't'",
 ];
 
 #[test]
