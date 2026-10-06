@@ -1,0 +1,1824 @@
+//! Tablo alter'ı: kimlik (`attnum`) eşlemeli kolon farkı ve tablo düzeyi değişiklikler. Kısıt farkı Task 4'te gelir.
+//!
+//! Kararlar:
+//! - Eski tanım yalnızca SQL'e giren kimlik alanları için doğrulanır (şema, ad, kolon adları) + eşleme anahtarı
+//!   `attnum`; yüklenmiş tanımın create-geçerliliği gerekmez (eski tip/ifade/varsayılan metni hiç SQL'e girmez).
+//!   Yeni tanım `validate_table` ile tam doğrulanır (create-only kurallar hariç).
+//! - İfade sırası sabittir (Global Constraints): (1) tablo `RENAME TO`, (2) `SET SCHEMA`, [(3) kısıt DROP — Task 4],
+//!   (4) `DROP COLUMN`, (5) `ALTER COLUMN … TYPE`, (6) `RENAME COLUMN`, (7) `ADD COLUMN`, (8) nullability/varsayılan/
+//!   kimlik/üretilmiş ifade, [(9–10) kısıtlar — Task 4], (11) sahip, tablespace, kalıcılık, fillfactor, yorumlar.
+//!   Adım 2'den sonra her ifade YENİ nitelikli tablo adını kullanır. `TYPE` (5) yeniden adlandırmadan (6) önce
+//!   çalıştığından ESKİ kolon adını, adım 8 ve sonrası YENİ kolon adını kullanır.
+//! - Adım 8'de her kolonun ifadeleri birlikte, şu sırayla üretilir: `DROP IDENTITY`, `DROP EXPRESSION`,
+//!   `SET|DROP DEFAULT`, `SET|DROP NOT NULL`, `ADD GENERATED … AS IDENTITY` / `SET GENERATED`, `SET EXPRESSION`.
+//!   Gerekçe: PG kimlik eklemeden önce kolonun NOT NULL olmasını ve varsayılansız olmasını ister; kimlikli kolonda
+//!   `DROP NOT NULL` ve `SET DEFAULT` reddedilir (önce `DROP IDENTITY`).
+//! - Serbest SQL alanları (`default`, `generated.expr`, `using`) `validate_table` içinde `check_free_sql`'den geçer,
+//!   `wrap` ile yerleşir ve serbest SQL içeren her NİHAİ ifade ayrıca `composed_is_clean` ile taranır.
+//! - Kolon sırası değiştirilemez: fark yalnızca ekleme/silme/değişim üzerinden üretilir, sıra farkı uyarıdır.
+
+use std::collections::{HashMap, HashSet};
+
+use super::freesql::{composed_is_clean, wrap};
+use super::table::{column_comment_sql, column_sql, has_comment, table_comment_sql, validate_table, version_err};
+use super::{BuildCtx, check_ident, check_schema_ident, err, stmt};
+use crate::model::{ColumnDef, FieldError, IdentityKind, Persistence, TableDef};
+use crate::plan::{Plan, Risk, Statement};
+use crate::quote::{qualified, quote_ident};
+
+const RENAME_TABLE_NOTE: &str = "Tabloya adla başvuran fonksiyonlar ve uygulama sorguları etkilenir";
+const SET_SCHEMA_NOTE: &str =
+    "Tablonun indeksleri, kısıtları ve kolonlarına bağlı diziler de taşınır; adla başvuran bağımlılar etkilenir";
+const DROP_COLUMN_NOTE: &str = "Kolondaki veri kalıcı silinir";
+const TYPE_NOTE: &str = "Tabloyu yeniden yazar; bağlı indeks/kısıtlar yeniden oluşturulur";
+const TYPE_USING_HINT: &str = "; otomatik dönüşüm yoksa USING gerekir";
+const RENAME_COLUMN_NOTE: &str = "Kolona adla başvuran fonksiyonlar ve uygulama sorguları etkilenir";
+const ADD_NOT_NULL_NOTE: &str = "Mevcut satırlar varsa başarısız olur";
+const ADD_GENERATED_NOT_NULL_NOTE: &str = "İfade mevcut bir satırda NULL üretirse başarısız olur";
+const SET_NOT_NULL_NOTE: &str = "Tabloyu tarar; NULL değer içeren satır varsa başarısız olur";
+const ADD_IDENTITY_NOTE: &str =
+    "Kimlik kolonu NOT NULL olmalıdır; yeni değerler kolona bağlı yeni bir diziden üretilir";
+const DROP_IDENTITY_NOTE: &str = "Kimliğe bağlı dizi silinir; mevcut değerler korunur";
+const DROP_EXPRESSION_NOTE: &str = "Kolon sıradan kolona dönüşür; mevcut değerler korunur";
+const SET_EXPRESSION_NOTE: &str = "Tüm satırlar için değer yeni ifadeyle yeniden hesaplanır";
+const REWRITE_NOTE: &str = "Tabloyu yeniden yazar; ACCESS EXCLUSIVE kilidi alır";
+const FILLFACTOR_NOTE: &str = "Yalnızca yeni yazılan sayfaları etkiler; mevcut sayfalar için VACUUM FULL gerekir";
+
+pub(crate) const REWRITE_WARNING: &str = "Tablo yeniden yazılır: işlem boyunca ACCESS EXCLUSIVE kilidi alınır ve tablo okuma ve yazmaya kapalı kalır; büyük tablolarda uzun sürer";
+pub(crate) const LOCK_TIMEOUT_WARNING: &str = "Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')";
+pub(crate) const COLUMN_ORDER_WARNING: &str = "Kolon sırası değiştirilemez; yeni sıra yoksayılır (mevcut kolonların sırası korunur, yeni kolonlar sona eklenir)";
+const MANAGED_MSG: &str = "Bölüm/kalıtımlı tablonun kolon ve kısıtları ana tablodan yönetilir.";
+const COMPOSED_MSG: &str =
+    "Serbest SQL alanları birleşince geçersiz ifade oluşuyor (ör. satır yorumuyla biten ifade).";
+
+const LOAD_FLAG_MSG: &str = "Bu alan yüklemeden gelir ve değiştirilemez; tanımı yeniden yükleyin.";
+const PARTITION_BY_MSG: &str =
+    "Bölümleme anahtarı sonradan değiştirilemez; yalnızca tablo oluşturulurken belirlenir.";
+const TABLESPACE_CLEAR_MSG: &str =
+    "Tablespace kaldırılamaz; varsayılana dönmek için pg_default'u açıkça seçin.";
+const CONSTRAINTS_PENDING_MSG: &str = "Kısıt değişiklikleri henüz desteklenmiyor.";
+
+/// Yeni tanımdaki her kolon: konumu, eski karşılığı (korunan) ya da `None` (eklenen).
+type Matched<'a> = Vec<(usize, Option<&'a ColumnDef>, &'a ColumnDef)>;
+
+/// Tablo alter'ı. Hata sırası: yeni tanımın tam doğrulaması, eski tanımın kimlik alanları (`old.` önekiyle), attnum
+/// eşlemesi, alter'a özgü kurallar, ifade üretimi sırasındaki hatalar (yeniden adlandırma döngüsü, nihai
+/// ifade taraması).
+pub fn alter(old: &TableDef, new: &TableDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
+    let e = validate_table(new, ctx);
+    if !e.is_empty() {
+        return Err(e);
+    }
+    let e = validate_old(old);
+    if !e.is_empty() {
+        return Err(e);
+    }
+    // Eşleme tutarlılığı iki taraf da kendi başına geçerliyken denetlenir (bozuk eski tanım "bayat" sanılmasın).
+    let mut e = vec![];
+    check_new_attnums(old, new, &mut e);
+    if !e.is_empty() {
+        return Err(e);
+    }
+    // Eşleme: eski tarafta attnum'lar benzersiz ve dolu (validate_old), yeni taraftakiler eskide var
+    // (check_new_attnums) → arama her zaman başarılı.
+    let by_attnum: HashMap<i16, &ColumnDef> = old
+        .columns
+        .iter()
+        .filter_map(|c| c.attnum.map(|n| (n, c)))
+        .collect();
+    let matched: Matched = new
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (i, c.attnum.map(|n| by_attnum[&n]), c))
+        .collect();
+    let e = check_alter_rules(old, new, &matched, ctx);
+    if !e.is_empty() {
+        return Err(e);
+    }
+    build(old, new, &matched)
+}
+
+/// Eski tanım: yalnızca SQL'e giren kimlik alanları (şema, ad, kolon adları) ve eşleme anahtarı `attnum`.
+fn validate_old(old: &TableDef) -> Vec<FieldError> {
+    let mut e = vec![];
+    check_schema_ident("old.schema", &old.schema, &mut e);
+    check_ident("old.name", &old.name, &mut e);
+    let mut seen = HashSet::new();
+    for (i, c) in old.columns.iter().enumerate() {
+        check_ident(&format!("old.columns[{i}].name"), &c.name, &mut e);
+        let p = format!("old.columns[{i}].attnum");
+        match c.attnum {
+            None => e.push(err(
+                &p,
+                "Yüklenmiş kolonun attnum değeri yok; tanımı yeniden yükleyin.",
+            )),
+            Some(n) if !seen.insert(n) => e.push(err(
+                &p,
+                format!("attnum {n} birden fazla kolonda; tanımı yeniden yükleyin."),
+            )),
+            Some(_) => {}
+        }
+    }
+    e
+}
+
+/// Yeni tanımın attnum'ları: benzersiz ve eski tanımda var (yoksa tanım bayat ya da oynanmış).
+fn check_new_attnums(old: &TableDef, new: &TableDef, e: &mut Vec<FieldError>) {
+    let known: HashSet<i16> = old.columns.iter().filter_map(|c| c.attnum).collect();
+    let mut seen = HashSet::new();
+    for (i, c) in new.columns.iter().enumerate() {
+        let Some(n) = c.attnum else { continue };
+        let p = format!("columns[{i}].attnum");
+        if !seen.insert(n) {
+            e.push(err(&p, format!("attnum {n} birden fazla kolonda.")));
+        } else if !known.contains(&n) {
+            e.push(err(
+                &p,
+                format!("attnum {n} mevcut tabloda yok; tanım bayat, yeniden yükleyin."),
+            ));
+        }
+    }
+}
+
+/// Kolon yorum dışı (ve `using` dışı) alanlarda değişmedi mi.
+fn same_shape(a: &ColumnDef, b: &ColumnDef) -> bool {
+    a.name == b.name
+        && a.data_type == b.data_type
+        && a.not_null == b.not_null
+        && a.default == b.default
+        && a.identity == b.identity
+        && a.generated == b.generated
+        && a.collation == b.collation
+}
+
+/// Kolon farkı var mı (silme, ekleme ya da korunan kolonda yorum dışı değişim).
+fn columns_changed(old: &TableDef, matched: &Matched) -> bool {
+    let kept = matched.iter().filter(|(_, oc, _)| oc.is_some()).count();
+    kept != old.columns.len()
+        || kept != matched.len()
+        || matched
+            .iter()
+            .any(|(_, oc, c)| oc.is_some_and(|oc| !same_shape(oc, c)))
+}
+
+/// Alter'a özgü kurallar (yeni tanım tek başına geçerli olsa da eski tanımla birlikte geçersiz olan değişiklikler).
+fn check_alter_rules(old: &TableDef, new: &TableDef, matched: &Matched, ctx: &BuildCtx) -> Vec<FieldError> {
+    let mut e = vec![];
+    if old.is_partition != new.is_partition {
+        e.push(err("isPartition", LOAD_FLAG_MSG));
+    }
+    if old.inherits != new.inherits {
+        e.push(err("inherits", LOAD_FLAG_MSG));
+    }
+    // Bölüm/kalıtımlı tablo: kolon ve kısıtlar ana tablodan yönetilir; ad/şema/sahip/tablespace/yorumlar serbest.
+    let managed = old.is_partition || old.inherits;
+    if managed && columns_changed(old, matched) {
+        e.push(err("columns", MANAGED_MSG));
+    }
+    if old.partition_by != new.partition_by {
+        e.push(err("partitionBy", PARTITION_BY_MSG));
+    }
+    if old.tablespace.is_some() && new.tablespace.is_none() {
+        e.push(err("tablespace", TABLESPACE_CLEAR_MSG));
+    }
+    if !managed {
+        for (i, oc, c) in matched {
+            let Some(oc) = oc else { continue };
+            let p = format!("columns[{i}].generated");
+            match (&oc.generated, &c.generated) {
+                (None, Some(_)) => e.push(err(
+                    &p,
+                    "Mevcut kolonu üretilmiş kolona çevirmek desteklenmez; yeni kolon ekleyin.",
+                )),
+                (Some(_), None) if ctx.version_num < 130000 => {
+                    e.push(version_err(&p, "Üretilmiş ifadeyi kaldırmak (DROP EXPRESSION)", 13));
+                }
+                // PG 18: DROP EXPRESSION yalnızca STORED kolonda; sanal kolonun değerleri saklanmadığından korunamaz.
+                (Some(og), None) if !og.stored => e.push(err(
+                    &p,
+                    "Sanal üretilmiş kolonun ifadesi kaldırılamaz (DROP EXPRESSION yalnızca STORED); kolonu silip yeniden ekleyin.",
+                )),
+                (Some(og), Some(ng)) if og.stored != ng.stored => e.push(err(
+                    &p,
+                    "Üretilmiş kolonun STORED/VIRTUAL türü değiştirilemez; kolonu silip yeniden ekleyin.",
+                )),
+                (Some(og), Some(ng)) if og.expr != ng.expr && ctx.version_num < 170000 => e.push(err(
+                    &p,
+                    "Üretilmiş ifadeyi değiştirmek (SET EXPRESSION) PG 17+ gerektirir; kolonu silip yeniden ekleyin.",
+                )),
+                _ => {}
+            }
+        }
+    }
+    // Task 4'e kadar kısıt farkı yok (bölüm/kalıtımlı tabloda kalıcı kural).
+    if old.constraints != new.constraints {
+        e.push(err(
+            "constraints",
+            if managed { MANAGED_MSG } else { CONSTRAINTS_PENDING_MSG },
+        ));
+    }
+    e
+}
+
+/// Korunan kolonların göreli sırası değişti mi ya da yeni kolon korunan bir kolonun önüne mi kondu (ADD sona ekler).
+fn order_changed(old: &TableDef, new: &TableDef) -> bool {
+    let pos: HashMap<i16, usize> = old
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| c.attnum.map(|n| (n, i)))
+        .collect();
+    let mut last: Option<usize> = None;
+    let mut added_before = false;
+    for c in &new.columns {
+        match c.attnum {
+            None => added_before = true,
+            Some(n) => {
+                let p = pos[&n];
+                if added_before || last.is_some_and(|l| p < l) {
+                    return true;
+                }
+                last = Some(p);
+            }
+        }
+    }
+    false
+}
+
+/// Boş yorum `None` sayılır (bkz. `has_comment`).
+fn norm_comment(c: &Option<String>) -> Option<String> {
+    c.clone().filter(|s| !s.is_empty())
+}
+
+fn identity_sql(k: IdentityKind) -> &'static str {
+    match k {
+        IdentityKind::Always => "ALWAYS",
+        IdentityKind::ByDefault => "BY DEFAULT",
+    }
+}
+
+#[derive(Default)]
+struct Out {
+    statements: Vec<Statement>,
+    errs: Vec<FieldError>,
+    /// Tabloyu yeniden yazan ifade var (uyarı + lock_timeout önerisi).
+    rewrite: bool,
+    /// Uzun sürebilen (tarayan) ifade var (lock_timeout önerisi).
+    long: bool,
+}
+
+impl Out {
+    fn push(&mut self, sql: String, risk: Risk, note: Option<&str>) {
+        self.statements.push(stmt(sql, risk, note));
+    }
+
+    /// Serbest SQL içeren ifade: alan kapısına ek olarak NİHAİ ifade de taranır.
+    fn push_free(&mut self, path: &str, sql: String, risk: Risk, note: Option<&str>) {
+        if composed_is_clean(&sql) {
+            self.push(sql, risk, note);
+        } else {
+            self.errs.push(err(path, COMPOSED_MSG));
+        }
+    }
+}
+
+fn build(old: &TableDef, new: &TableDef, matched: &Matched) -> Result<Plan, Vec<FieldError>> {
+    let mut out = Out::default();
+    let mut warnings = vec![];
+    if order_changed(old, new) {
+        warnings.push(COLUMN_ORDER_WARNING.to_string());
+    }
+    let kept: Vec<(usize, &ColumnDef, &ColumnDef)> = matched
+        .iter()
+        .filter_map(|(i, oc, c)| oc.map(|oc| (*i, oc, *c)))
+        .collect();
+
+    // (1) tablo adı, (2) şema: sonraki tüm ifadeler yeni nitelikli adı kullanır.
+    let old_q = qualified(&old.schema, &old.name);
+    if old.name != new.name {
+        out.push(
+            format!("ALTER TABLE {old_q} RENAME TO {}", quote_ident(&new.name)),
+            Risk::Safe,
+            Some(RENAME_TABLE_NOTE),
+        );
+    }
+    if old.schema != new.schema {
+        out.push(
+            format!(
+                "ALTER TABLE {} SET SCHEMA {}",
+                qualified(&old.schema, &new.name),
+                quote_ident(&new.schema)
+            ),
+            Risk::Safe,
+            Some(SET_SCHEMA_NOTE),
+        );
+    }
+    let q = qualified(&new.schema, &new.name);
+
+    // (4) silinen kolonlar (eski sırayla).
+    let kept_attnums: HashSet<i16> = kept.iter().filter_map(|(_, oc, _)| oc.attnum).collect();
+    for oc in &old.columns {
+        if oc.attnum.is_some_and(|n| !kept_attnums.contains(&n)) {
+            out.push(
+                format!("ALTER TABLE {q} DROP COLUMN {}", quote_ident(&oc.name)),
+                Risk::DataLoss,
+                Some(DROP_COLUMN_NOTE),
+            );
+        }
+    }
+
+    // (5) tip/collation değişimi: yeniden adlandırmadan önce, ESKİ kolon adıyla.
+    for (i, oc, c) in &kept {
+        if oc.data_type != c.data_type || oc.collation != c.collation {
+            // Tip metni `validate_type` ile doğrulandı; collation yalnızca TYPE ifadesinin parçası olarak değişir
+            // (COLLATE yoksa yeni tipin varsayılan collation'ı).
+            let mut sql = format!(
+                "ALTER TABLE {q} ALTER COLUMN {} TYPE {}",
+                quote_ident(&oc.name),
+                c.data_type
+            );
+            if let Some(cl) = &c.collation {
+                sql.push_str(&format!(" COLLATE {}", quote_ident(cl)));
+            }
+            let note = match &c.using {
+                Some(u) => {
+                    sql.push_str(&format!(" USING {}", wrap(u)));
+                    TYPE_NOTE.to_string()
+                }
+                None => format!("{TYPE_NOTE}{TYPE_USING_HINT}"),
+            };
+            out.push_free(&format!("columns[{i}].using"), sql, Risk::DataLoss, Some(&note));
+            out.rewrite = true;
+        } else if c.using.is_some() {
+            warnings.push(format!(
+                "'{}' kolonunun tipi değişmediği için USING yoksayıldı.",
+                c.name
+            ));
+        }
+    }
+
+    // (6) kolon adları: zincirler (a→b, b→c) hedef adı boşalan sırayla; döngü (a↔b) doğrulama hatası.
+    let mut pending: Vec<(usize, &str, &str)> = kept
+        .iter()
+        .filter(|(_, oc, c)| oc.name != c.name)
+        .map(|(i, oc, c)| (*i, oc.name.as_str(), c.name.as_str()))
+        .collect();
+    while !pending.is_empty() {
+        let free = pending
+            .iter()
+            .position(|(_, _, to)| !pending.iter().any(|(_, from, _)| from == to));
+        let Some(k) = free else {
+            out.errs.push(err(
+                &format!("columns[{}].name", pending[0].0),
+                "Kolon adları döngüsel olarak değiştirilemez (ör. a↔b takası); önce ara bir adla kaydedin.",
+            ));
+            break;
+        };
+        let (_, from, to) = pending.remove(k);
+        out.push(
+            format!(
+                "ALTER TABLE {q} RENAME COLUMN {} TO {}",
+                quote_ident(from),
+                quote_ident(to)
+            ),
+            Risk::Safe,
+            Some(RENAME_COLUMN_NOTE),
+        );
+    }
+
+    // (7) eklenen kolonlar (create'teki kolon biçimi; tabloya sona eklenir).
+    for (i, oc, c) in matched {
+        if oc.is_some() {
+            continue;
+        }
+        if c.using.is_some() {
+            warnings.push(format!(
+                "'{}' yeni bir kolon; USING yalnızca tip değişiminde kullanılır, yoksayıldı.",
+                c.name
+            ));
+        }
+        // Kimlik değerleri diziden, varsayılan değer ifadeden gelir; üretilmiş ifade NULL üretebilir.
+        let fails_on_rows = c.not_null && c.default.is_none() && c.identity.is_none();
+        let (risk, note) = if !fails_on_rows {
+            (Risk::Safe, None)
+        } else if c.generated.is_some() {
+            (Risk::Destructive, Some(ADD_GENERATED_NOT_NULL_NOTE))
+        } else {
+            (Risk::Destructive, Some(ADD_NOT_NULL_NOTE))
+        };
+        out.push_free(
+            &format!("columns[{i}]"),
+            format!("ALTER TABLE {q} ADD COLUMN {}", column_sql(c)),
+            risk,
+            note,
+        );
+    }
+
+    // (8) nullability/varsayılan/kimlik/üretilmiş ifade (YENİ kolon adıyla; kolon başına sabit iç sıra, bkz. modül).
+    for (i, oc, c) in &kept {
+        let ac = |rest: &str| format!("ALTER TABLE {q} ALTER COLUMN {} {rest}", quote_ident(&c.name));
+        if oc.identity.is_some() && c.identity.is_none() {
+            out.push(ac("DROP IDENTITY"), Risk::Safe, Some(DROP_IDENTITY_NOTE));
+        }
+        if oc.generated.is_some() && c.generated.is_none() {
+            out.push(ac("DROP EXPRESSION"), Risk::Safe, Some(DROP_EXPRESSION_NOTE));
+        }
+        if oc.default != c.default {
+            match &c.default {
+                Some(d) => out.push_free(
+                    &format!("columns[{i}].default"),
+                    ac(&format!("SET DEFAULT {}", wrap(d))),
+                    Risk::Safe,
+                    None,
+                ),
+                None => out.push(ac("DROP DEFAULT"), Risk::Safe, None),
+            }
+        }
+        if oc.not_null != c.not_null {
+            if c.not_null {
+                out.push(ac("SET NOT NULL"), Risk::Destructive, Some(SET_NOT_NULL_NOTE));
+                out.long = true;
+            } else {
+                out.push(ac("DROP NOT NULL"), Risk::Safe, None);
+            }
+        }
+        match (oc.identity, c.identity) {
+            (None, Some(k)) => out.push(
+                ac(&format!("ADD GENERATED {} AS IDENTITY", identity_sql(k))),
+                Risk::Safe,
+                Some(ADD_IDENTITY_NOTE),
+            ),
+            (Some(a), Some(k)) if a != k => out.push(
+                ac(&format!("SET GENERATED {}", identity_sql(k))),
+                Risk::Safe,
+                None,
+            ),
+            _ => {}
+        }
+        if let (Some(og), Some(ng)) = (&oc.generated, &c.generated)
+            && og.expr != ng.expr
+        {
+            out.push_free(
+                &format!("columns[{i}].generated"),
+                ac(&format!("SET EXPRESSION AS {}", wrap(&ng.expr))),
+                Risk::Destructive,
+                Some(SET_EXPRESSION_NOTE),
+            );
+            // STORED değerler yeniden hesaplanıp yazılır; VIRTUAL değerler saklanmaz.
+            if ng.stored {
+                out.rewrite = true;
+            }
+        }
+    }
+
+    // (11) tablo özellikleri ve yorumlar.
+    if let Some(ow) = &new.owner
+        && old.owner.as_ref() != Some(ow)
+    {
+        out.push(format!("ALTER TABLE {q} OWNER TO {}", quote_ident(ow)), Risk::Safe, None);
+    }
+    if old.tablespace != new.tablespace
+        && let Some(ts) = &new.tablespace
+    {
+        out.push(
+            format!("ALTER TABLE {q} SET TABLESPACE {}", quote_ident(ts)),
+            Risk::Safe,
+            Some(REWRITE_NOTE),
+        );
+        out.rewrite = true;
+    }
+    if old.persistence != new.persistence {
+        let what = match new.persistence {
+            Persistence::Permanent => "LOGGED",
+            Persistence::Unlogged => "UNLOGGED",
+        };
+        out.push(format!("ALTER TABLE {q} SET {what}"), Risk::Safe, Some(REWRITE_NOTE));
+        out.rewrite = true;
+    }
+    if old.fillfactor != new.fillfactor {
+        let sql = match new.fillfactor {
+            Some(n) => format!("ALTER TABLE {q} SET (fillfactor = {n})"),
+            None => format!("ALTER TABLE {q} RESET (fillfactor)"),
+        };
+        out.push(sql, Risk::Safe, Some(FILLFACTOR_NOTE));
+    }
+    if norm_comment(&old.comment) != norm_comment(&new.comment) {
+        out.push(table_comment_sql(&q, &norm_comment(&new.comment)), Risk::Safe, None);
+    }
+    for (_, oc, c) in matched {
+        let changed = match oc {
+            Some(oc) => norm_comment(&oc.comment) != norm_comment(&c.comment),
+            None => has_comment(&c.comment),
+        };
+        if changed {
+            out.push(
+                column_comment_sql(new, &c.name, &norm_comment(&c.comment)),
+                Risk::Safe,
+                None,
+            );
+        }
+    }
+
+    if !out.errs.is_empty() {
+        return Err(out.errs);
+    }
+    if out.rewrite {
+        warnings.push(REWRITE_WARNING.to_string());
+    }
+    if out.rewrite || out.long {
+        warnings.push(LOCK_TIMEOUT_WARNING.to_string());
+    }
+    Ok(Plan {
+        statements: out.statements,
+        warnings,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::type_syntax::{is_spoofing_format, validate_type};
+    use crate::build::{alter as balter, assert_single_statements, render, scan_semicolons};
+    use crate::model::*;
+
+    fn v(n: u32) -> BuildCtx {
+        BuildCtx {
+            version_num: n,
+            ..Default::default()
+        }
+    }
+    fn ctx() -> BuildCtx {
+        v(180000)
+    }
+    fn o(d: TableDef) -> ObjectDef {
+        ObjectDef::Table(d)
+    }
+    fn col(n: &str, ty: &str) -> ColumnDef {
+        ColumnDef {
+            attnum: None,
+            name: n.into(),
+            data_type: ty.into(),
+            not_null: false,
+            default: None,
+            identity: None,
+            generated: None,
+            collation: None,
+            comment: None,
+            using: None,
+        }
+    }
+    /// Yüklenmiş kolon (attnum dolu).
+    fn lc(n: i16, name: &str, ty: &str) -> ColumnDef {
+        ColumnDef {
+            attnum: Some(n),
+            ..col(name, ty)
+        }
+    }
+    fn base() -> TableDef {
+        TableDef {
+            schema: "public".into(),
+            name: "t".into(),
+            owner: None,
+            tablespace: None,
+            persistence: Persistence::Permanent,
+            columns: vec![lc(1, "id", "integer")],
+            constraints: vec![],
+            partition_by: None,
+            fillfactor: None,
+            comment: None,
+            partition_text: None,
+            is_partition: false,
+            inherits: false,
+            unsupported: vec![],
+        }
+    }
+    fn pk_id() -> ConstraintDef {
+        ConstraintDef {
+            oid: Some(100),
+            name: Some("t_pkey".into()),
+            kind: ConstraintKind::PrimaryKey {
+                columns: vec!["id".into()],
+                include: vec![],
+            },
+            deferrable: false,
+            initially_deferred: false,
+            not_valid: false,
+        }
+    }
+    /// Yüklenmiş zengin tablo: kimlik PK, collation + yorum, varsayılan, üretilmiş, sıradan, NULL'lanabilir tamsayı,
+    /// PK dışı kimlik.
+    fn loaded() -> TableDef {
+        TableDef {
+            owner: Some("app".into()),
+            tablespace: Some("fast".into()),
+            fillfactor: Some(70),
+            comment: Some("Tablo".into()),
+            columns: vec![
+                ColumnDef {
+                    not_null: true,
+                    identity: Some(IdentityKind::Always),
+                    ..lc(1, "id", "bigint")
+                },
+                ColumnDef {
+                    not_null: true,
+                    collation: Some("C".into()),
+                    comment: Some("ad".into()),
+                    ..lc(2, "caption", "text")
+                },
+                ColumnDef {
+                    not_null: true,
+                    default: Some("0".into()),
+                    ..lc(3, "qty", "integer")
+                },
+                ColumnDef {
+                    generated: Some(GeneratedDef {
+                        expr: "qty * 2".into(),
+                        stored: true,
+                    }),
+                    ..lc(4, "total", "numeric(10,2)")
+                },
+                lc(5, "note", "text"),
+                lc(6, "amount", "integer"),
+                ColumnDef {
+                    not_null: true,
+                    identity: Some(IdentityKind::ByDefault),
+                    ..lc(7, "seq", "integer")
+                },
+            ],
+            constraints: vec![pk_id()],
+            ..base()
+        }
+    }
+    fn with(d: &TableDef, f: impl FnOnce(&mut TableDef)) -> TableDef {
+        let mut d = d.clone();
+        f(&mut d);
+        d
+    }
+    fn idx(d: &TableDef, name: &str) -> usize {
+        d.columns.iter().position(|c| c.name == name).unwrap()
+    }
+    fn colm<'a>(d: &'a mut TableDef, name: &str) -> &'a mut ColumnDef {
+        let i = idx(d, name);
+        &mut d.columns[i]
+    }
+    fn sqls(p: &Plan) -> Vec<&str> {
+        p.statements.iter().map(|s| s.sql.as_str()).collect()
+    }
+    fn clean(p: &Plan) {
+        assert_single_statements(p);
+        for s in &p.statements {
+            let r = scan_semicolons(&s.sql);
+            assert!(
+                r.is_clean() && r.parens_balanced() && !r.ends_in_line_comment,
+                "{}",
+                s.sql
+            );
+            assert!(s.transactional, "{}", s.sql);
+        }
+    }
+    fn ok(old: &TableDef, new: &TableDef, c: &BuildCtx) -> Plan {
+        let p = balter(&o(old.clone()), &o(new.clone()), c)
+            .unwrap_or_else(|e| panic!("reddedildi: {e:?}\n{new:?}"));
+        clean(&p);
+        p
+    }
+    fn errs(old: &TableDef, new: &TableDef, c: &BuildCtx) -> Vec<FieldError> {
+        match balter(&o(old.clone()), &o(new.clone()), c) {
+            Ok(p) => panic!("hata bekleniyordu:\n{}", render(&p)),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn noop_is_empty_plan() {
+        let unlogged = TableDef {
+            persistence: Persistence::Unlogged,
+            ..loaded()
+        };
+        let virt = with(&loaded(), |d| {
+            colm(d, "total").generated.as_mut().unwrap().stored = false;
+        });
+        let parted = TableDef {
+            columns: vec![
+                ColumnDef { not_null: true, ..lc(1, "id", "bigint") },
+                lc(2, "created", "timestamp with time zone"),
+            ],
+            partition_by: Some(PartitionByDef {
+                strategy: PartitionStrategy::Range,
+                keys: vec![
+                    PartitionKey::Column { name: "created".into() },
+                    PartitionKey::Expression { sql: "date_trunc('day', created)".into() },
+                ],
+            }),
+            partition_text: Some("RANGE (created, date_trunc('day'::text, created))".into()),
+            ..base()
+        };
+        let part = TableDef {
+            is_partition: true,
+            unsupported: vec!["EXCLUDE kısıtı x".into()],
+            ..loaded()
+        };
+        let inh = TableDef { inherits: true, ..loaded() };
+        for d in [base(), loaded(), unlogged, virt, parted, part, inh] {
+            let p = ok(&d, &d, &ctx());
+            assert!(p.statements.is_empty() && p.warnings.is_empty(), "{}", render(&p));
+        }
+        // Boş yorum `None` sayılır; sahip kaldırma (None) değişiklik değildir (sahip temizlenemez).
+        let p = ok(
+            &with(&loaded(), |d| {
+                d.comment = None;
+                colm(d, "note").comment = Some(String::new());
+            }),
+            &with(&loaded(), |d| {
+                d.comment = Some(String::new());
+                d.owner = None;
+            }),
+            &ctx(),
+        );
+        assert!(p.statements.is_empty(), "{}", render(&p));
+    }
+
+    /// Her değişiklik türü tek başına: (etiket, sürüm, eski, yeni, beklenen ifadeler).
+    #[test]
+    fn single_changes_exact_and_snapshot() {
+        let l = loaded();
+        let unlogged = TableDef { persistence: Persistence::Unlogged, ..loaded() };
+        let add = |c: ColumnDef| with(&l, |d| d.columns.push(c));
+        let cases: Vec<(&str, u32, TableDef, TableDef, Vec<&str>)> = vec![
+            ("tablo adı", 120000, l.clone(), with(&l, |d| d.name = "t2".into()), vec!["ALTER TABLE public.t RENAME TO t2"]),
+            ("şema", 120000, l.clone(), with(&l, |d| d.schema = "s2".into()), vec!["ALTER TABLE public.t SET SCHEMA s2"]),
+            (
+                "kolon silme",
+                120000,
+                l.clone(),
+                with(&l, |d| d.columns.retain(|c| c.name != "note")),
+                vec!["ALTER TABLE public.t DROP COLUMN note"],
+            ),
+            (
+                "tip USING'siz",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "note").data_type = "character varying(20)".into()),
+                vec!["ALTER TABLE public.t ALTER COLUMN note TYPE character varying(20)"],
+            ),
+            (
+                "tip USING'li",
+                120000,
+                l.clone(),
+                with(&l, |d| {
+                    let c = colm(d, "amount");
+                    c.data_type = "bigint".into();
+                    c.using = Some("amount::bigint".into());
+                }),
+                vec!["ALTER TABLE public.t ALTER COLUMN amount TYPE bigint USING (amount::bigint\n)"],
+            ),
+            (
+                "tip + collation korunur",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "caption").data_type = "character varying(100)".into()),
+                vec!["ALTER TABLE public.t ALTER COLUMN caption TYPE character varying(100) COLLATE \"C\""],
+            ),
+            (
+                "yalnız collation değişimi",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "caption").collation = Some("POSIX".into())),
+                vec!["ALTER TABLE public.t ALTER COLUMN caption TYPE text COLLATE \"POSIX\""],
+            ),
+            (
+                "collation kaldırma (tipin varsayılanı)",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "caption").collation = None),
+                vec!["ALTER TABLE public.t ALTER COLUMN caption TYPE text"],
+            ),
+            (
+                "kolon adı",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "note").name = "memo".into()),
+                vec!["ALTER TABLE public.t RENAME COLUMN note TO memo"],
+            ),
+            ("ekleme NULL'lanabilir", 120000, l.clone(), add(col("extra", "text")), vec!["ALTER TABLE public.t ADD COLUMN extra text"]),
+            (
+                "ekleme NOT NULL varsayılansız",
+                120000,
+                l.clone(),
+                add(ColumnDef { not_null: true, ..col("extra", "text") }),
+                vec!["ALTER TABLE public.t ADD COLUMN extra text NOT NULL"],
+            ),
+            (
+                "ekleme NOT NULL varsayılanlı",
+                120000,
+                l.clone(),
+                add(ColumnDef { not_null: true, default: Some("1".into()), ..col("extra", "integer") }),
+                vec!["ALTER TABLE public.t ADD COLUMN extra integer DEFAULT (1\n) NOT NULL"],
+            ),
+            (
+                "ekleme kimlik",
+                120000,
+                l.clone(),
+                add(ColumnDef { not_null: true, identity: Some(IdentityKind::ByDefault), ..col("extra", "bigint") }),
+                vec!["ALTER TABLE public.t ADD COLUMN extra bigint GENERATED BY DEFAULT AS IDENTITY NOT NULL"],
+            ),
+            (
+                "ekleme üretilmiş STORED",
+                120000,
+                l.clone(),
+                add(ColumnDef {
+                    generated: Some(GeneratedDef { expr: "qty + 1".into(), stored: true }),
+                    ..col("extra", "integer")
+                }),
+                vec!["ALTER TABLE public.t ADD COLUMN extra integer GENERATED ALWAYS AS (qty + 1\n) STORED"],
+            ),
+            (
+                "ekleme üretilmiş NOT NULL",
+                120000,
+                l.clone(),
+                add(ColumnDef {
+                    not_null: true,
+                    generated: Some(GeneratedDef { expr: "qty + 1".into(), stored: true }),
+                    ..col("extra", "integer")
+                }),
+                vec!["ALTER TABLE public.t ADD COLUMN extra integer GENERATED ALWAYS AS (qty + 1\n) STORED NOT NULL"],
+            ),
+            (
+                "ekleme collation + yorum",
+                120000,
+                l.clone(),
+                add(ColumnDef { collation: Some("C".into()), comment: Some("e'".into()), ..col("Extra", "text") }),
+                vec![
+                    "ALTER TABLE public.t ADD COLUMN \"Extra\" text COLLATE \"C\"",
+                    "COMMENT ON COLUMN public.t.\"Extra\" IS 'e'''",
+                ],
+            ),
+            (
+                "SET NOT NULL",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "note").not_null = true),
+                vec!["ALTER TABLE public.t ALTER COLUMN note SET NOT NULL"],
+            ),
+            (
+                "DROP NOT NULL",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "qty").not_null = false),
+                vec!["ALTER TABLE public.t ALTER COLUMN qty DROP NOT NULL"],
+            ),
+            (
+                "SET DEFAULT",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "note").default = Some("'x'".into())),
+                vec!["ALTER TABLE public.t ALTER COLUMN note SET DEFAULT ('x'\n)"],
+            ),
+            (
+                "varsayılan değişimi",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "qty").default = Some("1 -- bir\n".into())),
+                vec!["ALTER TABLE public.t ALTER COLUMN qty SET DEFAULT (1 -- bir\n\n)"],
+            ),
+            (
+                "DROP DEFAULT",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "qty").default = None),
+                vec!["ALTER TABLE public.t ALTER COLUMN qty DROP DEFAULT"],
+            ),
+            (
+                "kimlik ekle (NOT NULL önce)",
+                120000,
+                l.clone(),
+                with(&l, |d| {
+                    let c = colm(d, "amount");
+                    c.identity = Some(IdentityKind::Always);
+                    c.not_null = true;
+                }),
+                vec![
+                    "ALTER TABLE public.t ALTER COLUMN amount SET NOT NULL",
+                    "ALTER TABLE public.t ALTER COLUMN amount ADD GENERATED ALWAYS AS IDENTITY",
+                ],
+            ),
+            (
+                "varsayılan → kimlik (DROP DEFAULT önce)",
+                120000,
+                l.clone(),
+                with(&l, |d| {
+                    let c = colm(d, "qty");
+                    c.default = None;
+                    c.identity = Some(IdentityKind::ByDefault);
+                }),
+                vec![
+                    "ALTER TABLE public.t ALTER COLUMN qty DROP DEFAULT",
+                    "ALTER TABLE public.t ALTER COLUMN qty ADD GENERATED BY DEFAULT AS IDENTITY",
+                ],
+            ),
+            (
+                "kimlik kaldır",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "seq").identity = None),
+                vec!["ALTER TABLE public.t ALTER COLUMN seq DROP IDENTITY"],
+            ),
+            (
+                "kimlik kaldır + DROP NOT NULL + varsayılan (DROP IDENTITY önce)",
+                120000,
+                l.clone(),
+                with(&l, |d| {
+                    let c = colm(d, "seq");
+                    c.identity = None;
+                    c.not_null = false;
+                    c.default = Some("7".into());
+                }),
+                vec![
+                    "ALTER TABLE public.t ALTER COLUMN seq DROP IDENTITY",
+                    "ALTER TABLE public.t ALTER COLUMN seq SET DEFAULT (7\n)",
+                    "ALTER TABLE public.t ALTER COLUMN seq DROP NOT NULL",
+                ],
+            ),
+            (
+                "kimlik türü ALWAYS",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "seq").identity = Some(IdentityKind::Always)),
+                vec!["ALTER TABLE public.t ALTER COLUMN seq SET GENERATED ALWAYS"],
+            ),
+            (
+                "kimlik türü BY DEFAULT",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "id").identity = Some(IdentityKind::ByDefault)),
+                vec!["ALTER TABLE public.t ALTER COLUMN id SET GENERATED BY DEFAULT"],
+            ),
+            (
+                "üretilmiş ifade kaldır (PG 13)",
+                130000,
+                l.clone(),
+                with(&l, |d| colm(d, "total").generated = None),
+                vec!["ALTER TABLE public.t ALTER COLUMN total DROP EXPRESSION"],
+            ),
+            (
+                "üretilmiş ifade kaldır + varsayılan",
+                130000,
+                l.clone(),
+                with(&l, |d| {
+                    let c = colm(d, "total");
+                    c.generated = None;
+                    c.default = Some("0".into());
+                }),
+                vec![
+                    "ALTER TABLE public.t ALTER COLUMN total DROP EXPRESSION",
+                    "ALTER TABLE public.t ALTER COLUMN total SET DEFAULT (0\n)",
+                ],
+            ),
+            (
+                "üretilmiş ifade değişimi (PG 17)",
+                170000,
+                l.clone(),
+                with(&l, |d| colm(d, "total").generated.as_mut().unwrap().expr = "qty * 3".into()),
+                vec!["ALTER TABLE public.t ALTER COLUMN total SET EXPRESSION AS (qty * 3\n)"],
+            ),
+            (
+                "sanal üretilmiş ifade değişimi (PG 18)",
+                180000,
+                with(&l, |d| colm(d, "total").generated.as_mut().unwrap().stored = false),
+                with(&l, |d| {
+                    let g = colm(d, "total").generated.as_mut().unwrap();
+                    g.stored = false;
+                    g.expr = "qty * 3".into();
+                }),
+                vec!["ALTER TABLE public.t ALTER COLUMN total SET EXPRESSION AS (qty * 3\n)"],
+            ),
+            (
+                "kolon yorumu değişimi",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "caption").comment = Some("isim".into())),
+                vec!["COMMENT ON COLUMN public.t.caption IS 'isim'"],
+            ),
+            (
+                "kolon yorumu ekleme",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "note").comment = Some("not".into())),
+                vec!["COMMENT ON COLUMN public.t.note IS 'not'"],
+            ),
+            (
+                "kolon yorumu silme",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "caption").comment = None),
+                vec!["COMMENT ON COLUMN public.t.caption IS NULL"],
+            ),
+            (
+                "kolon yorumu boş = silme",
+                120000,
+                l.clone(),
+                with(&l, |d| colm(d, "caption").comment = Some(String::new())),
+                vec!["COMMENT ON COLUMN public.t.caption IS NULL"],
+            ),
+            ("sahip", 120000, l.clone(), with(&l, |d| d.owner = Some("bob".into())), vec!["ALTER TABLE public.t OWNER TO bob"]),
+            (
+                "tablespace",
+                120000,
+                l.clone(),
+                with(&l, |d| d.tablespace = Some("slow".into())),
+                vec!["ALTER TABLE public.t SET TABLESPACE slow"],
+            ),
+            (
+                "tablespace pg_default",
+                120000,
+                l.clone(),
+                with(&l, |d| d.tablespace = Some("pg_default".into())),
+                vec!["ALTER TABLE public.t SET TABLESPACE pg_default"],
+            ),
+            (
+                "tablespace ilk kez",
+                120000,
+                base(),
+                TableDef { tablespace: Some("fast".into()), ..base() },
+                vec!["ALTER TABLE public.t SET TABLESPACE fast"],
+            ),
+            ("UNLOGGED", 120000, l.clone(), unlogged.clone(), vec!["ALTER TABLE public.t SET UNLOGGED"]),
+            ("LOGGED", 120000, unlogged, l.clone(), vec!["ALTER TABLE public.t SET LOGGED"]),
+            (
+                "fillfactor değişimi",
+                120000,
+                l.clone(),
+                with(&l, |d| d.fillfactor = Some(80)),
+                vec!["ALTER TABLE public.t SET (fillfactor = 80)"],
+            ),
+            (
+                "fillfactor sıfırlama",
+                120000,
+                l.clone(),
+                with(&l, |d| d.fillfactor = None),
+                vec!["ALTER TABLE public.t RESET (fillfactor)"],
+            ),
+            (
+                "tablo yorumu",
+                120000,
+                l.clone(),
+                with(&l, |d| d.comment = Some("Yeni".into())),
+                vec!["COMMENT ON TABLE public.t IS 'Yeni'"],
+            ),
+            (
+                "tablo yorumu silme",
+                120000,
+                l.clone(),
+                with(&l, |d| d.comment = None),
+                vec!["COMMENT ON TABLE public.t IS NULL"],
+            ),
+        ];
+        let mut out = String::new();
+        for (caption, ver, old, new, want) in cases {
+            let p = ok(&old, &new, &v(ver));
+            assert_eq!(sqls(&p), want, "{caption}");
+            out.push_str(&format!("## {caption} @{ver}\n{}\n", render(&p)));
+        }
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn combined_order_uses_new_names() {
+        let old = loaded();
+        let new = with(&old, |d| {
+            d.name = "t2".into();
+            d.schema = "s2".into();
+            d.columns.retain(|c| c.name != "note");
+            {
+                // Tip (eski adla) + yeniden adlandırma + yorum (yeni adla) aynı kolonda.
+                let c = colm(d, "caption");
+                c.data_type = "character varying(100)".into();
+                c.name = "full_name".into();
+                c.comment = Some("isim".into());
+            }
+            {
+                let c = colm(d, "amount");
+                c.data_type = "bigint".into();
+                c.using = Some("amount::bigint".into());
+                c.default = Some("5".into());
+                c.not_null = true;
+            }
+            colm(d, "seq").identity = Some(IdentityKind::Always);
+            colm(d, "total").generated.as_mut().unwrap().expr = "qty * 3".into();
+            d.columns.push(ColumnDef { not_null: true, default: Some("1".into()), ..col("extra", "integer") });
+            d.owner = Some("bob".into());
+            d.tablespace = Some("slow".into());
+            d.persistence = Persistence::Unlogged;
+            d.fillfactor = Some(80);
+            d.comment = Some("Yeni".into());
+        });
+        let p = ok(&old, &new, &v(170000));
+        assert_eq!(
+            sqls(&p),
+            [
+                "ALTER TABLE public.t RENAME TO t2",
+                "ALTER TABLE public.t2 SET SCHEMA s2",
+                "ALTER TABLE s2.t2 DROP COLUMN note",
+                "ALTER TABLE s2.t2 ALTER COLUMN caption TYPE character varying(100) COLLATE \"C\"",
+                "ALTER TABLE s2.t2 ALTER COLUMN amount TYPE bigint USING (amount::bigint\n)",
+                "ALTER TABLE s2.t2 RENAME COLUMN caption TO full_name",
+                "ALTER TABLE s2.t2 ADD COLUMN extra integer DEFAULT (1\n) NOT NULL",
+                "ALTER TABLE s2.t2 ALTER COLUMN total SET EXPRESSION AS (qty * 3\n)",
+                "ALTER TABLE s2.t2 ALTER COLUMN amount SET DEFAULT (5\n)",
+                "ALTER TABLE s2.t2 ALTER COLUMN amount SET NOT NULL",
+                "ALTER TABLE s2.t2 ALTER COLUMN seq SET GENERATED ALWAYS",
+                "ALTER TABLE s2.t2 OWNER TO bob",
+                "ALTER TABLE s2.t2 SET TABLESPACE slow",
+                "ALTER TABLE s2.t2 SET UNLOGGED",
+                "ALTER TABLE s2.t2 SET (fillfactor = 80)",
+                "COMMENT ON TABLE s2.t2 IS 'Yeni'",
+                "COMMENT ON COLUMN s2.t2.full_name IS 'isim'",
+            ]
+        );
+        assert_eq!(p.warnings, [REWRITE_WARNING, LOCK_TIMEOUT_WARNING]);
+        assert_eq!(p.risk(), Risk::DataLoss);
+        // Deterministik.
+        assert_eq!(ok(&old, &new, &v(170000)), p);
+        insta::assert_snapshot!(render(&p));
+    }
+
+    #[test]
+    fn column_renames_are_ordered_and_cycles_rejected() {
+        let ab = TableDef {
+            columns: vec![lc(1, "a", "integer"), lc(2, "b", "integer"), lc(3, "c", "integer")],
+            ..base()
+        };
+        // Zincir: a→b, b→c (c silinir) → önce c silinir, sonra b→c, sonra a→b.
+        let chain = with(&ab, |d| {
+            d.columns.retain(|c| c.name != "c");
+            d.columns[0].name = "b".into();
+            d.columns[1].name = "c".into();
+        });
+        assert_eq!(
+            sqls(&ok(&ab, &chain, &ctx())),
+            [
+                "ALTER TABLE public.t DROP COLUMN c",
+                "ALTER TABLE public.t RENAME COLUMN b TO c",
+                "ALTER TABLE public.t RENAME COLUMN a TO b",
+            ]
+        );
+        // Silinen kolonun adını alan yeniden adlandırma: silme önce.
+        let take = with(&ab, |d| {
+            d.columns.retain(|c| c.name != "b");
+            d.columns[0].name = "b".into();
+        });
+        assert_eq!(
+            sqls(&ok(&ab, &take, &ctx())),
+            ["ALTER TABLE public.t DROP COLUMN b", "ALTER TABLE public.t RENAME COLUMN a TO b"]
+        );
+        // Yeniden adlandırılan kolonun eski adıyla yeni kolon: ekleme sonra.
+        let reuse = with(&ab, |d| {
+            d.columns[0].name = "a_old".into();
+            d.columns.push(col("a", "text"));
+        });
+        assert_eq!(
+            sqls(&ok(&ab, &reuse, &ctx())),
+            ["ALTER TABLE public.t RENAME COLUMN a TO a_old", "ALTER TABLE public.t ADD COLUMN a text"]
+        );
+        // Takas (döngü): doğrulama hatası.
+        let swap = with(&ab, |d| {
+            d.columns[0].name = "b".into();
+            d.columns[1].name = "a".into();
+        });
+        let e = errs(&ab, &swap, &ctx());
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(e[0].path, "columns[0].name");
+        assert!(e[0].message.contains("döngüsel"));
+    }
+
+    #[test]
+    fn generated_transitions_and_version_gates() {
+        let l = loaded();
+        let drop_expr = with(&l, |d| colm(d, "total").generated = None);
+        let set_expr = with(&l, |d| colm(d, "total").generated.as_mut().unwrap().expr = "qty * 3".into());
+        let virt_old = with(&l, |d| colm(d, "total").generated.as_mut().unwrap().stored = false);
+        let virt_set = with(&virt_old, |d| colm(d, "total").generated.as_mut().unwrap().expr = "qty * 3".into());
+        let virt_drop = with(&virt_old, |d| colm(d, "total").generated = None);
+        let to_gen = with(&l, |d| {
+            colm(d, "note").generated = Some(GeneratedDef { expr: "'x'".into(), stored: true });
+        });
+        let p_gen = "columns[3].generated";
+        // (etiket, eski, yeni, sürüm, None = geçerli / Some(ileti parçası))
+        let cases: Vec<(&str, &TableDef, &TableDef, u32, Option<&str>)> = vec![
+            ("DROP EXPRESSION 12", &l, &drop_expr, 120000, Some("PG 13+")),
+            ("DROP EXPRESSION 13", &l, &drop_expr, 130000, None),
+            ("DROP EXPRESSION 18", &l, &drop_expr, 180000, None),
+            ("SET EXPRESSION 12", &l, &set_expr, 120000, Some("PG 17+")),
+            ("SET EXPRESSION 13", &l, &set_expr, 130000, Some("PG 17+")),
+            ("SET EXPRESSION 17", &l, &set_expr, 170000, None),
+            ("SET EXPRESSION 18", &l, &set_expr, 180000, None),
+            ("sanal SET EXPRESSION 18", &virt_old, &virt_set, 180000, None),
+            ("sanal DROP EXPRESSION 18", &virt_old, &virt_drop, 180000, Some("STORED")),
+            ("STORED → VIRTUAL", &l, &virt_old, 180000, Some("STORED/VIRTUAL")),
+            ("VIRTUAL → STORED", &virt_old, &l, 180000, Some("STORED/VIRTUAL")),
+            ("sanal yeni taraf 17", &virt_old, &virt_set, 170000, Some("PG 18+")),
+        ];
+        for (caption, old, new, ver, want) in cases {
+            match want {
+                None => {
+                    ok(old, new, &v(ver));
+                }
+                Some(m) => {
+                    let e = errs(old, new, &v(ver));
+                    assert_eq!(e[0].path, p_gen, "{caption}: {e:?}");
+                    assert!(e[0].message.contains(m), "{caption}: {e:?}");
+                }
+            }
+        }
+        // Mevcut kolonu üretilmiş kolona çevirmek desteklenmez.
+        let e = errs(&l, &to_gen, &v(180000));
+        assert_eq!(e[0].path, "columns[4].generated");
+        assert!(e[0].message.contains("yeni kolon ekleyin"), "{e:?}");
+        // Kimlik → üretilmiş de aynı kural.
+        let e = errs(
+            &l,
+            &with(&l, |d| {
+                let c = colm(d, "seq");
+                c.identity = None;
+                c.generated = Some(GeneratedDef { expr: "1".into(), stored: true });
+            }),
+            &v(180000),
+        );
+        assert_eq!(e[0].path, "columns[6].generated");
+        // Yeni sanal kolon eklemek PG 18 ister (create kuralı).
+        let add_virt = with(&l, |d| {
+            d.columns.push(ColumnDef { generated: Some(GeneratedDef { expr: "1".into(), stored: false }), ..col("x", "integer") })
+        });
+        assert_eq!(errs(&l, &add_virt, &v(170000))[0].path, "columns[7].generated");
+        ok(&l, &add_virt, &v(180000));
+        // Üretilmiş kolonsuz tablo PG 10'da sıradan alter'larla çalışır.
+        let plain = TableDef { columns: vec![lc(1, "a", "integer")], ..base() };
+        ok(&plain, &with(&plain, |d| d.columns[0].not_null = true), &v(100000));
+    }
+
+    #[test]
+    fn attnum_matching_errors() {
+        let l = loaded();
+        // Bayat attnum: eski tanımda yok.
+        let e = errs(&l, &with(&l, |d| d.columns[4].attnum = Some(99)), &ctx());
+        assert_eq!(e[0].path, "columns[4].attnum");
+        assert!(e[0].message.contains("99"));
+        // Yinelenen attnum (yeni taraf).
+        let e = errs(&l, &with(&l, |d| d.columns[5].attnum = Some(5)), &ctx());
+        assert_eq!(e[0].path, "columns[5].attnum");
+        // Eski tarafta attnum yok / yinelenen.
+        let e = errs(&with(&l, |d| d.columns[2].attnum = None), &l, &ctx());
+        assert_eq!(e[0].path, "old.columns[2].attnum");
+        let e = errs(&with(&l, |d| d.columns[3].attnum = Some(1)), &l, &ctx());
+        assert_eq!(e[0].path, "old.columns[3].attnum");
+        // attnum None = yeni kolon; korunan kolonla aynı ad yeni tarafın yinelenme kuralına takılır.
+        let e = errs(&l, &with(&l, |d| d.columns.push(col("note", "text"))), &ctx());
+        assert_eq!(e[0].path, "columns[7].name");
+        // Aynı adla sil + yeniden ekle (attnum None): DROP + ADD (yeniden adlandırma değil).
+        let readd = with(&l, |d| {
+            d.columns.retain(|c| c.name != "note");
+            d.columns.push(col("note", "integer"));
+        });
+        assert_eq!(
+            sqls(&ok(&l, &readd, &ctx())),
+            ["ALTER TABLE public.t DROP COLUMN note", "ALTER TABLE public.t ADD COLUMN note integer"]
+        );
+    }
+
+    #[test]
+    fn column_order_warning() {
+        let l = loaded();
+        // Korunan kolonların sırası değişti → uyarı, ifade yok.
+        let swapped = with(&l, |d| d.columns.swap(4, 5));
+        let p = ok(&l, &swapped, &ctx());
+        assert!(p.statements.is_empty());
+        assert_eq!(p.warnings, [COLUMN_ORDER_WARNING]);
+        // Yeni kolon araya eklendi → uyarı + ADD (sona eklenir).
+        let mid = with(&l, |d| d.columns.insert(1, col("x", "text")));
+        let p = ok(&l, &mid, &ctx());
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t ADD COLUMN x text"]);
+        assert_eq!(p.warnings, [COLUMN_ORDER_WARNING]);
+        // Silme sırayı bozmaz; sona ekleme uyarı vermez.
+        let p = ok(
+            &l,
+            &with(&l, |d| {
+                d.columns.remove(4);
+                d.columns.push(col("x", "text"));
+            }),
+            &ctx(),
+        );
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+    }
+
+    #[test]
+    fn using_without_type_change_is_ignored_with_warning() {
+        let l = loaded();
+        let p = ok(&l, &with(&l, |d| colm(d, "note").using = Some("note || 'x'".into())), &ctx());
+        assert!(p.statements.is_empty());
+        assert_eq!(p.warnings.len(), 1);
+        assert!(p.warnings[0].contains("'note'") && p.warnings[0].contains("USING"), "{:?}", p.warnings);
+        // Yeni kolonda da yoksayılır (ADD COLUMN USING almaz).
+        let p = ok(&l, &with(&l, |d| d.columns.push(ColumnDef { using: Some("1".into()), ..col("x", "text") })), &ctx());
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t ADD COLUMN x text"]);
+        assert_eq!(p.warnings.len(), 1);
+        // Yoksayılsa bile serbest SQL kapısından geçer.
+        let e = errs(&l, &with(&l, |d| colm(d, "note").using = Some("1; DROP TABLE t".into())), &ctx());
+        assert_eq!(e[0].path, "columns[4].using");
+        // Collation değişimi USING'i anlamlı kılar.
+        let p = ok(
+            &l,
+            &with(&l, |d| {
+                let c = colm(d, "caption");
+                c.collation = Some("POSIX".into());
+                c.using = Some("caption".into());
+            }),
+            &ctx(),
+        );
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t ALTER COLUMN caption TYPE text COLLATE \"POSIX\" USING (caption\n)"]);
+        assert_eq!(p.warnings, [REWRITE_WARNING, LOCK_TIMEOUT_WARNING]);
+    }
+
+    #[test]
+    fn partition_and_inheritance_protection() {
+        for flag in ["isPartition", "inherits"] {
+            let set = |d: &mut TableDef| {
+                if flag == "isPartition" {
+                    d.is_partition = true
+                } else {
+                    d.inherits = true
+                }
+            };
+            let old = with(&loaded(), set);
+            // Serbest: ad, şema, sahip, tablespace, yorumlar (kolon yorumu dahil).
+            let free = with(&old, |d| {
+                d.name = "t2".into();
+                d.schema = "s2".into();
+                d.owner = Some("bob".into());
+                d.tablespace = Some("slow".into());
+                d.comment = Some("x".into());
+                colm(d, "note").comment = Some("n".into());
+            });
+            let p = ok(&old, &free, &ctx());
+            assert_eq!(p.statements.len(), 6, "{flag}: {}", render(&p));
+            // Kolon farkları → `columns` hatası.
+            for (caption, new) in [
+                ("silme", with(&old, |d| d.columns.retain(|c| c.name != "note"))),
+                ("ekleme", with(&old, |d| d.columns.push(col("x", "text")))),
+                ("tip", with(&old, |d| colm(d, "note").data_type = "integer".into())),
+                ("ad", with(&old, |d| colm(d, "note").name = "memo".into())),
+                ("NOT NULL", with(&old, |d| colm(d, "note").not_null = true)),
+                ("varsayılan", with(&old, |d| colm(d, "note").default = Some("'x'".into()))),
+                ("kimlik", with(&old, |d| colm(d, "seq").identity = Some(IdentityKind::Always))),
+                ("collation", with(&old, |d| colm(d, "caption").collation = None)),
+            ] {
+                let e = errs(&old, &new, &ctx());
+                assert_eq!((e[0].path.as_str(), e[0].message.as_str()), ("columns", MANAGED_MSG), "{flag} {caption}");
+            }
+            // Kısıt farkı → `constraints` hatası.
+            let e = errs(&old, &with(&old, |d| d.constraints[0].name = Some("pk2".into())), &ctx());
+            assert_eq!((e[0].path.as_str(), e[0].message.as_str()), ("constraints", MANAGED_MSG), "{flag}");
+            // Yükleme bayrağı değiştirilemez.
+            let e = errs(
+                &old,
+                &with(&old, |d| {
+                    d.is_partition = false;
+                    d.inherits = false;
+                }),
+                &ctx(),
+            );
+            assert_eq!(e[0].path, flag);
+        }
+        // Bölümleme anahtarı değiştirilemez (ekleme/kaldırma/değişim).
+        let parted = TableDef {
+            columns: vec![lc(1, "id", "bigint"), lc(2, "created", "date")],
+            partition_by: Some(PartitionByDef {
+                strategy: PartitionStrategy::Range,
+                keys: vec![PartitionKey::Column { name: "created".into() }],
+            }),
+            ..base()
+        };
+        for new in [
+            with(&parted, |d| d.partition_by.as_mut().unwrap().strategy = PartitionStrategy::List),
+            with(&parted, |d| d.partition_by.as_mut().unwrap().keys[0] = PartitionKey::Column { name: "id".into() }),
+            with(&parted, |d| d.partition_by = None),
+        ] {
+            assert_eq!(errs(&parted, &new, &ctx())[0].path, "partitionBy");
+        }
+        let unparted = with(&parted, |d| d.partition_by = None);
+        assert_eq!(errs(&unparted, &parted, &ctx())[0].path, "partitionBy");
+        // Bölümlenmiş ANA tabloda kolon değişiklikleri serbesttir (bölümlere yayılır).
+        let p = ok(&parted, &with(&parted, |d| d.columns.push(col("x", "text"))), &ctx());
+        assert_eq!(sqls(&p), ["ALTER TABLE public.t ADD COLUMN x text"]);
+    }
+
+    #[test]
+    fn old_side_validates_identity_only() {
+        // Create doğrulamasına takılan yüklenmiş tanım: garip tip, kapanmamış varsayılan, dengesiz üretilmiş ifade,
+        // NOT NULL tutarsızlığı (kimlik), geçersiz sahip/tablespace/fillfactor, NUL'lu yorum. Hiçbiri SQL'e girmez.
+        let old = TableDef {
+            owner: Some("\n".into()),
+            tablespace: Some(String::new()),
+            fillfactor: Some(1),
+            comment: Some("a\0".into()),
+            columns: vec![
+                ColumnDef { identity: Some(IdentityKind::Always), ..lc(1, "id", "bigint") },
+                ColumnDef { default: Some("x'".into()), ..lc(2, "a", "garip tip ;") },
+                ColumnDef { generated: Some(GeneratedDef { expr: "1)".into(), stored: true }), ..lc(3, "g", "integer") },
+            ],
+            ..base()
+        };
+        let new = TableDef {
+            owner: Some("app".into()),
+            tablespace: Some("fast".into()),
+            fillfactor: None,
+            comment: None,
+            columns: vec![
+                ColumnDef { not_null: true, identity: Some(IdentityKind::Always), ..lc(1, "id", "bigint") },
+                ColumnDef { default: Some("0".into()), ..lc(2, "a", "integer") },
+                ColumnDef { generated: Some(GeneratedDef { expr: "id + 1".into(), stored: true }), ..lc(3, "g", "integer") },
+            ],
+            ..base()
+        };
+        let p = ok(&old, &new, &ctx());
+        assert_eq!(
+            sqls(&p),
+            [
+                "ALTER TABLE public.t ALTER COLUMN a TYPE integer",
+                "ALTER TABLE public.t ALTER COLUMN id SET NOT NULL",
+                "ALTER TABLE public.t ALTER COLUMN a SET DEFAULT (0\n)",
+                "ALTER TABLE public.t ALTER COLUMN g SET EXPRESSION AS (id + 1\n)",
+                "ALTER TABLE public.t OWNER TO app",
+                "ALTER TABLE public.t SET TABLESPACE fast",
+                "ALTER TABLE public.t RESET (fillfactor)",
+                "COMMENT ON TABLE public.t IS NULL",
+            ]
+        );
+        // Eski tarafın SQL'e giren alanları doğrulanır (`old.` önekiyle).
+        for (bad, path) in [
+            (TableDef { schema: "pg_catalog".into(), ..base() }, "old.schema"),
+            (TableDef { name: "t\n".into(), ..base() }, "old.name"),
+            (TableDef { name: "a".repeat(64), ..base() }, "old.name"),
+            (TableDef { columns: vec![lc(1, "i\0d", "integer")], ..base() }, "old.columns[0].name"),
+            (TableDef { columns: vec![lc(1, "", "integer")], ..base() }, "old.columns[0].name"),
+            (TableDef { columns: vec![lc(1, "a\u{202e}", "integer")], ..base() }, "old.columns[0].name"),
+        ] {
+            let e = errs(&bad, &base(), &ctx());
+            assert_eq!(e[0].path, path, "{e:?}");
+        }
+        // Yeni taraf tam doğrulanır (ve eski taraftan önce raporlanır).
+        let e = errs(
+            &TableDef { name: "\n".into(), ..base() },
+            &with(&base(), |d| d.columns[0].data_type = "integer; DROP TABLE t".into()),
+            &ctx(),
+        );
+        assert_eq!(e[0].path, "columns[0].dataType");
+        // Silinen kolonu kullanan kısıt yeni tarafta reddedilir.
+        let l = loaded();
+        let e = errs(&l, &with(&l, |d| d.columns.retain(|c| c.name != "id")), &ctx());
+        assert_eq!(e[0].path, "constraints[0].columns[0]");
+        // Create-only kurallar alter'da uygulanmaz: yüklenmiş `notValid` kısıtı kabul.
+        let nv = with(&l, |d| {
+            d.constraints.push(ConstraintDef {
+                oid: Some(101),
+                name: Some("ck".into()),
+                kind: ConstraintKind::Check { expr: "qty >= 0".into(), no_inherit: false },
+                deferrable: false,
+                initially_deferred: false,
+                not_valid: true,
+            })
+        });
+        assert!(ok(&nv, &nv, &ctx()).statements.is_empty());
+    }
+
+    #[test]
+    fn tablespace_clearing_is_an_error() {
+        let l = loaded();
+        let e = errs(&l, &with(&l, |d| d.tablespace = None), &ctx());
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].path, "tablespace");
+        assert!(e[0].message.contains("pg_default"));
+        // Tablespace'siz eski tanımda None → None değişiklik değildir.
+        assert!(ok(&base(), &base(), &ctx()).statements.is_empty());
+    }
+
+    #[test]
+    fn constraint_changes_are_not_yet_supported() {
+        let l = loaded();
+        for new in [
+            with(&l, |d| d.constraints.clear()),
+            with(&l, |d| d.constraints[0].name = Some("pk2".into())),
+            with(&l, |d| d.constraints[0].oid = None),
+        ] {
+            let e = errs(&l, &new, &ctx());
+            assert_eq!(e.len(), 1, "{e:?}");
+            assert_eq!(e[0].path, "constraints");
+            assert!(e[0].message.contains("henüz desteklenmiyor"));
+        }
+    }
+
+    /// Her ifade türünün riski tek tabloda: (ifadeyi tanıtan parça, eski, yeni, sürüm, beklenen risk).
+    #[test]
+    fn risk_classes_for_every_statement_kind() {
+        let l = loaded();
+        let unlogged = TableDef { persistence: Persistence::Unlogged, ..loaded() };
+        let add = |c: ColumnDef| with(&l, |d| d.columns.push(c));
+        let generated = |stored| Some(GeneratedDef { expr: "qty + 1".into(), stored });
+        let cases: Vec<(&str, TableDef, TableDef, u32, Risk)> = vec![
+            (" RENAME TO ", l.clone(), with(&l, |d| d.name = "t2".into()), 120000, Risk::Safe),
+            (" SET SCHEMA ", l.clone(), with(&l, |d| d.schema = "s".into()), 120000, Risk::Safe),
+            (" DROP COLUMN ", l.clone(), with(&l, |d| d.columns.retain(|c| c.name != "note")), 120000, Risk::DataLoss),
+            (" TYPE ", l.clone(), with(&l, |d| colm(d, "note").data_type = "integer".into()), 120000, Risk::DataLoss),
+            (" RENAME COLUMN ", l.clone(), with(&l, |d| colm(d, "note").name = "m".into()), 120000, Risk::Safe),
+            (" ADD COLUMN x text", l.clone(), add(col("x", "text")), 120000, Risk::Safe),
+            (
+                " ADD COLUMN x text NOT NULL",
+                l.clone(),
+                add(ColumnDef { not_null: true, ..col("x", "text") }),
+                120000,
+                Risk::Destructive,
+            ),
+            (
+                " ADD COLUMN x text DEFAULT",
+                l.clone(),
+                add(ColumnDef { not_null: true, default: Some("''".into()), ..col("x", "text") }),
+                120000,
+                Risk::Safe,
+            ),
+            (
+                " ADD COLUMN x bigint GENERATED BY DEFAULT AS IDENTITY",
+                l.clone(),
+                add(ColumnDef { not_null: true, identity: Some(IdentityKind::ByDefault), ..col("x", "bigint") }),
+                120000,
+                Risk::Safe,
+            ),
+            (
+                " ADD COLUMN x integer GENERATED ALWAYS AS (qty + 1\n) STORED",
+                l.clone(),
+                add(ColumnDef { generated: generated(true), ..col("x", "integer") }),
+                120000,
+                Risk::Safe,
+            ),
+            (
+                " ADD COLUMN x integer GENERATED ALWAYS AS (qty + 1\n) STORED NOT NULL",
+                l.clone(),
+                add(ColumnDef { not_null: true, generated: generated(true), ..col("x", "integer") }),
+                120000,
+                Risk::Destructive,
+            ),
+            (" SET NOT NULL", l.clone(), with(&l, |d| colm(d, "note").not_null = true), 120000, Risk::Destructive),
+            (" DROP NOT NULL", l.clone(), with(&l, |d| colm(d, "qty").not_null = false), 120000, Risk::Safe),
+            (" SET DEFAULT ", l.clone(), with(&l, |d| colm(d, "note").default = Some("''".into())), 120000, Risk::Safe),
+            (" DROP DEFAULT", l.clone(), with(&l, |d| colm(d, "qty").default = None), 120000, Risk::Safe),
+            (
+                " ADD GENERATED ",
+                l.clone(),
+                with(&l, |d| {
+                    let c = colm(d, "amount");
+                    c.identity = Some(IdentityKind::Always);
+                    c.not_null = true;
+                }),
+                120000,
+                Risk::Safe,
+            ),
+            (" SET GENERATED ", l.clone(), with(&l, |d| colm(d, "seq").identity = Some(IdentityKind::Always)), 120000, Risk::Safe),
+            (" DROP IDENTITY", l.clone(), with(&l, |d| colm(d, "seq").identity = None), 120000, Risk::Safe),
+            (" DROP EXPRESSION", l.clone(), with(&l, |d| colm(d, "total").generated = None), 130000, Risk::Safe),
+            (
+                " SET EXPRESSION ",
+                l.clone(),
+                with(&l, |d| colm(d, "total").generated.as_mut().unwrap().expr = "1".into()),
+                170000,
+                Risk::Destructive,
+            ),
+            (" OWNER TO ", l.clone(), with(&l, |d| d.owner = Some("b".into())), 120000, Risk::Safe),
+            (" SET TABLESPACE ", l.clone(), with(&l, |d| d.tablespace = Some("s".into())), 120000, Risk::Safe),
+            (" SET UNLOGGED", l.clone(), unlogged.clone(), 120000, Risk::Safe),
+            (" SET LOGGED", unlogged, l.clone(), 120000, Risk::Safe),
+            (" SET (fillfactor", l.clone(), with(&l, |d| d.fillfactor = Some(50)), 120000, Risk::Safe),
+            (" RESET (fillfactor)", l.clone(), with(&l, |d| d.fillfactor = None), 120000, Risk::Safe),
+            ("COMMENT ON TABLE ", l.clone(), with(&l, |d| d.comment = None), 120000, Risk::Safe),
+            ("COMMENT ON COLUMN ", l.clone(), with(&l, |d| colm(d, "note").comment = Some("c".into())), 120000, Risk::Safe),
+        ];
+        for (marker, old, new, ver, risk) in cases {
+            let p = ok(&old, &new, &v(ver));
+            let hits: Vec<&Statement> = p.statements.iter().filter(|s| s.sql.contains(marker)).collect();
+            assert_eq!(hits.len(), 1, "{marker:?}\n{}", render(&p));
+            assert_eq!(hits[0].risk, risk, "{marker:?}");
+            // Destructive/DataLoss ifadelerin hepsi notludur.
+            if risk != Risk::Safe {
+                assert!(hits[0].note.is_some(), "{marker:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn notes_and_plan_warnings() {
+        let l = loaded();
+        let note = |old: &TableDef, new: &TableDef, ver: u32| {
+            ok(old, new, &v(ver)).statements[0].note.clone().unwrap_or_default()
+        };
+        assert_eq!(note(&l, &with(&l, |d| d.columns.retain(|c| c.name != "note")), 120000), DROP_COLUMN_NOTE);
+        assert_eq!(
+            note(&l, &with(&l, |d| colm(d, "note").data_type = "integer".into()), 120000),
+            format!("{TYPE_NOTE}{TYPE_USING_HINT}")
+        );
+        assert_eq!(
+            note(
+                &l,
+                &with(&l, |d| {
+                    let c = colm(d, "note");
+                    c.data_type = "integer".into();
+                    c.using = Some("note::integer".into());
+                }),
+                120000
+            ),
+            TYPE_NOTE
+        );
+        assert_eq!(
+            note(&l, &with(&l, |d| d.columns.push(ColumnDef { not_null: true, ..col("x", "text") })), 120000),
+            ADD_NOT_NULL_NOTE
+        );
+        // Yeniden yazım uyarısı + lock_timeout: TYPE, SET TABLESPACE, SET LOGGED/UNLOGGED, STORED SET EXPRESSION.
+        let both = [REWRITE_WARNING, LOCK_TIMEOUT_WARNING];
+        for (new, ver) in [
+            (with(&l, |d| colm(d, "note").data_type = "integer".into()), 120000),
+            (with(&l, |d| d.tablespace = Some("s".into())), 120000),
+            (with(&l, |d| d.persistence = Persistence::Unlogged), 120000),
+            (with(&l, |d| colm(d, "total").generated.as_mut().unwrap().expr = "1".into()), 170000),
+        ] {
+            assert_eq!(ok(&l, &new, &v(ver)).warnings, both);
+        }
+        // SET NOT NULL tarar (yeniden yazmaz): yalnızca lock_timeout.
+        assert_eq!(ok(&l, &with(&l, |d| colm(d, "note").not_null = true), &ctx()).warnings, [LOCK_TIMEOUT_WARNING]);
+        // Ucuz değişiklikler uyarısız.
+        for new in [
+            with(&l, |d| d.name = "x".into()),
+            with(&l, |d| d.columns.retain(|c| c.name != "note")),
+            with(&l, |d| colm(d, "qty").default = None),
+            with(&l, |d| d.fillfactor = Some(50)),
+        ] {
+            assert!(ok(&l, &new, &ctx()).warnings.is_empty());
+        }
+    }
+
+    /// Saldırgan girdi matrisi: alter'ın HER yeni metin alanında girdi ya o alanda reddedilir ya da plan tek ifadeli,
+    /// temiz ve dengeli kalır.
+    #[test]
+    fn hostile_input_matrix() {
+        #[derive(Clone, Copy, PartialEq)]
+        enum K {
+            Name,
+            Type,
+            Free,
+            Comment,
+        }
+        type Set = fn(&mut TableDef, String);
+        // Temel yeni tanım: `amount` tipi değişiyor (USING anlamlı), sona `extra` ekleniyor (indeks 7).
+        let old = loaded();
+        let new_base = with(&old, |d| {
+            colm(d, "amount").data_type = "bigint".into();
+            d.columns.push(col("extra", "text"));
+        });
+        let fields: Vec<(&str, K, &str, Set)> = vec![
+            ("name", K::Name, "t2", |d, v| d.name = v),
+            ("schema", K::Name, "s2", |d, v| d.schema = v),
+            ("owner", K::Name, "bob", |d, v| d.owner = Some(v)),
+            ("tablespace", K::Name, "slow", |d, v| d.tablespace = Some(v)),
+            ("comment", K::Comment, "Yeni", |d, v| d.comment = Some(v)),
+            ("columns[1].name", K::Name, "full", |d, v| d.columns[1].name = v),
+            ("columns[7].name", K::Name, "extra2", |d, v| d.columns[7].name = v),
+            ("columns[4].dataType", K::Type, "integer", |d, v| d.columns[4].data_type = v),
+            ("columns[7].dataType", K::Type, "integer", |d, v| d.columns[7].data_type = v),
+            ("columns[4].default", K::Free, "'x'", |d, v| d.columns[4].default = Some(v)),
+            ("columns[7].default", K::Free, "'x'", |d, v| d.columns[7].default = Some(v)),
+            ("columns[5].using", K::Free, "amount::bigint", |d, v| d.columns[5].using = Some(v)),
+            ("columns[3].generated", K::Free, "qty * 3", |d, v| {
+                d.columns[3].generated.as_mut().unwrap().expr = v
+            }),
+            ("columns[1].collation", K::Name, "POSIX", |d, v| d.columns[1].collation = Some(v)),
+            ("columns[4].comment", K::Comment, "c", |d, v| d.columns[4].comment = Some(v)),
+            ("columns[7].comment", K::Comment, "c", |d, v| d.columns[7].comment = Some(v)),
+        ];
+        let hostile: Vec<String> = [
+            "x\"; DROP TABLE t; --",
+            "x'; DROP TABLE t; --",
+            "x); DROP TABLE t; --",
+            "x\n); DROP TABLE t; --",
+            "x\r\n) --",
+            "x\\",
+            "\\'; DROP TABLE t; --",
+            "--",
+            "a --",
+            "a -- yorum",
+            "/*",
+            "*/",
+            "a /* b",
+            "$$",
+            "$a$ x",
+            "x$$ ; DROP TABLE t; $$",
+            "1$$'$$ ) ; DROP TABLE t; --'",
+            "1'x'",
+            "'",
+            "\"",
+            "\"\"",
+            "(",
+            ")",
+            ";",
+            "a; ",
+            "E'\\'; DROP TABLE t; --'",
+            "\0",
+            "a\0b",
+            "\n",
+            "a\nb",
+            "\t",
+            "\x1b",
+            "\x7f",
+            "",
+            " ",
+            "select",
+            "user",
+            "order",
+            "Ünïcödé ş",
+            "\u{202e}x",
+            "\u{85}",
+            "integer NOT NULL",
+            "integer USING c",
+            "text) WITH (oids = true",
+            "\"My Type\"[]",
+            "numeric(10,2)",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .chain(["a".repeat(63), "a".repeat(64), "ş".repeat(32)])
+        .collect();
+        let mut accepted = 0;
+        for (path, kind, benign, set) in &fields {
+            let mut b = new_base.clone();
+            set(&mut b, benign.to_string());
+            let base_len = ok(&old, &b, &ctx()).statements.len();
+            for h in &hostile {
+                let mut d = new_base.clone();
+                set(&mut d, h.clone());
+                let caption = format!("{path} ← {h:?}");
+                match balter(&o(old.clone()), &o(d), &ctx()) {
+                    Ok(p) => {
+                        accepted += 1;
+                        clean(&p);
+                        // Boş yorum `None` sayılır (eklenen kolonda ifade düşer); diğerlerinde ifade sayısı sabit.
+                        let n = p.statements.len();
+                        assert!(
+                            n == base_len || (*kind == K::Comment && h.is_empty() && n + 1 == base_len),
+                            "{caption}\n{}",
+                            render(&p)
+                        );
+                        assert!(!p.statements.iter().any(|s| s.sql.ends_with(" IS ''")), "{caption}");
+                        assert!(!h.contains('\0'), "{caption}");
+                        match kind {
+                            K::Name => assert!(
+                                !h.is_empty()
+                                    && h.len() <= 63
+                                    && !h.chars().any(|c| c.is_ascii_control() || is_spoofing_format(c)),
+                                "{caption}"
+                            ),
+                            K::Type => assert!(validate_type(h).is_ok(), "{caption}"),
+                            K::Free => {
+                                let r = scan_semicolons(h);
+                                assert!(
+                                    r.is_clean() && r.parens_balanced() && !r.ends_in_line_comment && !h.trim().is_empty(),
+                                    "{caption}"
+                                );
+                            }
+                            K::Comment => {}
+                        }
+                    }
+                    Err(e) => assert_eq!(e[0].path, *path, "{caption}: {e:?}"),
+                }
+            }
+        }
+        assert!(accepted > 100, "{accepted}");
+    }
+
+    #[test]
+    fn composed_free_sql_statements_are_scanned() {
+        // Alan kapısı `--` ile biten alanı zaten reddeder; `wrap` kapanışı yeni satıra koyar. Nihai ifade taraması
+        // ikinci savunma hattıdır: kabul edilen her yorumlu alan nihai ifadede dengeli kalır.
+        let l = loaded();
+        let new = with(&l, |d| {
+            let c = colm(d, "amount");
+            c.data_type = "bigint".into();
+            c.using = Some("amount -- dönüşüm\n::bigint".into());
+            c.default = Some("1 -- bir\n".into());
+            colm(d, "total").generated.as_mut().unwrap().expr = "qty -- x\n* 3".into();
+            d.columns.push(ColumnDef { default: Some("2 /* ) */".into()), ..col("x", "integer") });
+        });
+        let p = ok(&l, &new, &ctx());
+        assert_eq!(p.statements.len(), 4, "{}", render(&p));
+        for s in &p.statements {
+            assert!(composed_is_clean(&s.sql), "{}", s.sql);
+        }
+        // Alan içi dengesizlik birleşik ifadede dengeli görünebilir: alan kapısı yakalar.
+        let e = errs(&l, &with(&l, |d| colm(d, "note").default = Some("1) , (2".into())), &ctx());
+        assert_eq!(e[0].path, "columns[4].default");
+    }
+}

@@ -14,6 +14,7 @@ pub mod schema;
 pub mod sequence;
 mod sqlscan;
 pub mod table;
+pub mod table_alter;
 pub mod type_syntax;
 
 pub use sqlscan::{ScanResult, scan_semicolons};
@@ -108,11 +109,6 @@ pub(crate) fn stmt(sql: String, risk: Risk, note: Option<&str>) -> Statement {
     }
 }
 
-/// Task 3–4 tablo alter üreticisine kadar yer tutucu hata.
-fn table_unsupported() -> Vec<FieldError> {
-    vec![err("kind", "Table türü henüz desteklenmiyor.")]
-}
-
 fn mismatch(old: &ObjectDef, new: &ObjectDef) -> Vec<FieldError> {
     vec![err(
         "kind",
@@ -185,9 +181,10 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
     if old.kind() != new.kind() {
         return Err(mismatch(old, new));
     }
-    if matches!(new, ObjectDef::Table(_)) {
-        // Task 3–4'e kadar: tablo alter'ı yok (yeni tarafın doğrulamasından önce, belirsiz hata vermesin).
-        return Err(table_unsupported());
+    if let (ObjectDef::Table(o), ObjectDef::Table(n)) = (old, new) {
+        // Tablo kendi doğrulamasını yapar: eski tarafta kimlik alanlarına kolon adları/attnum'lar da girer, yeni
+        // tarafta alter'a özgü kurallar (eşleme, bölüm/kalıtım koruması, üretilmiş kolon geçişleri) vardır.
+        return table_alter::alter(o, n, ctx);
     }
     checked(new, ctx)?;
     // Eski tanımdaki ad/şema da SQL'e girer (RENAME/ALTER hedefi); yalnızca kimlik alanları doğrulanır.
@@ -203,7 +200,6 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         (ObjectDef::Sequence(o), ObjectDef::Sequence(n)) => Ok(sequence::alter(o, n)),
         (ObjectDef::Extension(o), ObjectDef::Extension(n)) => extension::alter(o, n),
         (ObjectDef::Index(o), ObjectDef::Index(n)) => index::alter(o, n),
-        (ObjectDef::Table(_), ObjectDef::Table(_)) => Err(table_unsupported()),
         _ => Err(mismatch(old, new)),
     }
 }
@@ -313,13 +309,13 @@ mod tests {
     }
 
     #[test]
-    fn table_is_wired_and_alter_is_placeholder() {
+    fn table_is_wired() {
         let t = table();
-        let is_placeholder = |e: &[FieldError]| e.len() == 1 && e[0].path == "kind" && e[0].message.contains("henüz desteklenmiyor");
-        // create/drop/validate tablo üreticisine bağlı (kolonsuz tablo: "columns" hatası); alter Task 3–4'e kadar yer tutucu.
+        // create/drop/validate/alter tablo üreticisine bağlı (kolonsuz tablo: "columns" hatası; alter yeni tarafı
+        // tam doğrular).
         assert_eq!(validate(&t, &ctx())[0].path, "columns");
         assert_eq!(create(&t, &ctx()).unwrap_err()[0].path, "columns");
-        assert!(is_placeholder(&alter(&t, &t, &ctx()).unwrap_err()));
+        assert_eq!(alter(&t, &t, &ctx()).unwrap_err()[0].path, "columns");
         assert!(drop(&t, false, &ctx()).is_ok());
         // Kimlik doğrulaması tablo için de çalışır (eski taraf/drop).
         assert!(validate_identity(&t).is_empty());
@@ -329,7 +325,7 @@ mod tests {
         let paths: Vec<String> = validate_identity(&ObjectDef::Table(bad.clone())).into_iter().map(|e| e.path).collect();
         assert_eq!(paths, ["schema", "name"]);
         assert_eq!(drop(&ObjectDef::Table(bad), false, &ctx()).unwrap_err()[0].path, "schema");
-        // Tür uyuşmazlığı yer tutucudan önce yakalanır.
+        // Tür uyuşmazlığı tablo doğrulamasından önce yakalanır.
         let s = ObjectDef::Schema(SchemaDef { name: "a".into(), owner: None, comment: None });
         assert_eq!(alter(&s, &t, &ctx()).unwrap_err()[0].message, mismatch(&s, &t)[0].message);
     }

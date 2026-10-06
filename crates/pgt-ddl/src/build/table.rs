@@ -1,4 +1,4 @@
-//! Tablo üreticisi: CREATE (kolonlar, kısıtlar, bölümleme, sürüm kapıları) ve DROP. Alter Task 3–4'te gelir.
+//! Tablo üreticisi: CREATE (kolonlar, kısıtlar, bölümleme, sürüm kapıları) ve DROP. Alter `table_alter.rs`'te.
 //!
 //! Kararlar:
 //! - Ad alanları (tablo/şema/sahip/tablespace/kolon/kısıt/collation/FK hedefi/bölüm kolonu) yalnızca `quote_ident` ya da
@@ -54,7 +54,7 @@ fn fk_action(a: FkAction) -> &'static str {
 }
 
 /// Kolon tanımı: `ad tip [COLLATE] [IDENTITY] [GENERATED … AS (…)] [DEFAULT (…)] [NOT NULL]` (sabit sıra).
-fn column_sql(c: &ColumnDef) -> String {
+pub(crate) fn column_sql(c: &ColumnDef) -> String {
     // Tip metni `validate_type` ile doğrulandığından olduğu gibi yerleşir.
     let mut s = format!("{} {}", quote_ident(&c.name), c.data_type);
     if let Some(cl) = &c.collation {
@@ -238,7 +238,7 @@ fn ident_ok(v: &str) -> bool {
     t.is_empty()
 }
 
-fn version_err(path: &str, what: &str, major: u32) -> FieldError {
+pub(crate) fn version_err(path: &str, what: &str, major: u32) -> FieldError {
     err(path, format!("{what} PG {major}+ gerektirir."))
 }
 
@@ -656,7 +656,7 @@ pub(crate) fn validate_create(d: &TableDef, ctx: &BuildCtx) -> Vec<FieldError> {
 
 /// Yorum dolu mu: `Some("")` `None` sayılır. PG'de `COMMENT … IS ''` yorumu siler; yükleyici yorumsuz nesne için
 /// `None` döndürür, bu yüzden boş yorum için ifade üretilmez.
-fn has_comment(c: &Option<String>) -> bool {
+pub(crate) fn has_comment(c: &Option<String>) -> bool {
     c.as_deref().is_some_and(|s| !s.is_empty())
 }
 
@@ -723,7 +723,7 @@ mod tests {
     use crate::build::freesql::composed_is_clean;
     use crate::build::type_syntax::{is_spoofing_format, validate_type};
     use crate::build::{
-        alter as balter, assert_single_statements, create as bcreate, drop as bdrop, render,
+        assert_single_statements, create as bcreate, drop as bdrop, render,
         scan_semicolons, validate as bvalidate, validate_identity,
     };
     use crate::model::*;
@@ -2176,12 +2176,5 @@ mod tests {
         ] {
             assert_eq!(bdrop(&o(d), true, &ctx()).unwrap_err()[0].path, path);
         }
-    }
-
-    #[test]
-    fn alter_is_still_placeholder() {
-        let e = balter(&o(base()), &o(full()), &ctx()).unwrap_err();
-        assert_eq!(e[0].path, "kind");
-        assert!(e[0].message.contains("henüz desteklenmiyor"));
     }
 }
