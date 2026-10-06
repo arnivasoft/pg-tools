@@ -37,6 +37,8 @@ const SESSION_SETS: [&str; 3] =
 pub const MAX_STATEMENT_TIMEOUT_MS: u32 = 2_147_483_647;
 /// Sorgu oturumlarının `application_name`'i: `pg_stat_activity`'de katalog oturumlarından ayırt edilsin.
 const QUERY_APPLICATION_NAME: &str = "pg-tools query";
+/// Dashboard oturumunun `application_name`'i: `pg_stat_activity`'de kendi sorgularımız ayırt edilsin.
+const DASHBOARD_APPLICATION_NAME: &str = "pg-tools dash";
 
 /// Oturum ayarları profili.
 /// - `Catalog`: havuzdaki salt okunur katalog oturumu (`SESSION_OPTIONS`/`SESSION_SETS`, 30 sn, `search_path=pg_catalog`).
@@ -45,10 +47,13 @@ const QUERY_APPLICATION_NAME: &str = "pg-tools query";
 ///   `MAX_STATEMENT_TIMEOUT_MS` (PostgreSQL üst sınırı). `read_only` yalnızca oturum varsayılanıdır
 ///   (`default_transaction_read_only`), bir güvenlik sınırı değildir: kullanıcı SQL'i onu `SET` ya da
 ///   `BEGIN READ WRITE` ile değiştirebilir. Gerçek salt okunurluk rol yetkileriyle sağlanır.
+/// - `Dashboard`: dashboard'un ayrı (havuzsuz) salt okunur oturumu; `statement_timeout` 10 sn, `lock_timeout` 2 sn.
+///   `search_path` verilmez. İzleme sorguları yalnızca okur ve kilit beklemez.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionProfile {
     Catalog,
     Query { read_only: bool, statement_timeout_ms: u32 },
+    Dashboard,
 }
 
 impl SessionProfile {
@@ -56,6 +61,7 @@ impl SessionProfile {
         match self {
             SessionProfile::Catalog => "pg-tools",
             SessionProfile::Query { .. } => QUERY_APPLICATION_NAME,
+            SessionProfile::Dashboard => DASHBOARD_APPLICATION_NAME,
         }
     }
 }
@@ -72,6 +78,9 @@ fn profile_session_options(profile: SessionProfile) -> Cow<'static, str> {
             "-c default_transaction_read_only={} -c statement_timeout={statement_timeout_ms}",
             on_off(read_only)
         )),
+        SessionProfile::Dashboard => {
+            Cow::Borrowed("-c default_transaction_read_only=on -c statement_timeout=10000 -c lock_timeout=2000")
+        }
     }
 }
 
@@ -82,6 +91,11 @@ fn profile_session_sets(profile: SessionProfile) -> Vec<Cow<'static, str>> {
         SessionProfile::Query { read_only, statement_timeout_ms } => vec![
             Cow::Owned(format!("SET default_transaction_read_only = {}", on_off(read_only))),
             Cow::Owned(format!("SET statement_timeout = {statement_timeout_ms}")),
+        ],
+        SessionProfile::Dashboard => vec![
+            Cow::Borrowed("SET default_transaction_read_only = on"),
+            Cow::Borrowed("SET statement_timeout = 10000"),
+            Cow::Borrowed("SET lock_timeout = 2000"),
         ],
     }
 }
@@ -537,7 +551,8 @@ fn session_settings_ok(read_only: &str, statement_timeout: &str, search_path: &s
 
 /// Profilin gerektirdiği oturum ayarları gerçekten etkin mi? (`options`'ı sessizce yok sayan havuzlayıcılar,
 /// ör. pgbouncer `ignore_startup_parameters = options`, bağlantıyı başarıyla kurar ama ayarları uygulamaz.)
-/// `Catalog`: salt okunur, 30 sn ve `search_path = pg_catalog`; `Query`: yalnızca salt okunurluk ve süre sınırı.
+/// `Catalog`: salt okunur, 30 sn ve `search_path = pg_catalog`; `Query`: yalnızca salt okunurluk ve süre sınırı;
+/// `Dashboard`: salt okunur ve 10 sn.
 fn settings_ok_for(profile: SessionProfile, read_only: &str, statement_timeout: &str, search_path: &str) -> bool {
     match profile {
         SessionProfile::Catalog => {
@@ -547,6 +562,8 @@ fn settings_ok_for(profile: SessionProfile, read_only: &str, statement_timeout: 
             read_only.trim() == on_off(want_read_only)
                 && timeout_ms(statement_timeout) == Some(u64::from(statement_timeout_ms))
         }
+        // `lock_timeout` doğrulanmaz: `options` yok sayılırsa `statement_timeout` denetimi bağlantıyı zaten reddeder.
+        SessionProfile::Dashboard => read_only.trim() == "on" && timeout_ms(statement_timeout) == Some(10_000),
     }
 }
 
@@ -929,6 +946,35 @@ mod tests {
             assert_eq!(from_options, sets, "{p:?}");
         }
         assert_eq!(profile_session_sets(SessionProfile::Catalog), SESSION_SETS);
+    }
+
+    #[test]
+    fn dashboard_profile_options_and_sets_agree() {
+        let opts = profile_session_options(SessionProfile::Dashboard);
+        assert!(opts.contains("default_transaction_read_only=on"));
+        assert!(opts.contains("statement_timeout=10000"));
+        assert!(opts.contains("lock_timeout=2000"));
+        assert!(!opts.contains("search_path"));
+        let from_options: Vec<String> = opts
+            .split(" -c ")
+            .map(|p| p.trim_start_matches("-c ").replacen('=', " = ", 1))
+            .map(|p| format!("SET {p}"))
+            .collect();
+        let sets: Vec<String> = profile_session_sets(SessionProfile::Dashboard).iter().map(|s| s.to_string()).collect();
+        assert_eq!(from_options, sets);
+    }
+
+    #[test]
+    fn dashboard_profile_settings_check() {
+        // Dashboard search_path'a bakmaz.
+        assert!(settings_ok_for(SessionProfile::Dashboard, "on", "10s", "\"$user\", public"));
+        assert!(!settings_ok_for(SessionProfile::Dashboard, "off", "10s", "public"));
+        assert!(!settings_ok_for(SessionProfile::Dashboard, "on", "30s", "public"));
+    }
+
+    #[test]
+    fn dashboard_application_name() {
+        assert_eq!(SessionProfile::Dashboard.application_name(), "pg-tools dash");
     }
 
     #[test]
