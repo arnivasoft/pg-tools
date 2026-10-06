@@ -33,6 +33,17 @@ import type { SignalKind } from "./bindings/SignalKind";
 import type { SignalOutcome } from "./bindings/SignalOutcome";
 import type { Statements } from "./bindings/Statements";
 import type { StatementsOrder } from "./bindings/StatementsOrder";
+import type { ApplyOptions } from "./bindings/ApplyOptions";
+import type { ApplyOutcome } from "./bindings/ApplyOutcome";
+import type { CreateContext } from "./bindings/CreateContext";
+import type { DdlTarget } from "./bindings/DdlTarget";
+import type { LookupItem } from "./bindings/LookupItem";
+import type { LookupRequest } from "./bindings/LookupRequest";
+import type { ObjectDef } from "./bindings/ObjectDef";
+import type { ObjectKind } from "./bindings/ObjectKind";
+import type { ObjectRef } from "./bindings/ObjectRef";
+import type { PlanRequest } from "./bindings/PlanRequest";
+import type { PlanView } from "./bindings/PlanView";
 import { IpcError, toPayload } from "./errors";
 
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -115,6 +126,19 @@ export const commands = {
   dashPrepared: (id: string) => call<PreparedXact[]>("dash_prepared", { id }),
   dashStatements: (id: string, order: StatementsOrder) => call<Statements>("dash_statements", { id, order }),
   dashSignal: (id: string, pid: number, kind: SignalKind) => call<SignalOutcome>("dash_signal", { id, pid, kind }),
+
+  // Nesne diyalogları (ddl_*): Tauri parametre adları src-tauri/src/ddl.rs ile birebir (camelCase).
+  ddlTargetOf: (nodeId: string) => call<DdlTarget>("ddl_target_of", { nodeId }),
+  ddlDefaults: (serverId: string, databaseOid: number, kind: ObjectKind, ctx: CreateContext) =>
+    call<ObjectDef>("ddl_defaults", { serverId, databaseOid, kind, ctx }),
+  ddlLoad: (serverId: string, databaseOid: number, object: ObjectRef) => call<ObjectDef>("ddl_load", { serverId, databaseOid, object }),
+  ddlLookup: (serverId: string, databaseOid: number, request: LookupRequest) =>
+    call<LookupItem[]>("ddl_lookup", { serverId, databaseOid, request }),
+  ddlPreview: (serverId: string, databaseOid: number, request: PlanRequest) =>
+    call<PlanView>("ddl_preview", { serverId, databaseOid, request }),
+  ddlApply: (serverId: string, databaseOid: number, request: PlanRequest, options: ApplyOptions) =>
+    call<ApplyOutcome>("ddl_apply", { serverId, databaseOid, request, options }),
+  ddlCancel: (applyId: string) => call<null>("ddl_cancel", { applyId }),
 };
 
 export type Api = typeof commands;
