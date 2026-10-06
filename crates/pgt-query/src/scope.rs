@@ -95,6 +95,11 @@ enum El {
     Group { open: usize, close: usize },
 }
 
+/// Parantezli birleşim (`from ((a join b))`) iç içeliği bu derinliği aşınca grup opak sayılır; imleci çevreleyen
+/// düzeylerden de en içteki bu kadarı (ve ifadenin kendisi) taranır. Yığın güvenliği: kullanıcı metni sınırsız
+/// iç içe olabilir (taşma süreci sonlandırır, panik değildir).
+const MAX_SCOPE_DEPTH: u32 = 64;
+
 struct Cx<'a> {
     sql: &'a str,
     toks: Vec<Token>,
@@ -222,7 +227,7 @@ impl Cx<'_> {
     }
 
     /// `FROM`/`JOIN`/... ardından tek öğe; sonraki konumu döner.
-    fn parse_item(&self, els: &[El], mut p: usize, allow_fn: bool, out: &mut Vec<ScopeItem>) -> usize {
+    fn parse_item(&self, els: &[El], mut p: usize, allow_fn: bool, depth: u32, out: &mut Vec<ScopeItem>) -> usize {
         while els.get(p).is_some_and(|e| self.word_is(e, "lateral") || self.word_is(e, "only")) {
             p += 1;
         }
@@ -236,9 +241,11 @@ impl Cx<'_> {
                     }
                     np
                 } else {
-                    // Parantezli birleşim: `from (a join b on ...)`.
-                    let inner = self.elems(open + 1, *close);
-                    self.scan(&inner, true, out);
+                    // Parantezli birleşim: `from (a join b on ...)`; çok derinse opak.
+                    if depth < MAX_SCOPE_DEPTH {
+                        let inner = self.elems(open + 1, *close);
+                        self.scan(&inner, true, depth + 1, out);
+                    }
                     p + 1
                 }
             }
@@ -323,13 +330,13 @@ impl Cx<'_> {
     }
 
     /// Bir sorgu bloğu parçasındaki (küme işleci sınırları arası) ilişki öğeleri.
-    fn scan(&self, els: &[El], nested: bool, out: &mut Vec<ScopeItem>) {
+    fn scan(&self, els: &[El], nested: bool, depth: u32, out: &mut Vec<ScopeItem>) {
         let del_merge = els.iter().enumerate().any(|(i, e)| {
             (self.word_is(e, "delete") || self.word_is(e, "merge"))
                 && self.stmt_start(i.checked_sub(1).map(|j| &els[j]))
         });
         let mut in_from = nested;
-        let mut i = if nested { self.parse_item(els, 0, true, out) } else { 0 };
+        let mut i = if nested { self.parse_item(els, 0, true, depth, out) } else { 0 };
         while i < els.len() {
             let prev = i.checked_sub(1).map(|j| &els[j]);
             let next = match self.tok(&els[i]) {
@@ -337,19 +344,19 @@ impl Cx<'_> {
                     match t.text(self.sql).to_ascii_lowercase().as_str() {
                         "from" if !prev.is_some_and(|p| self.word_is(p, "distinct")) => {
                             in_from = true;
-                            self.parse_item(els, i + 1, true, out)
+                            self.parse_item(els, i + 1, true, depth, out)
                         }
-                        "join" => self.parse_item(els, i + 1, true, out),
+                        "join" => self.parse_item(els, i + 1, true, depth, out),
                         "using" if del_merge && !matches!(els.get(i + 1), Some(El::Group { .. })) => {
                             in_from = true;
-                            self.parse_item(els, i + 1, true, out)
+                            self.parse_item(els, i + 1, true, depth, out)
                         }
                         "update" if self.stmt_start(prev) => {
                             in_from = false;
-                            self.parse_item(els, i + 1, false, out)
+                            self.parse_item(els, i + 1, false, depth, out)
                         }
                         "into" if prev.is_some_and(|p| self.word_is(p, "insert") || self.word_is(p, "merge")) => {
-                            self.parse_item(els, i + 1, false, out)
+                            self.parse_item(els, i + 1, false, depth, out)
                         }
                         "where" | "group" | "order" | "having" | "limit" | "offset" | "window" | "fetch"
                         | "for" | "returning" | "set" | "values" | "select" => {
@@ -359,7 +366,7 @@ impl Cx<'_> {
                         _ => i + 1,
                     }
                 }
-                Some(_) if in_from && self.punct_is(&els[i], ",") => self.parse_item(els, i + 1, true, out),
+                Some(_) if in_from && self.punct_is(&els[i], ",") => self.parse_item(els, i + 1, true, depth, out),
                 _ => i + 1,
             };
             i = next.max(i + 1);
@@ -435,7 +442,9 @@ pub fn scope_at(sql: &str, offset: usize) -> Vec<ScopeItem> {
     let mut levels: Vec<(usize, usize, usize)> = Vec::new();
     let first_ref = stack.first().map_or(offset, |&o| cx.toks[o].start);
     levels.push((stmt_lo, n, first_ref));
-    for (k, &open) in stack.iter().enumerate() {
+    // Çok derin iç içelikte yalnızca en içteki `MAX_SCOPE_DEPTH` düzey (O(n·derinlik) işi ve kapsamı sınırlar).
+    let skip = stack.len().saturating_sub(MAX_SCOPE_DEPTH as usize);
+    for (k, &open) in stack.iter().enumerate().skip(skip) {
         let r = stack.get(k + 1).map_or(offset, |&o| cx.toks[o].start);
         levels.push((open + 1, cx.matching_close(open, n), r));
     }
@@ -456,7 +465,7 @@ pub fn scope_at(sql: &str, offset: usize) -> Vec<ScopeItem> {
             .skip(seg_lo)
             .find(|(_, e)| is_sep(e) && start_of(e) >= pos)
             .map_or(els.len(), |(i, _)| i);
-        cx.scan(&els[seg_lo..seg_hi], false, &mut blocks);
+        cx.scan(&els[seg_lo..seg_hi], false, 0, &mut blocks);
     }
     blocks.extend(ctes);
     blocks
@@ -812,6 +821,31 @@ mod tests {
         assert!(matches!(resolve(&items, "c"), Some(ScopeItem::Relation { .. })));
         let items = at("select | from (select 1) s");
         assert!(matches!(resolve(&items, "s"), Some(ScopeItem::Subquery { .. })));
+    }
+
+    /// Yığın güvenliği: `scope_at` tokio işçisinin varsayılanı olan 2 MiB yığınlı bir iş parçacığında 20.000 iç içe
+    /// parantezde taşmaz (hata ayıklama derlemesinde de: korumasız sürüm 2 MiB'ta ~10.000'de taşıyordu). İmleç hem
+    /// dışta (select listesi) hem en içte; sığ iç içelik (≤ sınır) çözülmeye devam eder.
+    #[test]
+    fn deep_nesting_does_not_overflow() {
+        let run = |sql: String, off: usize| {
+            std::thread::Builder::new()
+                .stack_size(2 << 20)
+                .spawn(move || scope_at(&sql, off))
+                .unwrap()
+                .join()
+                .expect("taşma/panik yok")
+        };
+        let n = 20_000;
+        let deep = format!("select x. from {}t{} x", "(".repeat(n), ")".repeat(n));
+        assert!(run(deep.clone(), "select x.".len()).is_empty()); // sınırın ötesi opak
+        let inner = deep.find('t').unwrap();
+        run(deep, inner + 1);
+        let sub = format!("select * from {}t{}", "(select * from ".repeat(n), ") s".repeat(n));
+        run(sub.clone(), sub.find('t').unwrap() + 1);
+        let shallow = format!("select x. from {}t{} x", "(".repeat(10), ")".repeat(10));
+        let items = run(shallow, "select x.".len());
+        assert!(matches!(resolve(&items, "t"), Some(ScopeItem::Relation { .. })), "{items:?}");
     }
 
     fn xorshift(s: &mut u64) -> u64 {
