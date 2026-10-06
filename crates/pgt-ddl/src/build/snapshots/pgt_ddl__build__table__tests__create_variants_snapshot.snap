@@ -58,7 +58,7 @@ expression: out
 
 ## UNIQUE NULLS NOT DISTINCT + INCLUDE, CHECK NO INHERIT, adsız kısıtlar @150000
 [Safe] CREATE TABLE public.t (
-  a integer,
+  a integer NOT NULL,
   b text,
   c text,
   UNIQUE NULLS NOT DISTINCT (a, b) INCLUDE (c),
@@ -81,7 +81,7 @@ expression: out
 [Safe] CREATE TABLE public.t (
   id bigint NOT NULL,
   created timestamp with time zone,
-  region text,
+  region text NOT NULL,
   PRIMARY KEY (id, region)
 ) PARTITION BY LIST (region)
 

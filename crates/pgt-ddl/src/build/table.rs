@@ -230,6 +230,14 @@ pub(crate) fn table_comment_sql(q: &str, comment: &Option<String>) -> String {
 // Doğrulama
 // ---------------------------------------------------------------------------------------------------------------
 
+/// Ad, `check_ident` kurallarını geçiyor mu (hata eklemeden). Yinelenme/eksiklik iletileri adı yalnızca geçerliyse
+/// içerir; geçersiz ad zaten kendi alanında tek hata alır.
+fn ident_ok(v: &str) -> bool {
+    let mut t = vec![];
+    check_ident("", v, &mut t);
+    t.is_empty()
+}
+
 fn version_err(path: &str, what: &str, major: u32) -> FieldError {
     err(path, format!("{what} PG {major}+ gerektirir."))
 }
@@ -289,8 +297,15 @@ fn validate_column(i: usize, c: &ColumnDef, ctx: &BuildCtx, e: &mut Vec<FieldErr
     }
 }
 
-/// Kısıtın kolon listesini doğrular: boş değil, her ad geçerli, tabloda var (büyük/küçük harf duyarlı), yinelenmiyor.
-fn check_column_list(path: &str, cols: &[String], table_cols: &HashSet<&str>, e: &mut Vec<FieldError>) {
+/// Kısıtın kolon listesini doğrular: boş değil, her ad geçerli, tabloda var (büyük/küçük harf duyarlı) ve
+/// `reject_dups` ise yinelenmiyor.
+fn check_column_list(
+    path: &str,
+    cols: &[String],
+    table_cols: &HashSet<&str>,
+    reject_dups: bool,
+    e: &mut Vec<FieldError>,
+) {
     if cols.is_empty() {
         e.push(err(path, "En az bir kolon gerekli."));
         return;
@@ -305,7 +320,7 @@ fn check_column_list(path: &str, cols: &[String], table_cols: &HashSet<&str>, e:
         }
         if !table_cols.contains(c.as_str()) {
             e.push(err(&pj, format!("'{c}' kolonu tabloda yok.")));
-        } else if !seen.insert(c.as_str()) {
+        } else if !seen.insert(c.as_str()) && reject_dups {
             e.push(err(&pj, format!("'{c}' kolonu listede birden fazla.")));
         }
     }
@@ -319,12 +334,18 @@ fn check_include(i: usize, include: &[String], table_cols: &HashSet<&str>, ctx: 
     if ctx.version_num < 110000 {
         e.push(version_err(&path, "INCLUDE", 11));
     }
+    let mut seen = HashSet::new();
     for (j, c) in include.iter().enumerate() {
         let pj = format!("{path}[{j}]");
         let before = e.len();
         check_ident(&pj, c, e);
-        if e.len() == before && !table_cols.contains(c.as_str()) {
+        if e.len() != before {
+            continue;
+        }
+        if !table_cols.contains(c.as_str()) {
             e.push(err(&pj, format!("'{c}' kolonu tabloda yok.")));
+        } else if !seen.insert(c.as_str()) {
+            e.push(err(&pj, format!("'{c}' kolonu INCLUDE listesinde birden fazla.")));
         }
     }
 }
@@ -347,7 +368,7 @@ fn validate_constraint(
         | ConstraintKind::Unique {
             columns, include, ..
         } => {
-            check_column_list(&p("columns"), columns, table_cols, e);
+            check_column_list(&p("columns"), columns, table_cols, true, e);
             check_include(i, include, table_cols, ctx, e);
             if let ConstraintKind::Unique {
                 nulls_not_distinct: true,
@@ -380,7 +401,8 @@ fn validate_constraint(
                         format!("Bölüm anahtarı ifade içerdiğinden {what} kısıtı kurulamaz."),
                     ));
                 } else if let Some(missing) = pb.keys.iter().find_map(|k| match k {
-                    PartitionKey::Column { name } if !columns.contains(name) => Some(name),
+                    // Geçersiz bölüm kolonu adı kendi alanında raporlanır; iletiye yalnızca geçerli ad girer.
+                    PartitionKey::Column { name } if ident_ok(name) && !columns.contains(name) => Some(name),
                     _ => None,
                 }) {
                     // PG 11+: benzersizlik kısıtı tüm bölüm kolonlarını içermeli.
@@ -413,15 +435,24 @@ fn validate_constraint(
             ref_columns,
             ..
         } => {
-            check_column_list(&p("columns"), columns, table_cols, e);
+            // PG yerel kolon listesinde yinelenmeye izin verir (yalnızca hedef listede reddeder); yüklenmiş böyle bir
+            // FK alter'ın yeni tarafında reddedilmesin diye burada da serbest.
+            check_column_list(&p("columns"), columns, table_cols, false, e);
             check_schema_ident(&p("refSchema"), ref_schema, e);
             check_ident(&p("refTable"), ref_table, e);
             // Hedef tablonun kolonları sunucuda doğrulanır; burada yalnızca adlar ve sayı.
             if ref_columns.is_empty() {
                 e.push(err(&p("refColumns"), "En az bir hedef kolon gerekli."));
             } else {
+                let mut seen = HashSet::new();
                 for (j, rc) in ref_columns.iter().enumerate() {
-                    check_ident(&format!("constraints[{i}].refColumns[{j}]"), rc, e);
+                    let pj = format!("constraints[{i}].refColumns[{j}]");
+                    let before = e.len();
+                    check_ident(&pj, rc, e);
+                    // PG: "foreign key referenced-columns list must not contain duplicates".
+                    if e.len() == before && !seen.insert(rc.as_str()) {
+                        e.push(err(&pj, format!("'{rc}' kolonu hedef listede birden fazla.")));
+                    }
                 }
                 if !columns.is_empty() && columns.len() != ref_columns.len() {
                     e.push(err(
@@ -484,15 +515,8 @@ fn validate_partition(d: &TableDef, table_cols: &HashSet<&str>, ctx: &BuildCtx, 
             PartitionKey::Expression { sql } => check_free_sql(&pj, sql, e),
         }
     }
-    // Bölümlenmiş tabloda depolama parametresi verilemez (PG 10+: "cannot specify storage parameters for a
-    // partitioned table"). UNLOGGED bölümlenmiş tablo (PG 18 reddeder, eskiler kabul eder) ve bölümlenmiş tabloda
-    // TABLESPACE (PG 12 öncesi davranış) sürüm ayrıntısından emin olmadığımız için sunucuya bırakılır.
-    if d.fillfactor.is_some() {
-        e.push(err(
-            "fillfactor",
-            "Bölümlenmiş tabloda fillfactor belirtilemez.",
-        ));
-    }
+    // UNLOGGED bölümlenmiş tablo (PG 18 reddeder, eskiler kabul eder) ve bölümlenmiş tabloda TABLESPACE (PG 12 öncesi
+    // davranış) sürüm ayrıntısından emin olmadığımız için sunucuya bırakılır.
 }
 
 /// Ortak tablo doğrulaması (create ve alter'ın yeni tarafı). Hata sırası sabittir: tablo alanları, kolonlar,
@@ -518,7 +542,8 @@ pub fn validate_table(d: &TableDef, ctx: &BuildCtx) -> Vec<FieldError> {
     for (i, c) in d.columns.iter().enumerate() {
         validate_column(i, c, ctx, &mut e);
         // Adlar tırnaklı yerleştiğinden karşılaştırma büyük/küçük harfe duyarlıdır ("A" ile "a" farklı kolondur).
-        if !c.name.is_empty() && !seen_cols.insert(c.name.as_str()) {
+        // Geçersiz ad kendi hatasını almıştır: yinelenme yalnızca geçerli adlar için (aynı yolda çift hata yok).
+        if ident_ok(&c.name) && !seen_cols.insert(c.name.as_str()) {
             e.push(err(
                 &format!("columns[{i}].name"),
                 format!("'{}' kolonu birden fazla tanımlı.", c.name),
@@ -531,7 +556,7 @@ pub fn validate_table(d: &TableDef, ctx: &BuildCtx) -> Vec<FieldError> {
     for (i, c) in d.constraints.iter().enumerate() {
         validate_constraint(i, c, d, &table_cols, ctx, &mut e);
         if let Some(n) = &c.name
-            && !n.is_empty()
+            && ident_ok(n)
             && !seen_cons.insert(n.as_str())
         {
             e.push(err(
@@ -549,14 +574,40 @@ pub fn validate_table(d: &TableDef, ctx: &BuildCtx) -> Vec<FieldError> {
             has_pk = true;
         }
     }
+    // PG kimlik ve PRIMARY KEY kolonlarını her zaman NOT NULL yapar; `notNull: false` yüklemede `true` döner ve
+    // "değiştirmeden düzenle → boş plan" eşitliğini bozardı. Tanım bunu açıkça taşımalı.
+    let pk_cols: HashSet<&str> = d
+        .constraints
+        .iter()
+        .filter_map(|c| match &c.kind {
+            ConstraintKind::PrimaryKey { columns, .. } => Some(columns),
+            _ => None,
+        })
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    for (i, c) in d.columns.iter().enumerate() {
+        if !c.not_null && (c.identity.is_some() || pk_cols.contains(c.name.as_str())) {
+            e.push(err(
+                &format!("columns[{i}].notNull"),
+                "Kimlik/PRIMARY KEY kolonu her zaman NOT NULL'dır; notNull işaretli olmalı.",
+            ));
+        }
+    }
     validate_partition(d, &table_cols, ctx, &mut e);
-    if let Some(ff) = d.fillfactor
-        && !(10..=100).contains(&ff)
-    {
-        e.push(err(
-            "fillfactor",
-            "Doldurma oranı 10 ile 100 arasında olmalı.",
-        ));
+    if let Some(ff) = d.fillfactor {
+        if d.partition_by.is_some() {
+            // PG 10+: "cannot specify storage parameters for a partitioned table" (aralık hatası ayrıca verilmez).
+            e.push(err(
+                "fillfactor",
+                "Bölümlenmiş tabloda fillfactor belirtilemez.",
+            ));
+        } else if !(10..=100).contains(&ff) {
+            e.push(err(
+                "fillfactor",
+                "Doldurma oranı 10 ile 100 arasında olmalı.",
+            ));
+        }
     }
     e
 }
@@ -572,9 +623,11 @@ pub(crate) fn validate_create(d: &TableDef, ctx: &BuildCtx) -> Vec<FieldError> {
         e.push(err("inherits", LOADED));
     }
     for (i, c) in d.columns.iter().enumerate() {
-        if c.using.is_some() {
+        let path = format!("columns[{i}].using");
+        // Serbest SQL hatası zaten bu yolda raporlandıysa ikinci hata eklenmez.
+        if c.using.is_some() && !e.iter().any(|x| x.path == path) {
             e.push(err(
-                &format!("columns[{i}].using"),
+                &path,
                 "USING yalnızca mevcut kolonun tipini değiştirirken kullanılabilir.",
             ));
         }
@@ -601,6 +654,12 @@ pub(crate) fn validate_create(d: &TableDef, ctx: &BuildCtx) -> Vec<FieldError> {
 // Planlar
 // ---------------------------------------------------------------------------------------------------------------
 
+/// Yorum dolu mu: `Some("")` `None` sayılır. PG'de `COMMENT … IS ''` yorumu siler; yükleyici yorumsuz nesne için
+/// `None` döndürür, bu yüzden boş yorum için ifade üretilmez.
+fn has_comment(c: &Option<String>) -> bool {
+    c.as_deref().is_some_and(|s| !s.is_empty())
+}
+
 /// Sıra: CREATE TABLE, sahip, tablo yorumu, kolon yorumları (yalnızca dolu olanlar, kolon sırasıyla). Hepsi Safe.
 pub fn create(d: &TableDef) -> Plan {
     let q = qualified(&d.schema, &d.name);
@@ -612,11 +671,11 @@ pub fn create(d: &TableDef) -> Plan {
             None,
         ));
     }
-    if d.comment.is_some() {
+    if has_comment(&d.comment) {
         statements.push(stmt(table_comment_sql(&q, &d.comment), Risk::Safe, None));
     }
     for c in &d.columns {
-        if c.comment.is_some() {
+        if has_comment(&c.comment) {
             statements.push(stmt(
                 column_comment_sql(d, &c.name, &c.comment),
                 Risk::Safe,
@@ -662,7 +721,7 @@ pub fn drop(d: &TableDef, cascade: bool) -> Plan {
 mod tests {
     use super::*;
     use crate::build::freesql::composed_is_clean;
-    use crate::build::type_syntax::validate_type;
+    use crate::build::type_syntax::{is_spoofing_format, validate_type};
     use crate::build::{
         alter as balter, assert_single_statements, create as bcreate, drop as bdrop, render,
         scan_semicolons, validate as bvalidate, validate_identity,
@@ -851,6 +910,15 @@ mod tests {
             ..base()
         }
     }
+    /// Verilen kolonları NOT NULL yapar (PK üyeleri her zaman NOT NULL olmalı).
+    fn nn(mut d: TableDef, cols: &[&str]) -> TableDef {
+        for c in &mut d.columns {
+            if cols.contains(&c.name.as_str()) {
+                c.not_null = true;
+            }
+        }
+        d
+    }
     fn part(strategy: PartitionStrategy, keys: Vec<PartitionKey>) -> Option<PartitionByDef> {
         Some(PartitionByDef { strategy, keys })
     }
@@ -977,7 +1045,7 @@ mod tests {
             ),
             (
                 "UNIQUE NULLS NOT DISTINCT + INCLUDE, CHECK NO INHERIT, adsız kısıtlar",
-                TableDef {
+                nn(TableDef {
                     columns: vec![col("a", "integer"), col("b", "text"), col("c", "text")],
                     constraints: vec![
                         con(
@@ -1001,17 +1069,17 @@ mod tests {
                         },
                     ],
                     ..base()
-                },
+                }, &["a"]),
                 150000,
             ),
             ("bölümlenmiş RANGE (kolon + ifade)", parted(), 100000),
             (
                 "bölümlenmiş LIST + PK (PG 11)",
-                TableDef {
+                nn(TableDef {
                     partition_by: part(PartitionStrategy::List, vec![pcol("region")]),
                     constraints: vec![con(None, pk(&["id", "region"]))],
                     ..parted()
-                },
+                }, &["region"]),
                 110000,
             ),
             (
@@ -1067,9 +1135,9 @@ mod tests {
                 "b text COLLATE \"C\" DEFAULT ('x'\n)",
             ),
             (
-                ColumnDef { identity: Some(IdentityKind::Always), ..col("b", "bigint") },
+                ColumnDef { identity: Some(IdentityKind::Always), not_null: true, ..col("b", "bigint") },
                 100000,
-                "b bigint GENERATED ALWAYS AS IDENTITY",
+                "b bigint GENERATED ALWAYS AS IDENTITY NOT NULL",
             ),
             (
                 ColumnDef { identity: Some(IdentityKind::ByDefault), not_null: true, ..col("b", "smallint") },
@@ -1156,7 +1224,11 @@ mod tests {
     #[test]
     fn constraint_kinds_exact() {
         let d = TableDef {
-            columns: vec![col("a", "integer"), col("b", "integer"), col("c", "text")],
+            columns: vec![
+                ColumnDef { not_null: true, ..col("a", "integer") },
+                ColumnDef { not_null: true, ..col("b", "integer") },
+                col("c", "text"),
+            ],
             constraints: vec![
                 ConstraintDef {
                     deferrable: true,
@@ -1186,7 +1258,7 @@ mod tests {
         let p = ok(&d, &v(150000));
         assert_eq!(
             sqls(&p),
-            ["CREATE TABLE public.t (\n  a integer,\n  b integer,\n  c text,\n  CONSTRAINT p PRIMARY KEY (a, b) INCLUDE (c) DEFERRABLE INITIALLY DEFERRED,\n  UNIQUE (c) DEFERRABLE,\n  CONSTRAINT n UNIQUE NULLS NOT DISTINCT (b),\n  CHECK (a <> b\n) NO INHERIT,\n  FOREIGN KEY (a) REFERENCES public.t (b) ON UPDATE NO ACTION ON DELETE NO ACTION\n)"]
+            ["CREATE TABLE public.t (\n  a integer NOT NULL,\n  b integer NOT NULL,\n  c text,\n  CONSTRAINT p PRIMARY KEY (a, b) INCLUDE (c) DEFERRABLE INITIALLY DEFERRED,\n  UNIQUE (c) DEFERRABLE,\n  CONSTRAINT n UNIQUE NULLS NOT DISTINCT (b),\n  CHECK (a <> b\n) NO INHERIT,\n  FOREIGN KEY (a) REFERENCES public.t (b) ON UPDATE NO ACTION ON DELETE NO ACTION\n)"]
         );
     }
 
@@ -1246,24 +1318,30 @@ mod tests {
             None,
             ConstraintKind::Unique { columns: names(&["a"]), include: vec![], nulls_not_distinct: true },
         )]);
-        let pk_inc = ab(vec![con(
-            None,
-            ConstraintKind::PrimaryKey { columns: names(&["a"]), include: names(&["b"]) },
-        )]);
+        let pk_inc = nn(
+            ab(vec![con(
+                None,
+                ConstraintKind::PrimaryKey { columns: names(&["a"]), include: names(&["b"]) },
+            )]),
+            &["a"],
+        );
         let uq_inc = ab(vec![con(
             None,
             ConstraintKind::Unique { columns: names(&["a"]), include: names(&["b"]), nulls_not_distinct: false },
         )]);
         let hash = TableDef { partition_by: part(PartitionStrategy::Hash, vec![pcol("id")]), ..parted() };
         let ident = TableDef {
-            columns: vec![ColumnDef { identity: Some(IdentityKind::Always), ..col("a", "integer") }],
+            columns: vec![ColumnDef { identity: Some(IdentityKind::Always), not_null: true, ..col("a", "integer") }],
             ..base()
         };
         let by_created = TableDef {
             partition_by: part(PartitionStrategy::Range, vec![pcol("created")]),
             ..parted()
         };
-        let parted_pk = TableDef { constraints: vec![con(None, pk(&["id", "created"]))], ..by_created.clone() };
+        let parted_pk = nn(
+            TableDef { constraints: vec![con(None, pk(&["id", "created"]))], ..by_created.clone() },
+            &["created"],
+        );
         let parted_uq = TableDef { constraints: vec![con(None, uq(&["created"]))], ..by_created };
         let parted_fk = TableDef { constraints: vec![con(None, fk(&["id"], "u", &["id"]))], ..parted() };
         let cases: Vec<(&str, TableDef, u32, Option<&str>)> = vec![
@@ -1538,6 +1616,22 @@ mod tests {
                 TableDef { constraints: vec![con(None, uq(&["id", "created"]))], ..parted() },
                 "constraints[0].columns",
             ),
+            (
+                "kimlik notNull false",
+                with_col(ColumnDef { identity: Some(IdentityKind::Always), ..col("a", "integer") }),
+                "columns[0].notNull",
+            ),
+            ("PK üyesi notNull false", abc(vec![con(None, pk(&["a"]))]), "columns[0].notNull"),
+            (
+                "INCLUDE yinelenen",
+                abc(vec![con(
+                    None,
+                    ConstraintKind::Unique { columns: names(&["a"]), include: names(&["b", "b"]), nulls_not_distinct: false },
+                )]),
+                "constraints[0].include[1]",
+            ),
+            ("FK hedef kolon yinelenen", abc(vec![con(None, fk(&["a", "b"], "u", &["x", "x"]))]), "constraints[0].refColumns[1]"),
+            ("ad biçim karakteri", TableDef { name: "t\u{202e}x".into(), ..base() }, "name"),
             ("bölüm tablosu create", TableDef { is_partition: true, ..base() }, "isPartition"),
             ("kalıtımlı create", TableDef { inherits: true, ..base() }, "inherits"),
         ];
@@ -1570,6 +1664,9 @@ mod tests {
             "constraints[0].expr",
             "constraints[0].include[0]",
             "constraints[0].initiallyDeferred",
+            "columns[0].notNull",
+            "constraints[0].include[1]",
+            "constraints[0].refColumns[1]",
             "fillfactor",
             "partitionBy.keys",
             "partitionBy.keys[0]",
@@ -1632,14 +1729,23 @@ mod tests {
                 ..base()
             },
             // Bölümlü tabloda (PG 11+) bölüm kolonlarını içeren PK/UNIQUE ve FK.
+            nn(
+                TableDef {
+                    partition_by: part(PartitionStrategy::List, vec![pcol("region")]),
+                    constraints: vec![
+                        con(None, pk(&["region", "id"])),
+                        con(None, uq(&["created", "region"])),
+                        con(None, fk(&["id"], "u", &["id"])),
+                    ],
+                    ..parted()
+                },
+                &["region"],
+            ),
+            // FK yerel kolon listesinde yinelenme PG'de serbest (yalnızca hedef listede yasak).
             TableDef {
-                partition_by: part(PartitionStrategy::List, vec![pcol("region")]),
-                constraints: vec![
-                    con(None, pk(&["region", "id"])),
-                    con(None, uq(&["created", "region"])),
-                    con(None, fk(&["id"], "u", &["id"])),
-                ],
-                ..parted()
+                columns: vec![col("a", "integer")],
+                constraints: vec![con(None, fk(&["a", "a"], "u", &["x", "y"]))],
+                ..base()
             },
         ] {
             ok(&d, &v(110000));
@@ -1696,6 +1802,9 @@ mod tests {
                 "x\x1b".into(),
                 "x\x7f".into(),
                 "x\n)) --".into(),
+                "a\u{202e}b".into(),
+                "\u{feff}x".into(),
+                "a\u{200b}".into(),
             ] {
                 let e = create_errs(&with(bad.clone()), &ctx());
                 assert_eq!(e[0].path, path, "{bad:?}: {e:?}");
@@ -1712,6 +1821,8 @@ mod tests {
             Type,
             Free,
             Comment,
+            /// Yalnızca alter alanı: create'te her değer reddedilmeli (Task 3–4 aynı listeyi kullanabilir).
+            AlterOnly,
         }
         let fields: Vec<(&str, K, TableDef, Set)> = vec![
             ("name", K::Name, full(), |d, v| d.name = v),
@@ -1722,6 +1833,7 @@ mod tests {
             ("columns[4].name", K::Name, full(), |d, v| d.columns[4].name = v),
             ("columns[4].dataType", K::Type, full(), |d, v| d.columns[4].data_type = v),
             ("columns[4].default", K::Free, full(), |d, v| d.columns[4].default = Some(v)),
+            ("columns[4].using", K::AlterOnly, full(), |d, v| d.columns[4].using = Some(v)),
             ("columns[3].generated", K::Free, full(), |d, v| {
                 d.columns[3].generated.as_mut().unwrap().expr = v
             }),
@@ -1824,14 +1936,20 @@ mod tests {
                                 s.sql
                             );
                         }
-                        assert_eq!(p.statements.len(), base_len, "{label}");
+                        // Boş yorum `None` sayılır: o yorum ifadesi üretilmez.
+                        let want = if *kind == K::Comment && h.is_empty() { base_len - 1 } else { base_len };
+                        assert_eq!(p.statements.len(), want, "{label}");
+                        assert!(!p.statements.iter().any(|s| s.sql.ends_with(" IS ''")), "{label}");
                         // Alan türüne göre kabul edilmemesi gerekenler.
                         assert!(!h.contains('\0'), "{label}");
                         match kind {
                             K::Name => assert!(
-                                !h.is_empty() && h.len() <= 63 && !h.chars().any(|c| c.is_ascii_control()),
+                                !h.is_empty()
+                                    && h.len() <= 63
+                                    && !h.chars().any(|c| c.is_ascii_control() || is_spoofing_format(c)),
                                 "{label}"
                             ),
+                            K::AlterOnly => panic!("create'te kabul edildi: {label}"),
                             K::Type => assert!(validate_type(h).is_ok(), "{label}"),
                             K::Free => {
                                 let r = scan_semicolons(h);
@@ -1860,7 +1978,7 @@ mod tests {
             name: "Tablo ş".into(),
             owner: Some("user".into()),
             columns: vec![
-                ColumnDef { comment: Some("c".into()), ..col("order", "integer") },
+                ColumnDef { comment: Some("c".into()), not_null: true, ..col("order", "integer") },
                 col("ünlü", "text"),
                 col("a\"b", "text"),
             ],
@@ -1871,7 +1989,7 @@ mod tests {
         assert_eq!(
             sqls(&p),
             [
-                "CREATE TABLE \"select\".\"Tablo ş\" (\n  \"order\" integer,\n  \"ünlü\" text,\n  \"a\"\"b\" text,\n  CONSTRAINT \"from\" PRIMARY KEY (\"order\")\n)",
+                "CREATE TABLE \"select\".\"Tablo ş\" (\n  \"order\" integer NOT NULL,\n  \"ünlü\" text,\n  \"a\"\"b\" text,\n  CONSTRAINT \"from\" PRIMARY KEY (\"order\")\n)",
                 "ALTER TABLE \"select\".\"Tablo ş\" OWNER TO \"user\"",
                 "COMMENT ON COLUMN \"select\".\"Tablo ş\".\"order\" IS 'c'",
             ]
@@ -1914,6 +2032,95 @@ mod tests {
         let p = ok(&d, &ctx());
         let r = scan_semicolons(&p.statements[0].sql);
         assert!(r.parens_balanced() && !r.ends_in_line_comment);
+    }
+
+    #[test]
+    fn not_null_rules_for_identity_and_pk() {
+        let t = |cols: Vec<ColumnDef>, cons: Vec<ConstraintDef>| TableDef { columns: cols, constraints: cons, ..base() };
+        let nncol = |n: &str| ColumnDef { not_null: true, ..col(n, "integer") };
+        // Geçerli: PK üyesi true, kimlik true, UNIQUE üyesi false.
+        ok(&t(vec![nncol("a"), col("b", "integer")], vec![con(None, pk(&["a"])), con(None, uq(&["b"]))]), &ctx());
+        ok(&t(vec![ColumnDef { identity: Some(IdentityKind::ByDefault), ..nncol("a") }], vec![]), &ctx());
+        // Bileşik PK: yalnızca işaretsiz üye hata alır; kimlik + PK üyesi tek hata.
+        let e = create_errs(
+            &t(vec![nncol("a"), col("b", "integer"), ColumnDef { identity: Some(IdentityKind::Always), ..col("c", "integer") }],
+               vec![con(None, pk(&["a", "b", "c"]))]),
+            &ctx(),
+        );
+        let paths: Vec<&str> = e.iter().map(|x| x.path.as_str()).collect();
+        assert_eq!(paths, ["columns[1].notNull", "columns[2].notNull"]);
+        assert!(e[0].message.contains("NOT NULL"));
+        // Paylaşılan doğrulayıcı (alter yeni tarafı) da uygular.
+        assert_eq!(bvalidate(&o(t(vec![col("a", "integer")], vec![con(None, pk(&["a"]))])), &ctx())[0].path, "columns[0].notNull");
+    }
+
+    #[test]
+    fn invalid_names_get_one_error_and_are_not_echoed() {
+        // Yinelenen GEÇERSİZ kolon/kısıt adı: her biri kendi yolunda tek hata (yinelenme iletisi yok).
+        let d = TableDef {
+            columns: vec![col("a\n", "integer"), col("a\n", "integer")],
+            ..base()
+        };
+        let paths: Vec<String> = create_errs(&d, &ctx()).into_iter().map(|e| e.path).collect();
+        assert_eq!(paths, ["columns[0].name", "columns[1].name"]);
+        let d = TableDef {
+            columns: vec![col("a", "integer")],
+            constraints: vec![con(Some("k\u{202e}"), ck("a > 0")), con(Some("k\u{202e}"), ck("a > 1"))],
+            ..base()
+        };
+        let paths: Vec<String> = create_errs(&d, &ctx()).into_iter().map(|e| e.path).collect();
+        assert_eq!(paths, ["constraints[0].name", "constraints[1].name"]);
+        // Geçersiz bölüm kolonu adı PK "eksik bölüm kolonu" iletisine sızmaz.
+        let d = TableDef {
+            partition_by: part(PartitionStrategy::List, vec![pcol("id\n; DROP")]),
+            constraints: vec![con(None, pk(&["id"]))],
+            ..parted()
+        };
+        let e = create_errs(&d, &v(110000));
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert_eq!(e[0].path, "partitionBy.keys[0]");
+        assert!(!e.iter().any(|x| x.message.contains("DROP")));
+        // Geçerli adlar iletide görünür.
+        let d = TableDef { columns: vec![col("x y", "integer"), col("x y", "text")], ..base() };
+        let e = create_errs(&d, &ctx());
+        assert_eq!((e.len(), e[0].path.as_str()), (1, "columns[1].name"));
+        assert!(e[0].message.contains("'x y'"));
+    }
+
+    #[test]
+    fn partitioned_fillfactor_gets_single_error() {
+        for ff in [5, 50, 101] {
+            let e = create_errs(&TableDef { fillfactor: Some(ff), ..parted() }, &ctx());
+            assert_eq!(e.len(), 1, "{ff}: {e:?}");
+            assert_eq!(e[0].path, "fillfactor");
+            assert!(e[0].message.contains("Bölümlenmiş"));
+        }
+    }
+
+    #[test]
+    fn empty_comments_are_treated_as_none() {
+        let d = TableDef {
+            comment: Some(String::new()),
+            columns: vec![ColumnDef { comment: Some(String::new()), ..col("a", "integer") }, ColumnDef { comment: Some("x".into()), ..col("b", "text") }],
+            ..base()
+        };
+        let p = ok(&d, &ctx());
+        assert_eq!(
+            sqls(&p),
+            ["CREATE TABLE public.t (\n  a integer,\n  b text\n)", "COMMENT ON COLUMN public.t.b IS 'x'"]
+        );
+        let p = ok(&TableDef { comment: Some(String::new()), ..base() }, &ctx());
+        assert_eq!(p.statements.len(), 1);
+    }
+
+    #[test]
+    fn using_gets_single_error_in_create() {
+        for u in ["a::text", "a; DROP TABLE t", ""] {
+            let d = TableDef { columns: vec![ColumnDef { using: Some(u.into()), ..col("a", "text") }], ..base() };
+            let e = create_errs(&d, &ctx());
+            assert_eq!(e.len(), 1, "{u:?}: {e:?}");
+            assert_eq!(e[0].path, "columns[0].using");
+        }
     }
 
     #[test]

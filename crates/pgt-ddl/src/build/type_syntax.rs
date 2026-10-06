@@ -71,8 +71,8 @@ struct Parser {
     i: usize,
 }
 
-/// Sıfır genişlikli ve yön denetimi biçim karakterleri (görsel aldatma).
-fn is_spoofing_format(c: char) -> bool {
+/// Sıfır genişlikli ve yön denetimi biçim karakterleri (görsel aldatma). Ad doğrulayıcısı (`check_ident`) da kullanır.
+pub(crate) fn is_spoofing_format(c: char) -> bool {
     matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{feff}')
 }
 

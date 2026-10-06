@@ -40,7 +40,9 @@ pub(crate) fn err(path: &str, message: impl Into<String>) -> FieldError {
     }
 }
 
-/// Ad kuralları: boş değil, NUL/ASCII denetim karakteri (satır sonu, sekme, 0x7f vb.) yok, en çok 63 bayt.
+/// Ad kuralları: boş değil, NUL/ASCII denetim karakteri (satır sonu, sekme, 0x7f vb.) yok, görünmez biçim/yön
+/// denetimi karakteri (tip dilbilgisindeki küme: `U+200B–U+200F`, `U+2028–U+202E`, `U+2060–U+2064`, `U+FEFF`) yok,
+/// en çok 63 bayt.
 pub(crate) fn check_ident(path: &str, value: &str, errs: &mut Vec<FieldError>) {
     if value.is_empty() {
         errs.push(err(path, "Ad boş olamaz."));
@@ -51,6 +53,15 @@ pub(crate) fn check_ident(path: &str, value: &str, errs: &mut Vec<FieldError>) {
         errs.push(err(
             path,
             "Ad denetim karakteri (satır sonu, sekme vb.) içeremez.",
+        ));
+    } else if let Some(c) = value.chars().find(|&c| type_syntax::is_spoofing_format(c)) {
+        // Tırnaklı adda zararsızdır ama görüntüyü aldatır (ör. sağdan sola çevirme ile "gizli" ad).
+        errs.push(err(
+            path,
+            format!(
+                "Ad görünmez biçim ya da yön denetimi karakteri içeremez (U+{:04X}).",
+                c as u32
+            ),
         ));
     } else if value.len() > MAX_IDENT_BYTES {
         errs.push(err(
@@ -361,6 +372,24 @@ mod tests {
         assert_eq!(errs_for("a b"), 0);
         // ASCII dışı denetim karakteri yasaklı değil (yalnız < 0x20 ve 0x7f).
         assert_eq!(errs_for("ş\u{85}"), 0);
+    }
+
+    #[test]
+    fn ident_rejects_spoofing_format_chars() {
+        for c in ['\u{200b}', '\u{200d}', '\u{200f}', '\u{2028}', '\u{202a}', '\u{202e}', '\u{2060}', '\u{2064}', '\u{feff}'] {
+            let mut e = vec![];
+            check_ident("n", &format!("a{c}b"), &mut e);
+            assert_eq!(e.len(), 1, "{c:?}");
+            assert!(e[0].message.contains(&format!("U+{:04X}", c as u32)), "{e:?}");
+        }
+        // Kümenin hemen dışındakiler ve sıradan Unicode serbest.
+        for v in ["a\u{2027}b", "a\u{202f}b", "a\u{2065}b", "a\u{200a}b", "ünlü ş", "日本"] {
+            assert_eq!(errs_for(v), 0, "{v:?}");
+        }
+        // Şema doğrulayıcısı da aynı kuralı uygular.
+        let mut e = vec![];
+        check_schema_ident("s", "pub\u{202e}lic", &mut e);
+        assert_eq!(e.len(), 1);
     }
 
     #[test]
