@@ -2568,6 +2568,7 @@ dependencies = [
  "pgt-catalog",
  "pgt-core",
  "pgt-dash",
+ "pgt-ddl",
  "pgt-query",
  "serde",
  "tauri",

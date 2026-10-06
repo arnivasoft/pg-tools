@@ -10,6 +10,7 @@ pub mod manager;
 pub mod model;
 pub mod plan;
 pub mod quote;
+pub mod target;
 
 pub use build::{BuildCtx, ScanResult, scan_semicolons};
 pub use error_codes::{DDL_ERROR_CODES, DdlErrorCode, ddl_payload};
@@ -18,4 +19,5 @@ pub use lookup::{LookupItem, LookupRequest, lookup};
 pub use manager::{ApplyOptions, ApplyOutcome, CreateContext, DdlManager, PlanRequest};
 pub use model::*;
 pub use plan::{Plan, PlanView, Risk, Statement, plan_hash};
+pub use target::{DdlCreate, DdlTarget, target_of};
 pub use quote::{qualified, quote_ident, quote_literal};

@@ -12,6 +12,7 @@ pgt-core.workspace = true
 pgt-catalog.workspace = true
 pgt-query.workspace = true
 pgt-dash.workspace = true
+pgt-ddl.workspace = true
 tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2.8"
 tokio.workspace = true

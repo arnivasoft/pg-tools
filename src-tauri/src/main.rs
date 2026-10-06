@@ -2,6 +2,7 @@
 
 mod commands;
 mod dash;
+mod ddl;
 mod logging;
 mod query;
 mod state;
@@ -31,6 +32,8 @@ fn main() {
                 let query = state.query.clone();
                 // Dashboard kimlikleri de arayüzle birlikte kaybolur: sahipsiz bağlantı kalmasın.
                 state.dash.close_all();
+                // Uçuştaki DDL uygulamasının sahibi (arayüz) gitti: iptal et (sunucu tarafı tx bağlantı düşünce geri alınır).
+                state.ddl.cancel_all();
                 tauri::async_runtime::spawn(async move { query::close_all_on_reload(&query).await });
             }
         })
@@ -91,6 +94,13 @@ fn main() {
             dash::dash_prepared,
             dash::dash_statements,
             dash::dash_signal,
+            ddl::ddl_target_of,
+            ddl::ddl_defaults,
+            ddl::ddl_load,
+            ddl::ddl_lookup,
+            ddl::ddl_preview,
+            ddl::ddl_apply,
+            ddl::ddl_cancel,
             store_cmds::qt_history_push_many,
             store_cmds::qt_history_list,
             store_cmds::qt_history_clear,
@@ -110,6 +120,7 @@ fn main() {
                 let state = app.state::<state::AppState>();
                 let query = state.query.clone();
                 state.dash.close_all();
+                state.ddl.cancel_all();
                 // Zaman aşımı geleceği çalışma zamanı İÇİNDE kurulmalı: dışarıda `tokio::time::timeout` "no reactor running" ile panikler.
                 tauri::async_runtime::block_on(async move {
                     let _ = tokio::time::timeout(Duration::from_secs(7), query.close_all()).await;
