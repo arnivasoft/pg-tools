@@ -494,6 +494,15 @@ struct Inner {
     lock_timeout_set_in_tx: bool,
 }
 
+impl Inner {
+    /// Bağlantı bırakıldı/yenilendi: bağlantıya bağlı `lock_timeout` izleri geçersizdir (yeni bağlantıda sunucu
+    /// varsayılanı geçerli; kaybolan transaction'daki SET de yok).
+    fn forget_lock_timeout(&mut self) {
+        self.pending_lock_timeout = None;
+        self.lock_timeout_set_in_tx = false;
+    }
+}
+
 struct SessionSlot {
     server: Uuid,
     target: Target,
@@ -1128,6 +1137,7 @@ impl QueryManager {
         let mut reset = false;
         if inner.exec.as_ref().is_some_and(Executor::is_closed) {
             inner.exec = None;
+            inner.forget_lock_timeout();
             let lost = slot.state() != TxState::Idle;
             reset = std::mem::take(&mut inner.dirty) && !lost;
             slot.set_state(TxState::Idle);
@@ -1144,7 +1154,7 @@ impl QueryManager {
         if inner.exec.is_none() {
             let conn = self.mgr.open_dedicated(slot.server, slot.target, slot.profile(&inner.opts)).await?;
             inner.exec = Some(Executor::new(conn));
-            inner.pending_lock_timeout = None;
+            inner.forget_lock_timeout();
             inner.applied_timeout = Some(inner.opts.statement_timeout_ms);
             slot.set_state(TxState::Idle);
             tracing::debug!(server = %slot.server, "sorgu oturumu yeniden bağlandı");
@@ -1722,6 +1732,24 @@ mod tests {
     use super::*;
 
     const SELECT: Option<TxOp> = None;
+
+    #[test]
+    fn reconnect_forgets_lock_timeout_tracking() {
+        let mut inner = Inner {
+            exec: None,
+            opts: SessionOptions::default(),
+            applied_timeout: None,
+            last_used: Instant::now(),
+            cursor_timer: None,
+            cursor_gen: 0,
+            dirty: false,
+            pending_lock_timeout: Some("5s".into()),
+            lock_timeout_set_in_tx: true,
+        };
+        inner.forget_lock_timeout();
+        assert_eq!(inner.pending_lock_timeout, None);
+        assert!(!inner.lock_timeout_set_in_tx);
+    }
 
     #[test]
     fn transaction_state_machine_table() {
