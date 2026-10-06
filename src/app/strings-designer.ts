@@ -112,6 +112,12 @@ export const tdes = {
     locked: "Sunucu salt okunur kilitli.",
     confirmationRequired: "Bu değişiklik onay gerektiriyor; önizlemeyi kontrol edip onaylayın.",
   },
+  /** Gezgin menüsünden açma (designer-open). */
+  open: {
+    none: "Bu düğüm için düzenleme yok.",
+    locked: "Sunucu salt okunur kilitli; nesne değiştirilemez.",
+    dropPending: "Silme henüz hazır değil.",
+  },
   status: {
     gone: "Nesne artık yok.",
     serverGone: "Sunucu kaydı silindi.",

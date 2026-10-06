@@ -308,6 +308,15 @@ kullanıcı işaretlemeli. Dashboard bağlantıları sunucuda `application_name 
 - [ ] lock_timeout seçici (1 sn / 5 sn / 30 sn / sınırsız) uygulamada kullanılır (başka oturumda `lock table … in access exclusive mode` tutarken 1 sn ile zaman aşımı). **[—]**
 - [ ] **Yeniden yükle**: kirli formda "Kaydedilmemiş değişiklikler atılsın mı?" onayı (odak Vazgeç); temizken doğrudan yükler. İlk yükleme hatasında "Yeniden dene". **[—]**
 
+### Gezgin menüsü ve açma (Task 4)
+- [ ] Schemas / Sequences / Extensions / Indexes koleksiyonunda sağ tık → **Oluştur…**; schema / sequence / extension / index düğümünde **Düzenle…**, **Yeniden adlandır…**, **Sil…** (Query Tool eyleminden sonra, ayırıcıyla ayrı grup). Tablo, kolon, görünüm, fonksiyon, rol, veritabanı, sunucu düğümlerinde bu eylemler yok. **[—]**
+- [ ] Salt okunur kilitli sunucuda bu dört eylem görünür ama soluk ve seçilemez; üzerine gelince `title` "Bu sunucu salt okunur kilitli."; kilit kaldırılıp ağaç yenilenince etkinleşir. **[—]**
+- [ ] İlk "Oluştur/Düzenle" designer parçasını yükler (ağ sekmesinde `designer-open-*.js`); iki hızlı tıklama tek sekme / tek kurulum üretir. Bağlı olmayan sunucuda önce parola istenir; iptalde sekme açılmaz. **[—]**
+- [ ] Aynı nesnede ikinci **Düzenle…** mevcut sekmeyi etkinleştirir; **Yeniden adlandır…** (yeni ya da mevcut sekmede) ad alanına odaklanır. Sekme üst çubuğunda "<sunucu>/<veritabanı>". **[—]**
+- [ ] **Sil…** şimdilik yalnızca "Silme henüz hazır değil." bildirimi verir (silme diyaloğu Task 7). **[—]**
+- [ ] Uygulama sonrası Explorer'da doğru koleksiyon yenilenir (yeni sequence görünür). Designer'dan "Query Tool'da aç" betiği yeni sorgu sekmesine **çalıştırmadan** koyar (başlık "<sunucu>/<veritabanı> #n"; etiketsiz sunucuda ortam sorusu; kilitli sunucuda da açılır, çalıştırma kilit kapısına takılır). **[—]**
+- [ ] Sunucu bağlantısı kesilince/silinince açık designer sekmeleri "Bağlantı kesildi"/"Sunucu kaydı silindi" olur; sunucu adı/etiketi/kilidi düzenlenince açık designer sekmesi yeni adı/kilidi gösterir. **[—]**
+
 ## Ölçümler
 
 | Tarih | Makine | Paket (MB) | Açılış (ms) | Toplam özel WS (MB) | Rust özel WS (MB) |

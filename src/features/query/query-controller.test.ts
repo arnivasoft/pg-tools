@@ -86,3 +86,63 @@ describe("temizleme sonrası", () => {
     expect(saved).toEqual([["a", "select 1"]]);
   });
 });
+
+describe("openScript (designer betiği Query Tool'da)", () => {
+  function scriptSetup(cfg: ServerConfig) {
+    const api = {
+      listServers: vi.fn(async () => [cfg]),
+      qtDraftsSave: vi.fn(async () => null),
+      qtOpen: vi.fn(),
+      qtRun: vi.fn(),
+      saveServer: vi.fn(),
+    } as unknown as Api;
+    const notify = vi.fn();
+    const ctl = createQueryController({ api, notify, tree: emptyTree, connect: async () => true, serversChanged: () => {} });
+    return { ctl, api, notify };
+  }
+
+  it("metni yeni etkin sekmeye koyar ve çalıştırmaz", async () => {
+    const { ctl, api } = scriptSetup({ ...server, label: "test" });
+    await ctl.openScript({ serverId: "S1", databaseOid: 42, database: "app", text: "ALTER SEQUENCE s RESTART;" });
+    expect(ctl.tabs.state.tabs).toHaveLength(1);
+    const tab = ctl.tabs.state.tabs[0];
+    expect(ctl.tabs.state.activeId).toBe(tab.id);
+    expect(tab.database).toBe("app");
+    expect(ctl.text(tab.id)).toBe("ALTER SEQUENCE s RESTART;");
+    expect(ctl.model(tab.id)?.databaseOid).toBe(42);
+    expect(ctl.model(tab.id)?.run.status).toBe("noSession"); // oturum açılmadı, çalıştırılmadı
+    expect(api.qtOpen).not.toHaveBeenCalled();
+    expect(api.qtRun).not.toHaveBeenCalled();
+  });
+
+  it("kilitli sunucuda da açar (çalıştırma kapısı ayrı)", async () => {
+    const { ctl, api } = scriptSetup({ ...server, label: "production", readOnlyLock: true });
+    await ctl.openScript({ serverId: "S1", databaseOid: 7, database: "app", text: "DROP INDEX i;" });
+    expect(ctl.tabs.state.tabs).toHaveLength(1);
+    expect(ctl.text(ctl.tabs.state.tabs[0].id)).toBe("DROP INDEX i;");
+    expect(api.qtOpen).not.toHaveBeenCalled();
+  });
+
+  it("etiketsiz sunucuda ortam istemini kullanır; iptalde sekme açılmaz", async () => {
+    const { ctl } = scriptSetup({ ...server, label: null });
+    const p = ctl.openScript({ serverId: "S1", databaseOid: 1, database: "app", text: "x" });
+    await vi.waitFor(() => expect(ctl.envGate.request()).not.toBeNull());
+    ctl.envGate.answer(null);
+    await p;
+    expect(ctl.tabs.state.tabs).toHaveLength(0);
+
+    const q = ctl.openScript({ serverId: "S1", databaseOid: 1, database: "app", text: "y" });
+    await vi.waitFor(() => expect(ctl.envGate.request()).not.toBeNull());
+    ctl.envGate.answer("skip");
+    await q;
+    expect(ctl.tabs.state.tabs).toHaveLength(1);
+    expect(ctl.text(ctl.tabs.state.tabs[0].id)).toBe("y");
+  });
+
+  it("sunucu kaydı yoksa sekme açmaz, bildirir", async () => {
+    const { ctl, notify } = scriptSetup(server);
+    await ctl.openScript({ serverId: "NOPE", databaseOid: 1, text: "x" });
+    expect(ctl.tabs.state.tabs).toHaveLength(0);
+    expect(notify).toHaveBeenCalledWith(expect.any(String), "error");
+  });
+});

@@ -271,39 +271,33 @@ export function createQueryController(deps: QueryControllerDeps) {
 
   // ---- açma
   let opening = false;
-  const openFromNode = async (nodeId: string, opts: { draft: boolean } = { draft: true }) => {
+  /**
+   * Ortak açma akışı (tek seferde bir): hedef → güncel sunucu kaydı → ortam istemi → yeni etkin sekme. `text` ortam
+   * isteminden sonra güncel yapılandırmayla hesaplanır. `database` yoksa bakım veritabanı adı.
+   */
+  const openAt = async (
+    target: () => Promise<{ serverId: string; databaseOid: number | null }>,
+    database: string | null | undefined,
+    relation: [string, string] | null,
+    text: (config: ServerConfig) => Promise<string> | string,
+  ) => {
     if (opening) return;
-    const ctx = openContext(deps.tree(), nodeId);
-    if (!ctx) return;
     opening = true;
     try {
-      const target = await api.qtTargetOf(nodeId);
-      const list = await refreshServers();
-      let config = list.find((s) => s.id === target.serverId);
-      if (!config) {
-        notify(t.query.ctx.serverGone, "error");
-        return;
-      }
-      const prompted = await promptEnvironment(config);
-      if (!prompted) return;
-      config = prompted;
-      let text = "";
-      if (opts.draft && ctx.relation) {
-        try {
-          text = initialSql(await api.quoteIdentifiers(config.id, ctx.relation));
-        } catch (err) {
-          notify(toPayload(err).message, "error");
-        }
-      }
+      const tg = await target();
+      const found = (await refreshServers()).find((s) => s.id === tg.serverId);
+      if (!found) return notify(t.query.ctx.serverGone, "error");
+      const config = await promptEnvironment(found);
+      if (!config) return;
       const id = addTab({
         serverId: config.id,
         serverName: config.name,
-        databaseOid: target.databaseOid,
-        database: ctx.database ?? config.maintenanceDb,
-        relation: opts.draft && ctx.relation ? ctx.relation[1] : null,
+        databaseOid: tg.databaseOid,
+        database: database ?? config.maintenanceDb,
+        relation: relation?.[1] ?? null,
         options: defaultOptions(config.label),
         serverGone: false,
-        text,
+        text: await text(config),
         activate: true,
       });
       saver.touch(id);
@@ -313,6 +307,27 @@ export function createQueryController(deps: QueryControllerDeps) {
       opening = false;
     }
   };
+
+  const openFromNode = async (nodeId: string, opts: { draft: boolean } = { draft: true }) => {
+    const ctx = openContext(deps.tree(), nodeId);
+    if (!ctx) return;
+    const rel = opts.draft ? ctx.relation : null;
+    await openAt(() => api.qtTargetOf(nodeId), ctx.database, rel, async (config) => {
+      try {
+        return rel ? initialSql(await api.quoteIdentifiers(config.id, rel)) : "";
+      } catch (err) {
+        notify(toPayload(err).message, "error");
+        return "";
+      }
+    });
+  };
+
+  /**
+   * Designer betiğini verilen hedefte yeni sekmede açar (metin olduğu gibi; ÇALIŞTIRMAZ). Kilitli sunucuda da açılır;
+   * çalıştırma kapısı her zamanki gibidir. `database`: sekme başlığındaki ad (yoksa bakım veritabanı adı).
+   */
+  const openScript = (input: { serverId: string; databaseOid: number | null; database?: string | null; text: string }) =>
+    openAt(async () => input, input.database, null, () => input.text);
 
   // ---- oturum
   const sessionLost = (id: string, note = true) => {
@@ -542,6 +557,7 @@ export function createQueryController(deps: QueryControllerDeps) {
     activate,
     rename,
     openFromNode,
+    openScript,
     ensureSession,
     sessionLost,
     setOptions,
