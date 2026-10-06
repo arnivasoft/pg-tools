@@ -16,7 +16,7 @@ use crate::plan::{Plan, Risk, Statement};
 use crate::quote::{qualified, quote_ident, quote_literal};
 
 const METHODS: [&str; 6] = ["btree", "hash", "gist", "gin", "brin", "spgist"];
-const REBUILD_WARNING: &str = "İndeks yeniden oluşturulur: önce silinir, sonra kurulur. DROP INDEX ACCESS EXCLUSIVE kilidi alır ve işlem      bitene kadar tablo okuma ve yazmaya kapalı kalır; büyük tablolarda kesinti uzar";
+const REBUILD_WARNING: &str = "İndeks yeniden oluşturulur: önce silinir, sonra kurulur. DROP INDEX ACCESS EXCLUSIVE kilidi alır ve işlem bitene kadar tablo okuma ve yazmaya kapalı kalır; büyük tablolarda kesinti uzar";
 const CONCURRENT_NOTE: &str =
     "Transaction dışında çalışır; hata olursa geçersiz (INVALID) indeks kalabilir";
 const PARTITION_WARNING: &str = "CONCURRENTLY bölümlenmiş (partitioned) tablolarda desteklenmez; tablo bölümlenmişse ifade hata verir";
@@ -1504,9 +1504,8 @@ mod tests {
         assert!(p.is_err(), "yeni taraf tam doğrulanır (bozuk ifade/yöntem)");
         // Kimlik hâlâ doğrulanır: NUL / denetim karakteri / sistem şeması / boş ad.
         for bad in [
-            IndexDef { name: "a ".into(), ..odd.clone() },
-            IndexDef { table: "a
-b".into(), ..odd.clone() },
+            IndexDef { name: "a\0".into(), ..odd.clone() },
+            IndexDef { table: "a\nb".into(), ..odd.clone() },
             IndexDef { schema: "pg_catalog".into(), ..odd.clone() },
             IndexDef { name: String::new(), ..odd.clone() },
         ] {

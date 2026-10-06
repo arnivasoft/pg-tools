@@ -2,9 +2,11 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{Builder, Rotation};
 use tracing_subscriber::EnvFilter;
 
-/// Süzgeç: `PGT_LOG` (varsayılan info) + `tokio_postgres=info` sabiti. tokio-postgres `debug` seviyesinde çalıştırdığı
-/// SQL metnini günlüğe yazar (`executing statement batch: …`); `PGT_LOG=debug` ya da `tokio_postgres=trace` olsa bile
-/// bu hedef info'nun altına inmez (Query Tool/DDL SQL'i diske yazılmaz).
+/// Süzgeç: `PGT_LOG` (varsayılan info) + `tokio_postgres=info`. tokio-postgres `debug` seviyesinde çalıştırdığı SQL
+/// metnini `log` kaydı olarak yazar (`executing statement batch: …`). Sabit yönerge yalnızca AYNI hedefteki
+/// (`tokio_postgres`) yönergelerin üzerine yazar; daha özel bir alt hedef (ör. `tokio_postgres::query=debug`) debug
+/// kaydını yine açabilir. Asıl güvence köprünün yokluğudur: `tracing-log` kapalı, `log` -> `tracing` köprüsü
+/// kurulmaz; tokio-postgres kayıtları günlük dosyasına ulaşamaz.
 pub fn build_filter(env: Option<&str>) -> EnvFilter {
     let base = env.and_then(|e| EnvFilter::try_new(e).ok()).unwrap_or_else(|| EnvFilter::new("info"));
     base.add_directive("tokio_postgres=info".parse().expect("geçerli yönerge"))
