@@ -131,4 +131,19 @@ describe("createDashOpener", () => {
     await s.opener.reopen(id);
     expect(s.dash.reopen).toHaveBeenCalledWith(id);
   });
+
+  it("var olan sekme kayıpsa yeniden açılınca bağlanıp otomatik yeniden açılır; canlıysa dokunulmaz", async () => {
+    const s = setup();
+    await s.opener.openFromNode("db");
+    const id = s.tabs.state.dashboards[0].id;
+    await s.opener.openFromNode("db"); // connecting: yeniden açma yok
+    expect(s.dash.reopen).not.toHaveBeenCalled();
+    s.models.set(id, { status: "lost", serverId: "s1" });
+    s.deps.connect.mockClear();
+    await s.opener.openFromNode("db");
+    expect(s.deps.connect).toHaveBeenCalledWith("s1");
+    expect(s.dash.reopen).toHaveBeenCalledWith(id);
+    expect(s.dash.open).toHaveBeenCalledTimes(1);
+    expect(s.tabs.state.dashboards).toHaveLength(1);
+  });
 });

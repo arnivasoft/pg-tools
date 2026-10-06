@@ -42,7 +42,11 @@ export function createDashOpener(deps: DashOpenDeps) {
       if (!(await deps.connect(config.id))) return;
       const title = td.tabTitle(config.name, node.kind === "database" ? node.label : null);
       const r = tabs.openDashboard({ serverId: config.id, databaseOid: target.databaseOid, title });
-      if (!r.created) return;
+      if (!r.created) {
+        // Var olan sekme kayıpsa (bağlantı kesilmişti) sunucu az önce bağlandı: "Yeniden aç" ile aynı akış.
+        if (dash.model(r.id)?.status === "lost") void dash.reopen(r.id);
+        return;
+      }
       // `open` modeli eşzamanlı kurar (ardından `setActive` onu görür); açılış hatası sekmede durum olarak görünür.
       void dash.open({ id: r.id, serverId: config.id, serverName: config.name, databaseOid: target.databaseOid });
       dash.setActive(tabs.state.activeId === r.id ? r.id : null);
