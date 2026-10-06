@@ -413,6 +413,21 @@ describe("previewEmptyState", () => {
     expect(previewEmptyState(view({ empty: true, statements: [] }), false, "alter")).toBe("noChanges");
     expect(previewEmptyState(view(), false, "create")).toBeNull();
   });
+  it("görünüm yokken yüklenen sekme → yükleniyor; hazır olmayan sekmede (hata/kesik/yok) metin yok", () => {
+    expect(previewEmptyState(null, false, "alter", "loading")).toBe("loading");
+    expect(previewEmptyState(null, true, "create", "loading")).toBe("loading");
+    for (const s of ["error", "disconnected", "gone"] as const) {
+      expect(previewEmptyState(null, false, "alter", s)).toBeNull();
+      expect(previewEmptyState(null, false, "create", s)).toBeNull();
+    }
+  });
+  it("önizleme hatası + görünüm yok → metin yok; yeniden bekliyorsa hazırlanıyor; görünüm varsa değişmez", () => {
+    expect(previewEmptyState(null, false, "alter", "ready", "bağlantı koptu")).toBeNull();
+    expect(previewEmptyState(null, false, "create", "ready", "bağlantı koptu")).toBeNull();
+    expect(previewEmptyState(null, true, "create", "ready", "eski hata")).toBe("pending");
+    expect(previewEmptyState(view(), false, "create", "ready", "hata")).toBeNull();
+    expect(previewEmptyState(view({ empty: true, statements: [] }), false, "alter", "ready", "hata")).toBe("noChanges");
+  });
   it("bekleyen önizlemede eski görünüm gösterilmeye devam eder", () => {
     expect(previewEmptyState(view(), true, "create")).toBeNull();
     expect(previewEmptyState(view({ empty: true, statements: [] }), true, "alter")).toBe("noChanges");

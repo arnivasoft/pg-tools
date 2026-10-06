@@ -1,6 +1,6 @@
 // Designer formlarının ortak parçaları (tembel parça): alan satırı (etiket + hata metni), sahip seçimi, yorum alanı,
 // serbest SQL notu ve form bileşenlerinin ortak prop tipi. Formlar (Task 5–6) yalnızca bunları kullanır; SQL üretmez.
-import { For, Show, createResource, createUniqueId, type Component, type JSX } from "solid-js";
+import { For, Show, createEffect, createResource, createUniqueId, type Component, type JSX } from "solid-js";
 import { tdes } from "../../app/strings-designer";
 import { inputClass } from "../../ui/Field";
 import type { DesignerController, DesignerModel } from "./designer-controller";
@@ -59,7 +59,18 @@ export function FieldRow(props: {
   );
 }
 
-const invalidClass = (invalid: boolean) => (invalid ? " !border-danger" : "");
+export const invalidClass = (invalid: boolean) => (invalid ? " !border-danger" : "");
+
+/**
+ * Denetleyiciden gelen odak isteği (`requestFocus`) bu alana (`field`) ise denetimi odaklar; form bağlandığında zaten
+ * bekleyen istek de uygulanır. Devre dışı denetim odaklanamaz (istek sessizce atlanır).
+ */
+export function createFocusOnRequest(props: { designer: DesignerController; tabId: string }, field: string, el: () => HTMLElement | undefined) {
+  createEffect(() => {
+    const req = props.designer.focusRequest(props.tabId);
+    if (req && req.field === field) el()?.focus();
+  });
+}
 
 /**
  * Sahip: yazılabilir metin + rol listesi (`datalist`; yüzlerce rol olabilir, Select yerine). Boş = varsayılan (`null`).
@@ -94,7 +105,7 @@ export function OwnerSelect(props: {
             aria-invalid={a.invalid}
             disabled={props.disabled}
             value={props.value ?? ""}
-            onChange={(ev) => {
+            onInput={(ev) => {
               const v = ev.currentTarget.value.trim();
               props.onChange(v === "" ? null : v);
             }}

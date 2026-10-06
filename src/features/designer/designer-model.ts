@@ -232,9 +232,26 @@ export function statementRangesToLineRanges(text: string, ranges: ReadonlyArray<
  * eder; yalnızca hiç görünüm yokken "hazırlanıyor". Görünüm yokken: create → "formu tamamlayın", alter → "değişiklik
  * yok" (yüklenen tanım = taslak). Geçersiz tanım `empty = true` da taşır: önce `errors` bakılır.
  */
-export type PreviewEmptyState = "pending" | "incomplete" | "noChanges";
-export function previewEmptyState(view: PlanView | null, pending: boolean, mode: "create" | "alter"): PreviewEmptyState | null {
-  if (!view) return pending ? "pending" : mode === "create" ? "incomplete" : "noChanges";
+export type PreviewEmptyState = "loading" | "pending" | "incomplete" | "noChanges";
+/**
+ * Sekme durumu ve önizleme hatası görünüm yokken dikkate alınır: yüklenirken "yükleniyor"; hazır olmayan sekmede
+ * (hata/bağlantı kesik/nesne yok) ya da önizleme hatası varken boş-durum metni yok (şeritler nedeni gösterir;
+ * "Değişiklik yok" yanıltıcı olurdu).
+ */
+export function previewEmptyState(
+  view: PlanView | null,
+  pending: boolean,
+  mode: "create" | "alter",
+  status: "loading" | "ready" | "error" | "disconnected" | "gone" = "ready",
+  previewError: string | null = null,
+): PreviewEmptyState | null {
+  if (!view) {
+    if (status === "loading") return "loading";
+    if (status !== "ready") return null;
+    if (pending) return "pending";
+    if (previewError !== null) return null;
+    return mode === "create" ? "incomplete" : "noChanges";
+  }
   if (view.errors.length > 0) return "incomplete";
   if (view.empty || view.statements.length === 0) return "noChanges";
   return null;

@@ -1,7 +1,7 @@
 // Designer sekmesinin gövdesi (tembel parça): üst çubuk (tür rozeti, sunucu/veritabanı, durum, Yeniden yükle), durum
 // şeritleri, türe göre form yuvası ve sağda SQL önizleme + uygulama çubuğu. Formlar türe göre ayrı tembel parçalardır.
 import { RefreshCw } from "lucide-solid";
-import { Show, Suspense, createMemo, createSignal } from "solid-js";
+import { Show, Suspense, createMemo, createSignal, lazy } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { tdes } from "../../app/strings-designer";
 import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
@@ -11,13 +11,17 @@ import ApplyBar from "./ApplyBar";
 import type { DesignerController, DesignerModel } from "./designer-controller";
 import { groupIssues, kindLabel } from "./designer-model";
 import type { FormEntry } from "./FormParts";
+import { EXTENSION_PATHS, SCHEMA_PATHS } from "./forms-model";
 import SqlPreview from "./SqlPreview";
 
 /**
- * Tür → form (tembel bileşen + bilinen alan yolları). Task 5–6 doldurur; eksik tür için yalnızca geçici "form henüz
+ * Tür → form (tembel bileşen + bilinen alan yolları). Task 5 schema/extension, Task 6 sequence/index bağlar; eksik tür için yalnızca geçici "form henüz
  * yok" notu gösterilir (Task 5–6 dört türü bağlayınca not kaldırılır).
  */
-const FORMS: Partial<Record<ObjectKind, FormEntry>> = {};
+const FORMS: Partial<Record<ObjectKind, FormEntry>> = {
+  schema: { view: lazy(() => import("./SchemaForm")), paths: SCHEMA_PATHS },
+  extension: { view: lazy(() => import("./ExtensionForm")), paths: EXTENSION_PATHS },
+};
 
 type StatusKey = keyof typeof tdes.view.status;
 
@@ -30,7 +34,6 @@ function StatusBadge(props: { model: DesignerModel }) {
   const live = () => key() === "ready" || key() === "done";
   return (
     <span
-      role="status"
       aria-label={`${tdes.view.statusLabel}: ${tdes.view.status[key()]}`}
       class="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-border px-2 text-[12px]"
       classList={{ "text-danger": danger(), "text-muted": !danger() && !live(), "text-fg": live() }}

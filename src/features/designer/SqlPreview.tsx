@@ -58,7 +58,7 @@ export default function SqlPreview(props: { model: DesignerModel; general: strin
   const failed = () => (props.model.outcome?.outcome === "failed" ? props.model.outcome : null);
   const shown = () => props.model.view ?? (failed() ? last() : null);
   const showingLast = () => props.model.view === null && shown() !== null;
-  const empty = () => previewEmptyState(shown(), props.model.pending, props.model.mode);
+  const empty = () => previewEmptyState(shown(), props.model.pending, props.model.mode, props.model.status, props.model.previewError);
   const script = createMemo(() => scriptWithRanges(shown()?.statements ?? []));
   const failedIndex = () => {
     const f = failed();
@@ -101,6 +101,7 @@ export default function SqlPreview(props: { model: DesignerModel; general: strin
 
   const emptyText = () => {
     switch (empty()) {
+      case "loading": return tdes.loading;
       case "pending": return p.pending;
       case "incomplete": return p.incomplete;
       case "noChanges": return p.noChanges;
