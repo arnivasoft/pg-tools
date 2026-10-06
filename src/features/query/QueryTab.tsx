@@ -29,6 +29,7 @@ import { hintFor } from "./errors";
 import { exportSql, exportTarget } from "./export";
 import { createExportUi } from "./ExportUi";
 import { formatRange, formatReplacement, safeFormatSelection } from "./format-edit";
+import { createSerialSaver } from "./settings-saver";
 import { historyEntriesFor, insertAt } from "./history-model";
 import { HistorySettings, HistoryView } from "./HistoryView";
 import { MessagesView } from "./MessagesView";
@@ -55,6 +56,7 @@ const FORMAT_FAILED = "biçimlendirilemedi";
 const DEFAULT_FORMAT: FormatOptions = { keywordCase: "upper", indent: 2, comma: "trailing", maxLine: 120 };
 
 type ResultPane = "result" | "messages" | "history";
+type EditorPrefs = { checkEnabled: boolean; format: FormatOptions };
 
 export default function QueryTab(props: { ctl: QueryController }) {
   const ctl = props.ctl;
@@ -85,17 +87,17 @@ export default function QueryTab(props: { ctl: QueryController }) {
     }
   };
   // Editör ayarları (settings.json): yazarken denetim + biçimlendirici seçenekleri.
-  const [checkEnabled, setCheckEnabled] = createSignal(true);
-  const [formatOptions, setFormatOptions] = createSignal<FormatOptions>(DEFAULT_FORMAT);
-  const saveEditorSettings = async (check: boolean, format: FormatOptions) => {
-    try {
-      const s = await commands.settingsSetEditor(check, format);
-      setCheckEnabled(s.checkEnabled);
-      setFormatOptions(s.format);
-    } catch (e) {
-      notify(toPayload(e).message);
-    }
-  };
+  // Değişiklik hemen uygulanır, yazımlar sıralıdır; başarısız yazım geri alınır (`settings-saver`).
+  const [editorPrefs, setEditorPrefs] = createSignal<EditorPrefs>({ checkEnabled: true, format: DEFAULT_FORMAT });
+  const checkEnabled = () => editorPrefs().checkEnabled;
+  const formatOptions = () => editorPrefs().format;
+  const prefsSaver = createSerialSaver<EditorPrefs>({
+    get: editorPrefs,
+    set: (v) => setEditorPrefs(v),
+    save: (v) => commands.settingsSetEditor(v.checkEnabled, v.format),
+    failed: (e) => notify(toPayload(e).message),
+  });
+  const saveEditorSettings = (check: boolean, format: FormatOptions) => void prefsSaver.save({ checkEnabled: check, format });
   const [editorHeight, setEditorHeight] = createSignal(Math.max(MIN_EDITOR, Number(readStorage(EDITOR_HEIGHT_KEY)) || 220));
 
   let host!: HTMLDivElement;
@@ -177,8 +179,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
       .settingsGet()
       .then((s) => {
         setHistoryEnabled(s.historyEnabled);
-        setCheckEnabled(s.checkEnabled);
-        setFormatOptions(s.format);
+        setEditorPrefs({ checkEnabled: s.checkEnabled, format: s.format });
       })
       .catch(() => {});
     onCleanup(() => {
@@ -713,7 +714,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
                   <EditorSettings
                     checkEnabled={checkEnabled()}
                     format={formatOptions()}
-                    onChange={(check, format) => void saveEditorSettings(check, format)}
+                    onChange={saveEditorSettings}
                   />
                 </div>
               </div>
