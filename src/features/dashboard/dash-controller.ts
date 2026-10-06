@@ -132,9 +132,12 @@ export function createDashController(deps: DashControllerDeps) {
   const { api, notify } = deps;
   const pd: PollerDeps = { ...defaultPollerDeps(), ...deps.poller };
   const entries = new Map<string, Entry>();
+  // Kayıt sinyali: `entries` düz Map'tir (tepkisiz). Sekme modelden ÖNCE çizilir (dash-open `openDashboard` →
+  // `open`; store eşzamanlı akar); okuyucular bu sinyale bağlanır, girdi eklenince/silinince yeniden çalışır.
+  const [registry, bump] = createSignal(0, { equals: false });
   const signalGate = gate<SignalRequest, boolean>(false);
 
-  const model = (tabId: string): DashModel | undefined => entries.get(tabId)?.model();
+  const model = (tabId: string): DashModel | undefined => (registry(), entries.get(tabId)?.model());
   const update = (e: Entry, f: (m: DashModel) => DashModel) => e.set((m) => f(m));
   const patch = (e: Entry, p: Partial<DashModel>) => update(e, (m) => ({ ...m, ...p }));
   /** Yanıt hâlâ geçerli mi: sekme açık ve aynı kuşak. */
@@ -319,6 +322,7 @@ export function createDashController(deps: DashControllerDeps) {
     const poller = createPoller(pd, () => tick(tabId, e));
     e = { model: m, set, poller, tabActive: false, gen: 0, listAt: {}, loading: new Set() };
     entries.set(tabId, e);
+    bump();
     await connect(tabId, e);
     return tabId;
   };
@@ -328,6 +332,7 @@ export function createDashController(deps: DashControllerDeps) {
     const e = entries.get(tabId);
     if (!e) return;
     entries.delete(tabId);
+    bump();
     e.gen++;
     e.poller.dispose();
     // Bu sekmenin açık onay diyaloğu vazgeçilmiş sayılır.
@@ -495,7 +500,7 @@ export function createDashController(deps: DashControllerDeps) {
 
   return {
     model,
-    ids: () => [...entries.keys()],
+    ids: () => (registry(), [...entries.keys()]),
     open,
     close,
     reopen,

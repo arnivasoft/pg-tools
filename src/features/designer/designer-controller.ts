@@ -174,10 +174,14 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   };
   const delay = deps.previewDelay ?? PREVIEW_DELAY_MS;
   const entries = new Map<string, Entry>();
+  // Kayıt sinyali: `entries` düz Map'tir (tepkisiz). Sekme denetleyici girdisinden ÖNCE çizilebilir (opener
+  // `openDesigner` → `openCreate/openAlter`; store eşzamanlı akar); okuyucular bu sinyale bağlanır, girdi
+  // eklenince/silinince yeniden çalışır.
+  const [registry, bump] = createSignal(0, { equals: false });
   const lookups = new Map<string, LookupSlot>();
   let focusSeq = 0;
 
-  const model = (tabId: string): DesignerModel | undefined => entries.get(tabId)?.model();
+  const model = (tabId: string): DesignerModel | undefined => (registry(), entries.get(tabId)?.model());
   const update = (e: Entry, f: (m: DesignerModel) => DesignerModel) => e.set((m) => f(m));
   const patch = (e: Entry, p: Partial<DesignerModel>) => update(e, (m) => ({ ...m, ...p }));
   /** Yanıt hâlâ geçerli mi: sekme açık ve aynı kuşak. */
@@ -323,6 +327,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const previewer = createPreviewer<PreviewOk>(pd, onPreview(tabId), onPreviewError(tabId), delay);
     const e: Entry = { model: m, set, gen: 0, previewer, refreshNodeId, create, base: null, focus, setFocus };
     entries.set(tabId, e);
+    bump();
     return e;
   };
 
@@ -574,6 +579,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const e = entries.get(tabId);
     if (!e) return;
     entries.delete(tabId);
+    bump();
     e.gen++;
     e.previewer.dispose();
     const m = e.model();
@@ -623,7 +629,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
 
   return {
     model,
-    ids: () => [...entries.keys()],
+    ids: () => (registry(), [...entries.keys()]),
     openCreate,
     openAlter,
     edit,
@@ -646,7 +652,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       const m = model(tabId);
       return m ? gateFor(m, false) : { kind: "blocked", reason: "disconnected" };
     },
-    focusRequest: (tabId: string): FocusRequest | null => entries.get(tabId)?.focus() ?? null,
+    focusRequest: (tabId: string): FocusRequest | null => (registry(), entries.get(tabId)?.focus() ?? null),
     /** Odak isteği uygulandı: yalnızca hâlâ aynı `seq` bekliyorsa temizler (yeni istek ezilmez); yeniden bağlanan form eski isteği tekrar uygulamaz. */
     consumeFocus: (tabId: string, seq: number) => {
       const e = entries.get(tabId);
