@@ -32,14 +32,21 @@ export function FieldRow(props: {
   path: string;
   issues: FieldIssues;
   hint?: string;
+  /** İstemci tarafı ön uyarı (ör. sayı biçimi); hata değildir, arka uç asıl doğrulamayı yapar. */
+  warning?: string | null;
+  /** `issuesFor` yerine yalnızca tam yol (satır düzeyi hata alt alan hatalarını tekrarlamasın). */
+  exact?: boolean;
   children: (a: { id: string; describedBy: string | undefined; invalid: boolean }) => JSX.Element;
 }) {
   const id = createUniqueId();
   const errId = `${id}-err`;
+  const warnId = `${id}-warn`;
   const hintId = `${id}-hint`;
-  const errors = () => issuesFor(props.issues, props.path);
+  const errors = () => (props.exact ? (props.issues.byPath.get(props.path) ?? []) : issuesFor(props.issues, props.path));
   const describedBy = () =>
-    [errors().length > 0 ? errId : null, props.hint ? hintId : null].filter((x) => x !== null).join(" ") || undefined;
+    [errors().length > 0 ? errId : null, props.warning ? warnId : null, props.hint ? hintId : null]
+      .filter((x) => x !== null)
+      .join(" ") || undefined;
   return (
     <div class="flex flex-col gap-1">
       <label for={id} class="text-xs text-muted">
@@ -49,6 +56,11 @@ export function FieldRow(props: {
       <Show when={errors().length > 0}>
         <span id={errId} class="text-xs text-danger">
           {errors().join(" ")}
+        </span>
+      </Show>
+      <Show when={props.warning}>
+        <span id={warnId} class="text-xs text-warn-text">
+          {props.warning}
         </span>
       </Show>
       <Show when={props.hint}>
