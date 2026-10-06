@@ -11,7 +11,7 @@ use crate::session::{
 };
 
 /// Ayrı kodu olmayan ama "Geçersiz ayar:" önekiyle gösterilmemesi gereken işaretler (genel `invalid` kodu).
-const PLAIN_INVALID: [&str; 1] = [SETTINGS_CHANGED_MESSAGE];
+const PLAIN_INVALID: [&str; 2] = [SETTINGS_CHANGED_MESSAGE, crate::format::FORMAT_FAILED];
 
 /// `QueryManager`'ın `Error::Invalid(<işaret>)` ile bildirdiği reddin kodu. `invalid` (diğer her geçersiz girdi)
 /// ve öteki genel kodlar (`query`, `not_found`, `not_connected`, …) `pgt_core::ErrorPayload`'dan gelir.

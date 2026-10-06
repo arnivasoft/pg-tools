@@ -16,6 +16,7 @@ use pgt_query::complete::{CompletionItem, CompletionRequest};
 use pgt_query::error_codes::query_payload;
 use pgt_query::events::{EventSink, QueryEvent};
 use pgt_query::export::{CsvOptions, ExportSummary};
+use pgt_query::format::FormatOptions;
 use pgt_query::session::{ClosePolicy, QueryManager, Scope, SessionId, SessionOptions, StmtPlan, TxAction, TxState};
 use tauri::State;
 use tauri::ipc::Channel;
@@ -140,6 +141,13 @@ pub async fn qt_check(
     target: CheckTarget,
 ) -> CmdResult<Vec<CheckDiag>> {
     Box::pin(state.query.check(session, &sql, target)).await.map_err(|e| query_payload(&e))
+}
+
+/// SQL biçimlendirme (saf; oturum gerektirmez, SQL günlüğe yazılmaz). Belirteç eşitliği ya da eşkuvvetlilik
+/// sağlanamazsa `invalid` kodlu "biçimlendirilemedi"; geçersiz seçenek `invalid`.
+#[tauri::command]
+pub async fn qt_format(sql: String, options: FormatOptions) -> CmdResult<String> {
+    Box::pin(async move { pgt_query::format::format(&sql, &options) }).await.map_err(|e| query_payload(&e))
 }
 
 /// İlerleme kanalı kapanırsa (gönderim hatası) dışa aktarma iptal edilir.

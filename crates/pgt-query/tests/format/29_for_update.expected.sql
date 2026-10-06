@@ -1,0 +1,6 @@
+SELECT *
+FROM jobs
+WHERE state = 'queued'
+ORDER BY id
+LIMIT 1
+FOR UPDATE SKIP LOCKED

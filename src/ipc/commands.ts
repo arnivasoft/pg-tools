@@ -8,6 +8,7 @@ import type { CsvOptions } from "./bindings/CsvOptions";
 import type { AppSettings } from "./bindings/AppSettings";
 import type { DraftTab } from "./bindings/DraftTab";
 import type { ExportSummary } from "./bindings/ExportSummary";
+import type { FormatOptions } from "./bindings/FormatOptions";
 import type { HistoryEntry } from "./bindings/HistoryEntry";
 import type { ImportItem } from "./bindings/ImportItem";
 import type { PropertySection } from "./bindings/PropertySection";
@@ -72,6 +73,7 @@ export const commands = {
   qtClose: (session: string, policy: ClosePolicy) => call<null>("qt_close", { session, policy }),
   qtComplete: (session: string, request: CompletionRequest) => call<CompletionItem[]>("qt_complete", { session, request }),
   qtCheck: (session: string, sql: string, target: CheckTarget) => call<CheckDiag[]>("qt_check", { session, sql, target }),
+  qtFormat: (sql: string, options: FormatOptions) => call<string>("qt_format", { sql, options }),
   qtExportCsv: (session: string, sql: string, path: string, options: CsvOptions, onProgress: (rows: number) => void) =>
     call<ExportSummary>("qt_export_csv", { session, sql, path, options, onProgress: channel(onProgress) }),
 

@@ -73,6 +73,7 @@ fn main() {
             query::qt_close,
             query::qt_complete,
             query::qt_check,
+            query::qt_format,
             query::qt_export_csv,
             store_cmds::qt_history_push_many,
             store_cmds::qt_history_list,
