@@ -1,0 +1,27 @@
+---
+source: crates/pgt-ddl/src/build/table_constraint.rs
+expression: render(&p)
+---
+[Safe] ALTER TABLE public.t RENAME TO t2  -- Tabloya adla başvuran fonksiyonlar ve uygulama sorguları etkilenir
+[Safe] ALTER TABLE public.t2 SET SCHEMA s2  -- Tablonun indeksleri, kısıtları ve kolonlarına bağlı diziler de taşınır; adla başvuran bağımlılar etkilenir
+[Destructive] ALTER TABLE s2.t2 DROP CONSTRAINT t_parent_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Destructive] ALTER TABLE s2.t2 DROP CONSTRAINT t_code_key  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Destructive] ALTER TABLE s2.t2 DROP CONSTRAINT t_qty_check  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[DataLoss] ALTER TABLE s2.t2 DROP COLUMN note  -- Kolondaki veri kalıcı silinir
+[DataLoss] ALTER TABLE s2.t2 ALTER COLUMN qty TYPE bigint  -- Tabloyu yeniden yazar; bağlı indeks/kısıtlar yeniden oluşturulur; otomatik dönüşüm yoksa USING gerekir (USING ifadesi eski kolon adlarını kullanır)
+[Safe] ALTER TABLE s2.t2 RENAME COLUMN org_id TO organization_id  -- Kolona adla başvuran fonksiyonlar ve uygulama sorguları etkilenir
+[Safe] ALTER TABLE s2.t2 ADD COLUMN extra integer
+[Destructive] ALTER TABLE s2.t2 ALTER COLUMN parent_id SET NOT NULL  -- Tabloyu tarar; NULL değer içeren satır varsa başarısız olur
+[Safe] ALTER TABLE s2.t2 RENAME CONSTRAINT t_org_fkey TO t_org_fk  -- Kısıta adla başvuran betikler etkilenir
+[Safe] ALTER TABLE s2.t2 ADD CONSTRAINT t_code_key UNIQUE (code)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+[Safe] ALTER TABLE s2.t2 ADD CONSTRAINT t_qty_pos CHECK (qty > 0
+)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+[Safe] ALTER TABLE s2.t2 ADD CONSTRAINT t_extra_check CHECK (extra > 0
+) NOT VALID  -- NOT VALID: mevcut satırlar denetlenmez, yalnızca yeni satırlar; sonra VALIDATE CONSTRAINT ile doğrulanabilir
+[Safe] ALTER TABLE s2.t2 ADD CONSTRAINT t_extra_fk FOREIGN KEY (extra) REFERENCES public.org (id) ON UPDATE NO ACTION ON DELETE NO ACTION  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+[Safe] ALTER TABLE s2.t2 VALIDATE CONSTRAINT t_pos_check  -- Tabloyu tarar (yazmaları engellemeyen SHARE UPDATE EXCLUSIVE kilidiyle); kurala uymayan satır varsa başarısız olur
+[Safe] ALTER TABLE s2.t2 OWNER TO bob
+[Safe] COMMENT ON TABLE s2.t2 IS 'Yeni'
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Tablo yeniden yazılır: işlem boyunca ACCESS EXCLUSIVE kilidi alınır ve tablo okuma ve yazmaya kapalı kalır; büyük tablolarda uzun sürer
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')

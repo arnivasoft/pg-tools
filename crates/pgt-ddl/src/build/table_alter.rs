@@ -1,14 +1,21 @@
-//! Tablo alter'ı: kimlik (`attnum`) eşlemeli kolon farkı ve tablo düzeyi değişiklikler. Kısıt farkı Task 4'te gelir.
+//! Tablo alter'ı: kimlik (`attnum`) eşlemeli kolon farkı, `oid` eşlemeli kısıt farkı (`table_constraint.rs`) ve
+//! tablo düzeyi değişiklikler.
 //!
 //! Kararlar:
-//! - Eski tanım yalnızca SQL'e giren kimlik alanları için doğrulanır (şema, ad, kolon adları) + eşleme anahtarı
-//!   `attnum`; yüklenmiş tanımın create-geçerliliği gerekmez (eski tip/ifade/varsayılan metni hiç SQL'e girmez).
+//! - Eski tanım yalnızca SQL'e giren kimlik alanları için doğrulanır (şema, ad, kolon ve kısıt adları) + eşleme
+//!   anahtarları `attnum`/`oid`; yüklenmiş tanımın create-geçerliliği gerekmez (eski tip/ifade/varsayılan/kısıt
+//!   gövdesi hiç SQL'e girmez).
 //!   Yeni tanım `validate_table` ile tam doğrulanır (create-only kurallar hariç).
-//! - İfade sırası sabittir (Global Constraints): (1) tablo `RENAME TO`, (2) `SET SCHEMA`, [(3) kısıt DROP — Task 4],
-//!   (4) `DROP COLUMN`, (5) `ALTER COLUMN … TYPE`, (6) `RENAME COLUMN`, (7) `ADD COLUMN`, (8) nullability/varsayılan/
-//!   kimlik/üretilmiş ifade, [(9–10) kısıtlar — Task 4], (11) sahip, tablespace, kalıcılık, fillfactor, yorumlar.
-//!   Adım 2'den sonra her ifade YENİ nitelikli tablo adını kullanır. `TYPE` (5) yeniden adlandırmadan (6) önce
-//!   çalıştığından ESKİ kolon adını (USING ifadesi de eski adları görür), adım 8 ve sonrası YENİ kolon adını kullanır.
+//! - İfade sırası sabittir (Global Constraints): (1) tablo `RENAME TO`, (2) `SET SCHEMA`, (3) silinen/yapısal değişen
+//!   kısıtların `DROP CONSTRAINT`'i (eski kısıt adıyla; PG kolon silince/tip değiştirince bağlı kısıtı kendiliğinden
+//!   düşürebilir ya da hata verir — bu yüzden önce), (4) `DROP COLUMN`, (5) `ALTER COLUMN … TYPE`, (6) `RENAME COLUMN`,
+//!   (7) `ADD COLUMN`, (8) nullability/varsayılan/kimlik/üretilmiş ifade, (9) `RENAME CONSTRAINT` (eski → yeni ad),
+//!   (10) `ADD CONSTRAINT` (yeni tanım, yeni kolon adları) ve ardından `VALIDATE CONSTRAINT` (yeni adla), (11) sahip,
+//!   tablespace, kalıcılık, fillfactor, yorumlar. Adım 2'den sonra her ifade YENİ nitelikli tablo adını kullanır.
+//!   `TYPE` (5) yeniden adlandırmadan (6) önce çalıştığından ESKİ kolon adını (USING ifadesi de eski adları görür),
+//!   adım 8 ve sonrası YENİ kolon adını kullanır.
+//! - Değişmeyen kısıtın kolonunun tipi değişirse kısıt yerinde kalır (PG tip değişiminde kısıtı yeniden doğrular,
+//!   PK/UNIQUE indeksini yeniden kurar); plana uyarı eklenir.
 //! - Tip değişen kolonun eski varsayılanı varsa adım 5'te `TYPE`'tan hemen önce `DROP DEFAULT` üretilir (PG eski
 //!   varsayılanı yeni tipe dönüştürmeye çalışır ve çoğu zaman başarısız olur); yeni varsayılan varsa adım 8'de metni
 //!   eskisiyle aynı olsa bile `SET DEFAULT` ile yeniden kurulur.
@@ -19,14 +26,20 @@
 //!   Gerekçe: PG kimlik eklemeden önce kolonun NOT NULL olmasını ve varsayılansız olmasını ister; kimlikli kolonda
 //!   `DROP NOT NULL` ve `SET DEFAULT` reddedilir (önce `DROP IDENTITY`).
 //! - Serbest SQL alanları (`default`, `generated.expr`, `using`) `validate_table` içinde `check_free_sql`'den geçer,
-//!   `wrap` ile yerleşir ve serbest SQL içeren her NİHAİ ifade ayrıca `composed_is_clean` ile taranır.
+//!   `wrap` ile yerleşir ve serbest SQL içeren her NİHAİ ifade (CHECK'li `ADD CONSTRAINT` dahil tüm kısıt
+//!   eklemeleri) ayrıca `composed_is_clean` ile taranır.
 //! - Kolon sırası değiştirilemez: fark yalnızca ekleme/silme/değişim üzerinden üretilir, sıra farkı uyarıdır.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::freesql::{composed_is_clean, wrap};
-use super::type_canon::canonical_type;
 use super::table::{column_comment_sql, column_sql, has_comment, table_comment_sql, validate_table, version_err};
+use super::table_constraint::{
+    ADD_CONSTRAINT_WARNING, ConstraintDiff, DROP_CONSTRAINT_NOTE, PK_DROP_WARNING, VALIDATE_NOTE, add_note,
+    add_path, add_sql, check_new_oids, constraint_columns, diff as constraint_diff, drop_sql, is_pk, rename_note,
+    rename_sql, validate_old_constraints, validate_sql,
+};
+use super::type_canon::canonical_type;
 use super::{BuildCtx, check_ident, check_schema_ident, err, stmt};
 use crate::model::{ColumnDef, FieldError, IdentityKind, Persistence, TableDef};
 use crate::plan::{Plan, Risk, Statement};
@@ -64,7 +77,6 @@ const PARTITION_BY_MSG: &str =
     "Bölümleme anahtarı sonradan değiştirilemez; yalnızca tablo oluşturulurken belirlenir.";
 const TABLESPACE_CLEAR_MSG: &str =
     "Tablespace kaldırılamaz; varsayılana dönmek için pg_default'u açıkça seçin.";
-const CONSTRAINTS_PENDING_MSG: &str = "Kısıt değişiklikleri henüz desteklenmiyor.";
 
 /// Yeni tanımdaki her kolon: konumu, eski karşılığı (korunan) ya da `None` (eklenen).
 type Matched<'a> = Vec<(usize, Option<&'a ColumnDef>, &'a ColumnDef)>;
@@ -84,6 +96,7 @@ pub fn alter(old: &TableDef, new: &TableDef, ctx: &BuildCtx) -> Result<Plan, Vec
     // Eşleme tutarlılığı iki taraf da kendi başına geçerliyken denetlenir (bozuk eski tanım "bayat" sanılmasın).
     let mut e = vec![];
     check_new_attnums(old, new, &mut e);
+    check_new_oids(old, new, &mut e);
     if !e.is_empty() {
         return Err(e);
     }
@@ -100,14 +113,21 @@ pub fn alter(old: &TableDef, new: &TableDef, ctx: &BuildCtx) -> Result<Plan, Vec
         .enumerate()
         .map(|(i, c)| (i, c.attnum.map(|n| by_attnum[&n]), c))
         .collect();
-    let e = check_alter_rules(old, new, &matched, ctx);
+    // Kolon yeniden adlandırma eşlemesi (eski ad → yeni ad; silinen kolonlar yok): kısıt karşılaştırması bunu kullanır.
+    let col_map: HashMap<&str, &str> = matched
+        .iter()
+        .filter_map(|(_, oc, c)| oc.map(|oc| (oc.name.as_str(), c.name.as_str())))
+        .collect();
+    let cons = constraint_diff(old, new, &col_map);
+    let e = check_alter_rules(old, new, &matched, &cons, ctx);
     if !e.is_empty() {
         return Err(e);
     }
-    build(old, new, &matched, ctx)
+    build(old, new, &matched, &cons, ctx)
 }
 
-/// Eski tanım: yalnızca SQL'e giren kimlik alanları (şema, ad, kolon adları) ve eşleme anahtarı `attnum`.
+/// Eski tanım: yalnızca SQL'e giren kimlik alanları (şema, ad, kolon ve kısıt adları) ve eşleme anahtarları
+/// `attnum`/`oid`.
 fn validate_old(old: &TableDef) -> Vec<FieldError> {
     let mut e = vec![];
     check_schema_ident("old.schema", &old.schema, &mut e);
@@ -134,6 +154,7 @@ fn validate_old(old: &TableDef) -> Vec<FieldError> {
             Some(_) => {}
         }
     }
+    validate_old_constraints(old, &mut e);
     e
 }
 
@@ -187,7 +208,13 @@ fn columns_changed(old: &TableDef, matched: &Matched) -> bool {
 }
 
 /// Alter'a özgü kurallar (yeni tanım tek başına geçerli olsa da eski tanımla birlikte geçersiz olan değişiklikler).
-fn check_alter_rules(old: &TableDef, new: &TableDef, matched: &Matched, ctx: &BuildCtx) -> Vec<FieldError> {
+fn check_alter_rules(
+    old: &TableDef,
+    new: &TableDef,
+    matched: &Matched,
+    cons: &ConstraintDiff,
+    ctx: &BuildCtx,
+) -> Vec<FieldError> {
     let mut e = vec![];
     if old.is_partition != new.is_partition {
         e.push(err("isPartition", LOAD_FLAG_MSG));
@@ -235,12 +262,11 @@ fn check_alter_rules(old: &TableDef, new: &TableDef, matched: &Matched, ctx: &Bu
             }
         }
     }
-    // Task 4'e kadar kısıt farkı yok (bölüm/kalıtımlı tabloda kalıcı kural).
-    if old.constraints != new.constraints {
-        e.push(err(
-            "constraints",
-            if managed { MANAGED_MSG } else { CONSTRAINTS_PENDING_MSG },
-        ));
+    // Bölüm/kalıtımlı tabloda herhangi bir kısıt farkı (sıra hariç) hatadır; diğer tablolarda fark kuralları.
+    if managed && (cons.changed() || !cons.errs.is_empty()) {
+        e.push(err("constraints", MANAGED_MSG));
+    } else {
+        e.extend(cons.errs.iter().cloned());
     }
     e
 }
@@ -307,7 +333,39 @@ impl Out {
     }
 }
 
-fn build(old: &TableDef, new: &TableDef, matched: &Matched, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
+/// Yeniden adlandırma sırası: (konum, eski ad, yeni ad) kayıtları, hedef adı boşalan sırayla (a→b, b→c zincirinde
+/// önce b→c). Doğrusal: bekleyen kaynak adları kümesi + hedef ad → kayıt eşlemesi; bir yeniden adlandırma çıkınca
+/// kaynak adını hedefleyen (hedefler benzersiz olduğundan en çok bir) kayıt hazır olur. Döngüde (a↔b) kalan ilk
+/// kaydın konumu ikinci değerdir.
+fn rename_order(renames: &[(usize, &str, &str)]) -> (Vec<usize>, Option<usize>) {
+    let mut pending_from: HashSet<&str> = renames.iter().map(|(_, from, _)| *from).collect();
+    let by_target: HashMap<&str, usize> = renames.iter().enumerate().map(|(k, (_, _, to))| (*to, k)).collect();
+    let mut done = vec![false; renames.len()];
+    let mut order = Vec::with_capacity(renames.len());
+    let mut ready: VecDeque<usize> = (0..renames.len())
+        .filter(|&k| !pending_from.contains(renames[k].2))
+        .collect();
+    while let Some(k) = ready.pop_front() {
+        let (_, from, _) = renames[k];
+        done[k] = true;
+        pending_from.remove(from);
+        order.push(k);
+        if let Some(&next) = by_target.get(from)
+            && !done[next]
+        {
+            ready.push_back(next);
+        }
+    }
+    (order, done.iter().position(|d| !d).map(|k| renames[k].0))
+}
+
+fn build(
+    old: &TableDef,
+    new: &TableDef,
+    matched: &Matched,
+    cons: &ConstraintDiff,
+    ctx: &BuildCtx,
+) -> Result<Plan, Vec<FieldError>> {
     let mut out = Out::default();
     let mut warnings = vec![];
     if order_changed(old, new) {
@@ -339,6 +397,16 @@ fn build(old: &TableDef, new: &TableDef, matched: &Matched, ctx: &BuildCtx) -> R
         );
     }
     let q = qualified(&new.schema, &new.name);
+
+    // (3) silinen ve yapısal değişen kısıtlar (eski adla; FK'ler önce): kolon silme/tip değişiminden önce.
+    let mut pk_dropped = false;
+    for oc in &cons.drops {
+        // Eski kısıt adı `validate_old_constraints` ile doğrulandı (dolu).
+        if let Some(n) = &oc.name {
+            out.push(drop_sql(&q, n), Risk::Destructive, Some(DROP_CONSTRAINT_NOTE));
+        }
+        pk_dropped |= is_pk(oc);
+    }
 
     // (4) silinen kolonlar (eski sırayla).
     let kept_attnums: HashSet<i16> = kept.iter().filter_map(|(_, oc, _)| oc.attnum).collect();
@@ -390,23 +458,14 @@ fn build(old: &TableDef, new: &TableDef, matched: &Matched, ctx: &BuildCtx) -> R
     }
 
     // (6) kolon adları: zincirler (a→b, b→c) hedef adı boşalan sırayla; döngü (a↔b) doğrulama hatası.
-    // Doğrusal: bekleyen kaynak adları kümesi + hedef ad → kayıt eşlemesi; bir yeniden adlandırma çıkınca kaynak
-    // adını hedefleyen (hedefler benzersiz olduğundan en çok bir) kayıt hazır olur.
     let renames: Vec<(usize, &str, &str)> = kept
         .iter()
         .filter(|(_, oc, c)| oc.name != c.name)
         .map(|(i, oc, c)| (*i, oc.name.as_str(), c.name.as_str()))
         .collect();
-    let mut pending_from: HashSet<&str> = renames.iter().map(|(_, from, _)| *from).collect();
-    let by_target: HashMap<&str, usize> = renames.iter().enumerate().map(|(k, (_, _, to))| (*to, k)).collect();
-    let mut done = vec![false; renames.len()];
-    let mut ready: VecDeque<usize> = (0..renames.len())
-        .filter(|&k| !pending_from.contains(renames[k].2))
-        .collect();
-    while let Some(k) = ready.pop_front() {
+    let (order, cycle) = rename_order(&renames);
+    for k in order {
         let (_, from, to) = renames[k];
-        done[k] = true;
-        pending_from.remove(from);
         out.push(
             format!(
                 "ALTER TABLE {q} RENAME COLUMN {} TO {}",
@@ -416,15 +475,10 @@ fn build(old: &TableDef, new: &TableDef, matched: &Matched, ctx: &BuildCtx) -> R
             Risk::Safe,
             Some(RENAME_COLUMN_NOTE),
         );
-        if let Some(&next) = by_target.get(from)
-            && !done[next]
-        {
-            ready.push_back(next);
-        }
     }
-    if let Some(k) = done.iter().position(|d| !d) {
+    if let Some(i) = cycle {
         out.errs.push(err(
-            &format!("columns[{}].name", renames[k].0),
+            &format!("columns[{i}].name"),
             "Kolon adları döngüsel olarak değiştirilemez (ör. a↔b takası); önce ara bir adla kaydedin.",
         ));
     }
@@ -532,6 +586,33 @@ fn build(old: &TableDef, new: &TableDef, matched: &Matched, ctx: &BuildCtx) -> R
         }
     }
 
+    // (9) kısıt adları (eski → yeni; zincirler kolonlardaki gibi sıralı, döngü hatası).
+    let (order, cycle) = rename_order(&cons.renames);
+    for k in order {
+        let (i, from, to) = cons.renames[k];
+        out.push(rename_sql(&q, from, to), Risk::Safe, Some(rename_note(&new.constraints[i])));
+    }
+    if let Some(i) = cycle {
+        out.errs.push(err(
+            &format!("constraints[{i}].name"),
+            "Kısıt adları döngüsel olarak değiştirilemez (ör. a↔b takası); önce ara bir adla kaydedin.",
+        ));
+    }
+
+    // (10) yeni ve yeniden kurulan kısıtlar (yeni tanım; FK'ler sonda), ardından doğrulamalar (yeni adla).
+    let mut scans = false;
+    for (i, c) in &cons.adds {
+        let (note, scan) = add_note(c);
+        scans |= scan;
+        out.push_free(&add_path(*i, c), add_sql(&q, c), Risk::Safe, Some(note));
+    }
+    for n in &cons.validates {
+        out.push(validate_sql(&q, n), Risk::Safe, Some(VALIDATE_NOTE));
+    }
+    if scans {
+        out.long = true;
+    }
+
     // (11) tablo özellikleri ve yorumlar.
     if let Some(ow) = &new.owner
         && old.owner.as_ref() != Some(ow)
@@ -582,6 +663,26 @@ fn build(old: &TableDef, new: &TableDef, matched: &Matched, ctx: &BuildCtx) -> R
 
     if !out.errs.is_empty() {
         return Err(out.errs);
+    }
+    // Yerinde kalan kısıtın kolonunun tipi değişiyor: PG kısıtı tip değişimi sırasında yeniden doğrular/kurar.
+    let retyped_cols: HashSet<&str> = kept
+        .iter()
+        .filter(|(_, oc, c)| retyped(oc, c))
+        .map(|(_, _, c)| c.name.as_str())
+        .collect();
+    for c in &cons.kept {
+        if constraint_columns(c).iter().any(|n| retyped_cols.contains(n)) {
+            warnings.push(format!(
+                "'{}' kısıtının kolon tipi değişiyor; kısıt yerinde kalır, PG tip değişimi sırasında onu yeniden doğrular (PRIMARY KEY/UNIQUE indeksi yeniden oluşturulur) ve tip uyumsuzsa uygulama başarısız olur.",
+                c.name.as_deref().unwrap_or_default()
+            ));
+        }
+    }
+    if pk_dropped {
+        warnings.push(PK_DROP_WARNING.to_string());
+    }
+    if scans {
+        warnings.push(ADD_CONSTRAINT_WARNING.to_string());
     }
     if out.rewrite {
         warnings.push(REWRITE_WARNING.to_string());
@@ -1564,21 +1665,6 @@ mod tests {
         assert!(ok(&base(), &base(), &ctx()).statements.is_empty());
     }
 
-    #[test]
-    fn constraint_changes_are_not_yet_supported() {
-        let l = loaded();
-        for new in [
-            with(&l, |d| d.constraints.clear()),
-            with(&l, |d| d.constraints[0].name = Some("pk2".into())),
-            with(&l, |d| d.constraints[0].oid = None),
-        ] {
-            let e = errs(&l, &new, &ctx());
-            assert_eq!(e.len(), 1, "{e:?}");
-            assert_eq!(e[0].path, "constraints");
-            assert!(e[0].message.contains("henüz desteklenmiyor"));
-        }
-    }
-
     /// Her ifade türünün riski tek tabloda: (ifadeyi tanıtan parça, eski, yeni, sürüm, beklenen risk).
     #[test]
     fn risk_classes_for_every_statement_kind() {
@@ -1586,6 +1672,16 @@ mod tests {
         let unlogged = TableDef { persistence: Persistence::Unlogged, ..loaded() };
         let add = |c: ColumnDef| with(&l, |d| d.columns.push(c));
         let generated = |stored| Some(GeneratedDef { expr: "qty + 1".into(), stored });
+        // Yüklenmiş (oid'li) ya da yeni (oid'siz) CHECK.
+        let check = |oid, not_valid| ConstraintDef {
+            oid,
+            name: Some("ck".into()),
+            kind: ConstraintKind::Check { expr: "qty >= 0".into(), no_inherit: false },
+            deferrable: false,
+            initially_deferred: false,
+            not_valid,
+        };
+        let with_check = |oid, not_valid| with(&l, |d| d.constraints.push(check(oid, not_valid)));
         let cases: Vec<(&str, TableDef, TableDef, u32, Risk)> = vec![
             (" RENAME TO ", l.clone(), with(&l, |d| d.name = "t2".into()), 120000, Risk::Safe),
             (" SET SCHEMA ", l.clone(), with(&l, |d| d.schema = "s".into()), 120000, Risk::Safe),
@@ -1661,17 +1757,74 @@ mod tests {
             (" RESET (fillfactor)", l.clone(), with(&l, |d| d.fillfactor = None), 120000, Risk::Safe),
             ("COMMENT ON TABLE ", l.clone(), with(&l, |d| d.comment = None), 120000, Risk::Safe),
             ("COMMENT ON COLUMN ", l.clone(), with(&l, |d| colm(d, "note").comment = Some("c".into())), 120000, Risk::Safe),
+            // Kısıt ifadeleri (Task 4).
+            (" DROP CONSTRAINT ", l.clone(), with(&l, |d| d.constraints.clear()), 120000, Risk::Destructive),
+            (" RENAME CONSTRAINT ", l.clone(), with(&l, |d| d.constraints[0].name = Some("pk2".into())), 120000, Risk::Safe),
+            (" ADD CONSTRAINT ck CHECK ", l.clone(), with_check(None, false), 120000, Risk::Safe),
+            (" ADD CONSTRAINT ck CHECK (qty >= 0
+) NOT VALID", l.clone(), with_check(None, true), 120000, Risk::Safe),
+            (" VALIDATE CONSTRAINT ", with_check(Some(101), true), with_check(Some(101), false), 120000, Risk::Safe),
         ];
+        let mut seen = HashSet::new();
         for (marker, old, new, ver, risk) in cases {
             let p = ok(&old, &new, &v(ver));
+            // Her üretilen ifade türü tabloda (ilk iki sözcükten sonraki eylem) bir kez geçer.
+            for s in &p.statements {
+                seen.insert(statement_kind(&s.sql));
+            }
             let hits: Vec<&Statement> = p.statements.iter().filter(|s| s.sql.contains(marker)).collect();
             assert_eq!(hits.len(), 1, "{marker:?}\n{}", render(&p));
             assert_eq!(hits[0].risk, risk, "{marker:?}");
-            // Destructive/DataLoss ifadelerin hepsi notludur.
-            if risk != Risk::Safe {
+            // Destructive/DataLoss ifadelerin ve tüm kısıt ifadelerinin hepsi notludur.
+            if risk != Risk::Safe || marker.contains("CONSTRAINT") {
                 assert!(hits[0].note.is_some(), "{marker:?}");
             }
         }
+        // Tablo `build`'in ürettiği her ifade türünü kapsar.
+        let all: HashSet<&str> = [
+            "RENAME TO", "SET SCHEMA", "DROP CONSTRAINT", "DROP COLUMN", "ALTER COLUMN DROP DEFAULT",
+            "ALTER COLUMN TYPE", "RENAME COLUMN", "ADD COLUMN", "ALTER COLUMN DROP IDENTITY",
+            "ALTER COLUMN DROP EXPRESSION", "ALTER COLUMN SET DEFAULT", "ALTER COLUMN SET NOT NULL",
+            "ALTER COLUMN DROP NOT NULL", "ALTER COLUMN ADD GENERATED", "ALTER COLUMN SET GENERATED",
+            "ALTER COLUMN SET EXPRESSION", "RENAME CONSTRAINT", "ADD CONSTRAINT", "VALIDATE CONSTRAINT", "OWNER TO",
+            "SET TABLESPACE", "SET LOGGED", "SET UNLOGGED", "SET (fillfactor", "RESET (fillfactor)",
+            "COMMENT ON TABLE", "COMMENT ON COLUMN",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(seen, all);
+    }
+
+    /// İfade türü: tablo adından sonraki eylem sözcükleri (kolon/kısıt adı hariç).
+    fn statement_kind(sql: &str) -> &'static str {
+        const KINDS: [&str; 27] = [
+            "ALTER COLUMN DROP DEFAULT", "ALTER COLUMN TYPE", "ALTER COLUMN DROP IDENTITY", "ALTER COLUMN DROP EXPRESSION",
+            "ALTER COLUMN SET DEFAULT", "ALTER COLUMN SET NOT NULL", "ALTER COLUMN DROP NOT NULL",
+            "ALTER COLUMN ADD GENERATED", "ALTER COLUMN SET GENERATED", "ALTER COLUMN SET EXPRESSION", "RENAME TO",
+            "SET SCHEMA", "DROP CONSTRAINT", "DROP COLUMN", "RENAME COLUMN", "ADD COLUMN", "RENAME CONSTRAINT",
+            "ADD CONSTRAINT", "VALIDATE CONSTRAINT", "OWNER TO", "SET TABLESPACE", "SET LOGGED", "SET UNLOGGED",
+            "SET (fillfactor", "RESET (fillfactor)", "COMMENT ON TABLE", "COMMENT ON COLUMN",
+        ];
+        if sql.starts_with("COMMENT ON TABLE") {
+            return "COMMENT ON TABLE";
+        }
+        if sql.starts_with("COMMENT ON COLUMN") {
+            return "COMMENT ON COLUMN";
+        }
+        // "ALTER TABLE <q> <eylem…>": kolon ifadelerinde kolon adı atlanır.
+        let rest = sql.splitn(4, ' ').nth(3).unwrap_or_default();
+        let rest = match rest.strip_prefix("ALTER COLUMN ") {
+            Some(r) => format!("ALTER COLUMN {}", r.split_once(' ').map(|x| x.1).unwrap_or_default()),
+            None => rest.to_string(),
+        };
+        // ADD CONSTRAINT'in adsız biçimi (ADD CHECK …) de aynı türdür.
+        if rest.starts_with("ADD ") && !rest.starts_with("ADD COLUMN") {
+            return "ADD CONSTRAINT";
+        }
+        KINDS
+            .into_iter()
+            .find(|k| rest.starts_with(k))
+            .unwrap_or_else(|| panic!("bilinmeyen ifade türü: {sql}"))
     }
 
     #[test]

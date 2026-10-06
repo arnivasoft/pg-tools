@@ -15,6 +15,7 @@ pub mod sequence;
 mod sqlscan;
 pub mod table;
 pub mod table_alter;
+pub mod table_constraint;
 pub mod type_canon;
 pub mod type_syntax;
 
