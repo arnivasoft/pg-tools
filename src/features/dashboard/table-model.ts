@@ -1,6 +1,7 @@
 // Dashboard tablo modeli (saf): oturum süzgeci/sıralaması ve ayar süzgeci. Sıralama kararlı; null her zaman sonda.
 import type { ActivityRow } from "../../ipc/bindings/ActivityRow";
 import type { Setting } from "../../ipc/bindings/Setting";
+import { formatDuration } from "./dash-model";
 
 export interface ActivityFilter {
   search: string;
@@ -155,4 +156,39 @@ export function ariaSort(cur: SortState | null, key: string): "ascending" | "des
 /** Bekleme: "Lock:relation"; yalnızca biri varsa o; ikisi de yoksa "". */
 export function waitLabel(r: Pick<ActivityRow, "waitEventType" | "waitEvent">): string {
   return [r.waitEventType, r.waitEvent].filter((x) => x != null && x !== "").join(":");
+}
+
+/** Hazır transaction bu süreden (sn) uzun açıksa "uzun süredir açık" rozeti gösterilir. */
+export const PREPARED_OLD_SECS = 3600;
+
+/** Hazır transaction yaşı: ≥ 1 saat → `"old"`; aksi halde (ya da geçersiz yaş) `null`. */
+export function preparedAgeBadge(ageSecs: number): "old" | null {
+  return Number.isFinite(ageSecs) && ageSecs >= PREPARED_OLD_SECS ? "old" : null;
+}
+
+/** Arabellek isabet oranı (0–1): `hit / (hit + read)`; hiç erişim yoksa ya da değer geçersizse `null`. */
+export function hitRatio(hit: number, read: number): number | null {
+  if (!Number.isFinite(hit) || !Number.isFinite(read) || hit < 0 || read < 0) return null;
+  const total = hit + read;
+  return total > 0 ? hit / total : null;
+}
+
+/** Oran (0–1) → "%97,3"; `null` → "—". */
+export function formatRatio(r: number | null): string {
+  return r == null || !Number.isFinite(r) ? "—" : `%${(Math.round(r * 1000) / 10).toFixed(1).replace(".", ",")}`;
+}
+
+/** Milisaniye: < 1 sn → "0,42 ms" / "12,3 ms" / "850 ms"; ≥ 1 sn → `formatDuration` ("12 sn", "3 dk 05 sn"). Geçersiz → "—". */
+export function formatMs(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  if (ms >= 1000) return formatDuration(ms / 1000);
+  const digits = ms < 10 ? 2 : ms < 100 ? 1 : 0;
+  const text = String(Math.round(ms * 10 ** digits) / 10 ** digits).replace(".", ",");
+  return `${text} ms`;
+}
+
+/** Ayar değeri + birim ("128 MB"); `value == null` (yetkisiz) → "—". */
+export function formatSettingValue(s: Pick<Setting, "value" | "unit">): string {
+  if (s.value == null) return "—";
+  return s.unit ? `${s.value} ${s.unit}` : s.value;
 }

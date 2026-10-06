@@ -13,11 +13,13 @@ export interface SectionProps {
   model: DashModel;
 }
 
-/** Görünen bölümler, sekme sırasıyla. Diğer bölümler (Yapılandırma, …) dosyaları eklendikçe buraya girer. */
+/** Görünen bölümler, sekme sırasıyla. Hepsi tembel parça. */
 const SECTIONS: { value: Section; view: Component<SectionProps> }[] = [
   { value: "overview", view: lazy(() => import("./OverviewView")) },
   { value: "sessions", view: lazy(() => import("./SessionsView")) },
   { value: "locks", view: lazy(() => import("./LocksView")) },
+  { value: "settings", view: lazy(() => import("./SettingsView")) },
+  { value: "statements", view: lazy(() => import("./StatementsView")) },
 ];
 
 /** Yenileme aralığı seçenekleri (sn). */
@@ -110,7 +112,12 @@ export default function DashboardView(props: { dash: DashController; tabId: stri
                 if (s) props.dash.setSection(props.tabId, s.value);
               }}
               class="min-h-0 flex-1"
-              tabs={SECTIONS.map((s) => ({ value: s.value, label: td.sections[s.value] }))}
+              tabs={SECTIONS.map((s) => ({
+                value: s.value,
+                label: td.sections[s.value],
+                // Eklenti yok/yüklü değil: sekme soluk ama tıklanabilir (neden metni görünsün).
+                muted: s.value === "statements" && m().statements?.kind === "unavailable",
+              }))}
             >
               <For each={SECTIONS}>
                 {(s) => (

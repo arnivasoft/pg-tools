@@ -148,7 +148,7 @@ export function createDashController(deps: DashControllerDeps) {
     const on = e.tabActive && m.status === "ready";
     e.poller.setActive(on);
     // Arka planda `settings` bölümüne geçildiyse talep üzerine yükleme etkinleşince yapılır.
-    if (on && m.section === "settings" && m.settings === null) void loadSettings(m.id);
+    if (on && m.section === "settings") enterSettings(m.id);
   };
 
   /**
@@ -262,6 +262,11 @@ export function createDashController(deps: DashControllerDeps) {
   };
   const loadSettings = (tabId: string) => loadOnDemand(tabId, "settings");
   const loadPrepared = (tabId: string) => loadOnDemand(tabId, "prepared");
+  /** `settings` bölümüne giriş: ayarlar yalnızca ilk kez, hazır transaction'lar (küçük liste) her girişte. */
+  const enterSettings = (tabId: string) => {
+    if (entries.get(tabId)?.model().settings === null) void loadSettings(tabId);
+    void loadPrepared(tabId);
+  };
 
   // ---- açma / kapatma
   const connect = async (tabId: string, e: Entry) => {
@@ -369,7 +374,7 @@ export function createDashController(deps: DashControllerDeps) {
     if (!e || e.model().section === section) return;
     patch(e, { section });
     if (section === "settings") {
-      if (e.tabActive && e.model().settings === null) void loadSettings(tabId); // arka planda: etkinleşince (syncPoller)
+      if (e.tabActive) enterSettings(tabId); // arka planda: etkinleşince (syncPoller)
       return;
     }
     // Liste bölümüne giriş: bayatsa hemen yenile (tek uçuşta kuralıyla); etkin değilse dönüşteki tur getirir.
@@ -402,7 +407,10 @@ export function createDashController(deps: DashControllerDeps) {
     delete e.listAt[m.section];
     if (!e.tabActive) return;
     kick(e);
-    if (m.section === "settings") void loadSettings(tabId);
+    if (m.section === "settings") {
+      void loadSettings(tabId);
+      void loadPrepared(tabId);
+    }
   };
 
   const setStatementsOrder = (tabId: string, order: StatementsOrder) => {

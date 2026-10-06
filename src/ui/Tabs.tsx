@@ -4,7 +4,7 @@ import { For, type JSX } from "solid-js";
 export function Tabs(props: {
   value: string;
   onChange: (value: string) => void;
-  tabs: { value: string; label: string }[];
+  tabs: { value: string; label: string; muted?: boolean }[];
   children: JSX.Element;
   class?: string;
 }) {
@@ -16,6 +16,7 @@ export function Tabs(props: {
             <K.Trigger
               value={tab.value}
               class="border-b-2 border-transparent px-2 py-1.5 text-[13px] text-muted data-[selected]:border-accent data-[selected]:text-fg"
+              classList={{ "opacity-60": tab.muted }}
             >
               {tab.label}
             </K.Trigger>

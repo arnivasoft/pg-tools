@@ -243,6 +243,7 @@ describe("dash-controller açma ve tur", () => {
     await flush();
     expect(s.api.dashSettings).toHaveBeenCalledTimes(1);
     expect(s.ctl.model(id)?.settings).toEqual([]);
+    expect(s.api.dashPrepared).toHaveBeenCalledTimes(1); // hazır transaction'lar da girişte yüklenir
     await vi.advanceTimersByTimeAsync(30_000);
     expect(s.api.dashSettings).toHaveBeenCalledTimes(1);
     s.ctl.setSection(id, "overview");

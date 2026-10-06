@@ -3,7 +3,7 @@ import type { ActivityRow } from "../../ipc/bindings/ActivityRow";
 import type { Setting } from "../../ipc/bindings/Setting";
 import {
   ariaSort, durationTone, filterActivity, filterSettings, firstLines, navIndex, nextSort, oneLine, sortActivity, stateTone,
-  waitLabel, type ActivityFilter,
+  waitLabel, formatMs, formatRatio, formatSettingValue, hitRatio, preparedAgeBadge, type ActivityFilter,
 } from "./table-model";
 
 const row = (pid: number, p: Partial<ActivityRow> = {}): ActivityRow => ({
@@ -188,5 +188,53 @@ describe("görünüm yardımcıları", () => {
     expect(waitLabel({ waitEventType: "Lock", waitEvent: "relation" })).toBe("Lock:relation");
     expect(waitLabel({ waitEventType: null, waitEvent: "x" })).toBe("x");
     expect(waitLabel({ waitEventType: null, waitEvent: null })).toBe("");
+  });
+});
+
+describe("preparedAgeBadge", () => {
+  it("1 saat ve üstü old, altı null", () => {
+    expect(preparedAgeBadge(3599)).toBeNull();
+    expect(preparedAgeBadge(3600)).toBe("old");
+    expect(preparedAgeBadge(86400)).toBe("old");
+    expect(preparedAgeBadge(0)).toBeNull();
+    expect(preparedAgeBadge(Number.NaN)).toBeNull();
+  });
+});
+
+describe("hitRatio / formatRatio", () => {
+  it("hit / (hit + read); erişim yoksa ya da geçersizse null", () => {
+    expect(hitRatio(90, 10)).toBe(0.9);
+    expect(hitRatio(0, 5)).toBe(0);
+    expect(hitRatio(5, 0)).toBe(1);
+    expect(hitRatio(0, 0)).toBeNull();
+    expect(hitRatio(-1, 5)).toBeNull();
+    expect(hitRatio(Number.NaN, 5)).toBeNull();
+  });
+  it("yüzde biçimi", () => {
+    expect(formatRatio(0.9731)).toBe("%97,3");
+    expect(formatRatio(1)).toBe("%100,0");
+    expect(formatRatio(null)).toBe("—");
+  });
+});
+
+describe("formatMs", () => {
+  it("küçük değerlerde ondalık, 1 sn üstünde süre metni", () => {
+    expect(formatMs(0.42)).toBe("0,42 ms");
+    expect(formatMs(12.34)).toBe("12,3 ms");
+    expect(formatMs(850.4)).toBe("850 ms");
+    expect(formatMs(0)).toBe("0 ms");
+    expect(formatMs(12_000)).toBe("12 sn");
+    expect(formatMs(185_000)).toBe("3 dk 05 sn");
+    expect(formatMs(-1)).toBe("—");
+    expect(formatMs(Number.NaN)).toBe("—");
+  });
+});
+
+describe("formatSettingValue", () => {
+  it("değer + birim; null → —", () => {
+    expect(formatSettingValue({ value: "128", unit: "MB" })).toBe("128 MB");
+    expect(formatSettingValue({ value: "on", unit: null })).toBe("on");
+    expect(formatSettingValue({ value: "", unit: null })).toBe("");
+    expect(formatSettingValue({ value: null, unit: "MB" })).toBe("—");
   });
 });
