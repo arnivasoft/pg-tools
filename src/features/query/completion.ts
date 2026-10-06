@@ -5,7 +5,10 @@
  * Bağlam kuralları:
  * - `a.` ve `a` FROM/JOIN/UPDATE/INTO'dan hemen sonra gelmişse `a` bir şemadır (`schemaMember`);
  *   aksi halde `a` bir ilişki/takma ad (`relationMember`; `s.t.` biçiminde şema da taşır).
+ *   `relationMember` önce arka uçtan kapsamlı (`scoped`: alias, CTE, alt sorgu) kolonları ister; boşsa Plan 5 yolu.
  * - FROM/JOIN/UPDATE/INTO sonrası (boşlukla ya da yazılmış kısmi kelimeyle) `relation`.
+ * - `select ` listesinde (`select`, `distinct`, `all` ya da listedeki `,` sonrası) `selectList`: kapsamdaki
+ *   ilişkilerin `alias.kolon` önerileri + anahtar kelimeler.
  * - Yorum / tek tırnaklı dize / dolar-tırnaklı dize içinde `none` (hiç öneri yok).
  * - Diğer her yerde `keyword`.
  * Sözcük analizi arka uçla aynı fikre dayanır: tırnak ve yorumlar metin boyunca izlenir.
@@ -15,11 +18,13 @@ import type { Completion, CompletionResult, CompletionSource } from "@codemirror
 import type { CompletionItem } from "../../ipc/bindings/CompletionItem";
 import type { CompletionKind } from "../../ipc/bindings/CompletionKind";
 import type { CompletionRequest } from "../../ipc/bindings/CompletionRequest";
+import { utf16ToScalar } from "./offsets";
 
 export type CompletionContextKind =
   | { kind: "schemaMember"; schema: string }
-  | { kind: "relationMember"; relation: string; schema?: string }
+  | { kind: "relationMember"; relation: string; schema?: string; quoted?: true }
   | { kind: "relation" }
+  | { kind: "selectList" }
   | { kind: "keyword" }
   | { kind: "none" };
 
@@ -156,6 +161,41 @@ function relPos(toks: Tok[], idx: number): boolean {
 }
 const isName = (t: Tok | undefined): t is Tok => t !== undefined && (t.t === "word" || t.t === "ident");
 
+/** Select listesini bitiren (ya da select listesi dışında olduğunu gösteren) sözcükler. */
+const SELECT_STOP = new Set([
+  "from", "where", "on", "using", "join", "group", "order", "by", "having", "limit", "offset", "set", "values",
+  "returning", "into", "union", "intersect", "except", "window", "fetch", "for", "update", "insert", "delete",
+  "table", "with", "when", "then", "else",
+]);
+
+const isWord = (t: Tok | undefined, w: string): boolean => t?.t === "word" && t.v.toLowerCase() === w;
+
+/** İmleç (son belirteçten sonra) bir select listesinde yeni bir öğenin başında mı? */
+function inSelectList(toks: Tok[]): boolean {
+  const last = toks[toks.length - 1];
+  if (last?.t === "word") {
+    if (isWord(last, "select")) return true;
+    return (isWord(last, "distinct") || isWord(last, "all")) && isWord(toks[toks.length - 2], "select");
+  }
+  if (last?.t !== "punct" || last.v !== ",") return false;
+  let depth = 0;
+  for (let k = toks.length - 2; k >= 0; k--) {
+    const u = toks[k]!;
+    if (u.t === "punct") {
+      if (u.v === ")") depth++;
+      else if (u.v === "(") {
+        if (depth === 0) return false; // fonksiyon argümanı ya da parantez içi liste
+        depth--;
+      } else if (u.v === ";") return false;
+    } else if (u.t === "word" && depth === 0) {
+      const w = u.v.toLowerCase();
+      if (w === "select") return true;
+      if (SELECT_STOP.has(w)) return false;
+    }
+  }
+  return false;
+}
+
 function classify(toks: Tok[]): CompletionContextKind {
   const last = toks[toks.length - 1];
   if (last?.t === "dot") {
@@ -167,14 +207,88 @@ function classify(toks: Tok[]): CompletionContextKind {
       if (isName(s)) return { kind: "relationMember", relation: a.v, schema: s.v };
     }
     if (before && relPos(toks, toks.length - 3)) return { kind: "schemaMember", schema: a.v };
-    return { kind: "relationMember", relation: a.v };
+    return a.t === "ident"
+      ? { kind: "relationMember", relation: a.v, quoted: true }
+      : { kind: "relationMember", relation: a.v };
   }
   if (last && relPos(toks, toks.length - 1)) return { kind: "relation" };
+  if (inSelectList(toks)) return { kind: "selectList" };
   return { kind: "keyword" };
 }
 
 export function contextAt(textBefore: string): CompletionContextKind {
   return analyzeBefore(textBefore).context;
+}
+
+/**
+ * İmlecin (`pos`, UTF-16) ifadesi: derinlik 0'daki `;` sınırları arası `[from, to)`. Yorum, dize, tırnaklı ad ve
+ * dolar-tırnak içindeki `;` sayılmaz (kapanmamışsa metin sonuna kadar sürer). Arka uç yine de yeniden böler.
+ */
+export function statementBounds(text: string, pos: number): { from: number; to: number } {
+  let from = 0;
+  let depth = 0;
+  let i = 0;
+  const n = text.length;
+  const skipTo = (needle: string, start: number): number => {
+    const e = text.indexOf(needle, start);
+    return e < 0 ? n : e + needle.length;
+  };
+  while (i < n) {
+    const c = text[i]!;
+    if (c === "-" && text[i + 1] === "-") {
+      i = skipTo("\n", i + 2);
+    } else if (c === "/" && text[i + 1] === "*") {
+      let nest = 1;
+      i += 2;
+      while (i < n && nest > 0) {
+        if (text[i] === "/" && text[i + 1] === "*") {
+          nest++;
+          i += 2;
+        } else if (text[i] === "*" && text[i + 1] === "/") {
+          nest--;
+          i += 2;
+        } else i++;
+      }
+    } else if (c === "'" || c === '"') {
+      i++;
+      while (i < n) {
+        if (text[i] === c) {
+          if (text[i + 1] === c) {
+            i += 2;
+            continue;
+          }
+          i++;
+          break;
+        }
+        i++;
+      }
+    } else if (c === "$") {
+      const m = DOLLAR_TAG.exec(text.slice(i, i + 80));
+      if (m && !(i > 0 && WORD_CH.test(text[i - 1]!))) i = skipTo(m[0], i + m[0].length);
+      else i++;
+    } else {
+      if (c === "(") depth++;
+      else if (c === ")") depth = Math.max(0, depth - 1);
+      else if (c === ";" && depth === 0) {
+        if (i < pos) from = i + 1;
+        else return { from, to: i };
+      }
+      i++;
+    }
+  }
+  return { from, to: n };
+}
+
+/** `scoped` isteğinin ifade metni ve imlecin bu metindeki Unicode scalar ofseti. */
+export function scopedTarget(text: string, pos: number): { sql: string; offset: number } {
+  const { from, to } = statementBounds(text, pos);
+  const sql = text.slice(from, to);
+  return { sql, offset: utf16ToScalar(sql, pos - from) };
+}
+
+/** Niteleyiciyi yazıldığı biçime çevirir (tırnaklı ad yeniden tırnaklanır). */
+function rawQualifier(ctx: { relation: string; quoted?: true }): string {
+  return ctx.quoted ? `"${ctx.relation.replace(/"/g, '""')}"` : ctx.relation;
 }
 
 /** CodeMirror `CompletionContext`'in kullandığımız alt kümesi (testte sahte verilebilir). */
@@ -226,6 +340,11 @@ export function matchItems(items: CompletionItem[], partial: string): Completion
   return [...prefix, ...rest];
 }
 
+/** İstekten önceki bekleme: `x.`/`şema.` hemen sonrası 0, kısmi ad ve select listesi için `debounceMs`. */
+export function completionWaitMs(context: CompletionContextKind, partial: string, debounceMs: number): number {
+  return partial === "" && (context.kind === "relationMember" || context.kind === "schemaMember") ? 0 : debounceMs;
+}
+
 export function createCompletionSource(deps: CompletionSourceDeps): CompletionSource {
   const keywords = deps.keywords ?? keywordCompletionSource(PostgreSQL, true);
   const debounceMs = deps.debounceMs ?? 150;
@@ -236,21 +355,27 @@ export function createCompletionSource(deps: CompletionSourceDeps): CompletionSo
     if (context.kind === "none") return null;
     const kwFallback = (): CompletionResult | null | Promise<CompletionResult | null> =>
       context.kind === "schemaMember" || context.kind === "relationMember" ? null : keywords(ctx);
+    const scoped = () => scopedTarget(c.state.doc.sliceString(0), c.pos);
 
     if (context.kind === "keyword" || deps.isBusy()) return kwFallback();
 
-    // Yazarken debounce: bu sürede iptal geldiyse (yeni tuş vuruşu) hiç istek atma.
+    // Yazarken debounce: bu sürede iptal geldiyse (yeni tuş vuruşu) hiç istek atma. `.`'nın hemen ardında (üye
+    // bağlamı, kısmi ad boş) bekleme yok: nokta başına tek istek; CodeMirror kaynak başına aynı anda tek sorgu
+    // çalıştırdığından istekler gidiş-dönüşle sınırlıdır (bkz. `completionWaitMs`).
     let aborted = c.aborted;
     c.addEventListener("abort", () => {
       aborted = true;
     });
-    await new Promise<void>((r) => setTimeout(r, debounceMs));
-    if (aborted || c.aborted) return null;
-    if (deps.isBusy()) return kwFallback(); // beklerken çalıştırma başladı
+    const wait = completionWaitMs(context, partial, debounceMs);
+    if (wait > 0) {
+      await new Promise<void>((r) => setTimeout(r, wait));
+      if (aborted || c.aborted) return null;
+      if (deps.isBusy()) return kwFallback(); // beklerken çalıştırma başladı
+    }
 
     let items: CompletionItem[];
     try {
-      items = await requestItems(deps, context, () => aborted || c.aborted);
+      items = await requestItems(deps, context, () => aborted || c.aborted, scoped);
     } catch {
       items = [];
     }
@@ -264,6 +389,14 @@ export function createCompletionSource(deps: CompletionSourceDeps): CompletionSo
     }));
     const next = c.state.doc.sliceString(c.pos, c.pos + 1);
     const { from, to } = replaceRange(c.pos, partial, next);
+    if (context.kind === "selectList") {
+      // Kolon önerileri önce, ardından yazılan önekle başlayan anahtar kelimeler.
+      const kw = await keywords(ctx);
+      if (aborted || c.aborted) return null;
+      const bare = partial.replace(/^"/, "").toLowerCase();
+      const kwOptions = (kw?.options ?? []).filter((o) => o.label.toLowerCase().startsWith(bare));
+      return { from, to, options: [...options, ...kwOptions], filter: false };
+    }
     // filter:false -> süzme/sıralama yukarıda ham etikete göre yapıldı (`"ord` -> `orders` eşleşir).
     return { from, to, options, filter: false };
   };
@@ -277,12 +410,21 @@ async function requestItems(
   deps: CompletionSourceDeps,
   ctx: Exclude<CompletionContextKind, { kind: "keyword" | "none" }>,
   isAborted: () => boolean,
+  scoped: () => { sql: string; offset: number },
 ): Promise<CompletionItem[]> {
   const { fetch } = deps;
   switch (ctx.kind) {
     case "schemaMember":
       return fetch({ type: "relations", schema: ctx.schema });
+    case "selectList":
+      return fetch({ type: "scoped", ...scoped(), prefix: "" });
     case "relationMember": {
+      if (ctx.schema === undefined) {
+        // Önce kapsam (alias, CTE, alt sorgu); boşsa Plan 5 yolu.
+        const found = await fetch({ type: "scoped", ...scoped(), prefix: rawQualifier(ctx) });
+        if (found.length > 0) return found;
+        if (isAborted() || deps.isBusy()) return [];
+      }
       const cols = await fetch({ type: "columns", schema: ctx.schema ?? null, relation: ctx.relation });
       if (cols.length > 0 || ctx.schema !== undefined) return cols;
       // `select app.`: `app` aslında şema olabilir.

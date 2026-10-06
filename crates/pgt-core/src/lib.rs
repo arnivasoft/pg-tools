@@ -2,6 +2,7 @@ pub mod config;
 pub mod connection;
 pub mod credentials;
 pub mod error;
+pub mod format_options;
 pub mod import;
 pub mod registry;
 pub mod store;

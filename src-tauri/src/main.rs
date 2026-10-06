@@ -72,6 +72,8 @@ fn main() {
             query::qt_set_options,
             query::qt_close,
             query::qt_complete,
+            query::qt_check,
+            query::qt_format,
             query::qt_export_csv,
             store_cmds::qt_history_push_many,
             store_cmds::qt_history_list,
@@ -82,6 +84,7 @@ fn main() {
             store_cmds::qt_drafts_clear,
             store_cmds::settings_get,
             store_cmds::settings_set_history,
+            store_cmds::settings_set_editor,
         ])
         .build(tauri::generate_context!())
         .expect("pg-tools başlatılamadı")

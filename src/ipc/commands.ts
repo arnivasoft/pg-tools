@@ -1,4 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { CheckDiag } from "./bindings/CheckDiag";
+import type { CheckTarget } from "./bindings/CheckTarget";
 import type { ClosePolicy } from "./bindings/ClosePolicy";
 import type { CompletionItem } from "./bindings/CompletionItem";
 import type { CompletionRequest } from "./bindings/CompletionRequest";
@@ -6,6 +8,7 @@ import type { CsvOptions } from "./bindings/CsvOptions";
 import type { AppSettings } from "./bindings/AppSettings";
 import type { DraftTab } from "./bindings/DraftTab";
 import type { ExportSummary } from "./bindings/ExportSummary";
+import type { FormatOptions } from "./bindings/FormatOptions";
 import type { HistoryEntry } from "./bindings/HistoryEntry";
 import type { ImportItem } from "./bindings/ImportItem";
 import type { PropertySection } from "./bindings/PropertySection";
@@ -69,6 +72,8 @@ export const commands = {
   qtSetOptions: (session: string, options: SessionOptions) => call<null>("qt_set_options", { session, options }),
   qtClose: (session: string, policy: ClosePolicy) => call<null>("qt_close", { session, policy }),
   qtComplete: (session: string, request: CompletionRequest) => call<CompletionItem[]>("qt_complete", { session, request }),
+  qtCheck: (session: string, sql: string, target: CheckTarget) => call<CheckDiag[]>("qt_check", { session, sql, target }),
+  qtFormat: (sql: string, options: FormatOptions) => call<string>("qt_format", { sql, options }),
   qtExportCsv: (session: string, sql: string, path: string, options: CsvOptions, onProgress: (rows: number) => void) =>
     call<ExportSummary>("qt_export_csv", { session, sql, path, options, onProgress: channel(onProgress) }),
 
@@ -83,6 +88,8 @@ export const commands = {
   qtDraftsClear: () => call<null>("qt_drafts_clear"),
   settingsGet: () => call<AppSettings>("settings_get"),
   settingsSetHistory: (enabled: boolean) => call<AppSettings>("settings_set_history", { enabled }),
+  settingsSetEditor: (checkEnabled: boolean, format: FormatOptions) =>
+    call<AppSettings>("settings_set_editor", { checkEnabled, format }),
 };
 
 export type Api = typeof commands;

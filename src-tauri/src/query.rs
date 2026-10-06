@@ -11,10 +11,12 @@ use std::path::PathBuf;
 
 use pgt_core::ErrorPayload;
 use pgt_core::connection::Target;
+use pgt_query::check::{CheckDiag, CheckTarget};
 use pgt_query::complete::{CompletionItem, CompletionRequest};
 use pgt_query::error_codes::query_payload;
 use pgt_query::events::{EventSink, QueryEvent};
 use pgt_query::export::{CsvOptions, ExportSummary};
+use pgt_query::format::FormatOptions;
 use pgt_query::session::{ClosePolicy, QueryManager, Scope, SessionId, SessionOptions, StmtPlan, TxAction, TxState};
 use tauri::State;
 use tauri::ipc::Channel;
@@ -128,6 +130,28 @@ pub async fn qt_close(state: State<'_, AppState>, session: Uuid, policy: ClosePo
 #[tauri::command]
 pub async fn qt_complete(state: State<'_, AppState>, session: Uuid, request: CompletionRequest) -> CmdResult<Vec<CompletionItem>> {
     Box::pin(state.query.complete(session, request)).await.map_err(|e| query_payload(&e))
+}
+
+/// Parse tabanlı hata denetimi (çalıştırmaz). Meşgul/uykudaki/hatalı transaction'daki oturumda boş liste.
+#[tauri::command]
+pub async fn qt_check(
+    state: State<'_, AppState>,
+    session: Uuid,
+    sql: String,
+    target: CheckTarget,
+) -> CmdResult<Vec<CheckDiag>> {
+    Box::pin(state.query.check(session, &sql, target)).await.map_err(|e| query_payload(&e))
+}
+
+/// SQL biçimlendirme (saf; oturum gerektirmez, SQL günlüğe yazılmaz). Belirteç eşitliği ya da eşkuvvetlilik
+/// sağlanamazsa `invalid` kodlu "biçimlendirilemedi"; geçersiz seçenek ya da 5 MB üstü metin `invalid`.
+/// CPU işi olduğundan engelleyici iş parçacığında çalışır (Tokio işçisini meşgul etmez).
+#[tauri::command]
+pub async fn qt_format(sql: String, options: FormatOptions) -> CmdResult<String> {
+    Box::pin(tokio::task::spawn_blocking(move || pgt_query::format::format(&sql, &options)))
+        .await
+        .map_err(|_| query_payload(&pgt_core::Error::Invalid(pgt_query::format::FORMAT_FAILED.into())))?
+        .map_err(|e| query_payload(&e))
 }
 
 /// İlerleme kanalı kapanırsa (gönderim hatası) dışa aktarma iptal edilir.

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::format_options::FormatOptions;
 use crate::{Error, Result};
 
 pub const MAX_HISTORY: usize = 500;
@@ -74,6 +75,12 @@ fn to_json<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 pub struct AppSettings {
     #[serde(default = "yes")]
     pub history_enabled: bool,
+    /// Yazarken Parse tabanlı hata denetimi (tasarım §4.3).
+    #[serde(default = "yes")]
+    pub check_enabled: bool,
+    /// Biçimlendirici seçenekleri (tasarım §5.1); eski dosyalarda yok → varsayılanlar.
+    #[serde(default)]
+    pub format: FormatOptions,
 }
 
 fn yes() -> bool {
@@ -82,7 +89,7 @@ fn yes() -> bool {
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { history_enabled: true }
+        Self { history_enabled: true, check_enabled: true, format: FormatOptions::default() }
     }
 }
 
@@ -90,6 +97,8 @@ impl AppSettings {
     /// Okunamayan/bozuk dosyada varsayılanlar döner (bozuk dosya yedeklenir).
     pub fn load(path: &Path) -> Self {
         match read_json::<AppSettings>(path) {
+            // Elle bozulmuş biçim seçenekleri (ör. girinti 3) varsayılana döner; diğer ayarlar korunur.
+            Ok((Some(s), _)) if s.format.validate().is_err() => Self { format: FormatOptions::default(), ..s },
             Ok((Some(s), _)) => s,
             Ok(_) => Self::default(),
             Err(e) => {
@@ -520,12 +529,49 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         assert!(AppSettings::load(&path).history_enabled);
-        AppSettings { history_enabled: false }.save(&path).unwrap();
+        AppSettings { history_enabled: false, ..AppSettings::default() }.save(&path).unwrap();
         assert!(!AppSettings::load(&path).history_enabled);
         fs::write(&path, "{}").unwrap();
         assert!(AppSettings::load(&path).history_enabled);
         fs::write(&path, "bozuk").unwrap();
         assert!(AppSettings::load(&path).history_enabled);
+    }
+
+    #[test]
+    fn settings_editor_fields_round_trip_and_old_file_loads() {
+        use crate::format_options::{CommaStyle, KeywordCase};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // Plan 6 dönemi dosyası: yalnızca historyEnabled.
+        fs::write(&path, r#"{ "historyEnabled": false }"#).unwrap();
+        let old = AppSettings::load(&path);
+        assert!(!old.history_enabled);
+        assert!(old.check_enabled);
+        assert_eq!(old.format, FormatOptions::default());
+        // Kısmi biçim nesnesi: eksik alanlar varsayılan.
+        fs::write(&path, r#"{ "format": { "indent": 4 } }"#).unwrap();
+        assert_eq!(AppSettings::load(&path).format, FormatOptions { indent: 4, ..FormatOptions::default() });
+        // Geçersiz seçenek → biçim varsayılana döner, diğerleri korunur.
+        fs::write(&path, r#"{ "checkEnabled": false, "format": { "indent": 3 } }"#).unwrap();
+        let bad = AppSettings::load(&path);
+        assert!(!bad.check_enabled);
+        assert_eq!(bad.format, FormatOptions::default());
+        let next = AppSettings {
+            history_enabled: true,
+            check_enabled: false,
+            format: FormatOptions { keyword_case: KeywordCase::Lower, indent: 4, comma: CommaStyle::Leading, max_line: 80 },
+        };
+        next.save(&path).unwrap();
+        assert_eq!(AppSettings::load(&path), next);
+        let json: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "historyEnabled": true,
+                "checkEnabled": false,
+                "format": { "keywordCase": "lower", "indent": 4, "comma": "leading", "maxLine": 80 }
+            })
+        );
     }
 
     #[test]

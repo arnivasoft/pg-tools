@@ -148,6 +148,67 @@ betikle sürüldü, yerel Windows diyalogları UIAutomation + SendKeys ile), **[
 ### session_reset
 - [ ] Manuel moda geç, `set search_path = pg_catalog;` çalıştır; sunucuyu yeniden başlat (`docker restart`) → sonraki çalıştırma "oturum sıfırlandı" ipucu verir ve ifade çalışmaz; yeniden çalıştırınca yeni bağlantıda çalışır; açık transaction kaybolduysa ayrı "bağlantı koptu; geri alındı" hatası. **[—]** (PG yeniden başlatma gerektirir; arka uç `session.rs` testli)
 
+## Editör zekâsı (Plan 7)
+
+Ön koşul: Query Tool bölümündeki gibi atılabilir bir PostgreSQL ve yalıtılmış `%APPDATA%`/`%LOCALAPPDATA%`. Sınama
+şeması: `create schema app; create table app.orders(id int primary key, customer text, total numeric); create table
+app.customers(id int primary key, name text, email text);`. Doğrulama notları: **[T5]** = Task 5 (`tauri dev` +
+WebView2 CDP, PG 18.6), **[T7]** = Task 6 / Plan 7 sonu doğrulaması ve son düzeltme dalgası (yayın exe'si `bun run tauri build --no-bundle`, CDP; sayılar
+`docs/performance.md`), **[—]** = elle çalıştırılmadı (birim/DB testleriyle kapsanır; sürüm öncesi işaretlenmeli).
+
+### Alias çözümlemeli tamamlama
+- [ ] `select o. from app.orders o` ile imleç `o.`'dan sonra → `id`, `customer`, `total` (tür bilgisiyle). **[T5] [T7]**
+- [ ] `with x as (select id, total+1 as tt from app.orders) select x. from x` → `id`, `tt` (CTE gövdesi sunucuda Parse edilir). **[T7]**
+- [ ] `select s. from (select id, customer || 'a' as cc from app.orders) s` → `id`, `cc` (alt sorgu). **[T7]**
+- [ ] CTE'de açık kolon listesi (`with x(a,b) as (…)`), `join` ile birden çok alias, `update t a … from`, `insert … returning`
+  ve `from generate_series(1,3) g` alias'ı. **[—]** (birim testli: `scope.rs`, `tests/complete.rs`)
+- [ ] `FROM`'dan önce yazılan `select ` sonrası kapsamdaki ilişkilerin kolonları `alias.kolon` önerilir (en çok 500). **[—]**
+- [ ] Alias tamamlaması oturum meşgulken (sorgu sürerken) hiçbir şey göstermez, hata vermez. **[—]**
+- [ ] Gecikme (`.` tuşundan öneri listesine): sıcak 54–69 ms, soğuk 56–70 ms (`.` sonrası debounce yok, CodeMirror 50 ms);
+  kısmi adda (`o.c`) ~210 ms (150 ms debounce korunur); arka uç yanıtı 1–4 ms. **[T7]** (bkz. performans notu)
+
+### Hata ve bilgi işaretleri (yazarken denetim)
+- [ ] `select * from no_such_table;` yazıp ~0,6 sn bekleyince `no_such_table` altı dalgalı kırmızı, gutter'da kırmızı nokta,
+  üzerine gelince "Hata: … (42P01)" ipucu; ifade çalışmaz (hiçbir şey çalıştırılmaz, yalnızca Parse). **[T5] [T7]**
+  (denetim gecikmesi 613–628 ms)
+- [ ] Betikte önceki bir `create table t_new …;` varken `select a from t_new;` → `t_new` **gri noktalı** (bilgi), kırmızı değil;
+  tablo oluşmaz. **[T5]**
+- [ ] Metni düzenleyince ilgili işaretler hemen kalkar, durup bekleyince yeniden gelir; hızlı yazarken eski sonuç uygulanmaz. **[T5]**
+- [ ] Emojili betikte (`select '😀'; select nope_kolon;`) işaret `nope_kolon` üstünde. **[—]** (UTF-16 eşleme `check-model.test.ts`'te)
+- [ ] Salt okunur kilitli / üretim etiketli sunucuda da çalışır (yalnızca Parse). **[—]**
+- [ ] Bağlı olmayan ya da uyuyan oturumda işaret yok, hata yok. **[—]**
+
+### Açık transaction güvenliği
+- [ ] Manuel modda `insert …` ile transaction aç; denetim sürerken: transaction `idle in transaction` kalır, `orders` üzerinde
+  yalnız `RowExclusiveLock` (Parse'ın kilitleri bırakılmış), aynı transaction'da `count(*)` satırı görür, Rollback sonrası satır yok. **[T5]**
+- [ ] `select 1/0` ile transaction `Failed` olunca denetim istek atmaz, işaret yok; Rollback sonrası yeniden denetler. **[T5]**
+- [ ] Başka oturum tabloyu ACCESS EXCLUSIVE kilitliyken denetim ~200 ms'de (lock_timeout) sessizce vazgeçer, sunucuda yetim bekleme yok. **[T5]**
+
+### Çalıştırma denetimden önce gelir (BUSY değil)
+- [ ] Denetim uçuştayken Ctrl+Enter: denetim kesilir (46 ms), çalıştırma `busy` toast'u vermeden başlar ve biter; denetim sonucu uygulanmaz. **[T5]**
+- [ ] Aynı şeyi `more`/Commit/Rollback/seçenek değişikliği/CSV için dene (kullanıcı işlemleri en çok 3 sn bekler). **[—]** (arka uç testli)
+
+### Biçimlendirme (Ctrl+Shift+F)
+- [ ] Seçim yokken tüm metin biçimlenir (BÜYÜK anahtar kelime, ana yan tümceler yeni satırda); imleç en yakın belirtecin önünde kalır; **tek Ctrl+Z** özgün metne döner. **[T5] [T7]**
+- [ ] Seçim varken yalnızca seçim biçimlenir, seçimin baş/son boşlukları korunur. **[T5]** (boşluk korunması `format-edit.test.ts`)
+- [ ] Seçim bir dize/yorum/dolar gövdesi/tırnaklı ad içinde ya da belirteç ortasında başlıyor/bitiyorsa çevreleyen ifadeye
+  genişletilir; dize içeriği değişmez (`insert … values ('select  a  from b')` içindeki metni seçip Ctrl+Shift+F). **[T7]**
+  (`format-edit.test.ts` `safeFormatSelection`)
+- [ ] 10.000 satırlık betikte tuştan belgenin değişmesine ~170 ms; arayüz donmaz (en uzun kare 38 ms). **[T7]**
+- [ ] Dize, dolar tırnaklı gövde, yorum, çift tırnaklı ad ve operatörler değişmez. **[—]** (`tests/format.rs`, fuzz)
+- [ ] Biçimlendirme başarısız olursa (belirteç eşitliği/eşkuvvetlilik bozulur, 5 MB üstü) "biçimlendirilemedi" toast'u çıkar ve metin değişmez. **[—]** (kod yolu basit; biçimlendiriciyi bozacak girdi bulunamadı)
+
+### Ayarlar ve sekme düğmesi
+- [ ] Ayarlar → Editör: "Yazarken hata denetimi" kapatınca işaretler kalkar, istek gitmez; kalıcıdır (`settings.json` `checkEnabled`). **[T5]**
+- [ ] Biçim seçenekleri (harf büyüklüğü / girinti 2–4 / virgül konumu / satır uzunluğu) hemen uygulanır ve `settings.json`'a yazılır; geçersiz
+  değerli `format` yüklemede yalnızca biçim varsayılanına döner. **[T5]** (kalıcılık); geçersiz dosya yüklemesi **[—]** (birim testli)
+- [ ] Sekme bağlam şeridindeki geçici düğme yalnız o sekmeyi kapatır/açar; kapatınca işaretler kalkar, düzenlemede istek gitmez; açınca bir istek gider. **[T5]**
+- [ ] Plan 6 dönemi `settings.json` (`{"historyEnabled":false}`) yeni sürümde açılır, varsayılanlar gelir. **[—]** (birim testli)
+
+### Kapanan iş
+- [x] Tamamlama gecikmesi (Plan 7 son düzeltme dalgası): `.` sonrası debounce kaldırıldı, CodeMirror `activateOnTypingDelay` 50 ms;
+  tuştan öneriye ~270 ms → 54–70 ms (sıcak/soğuk); spec §1.2 sıcak hedefi (< 150 ms) karşılanır (`docs/performance.md`).
+
 ## Ölçümler
 
 | Tarih | Makine | Paket (MB) | Açılış (ms) | Toplam özel WS (MB) | Rust özel WS (MB) |
@@ -155,4 +216,5 @@ betikle sürüldü, yerel Windows diyalogları UIAutomation + SendKeys ile), **[
 | 2026-10-05 | AMD Ryzen 9 5950X (16 çekirdek), 32 GB RAM, Windows 11 | 3,2 (NSIS kurulum paketi) | 131 / 63 / 31 (3 çalıştırma) | ≈191 (Plan 1 "özel bellek"; çalışma kümesi 390 / 377 / 376) | 40 / 30 / 30 (çalışma kümesi) |
 | 2026-10-05 (Plan 2) | aynı makine | — (paket üretilmedi; exe 12,4) | 40 (5 çalıştırma medyanı) | 76,1 (toplam WS 356,9) | 7,5 |
 | 2026-10-06 (Plan 6) | aynı makine | 3,56 (NSIS; ana parça `index` 228 kB, Query Tool tembel) | 45 (5 çalıştırma medyanı; Query Tool sekmesi ilk açılış 38–47 ms) | 76,1 boşta; 10.000 satırlı sorgu sekmesiyle en çok 109,1 | 7,4 |
-Notlar: Birimler — Plan 2 ve Plan 6 satırlarının bellek ve exe/paket değerleri `measure.ps1`/bayt sayısından geldiği için başlıktaki "MB" orada MiB'dir (Plan 6: 3,56 / 76,1 / 109,1 / 7,4 MiB) (1 MiB = 1.048.576 bayt); Plan 1 satırının birimi belirsiz kaynaktandır (bkz. `docs/performance.md` "Birimler"). Plan 2 satırı `scripts/measure.ps1 -Runs 5` ile ölçüldü (8 sn boşta, sunucu yok, seçilen WebView2/tokio ayarlarıyla); yöntem ve denenen ayarlar `docs/performance.md`'de. Plan 1 satırı: ölçüm `target/release/pg-tools.exe` doğrudan çalıştırılarak yapıldı (kurulum yapılmadı); boşta 5 sn, sunucu bağlı değil. Toplam bellek, WebView2 alt süreçleri dahil 7 sürecin çalışma kümesi toplamıdır (paylaşılan sayfalar tekrar sayıldığından özel bellek ≈191 MB). Açılış süresi `MainWindowHandle` oluşana kadar geçen süredir; içerik çizimi dahil olmayabilir. Yukarıdaki kutucuklar GUI üzerinden elle uygulanmadı; sürüm öncesi işaretlenmelidir.
+| 2026-10-06 (Plan 7) | aynı makine | — (`--no-bundle`; exe 14,19) | 43 (5 çalıştırma medyanı) | 77,5 boşta; sorgu sekmesi + 10.000 satırlı betik + denetim 113,2 | 7,4 |
+Notlar: Birimler — Plan 2, Plan 6 ve Plan 7 satırlarının bellek ve exe/paket değerleri `measure.ps1`/bayt sayısından geldiği için başlıktaki "MB" orada MiB'dir (Plan 6: 3,56 / 76,1 / 109,1 / 7,4 MiB; Plan 7: exe 14,19 / 77,5 / 113,2 / 7,4 MiB) (1 MiB = 1.048.576 bayt); Plan 1 satırının birimi belirsiz kaynaktandır (bkz. `docs/performance.md` "Birimler"). Plan 2 satırı `scripts/measure.ps1 -Runs 5` ile ölçüldü (8 sn boşta, sunucu yok, seçilen WebView2/tokio ayarlarıyla); yöntem ve denenen ayarlar `docs/performance.md`'de. Plan 1 satırı: ölçüm `target/release/pg-tools.exe` doğrudan çalıştırılarak yapıldı (kurulum yapılmadı); boşta 5 sn, sunucu bağlı değil. Toplam bellek, WebView2 alt süreçleri dahil 7 sürecin çalışma kümesi toplamıdır (paylaşılan sayfalar tekrar sayıldığından özel bellek ≈191 MB). Açılış süresi `MainWindowHandle` oluşana kadar geçen süredir; içerik çizimi dahil olmayabilir. Yukarıdaki kutucuklar GUI üzerinden elle uygulanmadı; sürüm öncesi işaretlenmelidir.

@@ -1,5 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createCompletionSource, contextAt, matchItems, replaceRange, type CompletionCtxLike } from "./completion";
+import {
+  completionWaitMs,
+  createCompletionSource,
+  contextAt,
+  matchItems,
+  replaceRange,
+  scopedTarget,
+  statementBounds,
+  type CompletionCtxLike,
+} from "./completion";
 import type { CompletionItem } from "../../ipc/bindings/CompletionItem";
 
 describe("contextAt", () => {
@@ -8,7 +17,7 @@ describe("contextAt", () => {
     ["select * from app.or", { kind: "schemaMember", schema: "app" }],
     ["select o.", { kind: "relationMember", relation: "o" }],
     ['select * from "Order Items".', { kind: "schemaMember", schema: "Order Items" }],
-    ['select "Order Items".', { kind: "relationMember", relation: "Order Items" }],
+    ['select "Order Items".', { kind: "relationMember", relation: "Order Items", quoted: true }],
     ["select * from app.orders.", { kind: "relationMember", relation: "orders", schema: "app" }],
     ['select * from "My ""S"""."T".', { kind: "relationMember", relation: "T", schema: 'My "S"' }],
     ["-- from x.", { kind: "none" }],
@@ -28,7 +37,7 @@ describe("contextAt", () => {
     ["insert into ", { kind: "relation" }],
     ["select * from orders o", { kind: "keyword" }],
     ["select * from orders where ", { kind: "keyword" }],
-    ["select fro", { kind: "keyword" }],
+    ["select fro", { kind: "selectList" }],
     ["", { kind: "keyword" }],
     ["select * from müşteri.", { kind: "schemaMember", schema: "müşteri" }],
     ["select ğ.", { kind: "relationMember", relation: "ğ" }],
@@ -39,7 +48,16 @@ describe("contextAt", () => {
     ["select * from a x, b y, ", { kind: "relation" }],
     ["select * from a, app.", { kind: "schemaMember", schema: "app" }],
     ["select * from a where b, ", { kind: "keyword" }],
-    ["select a, ", { kind: "keyword" }],
+    ["select a, ", { kind: "selectList" }],
+    ["select ", { kind: "selectList" }],
+    ["select distinct ", { kind: "selectList" }],
+    ["select a as x, f(b, c) y, ", { kind: "selectList" }],
+    ["select 1 from t; select ", { kind: "selectList" }],
+    ["select (select ", { kind: "selectList" }],
+    ["select count(a, ", { kind: "keyword" }],
+    ["select a from t where b in (1, ", { kind: "keyword" }],
+    ["select a from t order by a, ", { kind: "keyword" }],
+    ["insert into t (a, ", { kind: "keyword" }],
     ["truncate ", { kind: "relation" }],
     ["truncate app.", { kind: "schemaMember", schema: "app" }],
     ["alter table ", { kind: "relation" }],
@@ -112,13 +130,83 @@ describe("createCompletionSource", () => {
     expect(r!.options.map((o) => o.label)).toEqual(['"Order Items"']);
   });
 
-  it("ilişki üyesi kolon ister; şema yoksa null", async () => {
-    const fetch = vi.fn(async () => [item("id", "column")]);
+  it("ilişki üyesi önce kapsamlı ister; boşsa kolon ister", async () => {
+    const fetch = vi.fn(async (req: { type: string }) => (req.type === "scoped" ? [] : [item("id", "column")]));
     const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
     const p = run(src, ctx("select o."));
     await vi.advanceTimersByTimeAsync(150);
     await p;
-    expect(fetch).toHaveBeenCalledWith({ type: "columns", schema: null, relation: "o" });
+    expect(fetch).toHaveBeenNthCalledWith(1, { type: "scoped", sql: "select o.", offset: 9, prefix: "o" });
+    expect(fetch).toHaveBeenNthCalledWith(2, { type: "columns", schema: null, relation: "o" });
+  });
+
+  it("kapsamlı sonuç varsa Plan 5 isteği yok; ifade metni ve scalar ofset gönderilir", async () => {
+    const fetch = vi.fn(async () => [item("id", "column")]);
+    const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
+    const c = ctx("select 1; select '😀', o.");
+    const after = " from orders o; select 2";
+    c.state.doc.sliceString = (f: number, t?: number) => ("select 1; select '😀', o." + after).slice(f, t);
+    const p = run(src, c);
+    await vi.advanceTimersByTimeAsync(150);
+    const r = await p;
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith({
+      type: "scoped",
+      sql: " select '😀', o. from orders o",
+      offset: " select '😀', o.".length - 1,
+      prefix: "o",
+    });
+    expect(r!.options.map((o) => o.label)).toEqual(["id"]);
+  });
+
+  it("tırnaklı niteleyici yazıldığı gibi (tırnaklı) gönderilir; şemalı üye kapsamlı istemez", async () => {
+    const fetch = vi.fn(async () => [item("x", "column")]);
+    const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
+    const p = run(src, ctx('select "O""I".'));
+    await vi.advanceTimersByTimeAsync(150);
+    await p;
+    expect(fetch).toHaveBeenCalledWith(expect.objectContaining({ type: "scoped", prefix: '"O""I"' }));
+    fetch.mockClear();
+    const p2 = run(src, ctx("select * from app.orders."));
+    await vi.advanceTimersByTimeAsync(150);
+    await p2;
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith({ type: "columns", schema: "app", relation: "orders" });
+  });
+
+  it("select listesi: alias.kolon önerileri önce, sonra önekle eşleşen anahtar kelimeler", async () => {
+    const fetch = vi.fn(async () => [
+      { label: "o.id", quoted: "o.id", kind: "column" as const, detail: "integer" },
+      { label: "o.Sel", quoted: 'o."Sel"', kind: "column" as const, detail: null },
+    ]);
+    const kw = () => ({ from: 7, options: [{ label: "SELECT" }, { label: "FROM" }] });
+    const src = createCompletionSource({ fetch, isBusy: () => false, keywords: kw });
+    const p = run(src, ctx("select "));
+    await vi.advanceTimersByTimeAsync(150);
+    const r = await p;
+    expect(fetch).toHaveBeenCalledWith({ type: "scoped", sql: "select ", offset: 7, prefix: "" });
+    expect(r!.options.map((o) => o.label)).toEqual(["o.id", 'o."Sel"', "SELECT", "FROM"]);
+    const p2 = run(src, ctx("select o.s"));
+    await vi.advanceTimersByTimeAsync(150);
+    // `o.` niteleyicisi: ilişki üyesi bağlamı (kapsamlı istek, önek "o").
+    await p2;
+    expect(fetch).toHaveBeenLastCalledWith({ type: "scoped", sql: "select o.s", offset: 10, prefix: "o" });
+    const p3 = run(src, ctx("select se"));
+    await vi.advanceTimersByTimeAsync(150);
+    const r3 = await p3;
+    expect(r3!.options.map((o) => o.label)).toEqual(['o."Sel"', "SELECT"]);
+  });
+
+  it("select listesi: kapsamlı sonuç boşsa yalnızca anahtar kelimeler; meşgulken istek yok", async () => {
+    const fetch = vi.fn(async () => []);
+    const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
+    const p = run(src, ctx("select "));
+    await vi.advanceTimersByTimeAsync(150);
+    expect(await p).toEqual(KW());
+    const busy = vi.fn(async () => []);
+    const src2 = createCompletionSource({ fetch: busy, isBusy: () => true, keywords: KW });
+    expect(await run(src2, ctx("select "))).toEqual(KW());
+    expect(busy).not.toHaveBeenCalled();
   });
 
   it("meşgulken istek yok; ilişki bağlamında anahtar kelimeler, üyede null", async () => {
@@ -140,10 +228,45 @@ describe("createCompletionSource", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("`.` hemen sonrası (üye bağlamı, kısmi ad boş) beklemeden ister; kısmi adda 150 ms beklenir", async () => {
+    const fetch = vi.fn(async () => [item("id", "column")]);
+    const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
+    const p = run(src, ctx("select * from app."));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetch).toHaveBeenCalledWith({ type: "relations", schema: "app" });
+    await p;
+    fetch.mockClear();
+    const p2 = run(src, ctx("select o."));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetch).toHaveBeenCalledWith(expect.objectContaining({ type: "scoped", prefix: "o" }));
+    await p2;
+    fetch.mockClear();
+    const p3 = run(src, ctx("select o.i"));
+    await vi.advanceTimersByTimeAsync(149);
+    expect(fetch).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await p3;
+    expect(fetch).toHaveBeenCalled();
+    fetch.mockClear();
+    const p4 = run(src, ctx("select "));
+    await vi.advanceTimersByTimeAsync(149);
+    expect(fetch).not.toHaveBeenCalled(); // select listesi debounce'lu kalır
+    await vi.advanceTimersByTimeAsync(1);
+    await p4;
+  });
+
+  it("completionWaitMs", () => {
+    expect(completionWaitMs({ kind: "relationMember", relation: "o" }, "", 150)).toBe(0);
+    expect(completionWaitMs({ kind: "schemaMember", schema: "app" }, "", 150)).toBe(0);
+    expect(completionWaitMs({ kind: "relationMember", relation: "o" }, "i", 150)).toBe(150);
+    expect(completionWaitMs({ kind: "relation" }, "", 150)).toBe(150);
+    expect(completionWaitMs({ kind: "selectList" }, "", 150)).toBe(150);
+  });
+
   it("debounce sırasında iptal: istek yok, sonuç yok", async () => {
     const fetch = vi.fn(async () => [item("x")]);
     const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
-    const c = ctx("select * from app.");
+    const c = ctx("select * from app.or");
     const p = run(src, c);
     c.abort();
     await vi.advanceTimersByTimeAsync(150);
@@ -187,7 +310,7 @@ describe("createCompletionSource", () => {
     const fetch = vi.fn(async () => [item("x")]);
     const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
     expect(await run(src, ctx("-- from x."))).toBeNull();
-    expect(await run(src, ctx("select "))).toEqual(KW());
+    expect(await run(src, ctx("select * from t where "))).toEqual(KW());
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -205,13 +328,14 @@ describe("createCompletionSource", () => {
     expect(r.options.length).toBeGreaterThan(0); // relations + schemas (sahte fetch ikisine de aynı yanıtı verir)
   });
 
-  it("select app.: kolon boşsa şema olarak ilişkileri ister", async () => {
-    const fetch = vi.fn(async (req: { type: string }) => (req.type === "columns" ? [] : [item("orders")]));
+  it("select app.: kapsamlı ve kolon boşsa şema olarak ilişkileri ister", async () => {
+    const fetch = vi.fn(async (req: { type: string }) => (req.type === "relations" ? [item("orders")] : []));
     const src = createCompletionSource({ fetch, isBusy: () => false, keywords: KW });
     const p = run(src, ctx("select app."));
     await vi.advanceTimersByTimeAsync(150);
     const r = await p;
-    expect(fetch).toHaveBeenNthCalledWith(2, { type: "relations", schema: "app" });
+    expect(fetch).toHaveBeenNthCalledWith(1, expect.objectContaining({ type: "scoped", prefix: "app" }));
+    expect(fetch).toHaveBeenNthCalledWith(3, { type: "relations", schema: "app" });
     expect(r!.options).toHaveLength(1);
   });
 
@@ -226,5 +350,35 @@ describe("createCompletionSource", () => {
     await vi.advanceTimersByTimeAsync(150);
     expect(await p).toBeNull();
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("statementBounds / scopedTarget", () => {
+  const at = (s: string) => {
+    const pos = s.indexOf("|");
+    return { text: s.slice(0, pos) + s.slice(pos + 1), pos };
+  };
+  const cases: [string, string][] = [
+    ["select | from t", "select  from t"],
+    ["select 1; select | from t; select 2", " select  from t"],
+    ["select ';' x, | from t; select 2", "select ';' x,  from t"],
+    ["select 1 -- ;\n, | from t; x", "select 1 -- ;\n,  from t"],
+    ["select /* ; */ | from t; x", "select /* ; */  from t"],
+    ["select $$;$$, $q$ ; $q$, | from t; x", "select $$;$$, $q$ ; $q$,  from t"],
+    ['select ";" | from t; x', 'select ";"  from t'],
+    ["select (1; |) ; x", "select (1; ) "],
+    ["select 1;|", ""],
+    ["select '; | ", "select ';  "],
+  ];
+  for (const [input, sql] of cases) {
+    it(JSON.stringify(input), () => {
+      const { text, pos } = at(input);
+      const b = statementBounds(text, pos);
+      expect(text.slice(b.from, b.to)).toBe(sql);
+    });
+  }
+  it("ofset ifade içinde Unicode scalar", () => {
+    const { text, pos } = at("select 1; select '😀ğ', o.| from t o");
+    expect(scopedTarget(text, pos)).toEqual({ sql: " select '😀ğ', o. from t o", offset: 16 });
   });
 });

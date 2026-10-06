@@ -48,6 +48,8 @@ export interface TabModel {
   last: { text: string; scope: Scope } | null;
   selectedStmt: number | null;
   historyKey: number;
+  /** Bu sekmede yazarken denetim geçici olarak kapalı (bağlam şeridi; kalıcı değil). */
+  checkOff: boolean;
 }
 
 interface Entry {
@@ -210,6 +212,7 @@ export function createQueryController(deps: QueryControllerDeps) {
       last: null,
       selectedStmt: null,
       historyKey: 0,
+      checkOff: false,
     });
     entries.set(id, { model: m, set, text: input.text });
     const prevActive = tabs.state.activeId;

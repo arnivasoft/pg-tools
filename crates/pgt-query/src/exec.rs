@@ -255,6 +255,25 @@ impl Executor {
         Ok(stmt.columns().iter().map(|c| c.name().to_string()).collect())
     }
 
+    /// Yalnızca Parse/Describe (`prepare`; Bind/Execute yok): sonuç sütunlarının adları ve tür adları. Hazırlanan
+    /// deyim düşürülünce kapanır. Açık imlece ve transaction izlemesine dokunmaz, NOTICE'lar atılır.
+    /// Hata, sunucunun `sql` içindeki 1 tabanlı karakter konumuyla (varsa) döner.
+    pub(crate) async fn prepare_described(
+        &mut self,
+        sql: &str,
+    ) -> std::result::Result<Vec<(String, String)>, (Error, Option<u32>)> {
+        let prepared = with_notices(self.conn.client.prepare(sql), &mut self.conn.notices, &mut self.notices).await;
+        self.notices.reset();
+        let stmt = prepared.map_err(|e| {
+            let position = match e.as_db_error().and_then(|db| db.position()) {
+                Some(ErrorPosition::Original(n)) => Some(*n),
+                _ => None,
+            };
+            (Error::from_query(e), position)
+        })?;
+        Ok(stmt.columns().iter().map(|c| (c.name().to_string(), c.type_().name().to_string())).collect())
+    }
+
     /// Dışa aktarma imlecinden (`pgt_x`) bir parça; bellekteki en çok satır izlenir.
     pub(crate) async fn fetch_export_chunk(&mut self, n: u32) -> Result<TextRows> {
         let rows = self.exec_internal(&format!("FETCH FORWARD {n} FROM pgt_x")).await?;

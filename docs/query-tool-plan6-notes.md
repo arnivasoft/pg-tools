@@ -145,9 +145,11 @@ kodlarla gelir (`query`, `not_found`, `not_connected`, `unknown_server`, `invali
   rol zaman aşımını oturum için ezer (spec gereği; politika kararı Plan 6+).
 
 ## Diğer
-- Tamamlama oturum meşgulken ya da uyurken (idle reap) **boş liste** döner; beklemez. Ama tamamlama sürerken
-  (en çok 5 sn) oturum kilidini tutar: bu sırada başlatılan `qt_run` `busy` alır (arayüz tamamlamayı yazarken
-  iptal etmeli / kısa tutmalı).
+- Tamamlama oturum meşgulken ya da uyurken (idle reap) **boş liste** döner; beklemez. Tamamlama sürerken oturum
+  kilidini tutar ama bir arka plan işlemidir (Plan 7): bu sırada başlayan kullanıcı işlemi (`qt_run`, `qt_more`,
+  `qt_tx`, `qt_set_options`, CSV dışa aktarma, kapatma) tamamlamadan vazgeçmesini ister ve kilidi **en çok 3 sn**
+  bekler (tipik olarak hemen alır); `busy` yalnızca kilidi başka bir kullanıcı işlemi tutuyorsa (ya da 3 sn
+  dolarsa) döner. Arayüz yine de çalıştırmadan önce `closeCompletion` çağırır.
 - `CompletionKind::Function` hiçbir zaman üretilmez (fonksiyon tamamlaması yok); tür ileride kullanılmak üzere durur.
 - `qt_set_options` açık ızgara imlecini kapatır: sonrasında o ızgarada `more()` hata verir (arayüz "daha fazla"
   düğmesini kapatmalı).
@@ -164,3 +166,45 @@ kodlarla gelir (`query`, `not_found`, `not_connected`, `unknown_server`, `invali
 - **Hücre başına bayt sınırı yok**: bellek yalnızca satır sayısıyla sınırlıdır (limit/parça). 1 GB'lık bir `bytea`/`text`
   hücresi bütün olarak bellekte tutulur ve `Rows` olayıyla gönderilir. Plan 6 arayüzü hücre gösterimini kırpmalı;
   hücre/parça başına bayt sınırı olası bir izleme işidir.
+
+---
+
+## Plan 7 ile değişen arka uç davranışı (editör zekâsı, 2026-10-06)
+
+Plan 7 (`docs/superpowers/specs/2026-10-06-editor-intelligence-design.md`) yukarıdaki sözleşmeleri şu şekilde genişletti ya da
+değiştirdi; bu belgenin Plan 6 maddeleri aksi belirtilmedikçe geçerlidir.
+
+- **Yeni komutlar.** `qt_check(session, sql, target)` → `Vec<CheckDiag>`: oturum bağlantısında yalnızca **Parse** (`prepare`) yapar,
+  ifadeyi çalıştırmaz. `CheckTarget { cursor, visibleStart, visibleEnd }` Unicode scalar ofsetidir; denetlenecek ifadeler: önce
+  imlecin ifadesi, sonra görünür alanla kesişen **bütün** ifadeler (en çok 20 ifade / 64 KB, `CHECK_MAX_STMTS`/`CHECK_MAX_BYTES`).
+  `CheckDiag { stmtIndex, charOffset, charLen, position, message, sqlstate, severity }`; `stmtIndex` betiğin tamamındaki sıradır
+  (`qt_analyze(…, all)` ile aynı), `charLen` konumsuz hatada bütün ifadeyi işaretlemek içindir. Oturum **meşgul, uykuda ya da
+  `Failed` transaction'da** ise **boş liste** döner (hata değil); zaman aşımı/kilit/iptal (`55P03`, `57014`) ve `42P18` gösterilmez;
+  betikte önceki bir `Ddl` varsa isim hataları (`42P01`, `42703`, `42883`, `42704`, `3F000`) `severity: info` olur.
+  `qt_format(sql, options)` → `String`: saf, oturumsuz, `spawn_blocking`; sonuç belirteç eşitliği ve eşkuvvetlilik doğrulanmazsa
+  ya da girdi 5 MB'ı aşarsa `invalid` ("biçimlendirilemedi"), metin değişmez. `FormatOptions`/`KeywordCase`/`CommaStyle`
+  `pgt-core::format_options`'tadır (`pgt-query::format` yeniden dışa açar). Ayarlar: `settings_set_editor(checkEnabled, format)`;
+  `AppSettings`'e `checkEnabled` ve `format` eklendi (eski dosyalar varsayılanla açılır; geçersiz `format` yalnızca kendini sıfırlar).
+- **Tamamlama:** `CompletionRequest::Scoped { sql, offset, prefix }` eklendi (ifade metni + scalar ofset). Alias/CTE/alt sorgu
+  kolonları kapsam çözümleyiciden (`scope.rs`) ve katalogdan gelir; CTE/alt sorgu gövdeleri sunucuda Parse edilir (çalıştırılmaz) ve
+  `(gövde karması)` anahtarıyla 60 sn önbelleğe alınır. Katalog aramasına verilen `Scoped` `invalid` döner. `CompletionKind::Function`
+  hâlâ üretilmez.
+- **Kullanıcı işlemi arka plan işine üstün gelir.** Tamamlama ve denetim oturum kilidini tutan arka plan işleridir
+  (`BackgroundGuard`): `qt_run`, `qt_more`, `qt_tx`, `qt_set_options`, CSV dışa aktarma ve kapatma, çalışan arka plan işinden
+  vazgeçmesini ister ve kilidi **en çok 3 sn** bekler (`BACKGROUND_YIELD_WAIT`; tipik olarak hemen alır). Plan 6'da bu durumda
+  `busy` dönerdi; artık `busy` yalnızca kilidi başka bir **kullanıcı** işlemi tutuyorsa (ya da 3 sn dolarsa) döner. Denetimin kilidi
+  tutması tipik olarak birkaç ms'dir; Parse çağrılarının bütçesi 1 sn'dir (`PARSE_BUDGET`). Sunucu yanıt vermezse kurulum/temizlik
+  adımları (`STEP_WAIT` 2 sn, `DRAIN_WAIT` 1 sn), bekleyen `lock_timeout` geri yüklemesi ve tamamlamada 5 sn'lik katalog süresi kilidi
+  daha uzun tutabilir; kullanıcı işlemi yine de en çok 3 sn bekler (sonra `busy`).
+- **Korumalı Parse (`parse_guard.rs`)** tamamlama ve denetimin ortak yoludur: oturum boştaysa Parse doğrudan (örtük transaction),
+  transaction içindeyse (ya da ızgara imlecinin transaction'ı açıksa) `SAVEPOINT pgt_parse_<n>` … `ROLLBACK TO` + `RELEASE` içinde
+  (Parse'ın aldığı kilitler bırakılır), `Failed` ise hiçbir şey yapılmaz. Kullanıcının transaction durumu ve oturum durumu değişmez.
+- **`lock_timeout` ve bekleyen geri yükleme.** Parse kilit beklemesin diye `lock_timeout` 200 ms'ye çekilir (savepoint içinde
+  `SET LOCAL`; doğrudan yolda `SHOW` ile okunan kullanıcı değeri sonra geri yüklenir). Geri yükleme **doğrulanamazsa** (zaman aşımı,
+  bilinmeyen sonuç) kullanıcının değeri oturumda `pending_lock_timeout` olarak tutulur ve **bir sonraki kullanıcı SQL'inden önce**
+  uygulanır; kullanıcı `lock_timeout`'u kendisi değiştirirse (`SET`/`RESET`/`RESET ALL`/`DISCARD ALL`/`set_config(…, false)`;
+  `touches_lock_timeout`) bekleyen değer silinir, açık transaction'da değiştirdiyse COMMIT'te silinir; yeniden bağlanınca
+  sunucu varsayılanı geçerli olduğundan silinir.
+- **Sınırlar.** Parse yalnızca ham ayrıştırma + analiz yapar; yardımcı (utility) ifadelerin (DDL, `VACUUM`, `SET`…) anlamsal hataları
+  Parse'ta görünmez, ancak çalıştırınca. tokio-postgres yerleşik olmayan bir sonuç türünü kendi sabit katalog sorgusuyla çözebilir
+  (kullanıcı SQL'i değildir; aynı korumaların içinde çalışır). Denetim istekleri günlüğe yazılmaz ve geçmişe girmez.

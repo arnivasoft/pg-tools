@@ -1,0 +1,1 @@
+select payload->>'name' as name, (payload->'meta')::jsonb #>> '{a,b}', created::date, x :: int, '{"a":1}'::json -> 'a', arr[1], ts at time zone 'UTC' from events where payload ? 'name' and tags @> array['x']

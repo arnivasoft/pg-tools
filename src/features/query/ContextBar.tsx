@@ -1,4 +1,4 @@
-import { Lock, Play, PlayCircle, RotateCcw, Square, Check, Undo2 } from "lucide-solid";
+import { Lock, Play, PlayCircle, RotateCcw, SpellCheck, Square, Check, Undo2 } from "lucide-solid";
 import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
 import { t } from "../../app/strings";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
@@ -23,6 +23,9 @@ export function ContextBar(props: {
   onMode: (mode: TxMode) => void;
   onTimeout: (ms: number) => void;
   onReconnect: () => void;
+  /** Ayarlarda yazarken denetim açık mı (kapalıysa düğme görünmez). */
+  checkEnabled: boolean;
+  onToggleCheck: () => void;
 }) {
   const c = t.query.ctx;
   const m = () => props.model;
@@ -141,6 +144,19 @@ export function ContextBar(props: {
           </span>
         </Show>
         <div class="flex-1" />
+        <Show when={props.checkEnabled}>
+          <Button
+            variant="ghost"
+            class="h-7 text-[12px]"
+            aria-pressed={!m().checkOff}
+            aria-label={t.query.check.toggle}
+            title={!m().session || m().serverGone ? t.query.check.unavailable : m().checkOff ? t.query.check.toggleOff : t.query.check.toggleOn}
+            disabled={!m().session || m().serverGone}
+            onClick={() => props.onToggleCheck()}
+          >
+            <SpellCheck size={13} classList={{ "text-muted": m().checkOff }} />
+          </Button>
+        </Show>
         <Show when={statusText()}>
           <span role="status" aria-live="polite" class="text-muted" classList={{ "text-danger": status() === "lost" || m().serverGone }}>
             {statusText()}

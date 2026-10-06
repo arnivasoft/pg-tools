@@ -1,0 +1,7 @@
+SELECT 1;
+
+SELECT 2;;
+
+SELECT 3; -- üç
+
+SELECT 4

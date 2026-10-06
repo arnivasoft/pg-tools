@@ -8,6 +8,7 @@ import { t } from "../../app/strings";
 import { readStorage, writeStorage } from "../../app/storage";
 import { toast } from "../../app/toast";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
+import type { FormatOptions } from "../../ipc/bindings/FormatOptions";
 import type { QueryEvent } from "../../ipc/bindings/QueryEvent";
 import type { StmtPlan } from "../../ipc/bindings/StmtPlan";
 import type { TxAction } from "../../ipc/bindings/TxAction";
@@ -19,12 +20,16 @@ import { isProductionLabel } from "../servers/server-form";
 import { CellPanel } from "./CellPanel";
 import { createRunConfirm } from "./ConfirmRunDialog";
 import { ContextBar } from "./ContextBar";
+import { canCheck, createCheckScheduler, type CheckGate } from "./check-model";
 import { createCompletionSource } from "./completion";
 import { runWithGuards, type Snapshot } from "./confirm-model";
 import { createQueryEditor, type QueryEditor, type RunKind } from "./editor";
+import { EditorSettings } from "./EditorSettings";
 import { hintFor } from "./errors";
 import { exportSql, exportTarget } from "./export";
 import { createExportUi } from "./ExportUi";
+import { formatRange, formatReplacement, safeFormatSelection } from "./format-edit";
+import { createSerialSaver } from "./settings-saver";
 import { historyEntriesFor, insertAt } from "./history-model";
 import { HistorySettings, HistoryView } from "./HistoryView";
 import { MessagesView } from "./MessagesView";
@@ -46,7 +51,12 @@ export const ROW_LIMIT = Math.min(10_000, MAX_TAB_ROWS);
 const EDITOR_HEIGHT_KEY = "pgt.query.editorHeight";
 const MIN_EDITOR = 80;
 
+/** Arka uç `pgt_query::format::FORMAT_FAILED` (belirteç eşitliği/eşkuvvetlilik bozuldu). */
+const FORMAT_FAILED = "biçimlendirilemedi";
+const DEFAULT_FORMAT: FormatOptions = { keywordCase: "upper", indent: 2, comma: "trailing", maxLine: 120 };
+
 type ResultPane = "result" | "messages" | "history";
+type EditorPrefs = { checkEnabled: boolean; format: FormatOptions };
 
 export default function QueryTab(props: { ctl: QueryController }) {
   const ctl = props.ctl;
@@ -76,6 +86,18 @@ export default function QueryTab(props: { ctl: QueryController }) {
       notify(toPayload(e).message);
     }
   };
+  // Editör ayarları (settings.json): yazarken denetim + biçimlendirici seçenekleri.
+  // Değişiklik hemen uygulanır, yazımlar sıralıdır; başarısız yazım geri alınır (`settings-saver`).
+  const [editorPrefs, setEditorPrefs] = createSignal<EditorPrefs>({ checkEnabled: true, format: DEFAULT_FORMAT });
+  const checkEnabled = () => editorPrefs().checkEnabled;
+  const formatOptions = () => editorPrefs().format;
+  const prefsSaver = createSerialSaver<EditorPrefs>({
+    get: editorPrefs,
+    set: (v) => setEditorPrefs(v),
+    save: (v) => commands.settingsSetEditor(v.checkEnabled, v.format),
+    failed: (e) => notify(toPayload(e).message),
+  });
+  const saveEditorSettings = (check: boolean, format: FormatOptions) => void prefsSaver.save({ checkEnabled: check, format });
   const [editorHeight, setEditorHeight] = createSignal(Math.max(MIN_EDITOR, Number(readStorage(EDITOR_HEIGHT_KEY)) || 220));
 
   let host!: HTMLDivElement;
@@ -97,6 +119,46 @@ export default function QueryTab(props: { ctl: QueryController }) {
     },
   });
 
+  // ---- yazarken denetim (tasarım §4): yalnız gösterilen + etkin sekme, açık/boşta oturum, Failed dışı.
+  const checkGate = (): CheckGate | null => {
+    const id = shownId();
+    const m = model();
+    if (!id || !m || activeId() !== id) return null;
+    return {
+      enabled: checkEnabled() && !m.checkOff,
+      session: m.session,
+      status: m.run.status,
+      op: m.op,
+      tx: m.run.tx,
+      serverGone: m.serverGone,
+    };
+  };
+  const checker = createCheckScheduler({
+    gate: checkGate,
+    view: () => editor?.checkView() ?? null,
+    request: commands.qtCheck,
+    apply: (marks) => editor?.setLintMarks(marks),
+    // Sessiz (tasarım §6): yalnızca hata kodu, SQL metni yok.
+    failed: (e) => console.debug("denetim başarısız", toPayload(e).code),
+  });
+  /** Hedef ne olursa olsun yeniden denetle (sekme geçişi, oturum boşa döndü). */
+  const recheck = () => {
+    checker.invalidate();
+    checker.moved();
+  };
+  createEffect(on(() => canCheck(checkGate()), (ok) => (ok ? recheck() : checker.invalidate())));
+  // Denetim kapatılınca (ayar ya da sekme düğmesi) işaretler kalkar.
+  createEffect(
+    on(
+      () => checkEnabled() && !(model()?.checkOff ?? false),
+      (on_) => {
+        if (!on_) editor?.setLintMarks([]);
+      },
+      { defer: true },
+    ),
+  );
+  onCleanup(() => checker.dispose());
+
   const snapView = (): SavedView<EditorState> | null =>
     editor ? { state: editor.getState(), scrollTop: editor.view.scrollDOM.scrollTop, scrollLeft: editor.view.scrollDOM.scrollLeft } : null;
 
@@ -108,12 +170,17 @@ export default function QueryTab(props: { ctl: QueryController }) {
         const id = shownId();
         if (id) ctl.setText(id, doc);
       },
+      onUpdate: ({ edited }) => (edited ? checker.edited() : checker.moved()),
+      onFormat: () => void formatNow(),
       complete,
     });
     ctl.setRunner((kind) => void run(kind));
     commands
       .settingsGet()
-      .then((s) => setHistoryEnabled(s.historyEnabled))
+      .then((s) => {
+        setHistoryEnabled(s.historyEnabled);
+        setEditorPrefs({ checkEnabled: s.checkEnabled, format: s.format });
+      })
       .catch(() => {});
     onCleanup(() => {
       ctl.setRunner(null);
@@ -140,6 +207,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
     if (prev !== id) {
       editor.setState(target.state);
       setShownId(id);
+      recheck();
       setCell(null);
       setPane("result");
       requestAnimationFrame(() => {
@@ -194,6 +262,8 @@ export default function QueryTab(props: { ctl: QueryController }) {
       closeCompletion(editor.view); // tamamlama oturum kilidini (≤5 sn) tutabilir
       editor.setErrorMark(null);
     }
+    // Arka uç süren denetimi kendisi keser; geç gelen sonucu yok saymak için sürüm artar.
+    checker.invalidate();
     const runId = ctl.nextRunId();
     ctl.dispatch(id, { type: "runStart", runId });
     ctl.patch(id, { notes: [], last: { text: snap.text, scope: snap.scope }, selectedStmt: null });
@@ -396,6 +466,38 @@ export default function QueryTab(props: { ctl: QueryController }) {
     }
   };
 
+  // ---- biçimlendirme (Ctrl+Shift+F): seçim ya da tümü, tek geri alma adımı; oturum gerekmez.
+  const formatNow = async () => {
+    const id = shownId();
+    const m = model();
+    if (!editor || !id || !m || m.serverGone || editor.getState().readOnly) return;
+    const state = editor.getState();
+    const doc = state.doc.toString();
+    const sel = state.selection.main;
+    let range = formatRange(doc.length, sel.from, sel.to);
+    if (!range.whole) {
+      // Seçimin ucu dize/yorum/tırnaklı ad içinde ya da belirteç ortasındaysa çevreleyen ifadeye genişletilir.
+      const safe = safeFormatSelection(doc, range.from, range.to);
+      if (!safe) {
+        notify(t.query.format.unsafeSelection, "info");
+        return;
+      }
+      range = { ...range, from: safe.from, to: safe.to };
+    }
+    const original = doc.slice(range.from, range.to);
+    if (original.trim() === "") return;
+    try {
+      const formatted = await commands.qtFormat(original, formatOptions());
+      const insert = formatReplacement(original, formatted, range.whole);
+      // Bu arada yazıldıysa ya da sekme değiştiyse sessizce vazgeç (metin değişmez).
+      if (insert === null || !editor || shownId() !== id) return;
+      editor.replaceFormatted(doc, range.from, range.to, insert);
+    } catch (err) {
+      const e = toPayload(err);
+      notify(e.message === FORMAT_FAILED ? t.query.format.failed : `${t.query.format.failed} ${e.message}`);
+    }
+  };
+
   // ---- geçmişten ekleme
   const insertSql = (sql: string) => {
     const m = model();
@@ -472,6 +574,12 @@ export default function QueryTab(props: { ctl: QueryController }) {
             onMode={setMode}
             onTimeout={setTimeoutMs}
             onReconnect={reconnect}
+            checkEnabled={checkEnabled()}
+            onToggleCheck={() => {
+              const id = shownId();
+              const cur = id ? ctl.model(id) : undefined;
+              if (id && cur) ctl.patch(id, { checkOff: !cur.checkOff });
+            }}
           />
         )}
       </Show>
@@ -592,7 +700,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
                 <div class="min-h-0 flex-1">
                   <HistoryView onInsert={insertSql} refreshKey={model()?.historyKey ?? 0} />
                 </div>
-                <div class="shrink-0 border-t border-border p-2">
+                <div class="flex shrink-0 flex-wrap gap-x-8 gap-y-3 border-t border-border p-2">
                   <HistorySettings
                     enabled={historyEnabled()}
                     onToggle={(v) => void toggleHistory(v)}
@@ -602,6 +710,11 @@ export default function QueryTab(props: { ctl: QueryController }) {
                       // Temizleme yalnızca geçmişi ve kapalı sekmelerin taslaklarını silmeli: açık sekmeler yeniden yazılır.
                       void ctl.resaveDrafts();
                     }}
+                  />
+                  <EditorSettings
+                    checkEnabled={checkEnabled()}
+                    format={formatOptions()}
+                    onChange={saveEditorSettings}
                   />
                 </div>
               </div>
