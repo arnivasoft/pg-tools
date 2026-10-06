@@ -192,8 +192,10 @@ değiştirdi; bu belgenin Plan 6 maddeleri aksi belirtilmedikçe geçerlidir.
 - **Kullanıcı işlemi arka plan işine üstün gelir.** Tamamlama ve denetim oturum kilidini tutan arka plan işleridir
   (`BackgroundGuard`): `qt_run`, `qt_more`, `qt_tx`, `qt_set_options`, CSV dışa aktarma ve kapatma, çalışan arka plan işinden
   vazgeçmesini ister ve kilidi **en çok 3 sn** bekler (`BACKGROUND_YIELD_WAIT`; tipik olarak hemen alır). Plan 6'da bu durumda
-  `busy` dönerdi; artık `busy` yalnızca kilidi başka bir **kullanıcı** işlemi tutuyorsa (ya da 3 sn dolarsa) döner. Denetimin kendisi
-  oturum kilidini en çok **1 sn** tutar (`PARSE_BUDGET`).
+  `busy` dönerdi; artık `busy` yalnızca kilidi başka bir **kullanıcı** işlemi tutuyorsa (ya da 3 sn dolarsa) döner. Denetimin kilidi
+  tutması tipik olarak birkaç ms'dir; Parse çağrılarının bütçesi 1 sn'dir (`PARSE_BUDGET`). Sunucu yanıt vermezse kurulum/temizlik
+  adımları (`STEP_WAIT` 2 sn, `DRAIN_WAIT` 1 sn), bekleyen `lock_timeout` geri yüklemesi ve tamamlamada 5 sn'lik katalog süresi kilidi
+  daha uzun tutabilir; kullanıcı işlemi yine de en çok 3 sn bekler (sonra `busy`).
 - **Korumalı Parse (`parse_guard.rs`)** tamamlama ve denetimin ortak yoludur: oturum boştaysa Parse doğrudan (örtük transaction),
   transaction içindeyse (ya da ızgara imlecinin transaction'ı açıksa) `SAVEPOINT pgt_parse_<n>` … `ROLLBACK TO` + `RELEASE` içinde
   (Parse'ın aldığı kilitler bırakılır), `Failed` ise hiçbir şey yapılmaz. Kullanıcının transaction durumu ve oturum durumu değişmez.

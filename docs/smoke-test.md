@@ -153,7 +153,7 @@ betikle sürüldü, yerel Windows diyalogları UIAutomation + SendKeys ile), **[
 Ön koşul: Query Tool bölümündeki gibi atılabilir bir PostgreSQL ve yalıtılmış `%APPDATA%`/`%LOCALAPPDATA%`. Sınama
 şeması: `create schema app; create table app.orders(id int primary key, customer text, total numeric); create table
 app.customers(id int primary key, name text, email text);`. Doğrulama notları: **[T5]** = Task 5 (`tauri dev` +
-WebView2 CDP, PG 18.6), **[T7]** = Task 7 / Plan 7 sonu (yayın exe'si `bun run tauri build --no-bundle`, CDP; sayılar
+WebView2 CDP, PG 18.6), **[T7]** = Task 6 / Plan 7 sonu doğrulaması ve son düzeltme dalgası (yayın exe'si `bun run tauri build --no-bundle`, CDP; sayılar
 `docs/performance.md`), **[—]** = elle çalıştırılmadı (birim/DB testleriyle kapsanır; sürüm öncesi işaretlenmeli).
 
 ### Alias çözümlemeli tamamlama
@@ -164,7 +164,8 @@ WebView2 CDP, PG 18.6), **[T7]** = Task 7 / Plan 7 sonu (yayın exe'si `bun run 
   ve `from generate_series(1,3) g` alias'ı. **[—]** (birim testli: `scope.rs`, `tests/complete.rs`)
 - [ ] `FROM`'dan önce yazılan `select ` sonrası kapsamdaki ilişkilerin kolonları `alias.kolon` önerilir (en çok 500). **[—]**
 - [ ] Alias tamamlaması oturum meşgulken (sorgu sürerken) hiçbir şey göstermez, hata vermez. **[—]**
-- [ ] Gecikme: soğuk ve sıcak ~270 ms (150 ms debounce + CodeMirror gecikmesi); arka uç yanıtı 1–6 ms. **[T7]** (bkz. performans notu)
+- [ ] Gecikme (`.` tuşundan öneri listesine): sıcak 54–69 ms, soğuk 56–70 ms (`.` sonrası debounce yok, CodeMirror 50 ms);
+  kısmi adda (`o.c`) ~210 ms (150 ms debounce korunur); arka uç yanıtı 1–4 ms. **[T7]** (bkz. performans notu)
 
 ### Hata ve bilgi işaretleri (yazarken denetim)
 - [ ] `select * from no_such_table;` yazıp ~0,6 sn bekleyince `no_such_table` altı dalgalı kırmızı, gutter'da kırmızı nokta,
@@ -190,6 +191,9 @@ WebView2 CDP, PG 18.6), **[T7]** = Task 7 / Plan 7 sonu (yayın exe'si `bun run 
 ### Biçimlendirme (Ctrl+Shift+F)
 - [ ] Seçim yokken tüm metin biçimlenir (BÜYÜK anahtar kelime, ana yan tümceler yeni satırda); imleç en yakın belirtecin önünde kalır; **tek Ctrl+Z** özgün metne döner. **[T5] [T7]**
 - [ ] Seçim varken yalnızca seçim biçimlenir, seçimin baş/son boşlukları korunur. **[T5]** (boşluk korunması `format-edit.test.ts`)
+- [ ] Seçim bir dize/yorum/dolar gövdesi/tırnaklı ad içinde ya da belirteç ortasında başlıyor/bitiyorsa çevreleyen ifadeye
+  genişletilir; dize içeriği değişmez (`insert … values ('select  a  from b')` içindeki metni seçip Ctrl+Shift+F). **[T7]**
+  (`format-edit.test.ts` `safeFormatSelection`)
 - [ ] 10.000 satırlık betikte tuştan belgenin değişmesine ~170 ms; arayüz donmaz (en uzun kare 38 ms). **[T7]**
 - [ ] Dize, dolar tırnaklı gövde, yorum, çift tırnaklı ad ve operatörler değişmez. **[—]** (`tests/format.rs`, fuzz)
 - [ ] Biçimlendirme başarısız olursa (belirteç eşitliği/eşkuvvetlilik bozulur, 5 MB üstü) "biçimlendirilemedi" toast'u çıkar ve metin değişmez. **[—]** (kod yolu basit; biçimlendiriciyi bozacak girdi bulunamadı)
@@ -201,9 +205,9 @@ WebView2 CDP, PG 18.6), **[T7]** = Task 7 / Plan 7 sonu (yayın exe'si `bun run 
 - [ ] Sekme bağlam şeridindeki geçici düğme yalnız o sekmeyi kapatır/açar; kapatınca işaretler kalkar, düzenlemede istek gitmez; açınca bir istek gider. **[T5]**
 - [ ] Plan 6 dönemi `settings.json` (`{"historyEnabled":false}`) yeni sürümde açılır, varsayılanlar gelir. **[—]** (birim testli)
 
-### Açık iş
-- [ ] Tamamlamada `.` tetiklemesinde 150 ms debounce + 100 ms CodeMirror gecikmesi tuştan öneriye ~270 ms yapar; spec §1.2 sıcak hedefi (< 150 ms)
-  tuştan-görünüre okunursa karşılanmaz (`docs/performance.md`). Debounce `.` için sıfırlanıp yeniden ölçülmeli.
+### Kapanan iş
+- [x] Tamamlama gecikmesi (Plan 7 son düzeltme dalgası): `.` sonrası debounce kaldırıldı, CodeMirror `activateOnTypingDelay` 50 ms;
+  tuştan öneriye ~270 ms → 54–70 ms (sıcak/soğuk); spec §1.2 sıcak hedefi (< 150 ms) karşılanır (`docs/performance.md`).
 
 ## Ölçümler
 
@@ -213,4 +217,4 @@ WebView2 CDP, PG 18.6), **[T7]** = Task 7 / Plan 7 sonu (yayın exe'si `bun run 
 | 2026-10-05 (Plan 2) | aynı makine | — (paket üretilmedi; exe 12,4) | 40 (5 çalıştırma medyanı) | 76,1 (toplam WS 356,9) | 7,5 |
 | 2026-10-06 (Plan 6) | aynı makine | 3,56 (NSIS; ana parça `index` 228 kB, Query Tool tembel) | 45 (5 çalıştırma medyanı; Query Tool sekmesi ilk açılış 38–47 ms) | 76,1 boşta; 10.000 satırlı sorgu sekmesiyle en çok 109,1 | 7,4 |
 | 2026-10-06 (Plan 7) | aynı makine | — (`--no-bundle`; exe 14,19) | 43 (5 çalıştırma medyanı) | 77,5 boşta; sorgu sekmesi + 10.000 satırlı betik + denetim 113,2 | 7,4 |
-Notlar: Birimler — Plan 2 ve Plan 6 satırlarının bellek ve exe/paket değerleri `measure.ps1`/bayt sayısından geldiği için başlıktaki "MB" orada MiB'dir (Plan 6: 3,56 / 76,1 / 109,1 / 7,4 MiB) (1 MiB = 1.048.576 bayt); Plan 1 satırının birimi belirsiz kaynaktandır (bkz. `docs/performance.md` "Birimler"). Plan 2 satırı `scripts/measure.ps1 -Runs 5` ile ölçüldü (8 sn boşta, sunucu yok, seçilen WebView2/tokio ayarlarıyla); yöntem ve denenen ayarlar `docs/performance.md`'de. Plan 1 satırı: ölçüm `target/release/pg-tools.exe` doğrudan çalıştırılarak yapıldı (kurulum yapılmadı); boşta 5 sn, sunucu bağlı değil. Toplam bellek, WebView2 alt süreçleri dahil 7 sürecin çalışma kümesi toplamıdır (paylaşılan sayfalar tekrar sayıldığından özel bellek ≈191 MB). Açılış süresi `MainWindowHandle` oluşana kadar geçen süredir; içerik çizimi dahil olmayabilir. Yukarıdaki kutucuklar GUI üzerinden elle uygulanmadı; sürüm öncesi işaretlenmelidir.
+Notlar: Birimler — Plan 2, Plan 6 ve Plan 7 satırlarının bellek ve exe/paket değerleri `measure.ps1`/bayt sayısından geldiği için başlıktaki "MB" orada MiB'dir (Plan 6: 3,56 / 76,1 / 109,1 / 7,4 MiB; Plan 7: exe 14,19 / 77,5 / 113,2 / 7,4 MiB) (1 MiB = 1.048.576 bayt); Plan 1 satırının birimi belirsiz kaynaktandır (bkz. `docs/performance.md` "Birimler"). Plan 2 satırı `scripts/measure.ps1 -Runs 5` ile ölçüldü (8 sn boşta, sunucu yok, seçilen WebView2/tokio ayarlarıyla); yöntem ve denenen ayarlar `docs/performance.md`'de. Plan 1 satırı: ölçüm `target/release/pg-tools.exe` doğrudan çalıştırılarak yapıldı (kurulum yapılmadı); boşta 5 sn, sunucu bağlı değil. Toplam bellek, WebView2 alt süreçleri dahil 7 sürecin çalışma kümesi toplamıdır (paylaşılan sayfalar tekrar sayıldığından özel bellek ≈191 MB). Açılış süresi `MainWindowHandle` oluşana kadar geçen süredir; içerik çizimi dahil olmayabilir. Yukarıdaki kutucuklar GUI üzerinden elle uygulanmadı; sürüm öncesi işaretlenmelidir.

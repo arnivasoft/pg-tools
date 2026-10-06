@@ -387,16 +387,24 @@ Yöntem: Plan 6 CDP yöntemi (`docs/testing.md` "GUI'nin CDP ile sürülmesi"): 
 | CTE sütunları `with x as (select …) select x.` — soğuk (gövde Parse edilir) / sıcak | 6 / 5 | 262–276 / 259–273 | 4,4–5,8 / 1,3–2,0 | (aynı) |
 | Alt sorgu sütunları `from (select …) s` + `s.` — soğuk | 4 | 261–275 | 4,4–4,9 | (aynı) |
 | Hata denetimi: son tuş → kırmızı işaret (`select * from no_such_table_n;`) | 12 | **613–628** | 4,5–5,4 (istek tuştan ~610–623 ms sonra çıkar) | ≤ 700 ms |
+| **Son düzeltme dalgası** (`.` sonrası debounce yok, `activateOnTypingDelay` 50 ms): alias `o.` (`from app.orders o where o.`), **sıcak** | 10 | **54–69** | 1,3–1,8 (istek tuştan 51–66 ms sonra) | < 150 ms |
+| Aynısı, **soğuk** (`app.t4…t13`, her biri oturumda ilk kez) | 10 | **56–70** | 3,0–3,9 | < 400 ms |
+| Kısmi ad (`o.` + `c`; 150 ms debounce korunur) | 3 | 209–223 | 1,4–1,5 | — |
 
 - **Denetim: hedef karşılandı.** 600 ms debounce'a ~20 ms eklenir; `qt_check` (Parse) 5 ms sürer. Ölçümün büyük
   kısmı debounce'tur.
-- **Tamamlama: arka uç hedefi çok aşar; tuştan-görünüre ölçümü sıcak hedefi (< 150 ms) aşar.** Arka uç yanıtı 1–6 ms'dir
+- **Tamamlama (son düzeltme dalgası sonrası): hedefler karşılandı.** `.`'nın hemen ardında (üye bağlamı, kısmi ad boş)
+  uygulama debounce'u kaldırıldı ve CodeMirror'ın yazarken etkinleştirme gecikmesi 50 ms'ye indirildi: tuştan öneri listesine
+  sıcak 54–69 ms, soğuk 56–70 ms (yayın exe'si, aynı CDP yöntemi, 2026-10-06). Kısmi ad ve select listesi 150 ms debounce'lu
+  kalır (~210 ms). CodeMirror kaynak başına aynı anda tek sorgu çalıştırdığından `.` başına en çok bir istek gider. Aşağıdaki
+  madde düzeltme öncesi ölçümün kaydıdır.
+- **(Düzeltme öncesi) Tamamlama: arka uç hedefi çok aşar; tuştan-görünüre ölçümü sıcak hedefi (< 150 ms) aşar.** Arka uç yanıtı 1–6 ms'dir
   (soğuk/sıcak, CTE/alt sorgu dahil), ama `qt_complete` isteği tuştan **~270 ms sonra** çıkar ve ölçüm sıcak/soğuk/CTE
   için aynıdır: Plan 6'dan kalan tamamlama yolunda 150 ms'lik uygulama debounce'u (`completion.ts` `debounceMs`) ile
   CodeMirror'ın yazarken etkinleştirme gecikmesi (varsayılan 100 ms) üst üste biner. Bu yüzden sıcak/soğuk farkı
   ölçülemez; soğuk hedef (< 400 ms) karşılanır; sıcak hedef, "tuştan öneri listesine" okunursa **karşılanmaz** (270 ms),
-  isteğin yanıtı olarak okunursa (1–6 ms) karşılanır. Plan 7'de değiştirilmedi; açık iş olarak
-  `docs/smoke-test.md` "Editör zekâsı" sonunda listelenir (`.` tetiklemesinde debounce'u kaldırmak ~110 ms'ye indirmelidir; denenmedi).
+  isteğin yanıtı olarak okunursa (1–6 ms) karşılanır. Son düzeltme dalgasında giderildi (yukarıdaki madde; beklenen ~110 ms yerine ölçülen
+  54–70 ms).
 - Soğuk önbellek yalnızca ilk istekte ek ~2 ms (Parse yolunda ek ~3 ms) getirir; LAN gecikmesi ölçülmedi (127.0.0.1).
 
 ### Biçimlendirme (CDP, gerçek exe)
@@ -445,6 +453,9 @@ tabloya alınmadı, yalnızca aşırı kullanımın WebView2 yığınını büy�
 | `QueryTab` (lazy) | 78,37 kB (gz 26,30) | 90,59 kB (gz 30,02) |
 | `codemirror-setup` (lazy) | 351,57 kB (gz 115,94) | 357,07 kB (gz 117,53) |
 | CSS | 22,35 kB | 22,46 kB |
+
+Son düzeltme dalgasından sonra (aynı makine): `index` 229,15 kB (gz 74,26), `QueryTab` 91,88 kB (gz 30,49),
+`codemirror-setup` ve CSS değişmedi; exe 14.884.864 bayt (14,19 MiB).
 
 | | Boyut |
 |---|---|
