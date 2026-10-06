@@ -170,8 +170,16 @@ const lintHover = hoverTooltip((view, pos) => {
       dom.className = "cm-lint-tooltip";
       for (const m of hits) {
         const row = document.createElement("div");
-        row.className = m.severity === "error" ? "cm-lint-tooltip-error" : "cm-lint-tooltip-info";
-        row.textContent = `${m.severity === "error" ? t.query.check.error : t.query.check.info}: ${lintText(m)}`;
+        const label = document.createElement("span");
+        label.className = m.severity === "error" ? "cm-lint-label-error" : "cm-lint-label-info";
+        label.textContent = m.severity === "error" ? t.query.check.error : t.query.check.info;
+        row.append(label, ` ${lintText(m)}`);
+        if (m.severity === "info") {
+          const hint = document.createElement("div");
+          hint.className = "cm-lint-hint";
+          hint.textContent = t.query.check.infoHint;
+          row.append(hint);
+        }
         dom.appendChild(row);
       }
       return { dom };
@@ -186,8 +194,9 @@ const queryTheme = EditorView.theme({
   ".cm-lint-info": { textDecoration: "underline dotted var(--muted)", textDecorationSkipInk: "none", textUnderlineOffset: "3px" },
   ".cm-lint-info-marker": { color: "var(--muted)" },
   ".cm-lint-tooltip": { padding: "3px 6px", maxWidth: "560px", fontSize: "12px", whiteSpace: "pre-wrap" },
-  ".cm-lint-tooltip-error": { borderLeft: "3px solid var(--danger)", paddingLeft: "6px" },
-  ".cm-lint-tooltip-info": { borderLeft: "3px solid var(--muted)", paddingLeft: "6px" },
+  ".cm-lint-label-error": { color: "var(--danger)", fontWeight: "600" },
+  ".cm-lint-label-info": { color: "var(--muted)", fontWeight: "600" },
+  ".cm-lint-hint": { color: "var(--muted)" },
   ".cm-tooltip": {
     backgroundColor: "var(--panel)",
     color: "var(--fg)",

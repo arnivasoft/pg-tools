@@ -267,7 +267,8 @@ export const t = {
     },
     check: {
       error: "Hata",
-      info: "Bilgi (önceki bir ifadenin oluşturduğu nesne olabilir)",
+      info: "Bilgi",
+      infoHint: "Betikte önceki bir ifadenin oluşturduğu nesne olabilir.",
       toggle: "Yazarken hata denetimi",
       toggleOn: "Yazarken hata denetimi açık — bu sekmede kapatmak için tıklayın",
       toggleOff: "Yazarken hata denetimi bu sekmede kapalı — açmak için tıklayın",
