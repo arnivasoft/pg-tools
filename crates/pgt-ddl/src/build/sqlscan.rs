@@ -32,6 +32,11 @@ pub struct ScanResult {
     pub min_paren_depth: i32,
     /// Tarama sonundaki parantez derinliği (kapanmamış `(` → pozitif).
     pub final_paren_depth: i32,
+    /// Metin, satır sonu görmeden biten bir `--` yorumunun içinde bitiyor (sonraki parçayı yutar).
+    pub ends_in_line_comment: bool,
+    /// Bölge dışında bir `'` ya da `$`, ASCII rakamın hemen ardından geliyor (`1$$…`, `1'x'`). PG sayı belirteci
+    /// ile tarayıcının tanımlayıcı varsayımı burada ayrışabilir; çağıran bunu RED sayar.
+    pub digit_adjacent_quote: bool,
 }
 
 impl ScanResult {
@@ -58,7 +63,17 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
     let mut unterminated = false;
     let mut depth: i32 = 0;
     let mut min_depth: i32 = 0;
+    let mut ends_in_comment = false;
+    let mut digit_quote = false;
     while i < n {
+        // `1'x'` ve `1e'x'` (üstel gibi görünen E dizesi öneki) de dahil.
+        if (b[i] == b'\'' || b[i] == b'$')
+            && i > 0
+            && (b[i - 1].is_ascii_digit()
+                || (b[i] == b'\'' && matches!(b[i - 1], b'e' | b'E') && i > 1 && b[i - 2].is_ascii_digit()))
+        {
+            digit_quote = true;
+        }
         match b[i] {
             b'(' => {
                 depth += 1;
@@ -133,6 +148,7 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
                 while i < n && b[i] != b'\n' && b[i] != b'\r' {
                     i += 1;
                 }
+                ends_in_comment = i >= n;
             }
             b'/' if i + 1 < n && b[i + 1] == b'*' => {
                 let mut depth = 1;
@@ -158,6 +174,8 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
         unterminated,
         min_paren_depth: min_depth,
         final_paren_depth: depth,
+        ends_in_line_comment: ends_in_comment,
+        digit_adjacent_quote: digit_quote,
     }
 }
 
@@ -277,6 +295,31 @@ mod tests {
         assert!(!scan_semicolons("a)").parens_balanced());
         assert!(!scan_semicolons("1) , (2").parens_balanced());
         assert!(!scan_semicolons("(a").parens_balanced());
+    }
+
+    #[test]
+    fn line_comment_at_end_is_reported() {
+        let e = |s: &str| scan_semicolons(s).ends_in_line_comment;
+        assert!(e("a --"));
+        assert!(e("a -- x"));
+        assert!(e("--"));
+        assert!(!e("a -- x\n"));
+        assert!(!e("a -- x\r"));
+        assert!(!e("a -- x\nb"));
+        assert!(!e("a"));
+        assert!(!e("'--'"));
+        assert!(!e("/* -- */"));
+    }
+
+    #[test]
+    fn digit_adjacent_quote_is_reported() {
+        let d = |s: &str| scan_semicolons(s).digit_adjacent_quote;
+        for s in ["1$$'$$ ) ; DROP TABLE t; --'", "1'x'", "1e'x'", "a = 12$$x$$", "x1'y'"] {
+            assert!(d(s), "{s}");
+        }
+        for s in ["a = '1'", "a = '1''2'", "f(1, 'x')", "x $$1$$", "a = 'x' || '1'", "x = $1", "1 'x'", "-- 1'", "\"1\"", "x = 1"] {
+            assert!(!d(s), "{s}");
+        }
     }
 
     #[test]

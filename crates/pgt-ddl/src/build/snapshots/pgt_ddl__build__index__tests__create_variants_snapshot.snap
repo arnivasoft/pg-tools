@@ -6,11 +6,12 @@ expression: out
 
 [Safe] CREATE INDEX t_a_idx ON public.t USING hash (a)
 
-[Safe] CREATE INDEX t_a_idx ON public.t USING gin ((to_tsvector('simple', body)))
+[Safe] CREATE INDEX t_a_idx ON public.t USING gin ((to_tsvector('simple', body)
+))
 
-[Safe] CREATE INDEX t_a_idx ON public.t USING brin (a) WITH (fillfactor = 10)
+[Safe] CREATE INDEX t_a_idx ON public.t USING brin (a)
 
-[Safe] CREATE INDEX "ix;1" ON "My Schema"."order" USING gist ("user" NULLS FIRST) INCLUDE ("Ünï") TABLESPACE "Space X"
+[Safe] CREATE INDEX "ix;1" ON "My Schema"."order" USING gist ("user") INCLUDE ("Ünï") TABLESPACE "Space X"
 [Safe] COMMENT ON INDEX "My Schema"."ix;1" IS E'a\\b'
 
 [Safe] CREATE INDEX t_a_idx ON public.t USING spgist (a) WITH (fillfactor = 100)

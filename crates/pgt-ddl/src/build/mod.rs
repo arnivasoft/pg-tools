@@ -37,12 +37,18 @@ pub(crate) fn err(path: &str, message: impl Into<String>) -> FieldError {
     }
 }
 
-/// Ad kuralları: boş değil, NUL yok, en çok 63 bayt.
+/// Ad kuralları: boş değil, NUL/ASCII denetim karakteri (satır sonu, sekme, 0x7f vb.) yok, en çok 63 bayt.
 pub(crate) fn check_ident(path: &str, value: &str, errs: &mut Vec<FieldError>) {
     if value.is_empty() {
         errs.push(err(path, "Ad boş olamaz."));
     } else if value.contains('\0') {
         errs.push(err(path, "Ad NUL karakteri içeremez."));
+    } else if value.chars().any(|c| c.is_ascii_control()) {
+        // Satır sonu/sekme vb.: tırnaklı ad içinde ham kalır; `--` yorumunu bitirip sonrasını SQL yapabilir.
+        errs.push(err(
+            path,
+            "Ad denetim karakteri (satır sonu, sekme vb.) içeremez.",
+        ));
     } else if value.len() > MAX_IDENT_BYTES {
         errs.push(err(
             path,
@@ -253,6 +259,16 @@ mod tests {
     fn ident_rejects_empty_and_nul() {
         assert_eq!(errs_for(""), 1);
         assert_eq!(errs_for("a\0b"), 1);
+    }
+
+    #[test]
+    fn ident_rejects_control_characters() {
+        for v in ["a\nb", "a\rb", "a\tb", "a\x7fb", "\n", "a\x1bb", "x\n)) --"] {
+            assert_eq!(errs_for(v), 1, "{v:?}");
+        }
+        assert_eq!(errs_for("a b"), 0);
+        // ASCII dışı denetim karakteri yasaklı değil (yalnız < 0x20 ve 0x7f).
+        assert_eq!(errs_for("ş\u{85}"), 0);
     }
 
     #[test]

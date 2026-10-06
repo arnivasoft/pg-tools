@@ -766,7 +766,7 @@ mod tests {
             "x\"; DROP SCHEMA public; --",
             "'",
             "\\",
-            "a\nb",
+            "a\\nb",
             "a;b",
             "/*",
             "--",

@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn injection_names_stay_single_statement() {
-        let evil = ["x\"; DROP SCHEMA public; --", "'", "\\", "a\nb", "a;b", "/*", "--", "$$", "Ünï;cödé", "select", "a b"];
+        let evil = ["x\"; DROP SCHEMA public; --", "'", "\\", "a\\nb", "a;b", "/*", "--", "$$", "Ünï;cödé", "select", "a b"];
         for n in evil {
             let d = ExtensionDef { name: n.into(), schema: Some(n.into()), version: Some(n.into()), cascade: true };
             let new = ExtensionDef { schema: Some(format!("{n}2")), version: Some(format!("{n}3")), ..d.clone() };

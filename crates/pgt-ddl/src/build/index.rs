@@ -41,6 +41,16 @@ fn check_free_sql(path: &str, sql: &str, errs: &mut Vec<FieldError>) {
             path,
             "SQL'de kapanmamış tırnak, dolar tırnak ya da yorum var.",
         ));
+    } else if r.ends_in_line_comment {
+        errs.push(err(
+            path,
+            "SQL satır yorumu (--) ile bitemez; yorumdan sonra yeni satır ekleyin ya da yorumu kaldırın.",
+        ));
+    } else if r.digit_adjacent_quote {
+        errs.push(err(
+            path,
+            "SQL'de rakamın hemen ardından ' ya da $ gelemez; araya boşluk koyun.",
+        ));
     } else if r.outer_semicolons > 0 {
         errs.push(err(
             path,
@@ -57,7 +67,8 @@ fn check_free_sql(path: &str, sql: &str, errs: &mut Vec<FieldError>) {
 fn key_sql(c: &IndexColumn) -> String {
     let mut s = match &c.key {
         IndexKey::Column { name } => quote_ident(name),
-        IndexKey::Expression { sql } => format!("({sql})"),
+        // Kapanış parantezi yeni satırda: alan `--` ile bitse bile `)` yorumda kalmaz.
+        IndexKey::Expression { sql } => format!("({sql}\n)"),
     };
     if let Some(cl) = &c.collation {
         s.push_str(&format!(" COLLATE {}", quote_ident(cl)));
@@ -99,7 +110,7 @@ fn create_sql(d: &IndexDef, concurrently: bool) -> String {
         sql.push_str(&format!(" TABLESPACE {}", quote_ident(ts)));
     }
     if let Some(w) = &d.where_clause {
-        sql.push_str(&format!(" WHERE ({w})"));
+        sql.push_str(&format!(" WHERE ({w}\n)"));
     }
     sql
 }
@@ -159,6 +170,31 @@ pub fn validate(d: &IndexDef, ctx: &BuildCtx) -> Vec<FieldError> {
             format!("{} yöntemi INCLUDE desteklemez.", d.method),
         ));
     }
+    // PG: INCLUDE gist için 12+, spgist için 14+ (gin/brin/hash hiç desteklemez, yukarıda).
+    if !d.include.is_empty()
+        && ((d.method == "gist" && ctx.version_num < 120000)
+            || (d.method == "spgist" && ctx.version_num < 140000))
+    {
+        e.push(err(
+            "include",
+            format!(
+                "{} yöntemi için INCLUDE PG {}+ gerektirir.",
+                d.method,
+                if d.method == "gist" { 12 } else { 14 }
+            ),
+        ));
+    }
+    // ASC/DESC/NULLS FIRST|LAST yalnızca btree'de geçerlidir.
+    if d.method != "btree" && METHODS.contains(&d.method.as_str()) {
+        for (i, c) in d.columns.iter().enumerate() {
+            if c.descending || c.nulls_first.is_some() {
+                e.push(err(
+                    &format!("columns[{i}]"),
+                    format!("{} yöntemi DESC/NULLS FIRST/LAST desteklemez.", d.method),
+                ));
+            }
+        }
+    }
     if let Some(ts) = &d.tablespace {
         check_ident("tablespace", ts, &mut e);
     }
@@ -168,6 +204,13 @@ pub fn validate(d: &IndexDef, ctx: &BuildCtx) -> Vec<FieldError> {
         e.push(err(
             "fillfactor",
             "Doldurma oranı 10 ile 100 arasında olmalı.",
+        ));
+    }
+    // fillfactor: btree/hash/gist/spgist destekler; gin ve brin "unrecognized parameter" hatası verir.
+    if d.fillfactor.is_some() && matches!(d.method.as_str(), "gin" | "brin") {
+        e.push(err(
+            "fillfactor",
+            format!("{} yöntemi fillfactor desteklemez.", d.method),
         ));
     }
     if let Some(w) = &d.where_clause {
@@ -282,6 +325,12 @@ pub fn alter(old: &IndexDef, new: &IndexDef, ctx: &BuildCtx) -> Result<Plan, Vec
         });
     }
 
+    if old.tablespace.is_some() && new.tablespace.is_none() {
+        return Err(vec![err(
+            "tablespace",
+            "Tablespace kaldırılamaz; varsayılana dönmek için pg_default'u açıkça seçin.",
+        )]);
+    }
     let mut statements = vec![];
     let mut warnings = vec![];
     if renamed {
@@ -442,7 +491,7 @@ mod tests {
         assert_eq!(
             sqls(&p),
             [
-                "CREATE UNIQUE INDEX t_a_idx ON public.t USING btree (\"Name\" COLLATE \"C\" text_pattern_ops DESC NULLS LAST, (lower(email))) INCLUDE (b, c) WITH (fillfactor = 70) TABLESPACE fast WHERE (deleted_at IS NULL)",
+                "CREATE UNIQUE INDEX t_a_idx ON public.t USING btree (\"Name\" COLLATE \"C\" text_pattern_ops DESC NULLS LAST, (lower(email)\n)) INCLUDE (b, c) WITH (fillfactor = 70) TABLESPACE fast WHERE (deleted_at IS NULL\n)",
                 "COMMENT ON INDEX public.t_a_idx IS 'it''s'"
             ]
         );
@@ -464,7 +513,6 @@ mod tests {
             },
             IndexDef {
                 method: "brin".into(),
-                fillfactor: Some(10),
                 ..base()
             },
             IndexDef {
@@ -472,10 +520,7 @@ mod tests {
                 table: "order".into(),
                 name: "ix;1".into(),
                 method: "gist".into(),
-                columns: vec![IndexColumn {
-                    nulls_first: Some(true),
-                    ..col("user")
-                }],
+                columns: vec![col("user")],
                 include: vec!["Ünï".into()],
                 tablespace: Some("Space X".into()),
                 comment: Some("a\\b".into()),
@@ -508,7 +553,7 @@ mod tests {
         let p = bcreate(&o(d), &ctx()).unwrap();
         assert_eq!(
             p.statements[0].sql,
-            "CREATE INDEX t_a_idx ON public.t USING btree ((a + b), ((c))) WHERE (x > 1 OR y < 2)"
+            "CREATE INDEX t_a_idx ON public.t USING btree ((a + b\n), ((c)\n)) WHERE (x > 1 OR y < 2\n)"
         );
     }
 
@@ -858,6 +903,10 @@ mod tests {
             "   \n\t ",
             "a\0b",
             "x) WHERE (y",
+            "a -- yorum",
+            "a --",
+            "1$$'$$ ) ; DROP TABLE t; --'",
+            "1'x'",
         ];
         for a in attacks {
             let w = IndexDef {
@@ -911,20 +960,280 @@ mod tests {
 
     #[test]
     fn composed_statement_is_scanned() {
-        // Alanlar tek başına temiz ama `--` sonu kapanış parantezini yutar: nihai ifade dengesiz.
+        // `--` ile biten alan alan düzeyinde reddedilir; nihai ifade taraması ikinci savunma hattıdır.
+        for d in [
+            IndexDef {
+                columns: vec![expr("a --")],
+                ..base()
+            },
+            IndexDef {
+                where_clause: Some("a -- yorum".into()),
+                ..base()
+            },
+        ] {
+            let e = bvalidate(&o(d), &ctx());
+            assert_eq!(e.len(), 1, "{e:?}");
+            assert!(e[0].message.contains("satır yorumu"), "{e:?}");
+        }
+        // Yeni satırla biten yorum geçerlidir ve `)` yeni satırda kalır.
         let d = IndexDef {
-            columns: vec![expr("a --")],
+            where_clause: Some("a -- yorum\nb > 0".into()),
             ..base()
         };
-        // Alan düzeyinde `a --` temiz ve dengeli; nihai ifadede `)` yorumda kalır.
-        let e = bvalidate(&o(d), &ctx());
-        assert_eq!(e.len(), 1, "{e:?}");
+        let p = bcreate(&o(d), &ctx()).unwrap();
+        assert!(p.statements[0].sql.ends_with("WHERE (a -- yorum\nb > 0\n)"));
+        assert!(scan_semicolons(&p.statements[0].sql).parens_balanced());
+    }
+
+    /// Gözden geçirme bulgusu: `--` ile biten serbest SQL + sonraki ad alanındaki satır sonu, kapanış parantezini
+    /// yutup `WHERE (true) --` gibi sızdırıyordu. Her girdi reddedilmeli.
+    #[test]
+    fn comment_swallow_bypass_is_closed() {
+        let e = |s: &str| IndexColumn {
+            key: IndexKey::Expression { sql: s.into() },
+            ..col("x")
+        };
+        let cases: Vec<IndexDef> = vec![
+            IndexDef {
+                columns: vec![e("a --")],
+                include: vec!["x\n)) WHERE (true) --".into()],
+                ..base()
+            },
+            IndexDef {
+                columns: vec![e("a --")],
+                tablespace: Some("x\n)) --".into()),
+                ..base()
+            },
+            IndexDef {
+                columns: vec![e("a --"), col("q\n)) WHERE (b > 0) --")],
+                ..base()
+            },
+            IndexDef {
+                columns: vec![e("a --"), col("q\r)) WHERE (b > 0) --")],
+                ..base()
+            },
+            IndexDef {
+                columns: vec![e("a --")],
+                where_clause: Some("b".into()),
+                tablespace: Some("x\n)) --".into()),
+                ..base()
+            },
+            IndexDef {
+                where_clause: Some("a --".into()),
+                tablespace: Some("x\n) --".into()),
+                ..base()
+            },
+            IndexDef {
+                columns: vec![e("a --"), col("q\t)) /*")],
+                ..base()
+            },
+            IndexDef {
+                columns: vec![col("a")],
+                include: vec!["x\r\n".into()],
+                ..base()
+            },
+            IndexDef {
+                columns: vec![IndexColumn {
+                    opclass: Some("o\n--".into()),
+                    ..col("a")
+                }],
+                ..base()
+            },
+            IndexDef {
+                columns: vec![IndexColumn {
+                    collation: Some("o\n--".into()),
+                    ..col("a")
+                }],
+                ..base()
+            },
+            IndexDef {
+                schema: "s\n".into(),
+                ..base()
+            },
+            IndexDef {
+                table: "t\n".into(),
+                ..base()
+            },
+            IndexDef {
+                name: "i\n".into(),
+                ..base()
+            },
+        ];
+        for d in cases {
+            assert!(bcreate(&o(d.clone()), &ctx()).is_err(), "{d:?}");
+            assert!(bcreate(&o(d.clone()), &cctx()).is_err(), "{d:?}");
+            // alter kaynaklı yeniden oluşturma (yapısal fark) da aynı doğrulamadan geçer.
+            let old = IndexDef {
+                unique: true,
+                ..base()
+            };
+            assert!(
+                balter(&o(old.clone()), &o(d.clone()), &ctx()).is_err(),
+                "{d:?}"
+            );
+            assert!(balter(&o(d.clone()), &o(old), &ctx()).is_err(), "{d:?}");
+        }
+        // Kabul edilen biçimlerde nihai ifade (tam metin taraması) temiz ve dengeli kalır.
+        let d = IndexDef {
+            columns: vec![e("a -- yorum\nb"), col("q")],
+            where_clause: Some("c > 0 -- k\n".into()),
+            tablespace: Some("ts".into()),
+            ..base()
+        };
+        let p = bcreate(&o(d), &ctx()).unwrap();
+        let r = scan_semicolons(&p.statements[0].sql);
+        assert!(r.is_clean() && r.parens_balanced() && !r.ends_in_line_comment);
+        assert_eq!(
+            p.statements[0].sql,
+            "CREATE INDEX t_a_idx ON public.t USING btree ((a -- yorum\nb\n), q) TABLESPACE ts WHERE (c > 0 -- k\n\n)"
+        );
+    }
+
+    #[test]
+    fn digit_adjacent_quotes_are_rejected() {
+        for a in [
+            "1$$'$$ ) ; DROP TABLE t; --'",
+            "1'x'",
+            "1e'x'",
+            "x > 1$$a$$",
+        ] {
+            let w = IndexDef {
+                where_clause: Some(a.into()),
+                ..base()
+            };
+            let e = bvalidate(&o(w), &ctx());
+            assert!(!e.is_empty() && e[0].path == "whereClause", "{a:?}: {e:?}");
+            let k = IndexDef {
+                columns: vec![expr(a)],
+                ..base()
+            };
+            assert!(!bvalidate(&o(k), &ctx()).is_empty(), "{a:?}");
+        }
+        // Boşluklu/aralıklı biçimler geçerli.
         let w = IndexDef {
-            where_clause: Some("a -- yorum".into()),
+            where_clause: Some("a = 1 AND b = 'x1'".into()),
             ..base()
         };
-        assert!(bvalidate(&o(w), &ctx())[0].message.contains("birleşince"));
-        assert!(e[0].message.contains("birleşince"));
+        assert!(bvalidate(&o(w), &ctx()).is_empty());
+    }
+
+    #[test]
+    fn fillfactor_only_for_supporting_methods() {
+        for m in ["btree", "hash", "gist", "spgist"] {
+            let d = IndexDef {
+                method: m.into(),
+                fillfactor: Some(50),
+                ..base()
+            };
+            assert!(bvalidate(&o(d), &ctx()).is_empty(), "{m}");
+        }
+        for m in ["gin", "brin"] {
+            assert_eq!(
+                first_err(&IndexDef {
+                    method: m.into(),
+                    fillfactor: Some(50),
+                    ..base()
+                }),
+                "fillfactor",
+                "{m}"
+            );
+            assert!(
+                bvalidate(
+                    &o(IndexDef {
+                        method: m.into(),
+                        ..base()
+                    }),
+                    &ctx()
+                )
+                .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn tablespace_removal_is_an_error() {
+        let old = IndexDef {
+            tablespace: Some("x".into()),
+            ..base()
+        };
+        let e = balter(&o(old.clone()), &o(base()), &ctx()).unwrap_err();
+        assert_eq!(e[0].path, "tablespace");
+        assert!(e[0].message.contains("pg_default"));
+        // Açıkça pg_default seçmek serbest; yapısal yeniden oluşturmada kaldırma sorun değil.
+        let p = balter(
+            &o(old.clone()),
+            &o(IndexDef {
+                tablespace: Some("pg_default".into()),
+                ..base()
+            }),
+            &ctx(),
+        )
+        .unwrap();
+        assert_eq!(
+            sqls(&p),
+            ["ALTER INDEX public.t_a_idx SET TABLESPACE pg_default"]
+        );
+        let p = balter(
+            &o(old),
+            &o(IndexDef {
+                unique: true,
+                ..base()
+            }),
+            &ctx(),
+        )
+        .unwrap();
+        assert_eq!(p.statements.len(), 2);
+    }
+
+    #[test]
+    fn include_and_sort_gates_by_method() {
+        let v = |n: u32| BuildCtx {
+            version_num: n,
+            ..Default::default()
+        };
+        let inc = |m: &str| IndexDef {
+            method: m.into(),
+            include: vec!["b".into()],
+            ..base()
+        };
+        assert!(!bvalidate(&o(inc("gist")), &v(110000)).is_empty());
+        assert!(bvalidate(&o(inc("gist")), &v(120000)).is_empty());
+        assert!(!bvalidate(&o(inc("spgist")), &v(130000)).is_empty());
+        assert!(bvalidate(&o(inc("spgist")), &v(140000)).is_empty());
+        assert!(bvalidate(&o(inc("btree")), &v(110000)).is_empty());
+        // ASC/DESC/NULLS yalnızca btree.
+        for m in ["hash", "gin", "gist", "brin", "spgist"] {
+            for c in [
+                IndexColumn {
+                    descending: true,
+                    ..col("a")
+                },
+                IndexColumn {
+                    nulls_first: Some(true),
+                    ..col("a")
+                },
+                IndexColumn {
+                    nulls_first: Some(false),
+                    ..col("a")
+                },
+            ] {
+                let d = IndexDef {
+                    method: m.into(),
+                    columns: vec![c],
+                    ..base()
+                };
+                assert_eq!(first_err(&d), "columns[0]", "{m}");
+            }
+        }
+        let d = IndexDef {
+            columns: vec![IndexColumn {
+                descending: true,
+                nulls_first: Some(true),
+                ..col("a")
+            }],
+            ..base()
+        };
+        assert!(bvalidate(&o(d), &ctx()).is_empty());
     }
 
     #[test]
@@ -1066,17 +1375,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sqls(&p), ["COMMENT ON INDEX public.t_a_idx IS NULL"]);
-        // Tablespace kaldırma yerinde ifade üretmez (PG'de "varsayılana dön" için ad gerekir).
-        let p = balter(
-            &o(IndexDef {
-                tablespace: Some("x".into()),
-                ..base()
-            }),
-            &o(base()),
-            &ctx(),
-        )
-        .unwrap();
-        assert!(p.statements.is_empty());
+        // Tablespace kaldırma hatadır (bkz. tablespace_removal_is_an_error).
     }
 
     #[test]
@@ -1347,7 +1646,7 @@ mod tests {
             "x\"; DROP TABLE t; --",
             "'",
             "\\",
-            "a\nb",
+            "a\\nb",
             "a;b",
             "/*",
             "--",

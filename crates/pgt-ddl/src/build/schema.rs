@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn injection_names_stay_single_statement() {
-        let evil = ["x\"; DROP SCHEMA public; --", "'", "\\", "a\nb", "a;b", "/*", "--", "$$", "Ünï;cödé", "select", "a b"];
+        let evil = ["x\"; DROP SCHEMA public; --", "'", "\\", "a\\nb", "a;b", "/*", "--", "$$", "Ünï;cödé", "select", "a b"];
         for n in evil {
             let d = SchemaDef { name: n.into(), owner: Some(n.into()), comment: Some(n.into()) };
             let new = SchemaDef { name: format!("{n}2"), owner: Some(format!("{n}3")), comment: Some(format!("{n}4")) };
