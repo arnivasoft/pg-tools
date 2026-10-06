@@ -29,7 +29,36 @@ fn defs() -> Vec<(ObjectKind, Value)> {
                    ],
                    "include": ["a"], "whereClause": "id > 0", "tablespace": null, "fillfactor": 90, "comment": null, "constraint": null, "valid": true}),
         ),
+        (ObjectKind::Table, table_json()),
     ]
+}
+
+/// Yüklenmiş biçimde tablo (attnum/oid ve yükleme alanları dolu); dört kısıt türünün etiketli biçimleriyle.
+fn table_json() -> Value {
+    json!({
+        "kind": "table", "schema": "public", "name": "t", "owner": "me", "tablespace": null, "persistence": "permanent",
+        "columns": [
+            {"attnum": 1, "name": "id", "dataType": "bigint", "notNull": true, "default": null, "identity": "always",
+             "generated": null, "collation": null, "comment": null, "using": null},
+            {"attnum": 2, "name": "a", "dataType": "numeric(10,2)", "notNull": false, "default": "0", "identity": null,
+             "generated": null, "collation": null, "comment": "c", "using": null},
+            {"attnum": 3, "name": "g", "dataType": "text", "notNull": false, "default": null, "identity": null,
+             "generated": {"expr": "a::text", "stored": true}, "collation": "C", "comment": null, "using": null}
+        ],
+        "constraints": [
+            {"oid": 16401, "name": "t_pkey", "kind": {"type": "primary_key", "columns": ["id"], "include": []},
+             "deferrable": false, "initiallyDeferred": false, "notValid": false},
+            {"oid": 16402, "name": "t_a_key", "kind": {"type": "unique", "columns": ["a"], "include": [], "nullsNotDistinct": false},
+             "deferrable": true, "initiallyDeferred": false, "notValid": false},
+            {"oid": 16403, "name": "t_a_check", "kind": {"type": "check", "expr": "a > 0", "noInherit": false},
+             "deferrable": false, "initiallyDeferred": false, "notValid": false},
+            {"oid": 16404, "name": "t_fk", "kind": {"type": "foreign_key", "columns": ["id"], "refSchema": "public", "refTable": "u",
+             "refColumns": ["id"], "matchType": "simple", "onUpdate": "cascade", "onDelete": "restrict"},
+             "deferrable": false, "initiallyDeferred": false, "notValid": true}
+        ],
+        "partitionBy": null, "fillfactor": null, "comment": null,
+        "partitionText": null, "isPartition": false, "inherits": false, "unsupported": []
+    })
 }
 
 #[test]
@@ -105,4 +134,45 @@ fn index_valid_defaults_to_true_when_omitted() {
     v.as_object_mut().unwrap().remove("valid");
     let ObjectDef::Index(d) = serde_json::from_value::<ObjectDef>(v).unwrap() else { panic!() };
     assert!(d.valid);
+}
+
+#[test]
+fn table_create_request_accepts_a_client_built_def_without_load_only_fields() {
+    // İstemcinin kurduğu yeni tablo: attnum/oid null, yükleme alanları ve `using`/kısıt bayrakları gönderilmez.
+    let v = json!({"op": "create", "concurrently": false, "def": {
+        "kind": "table", "schema": "public", "name": "n", "owner": null, "tablespace": null, "persistence": "unlogged",
+        "columns": [{"attnum": null, "name": "id", "dataType": "integer", "notNull": true, "default": null, "identity": null,
+                     "generated": null, "collation": null, "comment": null}],
+        "constraints": [{"oid": null, "name": null, "kind": {"type": "primary_key", "columns": ["id"], "include": []}}],
+        "partitionBy": {"strategy": "hash", "keys": [{"kind": "column", "name": "id"}]}, "fillfactor": 80, "comment": null
+    }});
+    let r: PlanRequest = serde_json::from_value(v).unwrap();
+    let PlanRequest::Create { def: ObjectDef::Table(t), .. } = r else { panic!("{r:?}") };
+    assert_eq!((t.persistence, t.is_partition, t.inherits, t.unsupported.len()), (Persistence::Unlogged, false, false, 0));
+    assert!(t.columns[0].using.is_none() && t.constraints[0].oid.is_none() && !t.constraints[0].not_valid);
+    assert_eq!(t.partition_by.unwrap().strategy, PartitionStrategy::Hash);
+    // Tanınmayan kısıt türü (EXCLUDE modellenmez) reddedilir.
+    let mut bad = table_json();
+    bad["constraints"][0]["kind"] = json!({"type": "exclude", "columns": ["id"]});
+    assert!(serde_json::from_value::<ObjectDef>(bad).is_err());
+}
+
+#[test]
+fn ddl_target_with_focus_serializes_as_the_frontend_expects() {
+    let u = "3f2a6d1e-8a4b-4c2e-9f00-0123456789ab";
+    let v = serde_json::to_value(target_of(&format!("srv:{u}/db:5/sch:2200/tbl:24576/con:40")).unwrap()).unwrap();
+    assert_eq!(
+        v,
+        json!({"serverId": u, "databaseOid": 5, "object": {"kind": "table", "oid": 24576}, "create": null,
+               "focus": {"kind": "constraint", "id": 40}, "refreshNodeId": format!("srv:{u}/db:5/sch:2200/tbl:24576")})
+    );
+    let v = serde_json::to_value(target_of(&format!("srv:{u}/db:5/sch:2200/tbl:24576/col:2")).unwrap()).unwrap();
+    assert_eq!(v["focus"], json!({"kind": "column", "id": 2}));
+    let v = serde_json::to_value(target_of(&format!("srv:{u}/db:5/sch:2200/tables")).unwrap()).unwrap();
+    assert_eq!(
+        v,
+        json!({"serverId": u, "databaseOid": 5, "object": null, "create": {"kind": "table", "context": {"schemaOid": 2200, "tableOid": null}},
+               "focus": null, "refreshNodeId": format!("srv:{u}/db:5/sch:2200/tables")})
+    );
+    assert_eq!(serde_json::to_value(DdlFocus::Column { id: 1 }).unwrap(), json!({"kind": "column", "id": 1}));
 }

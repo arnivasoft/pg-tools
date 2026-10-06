@@ -814,3 +814,422 @@ async fn system_body(ts: TestServer) {
     assert_eq!(code(&f.apply_with(&req, |o| o.confirmed = true).await), "invalid_def");
     assert!(exists(&env, "public.pk_t_pkey").await);
 }
+
+// ================================================================================================================
+// Tablo: yönetici entegrasyonu (defaults, created, nesne denetimi, kapılar, lock_timeout, koruma)
+// ================================================================================================================
+
+fn col(name: &str, ty: &str) -> ColumnDef {
+    ColumnDef {
+        attnum: None,
+        name: name.into(),
+        data_type: ty.into(),
+        not_null: false,
+        default: None,
+        identity: None,
+        generated: None,
+        collation: None,
+        comment: None,
+        using: None,
+    }
+}
+
+fn names(v: &[&str]) -> Vec<String> {
+    v.iter().map(|x| x.to_string()).collect()
+}
+
+fn named(name: &str, kind: ConstraintKind) -> ConstraintDef {
+    ConstraintDef { oid: None, name: Some(name.into()), kind, deferrable: false, initially_deferred: false, not_valid: false }
+}
+
+fn unique(cols: &[&str]) -> ConstraintKind {
+    ConstraintKind::Unique { columns: names(cols), include: vec![], nulls_not_distinct: false }
+}
+
+fn check(expr: &str) -> ConstraintKind {
+    ConstraintKind::Check { expr: expr.into(), no_inherit: false }
+}
+
+fn tbl(d: &TableDef) -> ObjectDef {
+    ObjectDef::Table(d.clone())
+}
+
+fn col_mut<'a>(d: &'a mut TableDef, name: &str) -> &'a mut ColumnDef {
+    d.columns.iter_mut().find(|c| c.name == name).unwrap_or_else(|| panic!("kolon yok: {name}"))
+}
+
+/// Uygulanan tanımın sunucudaki karşılığı: yeni kolon/kısıtın attnum/oid'i ve belirtilmeyen sahip yüklenenden;
+/// kısıtlar ad sırasıyla (yükleyicinin sırası).
+fn settled(want: &TableDef, loaded: &TableDef) -> TableDef {
+    let mut e = want.clone();
+    if e.owner.is_none() {
+        e.owner = loaded.owner.clone();
+    }
+    e.partition_by = None;
+    for c in &mut e.columns {
+        if c.attnum.is_none() {
+            c.attnum = loaded.columns.iter().find(|l| l.name == c.name).and_then(|l| l.attnum);
+        }
+        c.using = None;
+    }
+    for k in &mut e.constraints {
+        if k.oid.is_none() {
+            k.oid = loaded.constraints.iter().find(|l| l.name == k.name).and_then(|l| l.oid);
+        }
+        k.not_valid = false;
+    }
+    e.constraints.sort_by(|a, b| a.name.cmp(&b.name));
+    e
+}
+
+impl Fx {
+    async fn load_table(&self, env: &Env, schema: &str, name: &str) -> (ObjectRef, TableDef) {
+        let object = ObjectRef { kind: ObjectKind::Table, oid: env.class_oid(schema, name).await };
+        (object, self.reload(object).await)
+    }
+
+    async fn reload(&self, object: ObjectRef) -> TableDef {
+        match self.dm.load(self.server, self.db, object).await {
+            Ok(ObjectDef::Table(d)) => d,
+            other => panic!("tablo yüklenemedi: {other:?}"),
+        }
+    }
+
+    /// `public.<name>` tablosunu yükler, `edit` ile değiştirir: (istek, nesne, eski, yeni).
+    async fn alter_table(&self, env: &Env, name: &str, edit: impl FnOnce(&mut TableDef)) -> (PlanRequest, ObjectRef, TableDef, TableDef) {
+        let (object, old) = self.load_table(env, "public", name).await;
+        let mut new = old.clone();
+        edit(&mut new);
+        (PlanRequest::Alter { object, old: tbl(&old), new: tbl(&new) }, object, old, new)
+    }
+}
+
+fn created_of(r: Result<ApplyOutcome>) -> Option<ObjectRef> {
+    match r {
+        Ok(ApplyOutcome::Applied { created, .. }) => created,
+        other => panic!("uygulanmalıydı: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn table_defaults_create_and_drop_through_the_manager() {
+    for ts in servers() {
+        guarded(table_create_body(ts.clone()), cleanup(&ts, "m_tbcreate")).await;
+    }
+}
+
+async fn table_create_body(ts: TestServer) {
+    let env = setup(&ts, "m_tbcreate").await;
+    let f = fx(&env, &ts, false, None);
+    let public = env.schema_oid("public").await;
+    let ctx = |schema_oid, table_oid| CreateContext { schema_oid, table_oid };
+
+    // Varsayılan: şema bağlamından, boş ad/kolon/kısıt, kalıcı; yükleme alanları boş.
+    let ObjectDef::Table(d) = f.dm.defaults(f.server, f.db, ObjectKind::Table, ctx(Some(public), None)).await.unwrap() else {
+        panic!("tablo bekleniyordu")
+    };
+    assert_eq!((d.schema.as_str(), d.name.as_str(), d.persistence), ("public", "", Persistence::Permanent));
+    assert!(d.columns.is_empty() && d.constraints.is_empty() && d.unsupported.is_empty());
+    assert_eq!((&d.owner, &d.tablespace, &d.partition_by, d.fillfactor, &d.comment), (&None, &None, &None, None, &None));
+    assert_eq!((&d.partition_text, d.is_partition, d.inherits), (&None, false, false));
+    // Geçersiz bağlamlar.
+    env.sql("CREATE TABLE public.other (id int)").await;
+    let other = env.class_oid("public", "other").await;
+    for c in [ctx(None, None), ctx(Some(public), Some(other)), ctx(None, Some(other))] {
+        let r = f.dm.defaults(f.server, f.db, ObjectKind::Table, c).await;
+        assert!(matches!(r, Err(Error::Invalid(_))), "{c:?}: {r:?}");
+    }
+    let missing = f.dm.defaults(f.server, f.db, ObjectKind::Table, ctx(Some(u32::MAX - 7), None)).await;
+    assert!(matches!(missing, Err(Error::NotFound(_))), "{missing:?}");
+
+    // create → apply → created dolu → load eşit.
+    let mut def = d;
+    def.name = "Tb \"c\"".into();
+    def.comment = Some("tablo".into());
+    def.columns = vec![
+        ColumnDef { identity: Some(IdentityKind::Always), not_null: true, ..col("id", "bigint") },
+        ColumnDef { default: Some("0".into()), not_null: true, ..col("qty", "integer") },
+        ColumnDef { comment: Some("fiyat".into()), ..col("price", "numeric(10,2)") },
+    ];
+    def.constraints = vec![
+        named("tb_pkey", ConstraintKind::PrimaryKey { columns: names(&["id"]), include: vec![] }),
+        named("tb_qty_check", check("qty >= 0")),
+    ];
+    let req = create(tbl(&def));
+    assert_eq!(f.preview(&req).await.risk, Risk::Safe);
+    let c = created_of(f.apply(&req).await);
+    let object = ObjectRef { kind: ObjectKind::Table, oid: env.class_oid("public", "Tb \"c\"").await };
+    assert_eq!(c, Some(object));
+    let loaded = f.reload(object).await;
+    let mut want = settled(&def, &loaded);
+    // CHECK ifadesi sunucunun normalleştirmesiyle (`pg_get_constraintdef`) yüklenir.
+    let ck = loaded.constraints.iter().find(|k| k.name.as_deref() == Some("tb_qty_check")).unwrap();
+    want.constraints.iter_mut().find(|k| k.name.as_deref() == Some("tb_qty_check")).unwrap().kind = ck.kind.clone();
+    assert_eq!(loaded, want);
+    // Aynı create ikinci kez: yürütme hatası (42P07), kapı değil.
+    let (_, committed, sqlstate, _) = failed(f.apply(&req).await);
+    assert_eq!((committed, sqlstate.as_deref()), (0, Some("42P07")));
+
+    // Drop: onaysız reddedilir; onaylı uygulanır, created yok.
+    let drop = PlanRequest::Drop { object, def: tbl(&loaded), cascade: false };
+    assert_eq!(f.preview(&drop).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&drop).await), "confirmation_required");
+    assert!(exists(&env, "public.Tb \"c\"").await);
+    assert_eq!(created_of(f.apply_with(&drop, |o| o.confirmed = true).await), None);
+    assert!(!exists(&env, "public.Tb \"c\"").await);
+    // Silinmiş tabloyu yeniden silme: yükleme hatası olduğu gibi (not_found).
+    assert_eq!(code(&f.apply_with(&drop, |o| o.confirmed = true).await), "not_found");
+
+    // CASCADE: bağımlı FK düşer (DataLoss); CASCADE'siz silme sunucuda 2BP01.
+    env.sql("CREATE TABLE public.par (id int PRIMARY KEY); CREATE TABLE public.chi (p int CONSTRAINT chi_fk REFERENCES public.par)").await;
+    let (object, par) = f.load_table(&env, "public", "par").await;
+    let plain = PlanRequest::Drop { object, def: tbl(&par), cascade: false };
+    let (_, committed, sqlstate, _) = failed(f.apply_with(&plain, |o| o.confirmed = true).await);
+    assert_eq!((committed, sqlstate.as_deref()), (0, Some("2BP01")));
+    let cascade = PlanRequest::Drop { object, def: tbl(&par), cascade: true };
+    assert_eq!(f.preview(&cascade).await.risk, Risk::DataLoss);
+    applied(f.apply_with(&cascade, |o| o.confirmed = true).await);
+    assert!(!exists(&env, "public.par").await);
+    let (_, chi) = f.load_table(&env, "public", "chi").await;
+    assert!(chi.constraints.is_empty(), "CASCADE bağımlı FK'yi düşürür: {:?}", chi.constraints);
+}
+
+#[tokio::test]
+async fn table_alter_applies_and_reloads_equal() {
+    for ts in servers() {
+        guarded(table_alter_body(ts.clone()), cleanup(&ts, "m_tbalter")).await;
+    }
+}
+
+async fn table_alter_body(ts: TestServer) {
+    let env = setup(&ts, "m_tbalter").await;
+    let f = fx(&env, &ts, false, None);
+    env.sql("CREATE TABLE public.ta (id int PRIMARY KEY, b text, CONSTRAINT ta_b_key UNIQUE (b))").await;
+    let (_, before) = f.load_table(&env, "public", "ta").await;
+    let uq_oid = before.constraints.iter().find(|k| k.name.as_deref() == Some("ta_b_key")).unwrap().oid;
+    assert!(uq_oid.is_some());
+
+    // Kolon ekle + kısıt ekle + kolon yeniden adlandır (kısıt kolon listesi eşlemeyle izlenir).
+    let (req, object, _, new) = f
+        .alter_table(&env, "ta", |n| {
+            col_mut(n, "b").name = "b2".into();
+            for k in &mut n.constraints {
+                if let ConstraintKind::Unique { columns, .. } = &mut k.kind {
+                    *columns = names(&["b2"]);
+                }
+            }
+            n.columns.push(col("c", "text"));
+            n.constraints.push(named("ta_c_key", unique(&["c"])));
+        })
+        .await;
+    let v = f.preview(&req).await;
+    assert_eq!((v.risk, v.errors.len()), (Risk::Safe, 0));
+    assert!(!v.statements.iter().any(|s| s.sql.contains("DROP CONSTRAINT")), "eşlenen kısıt yeniden kurulmamalı: {:?}", v.statements);
+    // Kimlik (şema/ad) değişmedi: created yok.
+    assert_eq!(created_of(f.apply(&req).await), None);
+    let loaded = f.reload(object).await;
+    assert_eq!(loaded, settled(&new, &loaded));
+    let uq = loaded.constraints.iter().find(|k| k.name.as_deref() == Some("ta_b_key")).unwrap();
+    assert_eq!((uq.oid, &uq.kind), (uq_oid, &unique(&["b2"])), "kısıt oid'i kolon yeniden adlandırmada korunur");
+
+    // Tablo yeniden adlandırma + yorum: created = aynı oid (tablo kimliği yeni adla bulunur).
+    let (req, object, _, new) = f.alter_table(&env, "ta", |n| (n.name, n.comment) = ("ta_new".into(), Some("y".into()))).await;
+    assert_eq!(created_of(f.apply(&req).await), Some(object));
+    assert_eq!(f.reload(object).await, new);
+
+    // Kısıtlı kolonu sil + kısıtları kaldır aynı düzenlemede: plan sırası gerçek sunucuda geçerli.
+    env.sql(
+        "CREATE TABLE public.tx (id int, x int, CONSTRAINT tx_x_check CHECK (x > 0), CONSTRAINT tx_x_key UNIQUE (x), \
+         CONSTRAINT tx_idx_key UNIQUE (id, x))",
+    )
+    .await;
+    let (req, object, _, new) = f
+        .alter_table(&env, "tx", |n| {
+            n.columns.retain(|c| c.name != "x");
+            n.constraints.clear();
+        })
+        .await;
+    let v = f.preview(&req).await;
+    assert_eq!(v.risk, Risk::DataLoss);
+    let pos = |needle: &str| v.statements.iter().position(|s| s.sql.contains(needle)).unwrap_or_else(|| panic!("{needle}: {:?}", v.statements));
+    assert!(pos("DROP CONSTRAINT") < pos("DROP COLUMN"));
+    applied(f.apply_with(&req, |o| o.confirmed = true).await);
+    let loaded = f.reload(object).await;
+    assert_eq!(loaded, new);
+    assert!(loaded.constraints.is_empty() && loaded.columns.len() == 1);
+}
+
+#[tokio::test]
+async fn table_object_check_rejects_stale_and_tampered_definitions() {
+    for ts in servers() {
+        guarded(table_stale_body(ts.clone()), cleanup(&ts, "m_tbstale")).await;
+    }
+}
+
+async fn table_stale_body(ts: TestServer) {
+    let env = setup(&ts, "m_tbstale").await;
+    let f = fx(&env, &ts, false, None);
+    env.sql("CREATE TABLE public.ts1 (id int PRIMARY KEY, a int, b int, CONSTRAINT ts1_a_check CHECK (a > 0))").await;
+    let (honest, object, old, new) = f.alter_table(&env, "ts1", |n| n.columns.push(col("c", "text"))).await;
+
+    // Tahrifler: her biri plan üretiminden geçer ama `old` sunucudaki tanıma eşit değildir → plan_changed.
+    let tampered = |edit: &dyn Fn(&mut TableDef)| {
+        let (mut o, mut n) = (old.clone(), new.clone());
+        edit(&mut o);
+        edit(&mut n);
+        PlanRequest::Alter { object, old: tbl(&o), new: tbl(&n) }
+    };
+    let swap_attnums = |d: &mut TableDef| {
+        let (x, y) = (col_mut(d, "a").attnum, col_mut(d, "b").attnum);
+        col_mut(d, "a").attnum = y;
+        col_mut(d, "b").attnum = x;
+    };
+    let mut inherited = old.clone();
+    inherited.inherits = true;
+    let cases: Vec<(&str, PlanRequest)> = vec![
+        ("fazladan desteklenmeyen öğe", tampered(&|d| d.unsupported.push("EXCLUDE kısıtı sahte".into()))),
+        ("kısıt listesinden çıkarılmış", tampered(&|d| d.constraints.retain(|k| k.name.as_deref() != Some("ts1_a_check")))),
+        ("değiştirilmiş attnum", tampered(&swap_attnums)),
+        ("değiştirilmiş kısıt oid'i", tampered(&|d| d.constraints[0].oid = d.constraints[0].oid.map(|o| o + 1))),
+        (
+            "sahte kalıtım bayrağı",
+            PlanRequest::Alter { object, old: tbl(&inherited), new: tbl(&TableDef { comment: Some("x".into()), ..inherited.clone() }) },
+        ),
+    ];
+    for (what, req) in &cases {
+        assert!(f.preview(req).await.errors.is_empty(), "{what}: plan üretilebilmeli");
+        assert_eq!(code(&f.apply_with(req, |o| o.confirmed = true).await), "plan_changed", "{what}");
+    }
+    assert_eq!(f.reload(object).await, old, "tahrifli istekler hiçbir şey yazmamalı");
+
+    // Bayat `old`: başka oturum kolon ekledi → plan_changed; istek uygulanmaz.
+    env.sql("ALTER TABLE public.ts1 ADD COLUMN z int").await;
+    assert_eq!(code(&f.apply(&honest).await), "plan_changed");
+    let now = f.reload(object).await;
+    assert!(now.columns.iter().any(|c| c.name == "z") && !now.columns.iter().any(|c| c.name == "c"));
+    // Yeniden yükleyip aynı düzenleme: uygulanır.
+    let (req, object, _, new) = f.alter_table(&env, "ts1", |n| n.columns.push(col("c", "text"))).await;
+    applied(f.apply(&req).await);
+    let loaded = f.reload(object).await;
+    assert_eq!(loaded, settled(&new, &loaded));
+}
+
+#[tokio::test]
+async fn table_gates_confirmation_production_and_lock() {
+    for ts in servers() {
+        guarded(table_gates_body(ts.clone()), cleanup(&ts, "m_tbgates")).await;
+    }
+}
+
+async fn table_gates_body(ts: TestServer) {
+    let env = setup(&ts, "m_tbgates").await;
+    let prod = fx(&env, &ts, false, Some("Üretim"));
+    env.sql("CREATE TABLE public.tg (id int, gone text, nn int)").await;
+
+    // DROP COLUMN: DataLoss → genel onay, sonra üretim onayı.
+    let (req, object, _, new) = prod.alter_table(&env, "tg", |n| n.columns.retain(|c| c.name != "gone")).await;
+    assert_eq!(prod.preview(&req).await.risk, Risk::DataLoss);
+    assert_eq!(code(&prod.apply(&req).await), "confirmation_required");
+    assert_eq!(code(&prod.apply_with(&req, |o| o.confirmed = true).await), "production_confirmation_required");
+    assert!(prod.reload(object).await.columns.iter().any(|c| c.name == "gone"));
+    applied(prod.apply_with(&req, |o| (o.confirmed, o.confirmed_production) = (true, true)).await);
+    assert_eq!(prod.reload(object).await, new);
+
+    // SET NOT NULL: yalnızca yıkıcı → üretimde de genel onay yeter.
+    let (req, object, _, new) = prod.alter_table(&env, "tg", |n| col_mut(n, "nn").not_null = true).await;
+    assert_eq!(prod.preview(&req).await.risk, Risk::Destructive);
+    assert_eq!(code(&prod.apply(&req).await), "confirmation_required");
+    applied(prod.apply_with(&req, |o| o.confirmed = true).await);
+    assert_eq!(prod.reload(object).await, new);
+
+    // Kilitli sunucu: tablo create/alter `locked`; önizleme serbest.
+    let locked = fx(&env, &ts, true, None);
+    let mut def = prod.reload(object).await;
+    def.name = "tg_new".into();
+    def.columns = vec![col("id", "int")];
+    def.constraints.clear();
+    let c = create(tbl(&def));
+    assert!(locked.preview(&c).await.errors.is_empty());
+    assert_eq!(code(&locked.apply(&c).await), "locked");
+    assert!(!exists(&env, "public.tg_new").await);
+    let (req, ..) = locked.alter_table(&env, "tg", |n| n.comment = Some("x".into())).await;
+    assert_eq!(code(&locked.apply(&req).await), "locked");
+}
+
+#[tokio::test]
+async fn table_alter_respects_lock_timeout() {
+    for ts in servers() {
+        guarded(table_lockto_body(ts.clone()), cleanup(&ts, "m_tblockto")).await;
+    }
+}
+
+async fn table_lockto_body(ts: TestServer) {
+    let env = setup(&ts, "m_tblockto").await;
+    let f = fx(&env, &ts, false, None);
+    env.sql("CREATE TABLE public.tl (id int)").await;
+    let (req, object, old, new) = f.alter_table(&env, "tl", |n| n.columns.push(col("c", "text"))).await;
+    let locker = lock_table(&ts, &env, "tl").await;
+    let hash = f.preview(&req).await.hash;
+    // Nesne denetimi katalogdan okur (kilit beklemez); ALTER TABLE kilidi bekler ve zaman aşımına uğrar.
+    let started = Instant::now();
+    let r = f.dm.apply(f.server, f.db, &req, ApplyOptions { lock_timeout_ms: 500, ..opts(&hash) }).await;
+    let (idx, committed, sqlstate, _) = failed(r);
+    assert_eq!((idx, committed, sqlstate.as_deref()), (0, 0, Some("55P03")));
+    assert!(started.elapsed() < Duration::from_secs(5), "lock_timeout beklenenden uzun");
+    assert_eq!(ddl_waiting(&env.admin).await, 0);
+    locker.batch_execute("COMMIT").await.unwrap();
+    assert_eq!(f.reload(object).await, old, "zaman aşımında değişiklik olmamalı");
+    applied(f.dm.apply(f.server, f.db, &req, ApplyOptions { lock_timeout_ms: 500, ..opts(&hash) }).await);
+    let loaded = f.reload(object).await;
+    assert_eq!(loaded, settled(&new, &loaded));
+}
+
+#[tokio::test]
+async fn system_and_partition_tables_are_protected() {
+    for ts in servers() {
+        guarded(table_protect_body(ts.clone()), cleanup(&ts, "m_tbprot")).await;
+    }
+}
+
+async fn table_protect_body(ts: TestServer) {
+    let env = setup(&ts, "m_tbprot").await;
+    let f = fx(&env, &ts, false, None);
+    // Sistem tablosu: yükleme `Invalid`; istemci tanımı ne derse desin silinemez/değiştirilemez.
+    let object = ObjectRef { kind: ObjectKind::Table, oid: env.class_oid("pg_catalog", "pg_class").await };
+    assert!(matches!(f.dm.load(f.server, f.db, object).await, Err(Error::Invalid(_))));
+    let fake = TableDef {
+        schema: "public".into(),
+        name: "pg_class".into(),
+        owner: None,
+        tablespace: None,
+        persistence: Persistence::Permanent,
+        columns: vec![],
+        constraints: vec![],
+        partition_by: None,
+        fillfactor: None,
+        comment: None,
+        partition_text: None,
+        is_partition: false,
+        inherits: false,
+        unsupported: vec![],
+    };
+    let r = f.apply_with(&PlanRequest::Drop { object, def: tbl(&fake), cascade: true }, |o| (o.confirmed, o.confirmed_production) = (true, true)).await;
+    assert_eq!(code(&r), "invalid");
+    let alter = PlanRequest::Alter { object, old: tbl(&fake), new: tbl(&TableDef { comment: Some("x".into()), ..fake.clone() }) };
+    assert_eq!(code(&f.apply(&alter).await), "invalid");
+    assert!(exists(&env, "pg_catalog.pg_class").await);
+
+    // Bölüm: kolon/kısıt değişikliği `invalid_def`; yeniden adlandırma serbest (created = aynı oid).
+    env.sql("CREATE TABLE public.pp (k int, v text) PARTITION BY LIST (k); CREATE TABLE public.pp1 PARTITION OF public.pp FOR VALUES IN (1)").await;
+    let (req, object, old, _) = f.alter_table(&env, "pp1", |n| n.columns.push(col("extra", "int"))).await;
+    assert!(old.is_partition);
+    assert_eq!(code(&f.apply(&req).await), "invalid_def");
+    let (req, ..) = f.alter_table(&env, "pp1", |n| col_mut(n, "v").not_null = true).await;
+    assert_eq!(code(&f.apply_with(&req, |o| o.confirmed = true).await), "invalid_def");
+    let (req, ..) = f.alter_table(&env, "pp1", |n| n.constraints.push(named("pp1_ck", check("k > 0")))).await;
+    assert_eq!(code(&f.apply(&req).await), "invalid_def");
+    assert_eq!(f.reload(object).await, old);
+    let (req, object, _, new) = f.alter_table(&env, "pp1", |n| n.name = "pp_one".into()).await;
+    assert_eq!(created_of(f.apply(&req).await), Some(object));
+    assert_eq!(f.reload(object).await, new);
+}
