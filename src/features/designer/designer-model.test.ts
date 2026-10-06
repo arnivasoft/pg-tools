@@ -19,7 +19,7 @@ const view = (p: Partial<PlanView> = {}): PlanView => ({
 });
 const gin = (p: Partial<GateInput> = {}): GateInput => ({
   locked: false, production: false, serverName: "prod-1", view: view(), viewIsCurrent: true, pending: false, applying: false,
-  connected: true, ...p,
+  connected: true, loading: false, ...p,
 });
 const col = (name: string, p: Partial<IndexColumn> = {}): IndexColumn => ({
   key: { kind: "column", name }, opclass: null, collation: null, descending: false, nullsFirst: null, ...p,
@@ -157,6 +157,12 @@ describe("applyGate", () => {
       connected: false, applying: true, pending: true, viewIsCurrent: false, view: view({ errors: [fe("name")], empty: true }),
     }))).toEqual(blocked("disconnected"));
   });
+  it("yükleniyor/yükleme hatası → loading (disconnected'dan sonra, busy/pending/stale'den önce)", () => {
+    expect(applyGate(gin({ loading: true }))).toEqual(blocked("loading"));
+    expect(applyGate(gin({ loading: true, applying: true, pending: true, view: null }))).toEqual(blocked("loading"));
+    expect(applyGate(gin({ loading: true, connected: false }))).toEqual(blocked("disconnected"));
+    expect(applyGate(gin({ loading: true, locked: true }))).toEqual(blocked("locked"));
+  });
   it("uygulama uçuşta → busy (pending/stale/invalid'den önce)", () => {
     expect(applyGate(gin({ applying: true }))).toEqual(blocked("busy"));
     expect(applyGate(gin({ applying: true, pending: true, viewIsCurrent: false, view: null }))).toEqual(blocked("busy"));
@@ -208,7 +214,7 @@ describe("canSubmit / confirmFlags", () => {
   const ready: ApplyGate = { kind: "ready" };
   const conf: ApplyGate = { kind: "needsConfirm" };
   const prod: ApplyGate = { kind: "needsProductionName", expected: "Prod-1" };
-  const blockedReasons = ["locked", "invalid", "empty", "stale", "pending", "busy", "disconnected"] as const;
+  const blockedReasons = ["locked", "invalid", "empty", "stale", "pending", "busy", "disconnected", "loading"] as const;
 
   it("ready → true; onay durumundan bağımsız; bayraklar false", () => {
     expect(canSubmit(ready, cs(false))).toBe(true);

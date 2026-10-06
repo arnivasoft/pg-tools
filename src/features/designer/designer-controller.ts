@@ -9,6 +9,12 @@
 // - Uygulama sırasında düzenleme/önizleme yok sayılır (taslak gönderilenle aynı kalır).
 // - Kapanan sekmenin / eski kuşağın yanıtı durum yazmaz, bildirim ve ağaç yenilemesi yapmaz.
 // - `plan_changed` sonrası otomatik yeniden yükleme yapılmaz (taslak ezilmez); kullanıcı `reload(force)` ile ister.
+//   Temel tanımın bayat olabileceği her durumda (`plan_changed`, kısmen kalıcı `Failed`, uygulama sonrası başarısız
+//   yeniden yükleme) `needsReload = true` olur; arayüz yeniden yükleme ipucunu buna göre gösterir.
+// - Sonuçsuz create başarısı (`created = null`): sekme "tamam" durumundadır; düzenleme/önizleme/uygulama kapalı.
+// - Tepkisellik: `model(tabId)` yalnızca `openCreate`/`openAlter` girdiyi kaydettikten sonra tepkiseldir. Girdi bu
+//   çağrıların içinde EŞZAMANLI kurulur (`makeEntry` eşzamanlıdır, ilk `await`'ten önce); arayüz (Task 3) sekmeyi
+//   çizmeden önce bu çağrıları eşzamanlı başlatmalıdır (sözü beklemek gerekmez).
 import { createSignal, type Accessor, type Setter } from "solid-js";
 import { tdes } from "../../app/strings-designer";
 import type { ToastKind } from "../../app/toast-model";
@@ -31,8 +37,11 @@ import { classifyError, designerErrorText, failedText } from "./errors";
 import { PREVIEW_DELAY_MS, createPreviewer, type PreviewDeps, type Previewer } from "./preview";
 
 export type DesignerMode = "create" | "alter";
-/** `loading` + `error` dolu: ilk yükleme genel hatayla bitti (yeniden dene = `reload`). `gone`: nesne/sunucu yok. */
-export type DesignerStatus = "loading" | "ready" | "disconnected" | "gone";
+/**
+ * `error`: ilk yükleme genel hatayla bitti (`error` metni; yeniden dene = `reload`). `gone`: nesne/sunucu yok.
+ * Yalnızca `ready` düzenlenebilir.
+ */
+export type DesignerStatus = "loading" | "ready" | "error" | "disconnected" | "gone";
 
 export interface DesignerModel {
   /** Sekme kimliği. */
@@ -66,8 +75,10 @@ export interface DesignerModel {
   outcome: ApplyOutcome | null;
   /** `Failed` metni (`55P03` → kilit zaman aşımı). */
   applyError: string | null;
-  /** `ddl_apply` reddi (Err) metni (`code`'a göre). */
+  /** `ddl_apply` reddi (Err) metni (`code`'a göre) ya da kısmen kalıcı `Failed` uyarısı. */
   gateError: string | null;
+  /** Temel tanım bayat olabilir (plan_changed / kısmi uygulama / uygulama sonrası yükleme hatası): yeniden yükleyin. */
+  needsReload: boolean;
   lockTimeoutMs: number;
   confirm: ConfirmState;
   /** Sunucu kaydından (kayıt değişince `serverChanged` ile güncellenir). */
@@ -198,6 +209,16 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     if (m.applying && m.applyId) cancelQuietly(m.applyId);
     patch(e, { status, error, pending: false, applying: false, applyId: null });
   };
+  /** Sonuçsuz create başarısı: sekme "tamam" (arayüz Kapat sunar); düzenleme/önizleme/uygulama yok. */
+  const finished = (m: DesignerModel) => m.mode === "create" && m.outcome?.outcome === "applied";
+  /** Düzenleme/önizleme yapılabilir mi: `ready`, uygulama dışında ve "tamam" değil. */
+  const editable = (m: DesignerModel) => m.status === "ready" && !m.applying && !finished(m);
+  /** Kirli: taslak temelden (alter: original; create: varsayılan) farklı ya da create'te CONCURRENTLY seçili. */
+  const dirtyOf = (e: Entry, draft: ObjectDef, m: Pick<DesignerModel, "original" | "mode" | "concurrently">) => {
+    const ref = m.original ?? e.base;
+    if (!ref) return true;
+    return !defsEqual(draft, ref) || (m.mode === "create" && m.concurrently);
+  };
   const goneText = (p: ErrorPayload) => (p.code === "unknown_server" ? tdes.status.serverGone : tdes.status.gone);
 
   /** Bağlantı/yokluk hatası ise sekmeyi düşürür ve true döner. */
@@ -224,7 +245,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       viewIsCurrent: m.view !== null && m.viewFor === m.version,
       pending: m.pending,
       applying: m.applying,
-      connected: m.status === "ready" && (!fresh || info !== null),
+      connected: m.status !== "disconnected" && m.status !== "gone" && (!fresh || info !== null),
+      loading: m.status === "loading" || m.status === "error",
     });
   };
 
@@ -257,7 +279,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   /** Mevcut taslağın önizlemesini ister (`now`: beklemeden). Yalnızca `ready` ve uygulama dışında. */
   const startPreview = (e: Entry, immediately: boolean) => {
     const m = e.model();
-    if (m.status !== "ready" || m.applying) return;
+    if (!editable(m)) return;
     const req = planRequest(m);
     if (!req) return;
     const { version } = m;
@@ -282,7 +304,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       id: tabId, serverId, serverName: info?.name ?? "", databaseOid, mode, kind, object,
       original: null, draft: null, status: "loading", error: null, dirty: false,
       view: null, viewFor: -1, version: 0, pending: false, previewError: null,
-      applying: false, applyId: null, outcome: null, applyError: null, gateError: null,
+      applying: false, applyId: null, outcome: null, applyError: null, gateError: null, needsReload: false,
       lockTimeoutMs: DEFAULT_LOCK_TIMEOUT_MS, confirm: emptyConfirm(),
       locked: info?.locked ?? false, production: info?.production ?? false,
       concurrently: false, cascade: false,
@@ -298,14 +320,15 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   const loadFailed = (e: Entry, err: unknown, prev: DesignerStatus) => {
     const p = toPayload(err);
     if (markIfDown(e, p)) return;
-    patch(e, { status: prev === "ready" ? "ready" : "loading", error: errorText(p) });
+    patch(e, { status: prev === "ready" ? "ready" : "error", error: errorText(p) });
   };
 
   /** Yeni temel tanımı kurar: taslak = kopya, sürüm ilerler, eski önizleme/onay/hatalar düşer. */
   const setBase = (e: Entry, original: ObjectDef | null, draft: ObjectDef) =>
     update(e, (m) => ({
       ...m, status: "ready", error: null, original, draft, dirty: false, version: m.version + 1,
-      view: null, viewFor: -1, pending: false, previewError: null, gateError: null, applyError: null, confirm: emptyConfirm(),
+      view: null, viewFor: -1, pending: false, previewError: null, gateError: null, applyError: null, needsReload: false,
+      confirm: emptyConfirm(),
     }));
 
   const loadDefaults = async (tabId: string, e: Entry) => {
@@ -375,12 +398,11 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   const edit = (tabId: string, f: (draft: ObjectDef) => ObjectDef | void) => {
     const e = entries.get(tabId);
     const m = e?.model();
-    if (!e || !m || m.status !== "ready" || m.applying || !m.draft) return;
+    if (!e || !m || !editable(m) || !m.draft) return;
     const copy = cloneDef(m.draft);
     const next = cloneDef(f(copy) ?? copy);
-    const ref = m.original ?? e.base;
     update(e, (cur) => ({
-      ...cur, draft: next, version: cur.version + 1, dirty: ref ? !defsEqual(next, ref) : true, outcome: null, applyError: null,
+      ...cur, draft: next, version: cur.version + 1, dirty: dirtyOf(e, next, cur), outcome: null, applyError: null,
     }));
     startPreview(e, false);
   };
@@ -404,8 +426,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   const setConcurrently = (tabId: string, v: boolean) => {
     const e = entries.get(tabId);
     const m = e?.model();
-    if (!e || !m || m.mode !== "create" || m.kind !== "index" || m.status !== "ready" || m.applying || m.concurrently === v) return;
-    patch(e, { concurrently: v, version: m.version + 1 });
+    if (!e || !m || m.mode !== "create" || m.kind !== "index" || !editable(m) || m.concurrently === v) return;
+    patch(e, { concurrently: v, version: m.version + 1, dirty: m.draft ? dirtyOf(e, m.draft, { ...m, concurrently: v }) : m.dirty });
     startPreview(e, false);
   };
   const setCascade = (tabId: string, v: boolean) => {
@@ -425,16 +447,22 @@ export function createDesignerController(deps: DesignerControllerDeps) {
         patch(e, { dirty: false });
         return;
       }
-      patch(e, { mode: "alter", object: { ...out.created }, kind: out.created.kind, dirty: false });
+      // Yeniden yükleme başarısız olursa temel bayat kalır: `needsReload` (başarıda `setBase` temizler).
+      patch(e, { mode: "alter", object: { ...out.created }, kind: out.created.kind, dirty: false, needsReload: true });
     } else {
-      patch(e, { dirty: false });
+      patch(e, { dirty: false, needsReload: true });
     }
     await loadObject(tabId, e);
   };
 
   const failed = (e: Entry, out: Extract<ApplyOutcome, { outcome: "failed" }>) => {
     patch(e, { applyError: failedText(out) });
-    if (out.committed > 0) notify(tdes.apply.committed(out.committed), "error");
+    if (out.committed > 0) {
+      // Bir kısmı kalıcı: nesne değişti, `original` bayat. Taslak korunur; bayat temele karşı önizleme istenmez.
+      notify(tdes.apply.committed(out.committed), "error");
+      patch(e, { gateError: tdes.gate.partial, needsReload: true });
+      return;
+    }
     // Aynı `expectedHash` ile yeniden gönderilmez: görünüm düştü, yenisi istenir.
     startPreview(e, true);
   };
@@ -445,7 +473,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     switch (classifyError(p)) {
       case "planChanged":
         // Taslak korunur; eski `original`e karşı yeniden önizleme istenmez. Yeniden yükleme kullanıcıya bırakılır.
-        patch(e, { gateError: tdes.gate.planChanged });
+        patch(e, { gateError: tdes.gate.planChanged, needsReload: true });
         return;
       case "locked":
         patch(e, { gateError: tdes.gate.locked, locked: true });
@@ -460,7 +488,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   const apply = async (tabId: string): Promise<void> => {
     const e = entries.get(tabId);
     const m = e?.model();
-    if (!e || !m || m.applying || !m.view) return;
+    if (!e || !m || m.applying || !m.view || finished(m)) return;
     const gate = gateFor(m, true);
     if (!canSubmit(gate, m.confirm)) return;
     const req = planRequest(m);

@@ -9,6 +9,7 @@ export const tdes = {
   },
   gate: {
     planChanged: "Nesne değişti; yeniden yükleyin.",
+    partial: "Nesne kısmen değişti; yeniden yükleyin.",
     invalidDef: "Tanım geçersiz; önizleme yenilendi.",
     locked: "Sunucu salt okunur kilitli.",
     confirmationRequired: "Bu değişiklik onay gerektiriyor; önizlemeyi kontrol edip onaylayın.",

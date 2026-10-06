@@ -76,7 +76,7 @@ export function issuesFor(issues: FieldIssues, path: string): string[] {
 
 export type ApplyGate =
   | { kind: "ready" }
-  | { kind: "blocked"; reason: "locked" | "invalid" | "empty" | "stale" | "pending" | "busy" | "disconnected" }
+  | { kind: "blocked"; reason: "locked" | "invalid" | "empty" | "stale" | "pending" | "busy" | "disconnected" | "loading" }
   | { kind: "needsConfirm" }                                  // onay kutusu gerekli
   | { kind: "needsProductionName"; expected: string };        // onay kutusu + sunucu adı gerekli
 
@@ -90,16 +90,19 @@ export interface GateInput {
   pending: boolean;
   applying: boolean;
   connected: boolean;
+  /** Tanım yükleniyor ya da ilk yükleme hatayla bitti (sekme henüz düzenlenebilir değil; bağlantı kesik değil). */
+  loading: boolean;
 }
 
 /**
- * Öncelik (ilk eşleşen kazanır): locked > disconnected > busy > pending > stale (view yok dahil) > invalid > empty > risk.
+ * Öncelik (ilk eşleşen kazanır): locked > disconnected > loading > busy > pending > stale (view yok dahil) > invalid > empty > risk.
  * Bayat/bekleyen görünümün hata ve boşluk durumu dikkate alınmaz; `invalid` `empty`den önce (geçersiz tanım empty=true da taşır).
  * Risk: safe → ready; destructive → needsConfirm; data_loss → üretimde needsProductionName, aksi halde needsConfirm.
  */
 export function applyGate(i: GateInput): ApplyGate {
   if (i.locked) return { kind: "blocked", reason: "locked" };
   if (!i.connected) return { kind: "blocked", reason: "disconnected" };
+  if (i.loading) return { kind: "blocked", reason: "loading" };
   if (i.applying) return { kind: "blocked", reason: "busy" };
   if (i.pending) return { kind: "blocked", reason: "pending" };
   const v = i.view;

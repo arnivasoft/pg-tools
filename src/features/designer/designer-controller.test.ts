@@ -163,7 +163,14 @@ describe("designer-controller açılış", () => {
     expect(s.ctl.model("C")).toMatchObject({ status: "disconnected", error: "m:connection_lost" });
     s.api.ddlLoad.mockRejectedValueOnce(err("query", "izin yok", "permission denied"));
     await openAlter(s, "D");
-    expect(s.ctl.model("D")).toMatchObject({ status: "loading", error: "izin yok — permission denied", draft: null });
+    expect(s.ctl.model("D")).toMatchObject({ status: "error", error: "izin yok — permission denied", draft: null });
+    expect(s.ctl.peekApplyGate("D")).toEqual({ kind: "blocked", reason: "loading" });
+    expect(s.ctl.peekApplyGate("C")).toEqual({ kind: "blocked", reason: "disconnected" });
+    // Hata durumunda düzenleme/önizleme yok
+    s.ctl.edit("D", rename("x"));
+    s.ctl.previewNow("D");
+    await settle();
+    expect(s.api.ddlPreview).not.toHaveBeenCalled();
     // Yeniden dene
     await s.ctl.reload("D");
     expect(s.ctl.model("D")).toMatchObject({ status: "ready", error: null });
@@ -427,6 +434,29 @@ describe("designer-controller uygulama sonuçları", () => {
     expect(s.api.ddlLoad).not.toHaveBeenCalled();
     expect(s.refreshNode).toHaveBeenCalledWith("N-coll");
     expect(s.ctl.model(id)).toMatchObject({ mode: "create", status: "ready", dirty: false, outcome: applied(null), view: null });
+    // "Tamam" durumu: düzenleme, önizleme, uygulama yok (arayüz Kapat sunar)
+    const before = s.ctl.model(id)!;
+    s.ctl.edit(id, rename("ikinci"));
+    s.ctl.previewNow(id);
+    await settle();
+    await s.ctl.apply(id);
+    expect(s.ctl.model(id)!.draft).toBe(before.draft);
+    expect(s.ctl.model(id)!.outcome).toEqual(applied(null));
+    expect(s.api.ddlPreview).toHaveBeenCalledTimes(1);
+    expect(s.api.ddlApply).toHaveBeenCalledTimes(1);
+  });
+
+  it("Applied(alter) sonrası yeniden yükleme genel hatası: ready + error + needsReload; başarılı reload temizler", async () => {
+    const s = setup();
+    const id = await readyToApply(s);
+    expect(s.ctl.model(id)!.needsReload).toBe(false);
+    s.api.ddlLoad.mockRejectedValueOnce(err("query", "geçici"));
+    await s.ctl.apply(id);
+    await flush();
+    expect(s.ctl.model(id)).toMatchObject({ status: "ready", error: "geçici", needsReload: true, dirty: false });
+    expect(s.ctl.model(id)!.original).toEqual(schema());
+    await s.ctl.reload(id);
+    expect(s.ctl.model(id)).toMatchObject({ status: "ready", error: null, needsReload: false });
   });
 
   it("Applied(alter): reload + refreshNode; dirty=false; bayat önizleme düşer; lookup önbelleği temizlenir", async () => {
@@ -471,10 +501,12 @@ describe("designer-controller uygulama sonuçları", () => {
     expect(s.notify).toHaveBeenCalledExactlyOnceWith(tdes.apply.committed(1), "error");
     expect(s.refreshNode).not.toHaveBeenCalled();
     expect(s.api.ddlLoad).toHaveBeenCalledTimes(1);
-    // Aynı hash'le otomatik yeniden gönderim yok; önizleme yenilenir
-    await flush();
-    expect(s.api.ddlPreview).toHaveBeenCalledTimes(2);
+    // Kısmen kalıcı: hemen yeniden yükleme ipucu; bayat temele karşı önizleme ve otomatik gönderim yok
+    expect(m).toMatchObject({ gateError: tdes.gate.partial, needsReload: true, view: null });
+    await settle();
+    expect(s.api.ddlPreview).toHaveBeenCalledTimes(1);
     expect(s.api.ddlApply).toHaveBeenCalledTimes(1);
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "stale" });
     // committed=0 → toast yok
     const id2 = await openAlter(s, "T2");
     s.ctl.edit(id2, rename("k"));
@@ -482,7 +514,10 @@ describe("designer-controller uygulama sonuçları", () => {
     s.api.ddlApply.mockResolvedValueOnce({ ...failed, committed: 0, sqlstate: "42P07", error: err("query", "zaten var", "d") });
     await s.ctl.apply(id2);
     expect(s.notify).toHaveBeenCalledTimes(1);
-    expect(s.ctl.model(id2)!.applyError).toBe(tdes.apply.failed(1, "zaten var — d"));
+    expect(s.ctl.model(id2)).toMatchObject({ applyError: tdes.apply.failed(1, "zaten var — d"), gateError: null, needsReload: false });
+    // committed=0: aynı hash'le gönderim yok, önizleme yenilenir
+    await flush();
+    expect(s.api.ddlPreview).toHaveBeenCalledTimes(3);
     // Düzenleme sonucu temizler
     s.ctl.edit(id2, rename("l"));
     expect(s.ctl.model(id2)).toMatchObject({ outcome: null, applyError: null });
@@ -495,7 +530,7 @@ describe("designer-controller uygulama sonuçları", () => {
     await s.ctl.apply(id);
     await settle();
     const m = s.ctl.model(id)!;
-    expect(m).toMatchObject({ gateError: tdes.gate.planChanged, dirty: true, applying: false, view: null, status: "ready" });
+    expect(m).toMatchObject({ gateError: tdes.gate.planChanged, needsReload: true, dirty: true, applying: false, view: null, status: "ready" });
     expect((m.draft as { name: string }).name).toBe("yeni");
     expect(s.api.ddlLoad).toHaveBeenCalledTimes(1);
     expect(s.api.ddlPreview).toHaveBeenCalledTimes(1); // eski original'e karşı önizleme yeniden istenmez
@@ -740,14 +775,25 @@ describe("designer-controller ayarlar ve istekler", () => {
     } as unknown as ObjectDef;
     s.api.ddlDefaults.mockResolvedValueOnce(idx);
     await s.ctl.openCreate({ tabId: "I", serverId: "S1", databaseOid: 5, create: { kind: "index", context: { schemaOid: 1, tableOid: 2 } }, refreshNodeId: null });
+    expect(s.ctl.isDirty("I")).toBe(false);
     s.ctl.setConcurrently("I", true);
+    expect(s.ctl.isDirty("I")).toBe(true); // varsayılandan farklı (edit ile tutarlı)
     await settle();
     expect(s.api.ddlPreview.mock.calls[0]![2]).toMatchObject({ op: "create", concurrently: true });
+    s.ctl.setConcurrently("I", false);
+    expect(s.ctl.isDirty("I")).toBe(false);
+    s.ctl.edit("I", (d) => ({ ...d, name: "j" }));
+    s.ctl.setConcurrently("I", true);
+    s.ctl.edit("I", (d) => ({ ...d, name: "i" })); // taslak varsayılana döndü ama CONCURRENTLY seçili
+    expect(s.ctl.isDirty("I")).toBe(true);
+    await settle();
+    const n = s.api.ddlPreview.mock.calls.length;
     // Schema'da etkisiz
     const c = await openCreate(s);
     s.ctl.setConcurrently(c, true);
     await settle();
-    expect(s.api.ddlPreview).toHaveBeenCalledTimes(1);
+    expect(s.api.ddlPreview).toHaveBeenCalledTimes(n);
+    expect(s.ctl.model(c)!.concurrently).toBe(false);
   });
 
   it("drop için cascade bayrağı request'e girer (drop request'i: object, def=original, cascade)", async () => {
