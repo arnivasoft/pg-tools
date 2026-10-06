@@ -2,7 +2,7 @@
 // seçimi (Yukarı/Aşağı/Home/End/PageUp/PageDown), Enter = ayrıntı, Delete = iptal isteği. Sorgu sonuç ızgarasından
 // (`ResultGrid`) ayrıdır: orada hücre/NULL/tür başlığı özeldir. Sıralama durumunu görünüm tutar.
 import { createVirtualizer } from "@tanstack/solid-virtual";
-import { For, Show, createEffect, createUniqueId, on, type JSX } from "solid-js";
+import { For, Show, createEffect, createUniqueId, on, untrack, type JSX } from "solid-js";
 import { ArrowDown, ArrowUp } from "lucide-solid";
 import { ariaSort, isNavKey, navIndex, type SortState } from "./table-model";
 
@@ -50,13 +50,16 @@ export function DataTable<T>(props: {
     scrollPaddingStart: HEADER_HEIGHT,
   });
 
-  // Seçili satır sıralama/süzgeçle kaydığında görünür kalsın.
+  // Seçili satır yalnızca seçim anahtarı ya da sıralama değişince görünür yapılır; veri yenilemesinin kaydırdığı dizin
+  // görünümü geri çekmez.
   createEffect(
     on(
-      () => indexOfKey(props.selectedKey),
-      (i, prev) => {
-        if (i >= 0 && i !== prev) rowV.scrollToIndex(i, { align: "auto" });
+      () => [props.selectedKey, props.sort?.key, props.sort?.dir] as const,
+      () => {
+        const i = untrack(() => indexOfKey(props.selectedKey));
+        if (i >= 0) rowV.scrollToIndex(i, { align: "auto" });
       },
+      { defer: true },
     ),
   );
 

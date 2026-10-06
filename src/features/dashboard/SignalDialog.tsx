@@ -1,7 +1,7 @@
 // İptal/sonlandırma onay diyaloğu: `dash.signalGate.request()`'i çizer (QueryTabs'taki `CloseTxDialog` kalıbı). Odak
 // "Vazgeç"te başlar (Enter yıkıcı eylemi onaylamaz); onayda gerçek iş denetleyicidedir (`confirmSignal` → canlı doğrulama →
 // `dash_signal`). Onaydan sonra kapı kapanır; uçuştaki istek `model.signaling` ile düğmeleri kapalı tutar.
-import { For, Show } from "solid-js";
+import { For, Show, createEffect, on } from "solid-js";
 import { t } from "../../app/strings";
 import { td } from "../../app/strings-dashboard";
 import { Button } from "../../ui/Button";
@@ -12,7 +12,7 @@ import { firstLines } from "./table-model";
 /** Gövdede gösterilen sorgu satırı sayısı. */
 const QUERY_LINES = 3;
 
-export default function SignalDialog(props: { dash: DashController; tabId: string }) {
+export default function SignalDialog(props: { dash: DashController; tabId: string; restoreFocus?: () => void }) {
   const g = props.dash.signalGate;
   /** Yalnızca bu sekmenin isteği (her dashboard sekmesi kendi görünümünde bir diyalog taşır). */
   const req = () => {
@@ -20,6 +20,15 @@ export default function SignalDialog(props: { dash: DashController; tabId: strin
     return r && r.tabId === props.tabId ? r : null;
   };
   const busy = () => props.dash.model(props.tabId)?.signaling ?? false;
+  // Diyalog kapanınca odak gövdeye düştüyse (tetikleyen düğme yenilemede yeniden oluşmuş olabilir) ızgaraya dön.
+  createEffect(
+    on(
+      () => req() !== null,
+      (open, was) => {
+        if (was && !open) setTimeout(() => document.activeElement === document.body && props.restoreFocus?.(), 0);
+      },
+    ),
+  );
   let cancelEl: HTMLButtonElement | undefined;
   const s = td.signal;
   const lines = () => firstLines(req()?.row.query ?? null, QUERY_LINES);

@@ -1,7 +1,7 @@
 // Oturumlar bölümü: araç çubuğu (arama, durum/etkin/boşta-tx/veritabanı süzgeçleri), sanal tablo ve ayrıntı paneli.
 // Süzgeç ve sıralama görünümde durur; veri `model.activity` alanından gelir (yenilemeyi denetleyici yapar, bölüm seçiliyken
 // liste 5 sn'de bir çekilir). İptal/Sonlandır doğrudan göndermez: `confirmSignal` onay diyaloğunu açar.
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal } from "solid-js";
 import { copyText } from "../../app/clipboard";
 import { td } from "../../app/strings-dashboard";
 import { toast } from "../../app/toast";
@@ -41,7 +41,11 @@ export default function SessionsView(props: SectionProps) {
   });
   const stateNames = createMemo(() => [...new Set(all().map((r) => r.state).filter((x): x is string => x != null))].sort());
   const dbNames = createMemo(() => [...new Set(all().map((r) => r.database).filter((x): x is string => x != null))].sort());
-  const current = createMemo(() => all().find((r) => r.pid === selected()) ?? null);
+  // Ayrıntı, Delete ve vurgu aynı (süzülmüş) listeden gelir: seçili satır listeden çıkarsa seçim temizlenir.
+  const current = createMemo(() => rows().find((r) => r.pid === selected()) ?? null);
+  createEffect(() => {
+    if (selected() !== null && current() === null) setSelected(null);
+  });
 
   const toggleState = (name: string) =>
     setStates((cur) => {
@@ -80,7 +84,7 @@ export default function SessionsView(props: SectionProps) {
   const copy = (q: string) => {
     void copyText(q).then(
       () => toast.show(s.copied, "success"),
-      () => {},
+      () => toast.show(s.copyFailed, "error"),
     );
   };
 

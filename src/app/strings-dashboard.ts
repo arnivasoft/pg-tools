@@ -87,6 +87,7 @@ export const td = {
     detail: "Sorgu",
     copy: "Kopyala",
     copied: "Sorgu panoya kopyalandı.",
+    copyFailed: "Panoya kopyalanamadı.",
     noQuery: "Yetki yok: başka bir rolün sorgusu görüntülenemez",
     emptyQuery: "(boş sorgu)",
     selfTitle: "Bu dashboard'un kendi bağlantısı; durdurulamaz.",

@@ -62,7 +62,7 @@ function TreeNode(props: SectionProps & { node: LockNode; depth: number }) {
                 <span>{s().user ?? td.sessions.unknown}</span>
                 <span class="text-muted">{s().application}</span>
                 <StateBadge state={s().state} />
-                <Show when={props.depth > 0 && s().waitSecs != null}>
+                <Show when={s().blockedBy.length > 0 && s().waitSecs != null}>
                   <span class="text-muted">{l.waited(formatDuration(s().waitSecs))}</span>
                 </Show>
                 <Show when={s().query != null}>

@@ -36,9 +36,15 @@ export function minimalRow(s: BlockSession): ActivityRow {
   };
 }
 
-/** Kilit düğümünün sinyal satırı: etkinlik listesindeki gerçek satır varsa o, yoksa asgari satır. */
+/**
+ * Kilit düğümünün sinyal satırı. Etkinlik listesi yalnızca Oturumlar bölümü açıkken yenilenir (bayat olabilir): gerçek satır
+ * yalnızca kullanıcı + uygulama eşleşirse kullanılır ve taze alanlar (durum, sorgu) `BlockSession`'dan üstüne yazılır;
+ * aksi halde asgari satır.
+ */
 export function resolveSignalRow(s: BlockSession, activity: readonly ActivityRow[] | null | undefined): ActivityRow {
-  return activity?.find((r) => r.pid === s.pid) ?? minimalRow(s);
+  const real = activity?.find((r) => r.pid === s.pid);
+  if (real && real.user === s.user && real.application === s.application) return { ...real, state: s.state, query: s.query };
+  return minimalRow(s);
 }
 
 /** Onay anında canlı listede aynı pid hâlâ aynı oturum mu? (pid + user + application + backendType; pid yeniden kullanımına karşı.) */

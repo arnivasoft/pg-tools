@@ -59,8 +59,10 @@ describe("minimalRow / resolveSignalRow", () => {
     expect(minimalRow(bs)).toMatchObject({ pid: 7, user: "alice", application: "psql", state: "active", query: "select 1", isSelf: false });
   });
   it("gerçek satır varsa onu, yoksa asgariyi seçer", () => {
-    const real = row({ pid: 7 });
-    expect(resolveSignalRow(bs, [row({ pid: 1 }), real])).toBe(real);
+    const real = row({ pid: 7, isSelf: false, state: "idle", query: "old", database: "d1" });
+    expect(resolveSignalRow(bs, [row({ pid: 1 }), real])).toEqual({ ...real, state: "active", query: "select 1" });
+    expect(resolveSignalRow(bs, [row({ pid: 7, user: "bob" })]).backendType).toBe("");
+    expect(resolveSignalRow(bs, [row({ pid: 7, application: "x" })]).backendType).toBe("");
     expect(resolveSignalRow(bs, [row({ pid: 1 })]).backendType).toBe("");
     expect(resolveSignalRow(bs, null).pid).toBe(7);
   });

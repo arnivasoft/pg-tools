@@ -52,13 +52,14 @@ function StatusBadge(props: { model: DashModel }) {
 
 export default function DashboardView(props: { dash: DashController; tabId: string; onReopen: (tabId: string) => void }) {
   const model = () => props.dash.model(props.tabId);
+  let root: HTMLDivElement | undefined;
   return (
     <Show when={model()}>
       {(m) => {
         const ready = () => m().status === "ready";
         const where = () => (m().info?.database ? `${m().serverName}/${m().info?.database}` : m().serverName);
         return (
-          <div class="flex h-full min-h-0 flex-col">
+          <div ref={root} class="flex h-full min-h-0 flex-col">
             <div class="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-panel px-2">
               <span class="min-w-0 truncate text-[13px]" title={where()}>
                 {where()}
@@ -121,7 +122,11 @@ export default function DashboardView(props: { dash: DashController; tabId: stri
                 )}
               </For>
             </Tabs>
-            <SignalDialog dash={props.dash} tabId={props.tabId} />
+            <SignalDialog
+              dash={props.dash}
+              tabId={props.tabId}
+              restoreFocus={() => root?.querySelector<HTMLElement>("[role=grid]")?.focus()}
+            />
           </div>
         );
       }}
