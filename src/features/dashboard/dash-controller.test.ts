@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { t } from "../../app/strings";
+import { td } from "../../app/strings-dashboard";
 import type { ActivityRow } from "../../ipc/bindings/ActivityRow";
 import type { DashInfo } from "../../ipc/bindings/DashInfo";
 import type { Overview } from "../../ipc/bindings/Overview";
@@ -433,14 +433,14 @@ describe("dash-controller sinyal", () => {
     const overviewCalls = s.api.dashOverview.mock.calls.length;
     expect(await s.ctl.signal(s.id, row(10), "cancel")).toBe("sent");
     expect(s.api.dashSignal).toHaveBeenCalledWith("D1", 10, "cancel");
-    expect(s.notify).toHaveBeenLastCalledWith(t.dashboard.signal.sent("cancel"), "success");
+    expect(s.notify).toHaveBeenLastCalledWith(td.signal.sent("cancel"), "success");
     await flush();
     expect(s.api.dashOverview.mock.calls.length).toBe(overviewCalls + 1); // hemen bir yenileme
     expect(s.ctl.model(s.id)?.signaling).toBe(false);
 
     s.api.dashSignal.mockResolvedValueOnce("not_found" as never);
     expect(await s.ctl.signal(s.id, row(10), "terminate")).toBe("notFound");
-    expect(s.notify).toHaveBeenLastCalledWith(t.dashboard.signal.notFound, "info");
+    expect(s.notify).toHaveBeenLastCalledWith(td.signal.notFound, "info");
 
     // SQLSTATE 42501 arka uçtan `code: "query"` ile gelir: dostça metin + PostgreSQL'in metni birlikte
     s.api.dashSignal.mockRejectedValueOnce({
@@ -454,7 +454,7 @@ describe("dash-controller sinyal", () => {
 
     s.api.dashSignal.mockRejectedValueOnce(err("invalid"));
     expect(await s.ctl.signal(s.id, row(10), "cancel")).toBe("error");
-    expect(s.notify).toHaveBeenLastCalledWith(t.dashboard.signal.ownSession, "error");
+    expect(s.notify).toHaveBeenLastCalledWith(td.signal.ownSession, "error");
 
     s.api.dashSignal.mockRejectedValueOnce(err("query"));
     expect(await s.ctl.signal(s.id, row(10), "cancel")).toBe("error");
@@ -479,15 +479,15 @@ describe("dash-controller sinyal", () => {
     // canlı listede pid yok → gone
     s.api.dashActivity.mockResolvedValueOnce({ rows: [row(11)], truncated: false });
     expect(await s.ctl.signal(s.id, row(10), "terminate")).toBe("notFound");
-    expect(s.notify).toHaveBeenLastCalledWith(t.dashboard.signal.notFound, "info");
+    expect(s.notify).toHaveBeenLastCalledWith(td.signal.notFound, "info");
     // pid yeniden kullanıldı (kullanıcı değişti) → changed
     s.api.dashActivity.mockResolvedValueOnce({ rows: [row(10, { user: "bob" })], truncated: false });
     expect(await s.ctl.signal(s.id, row(10), "terminate")).toBe("changed");
-    expect(s.notify).toHaveBeenLastCalledWith(t.dashboard.signal.changed, "info");
+    expect(s.notify).toHaveBeenLastCalledWith(td.signal.changed, "info");
     // kesilmiş listede pid yok → "oturum yok" denmez, doğrulanamadı
     s.api.dashActivity.mockResolvedValueOnce({ rows: [row(11)], truncated: true });
     expect(await s.ctl.signal(s.id, row(10), "terminate")).toBe("error");
-    expect(s.notify).toHaveBeenLastCalledWith(t.dashboard.signal.unverified, "error");
+    expect(s.notify).toHaveBeenLastCalledWith(td.signal.unverified, "error");
     // canlı liste alınamadı → gönderilmez; SQL hatası ayrıntısıyla
     s.api.dashActivity.mockRejectedValueOnce({ ...err("query"), detail: "d", hint: "h" });
     expect(await s.ctl.signal(s.id, row(10), "cancel")).toBe("error");

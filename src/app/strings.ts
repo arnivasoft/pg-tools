@@ -106,6 +106,7 @@ export const t = {
     copyDdl: "DDL'i kopyala",
     openQueryTool: "Query Tool'da aç",
     openQueryToolShortcut: "Ctrl+Alt+Q",
+    openDashboard: "Dashboard'u aç",
     gone: "Bu öğe artık yok.",
     disconnected: "Bağlantı kesildi.",
     deleted: (name: string) => `‘${name}’ silindi.`,
@@ -333,16 +334,6 @@ export const t = {
         readOnlySetting: "Sunucu kilitli: salt okunur ayarını değiştiren ifade reddedildi.",
       },
       lockedSummary: "Sunucu salt okunur kilitli; betik çalıştırılmadı.",
-    },
-  },
-  dashboard: {
-    signal: {
-      sent: (kind: "cancel" | "terminate") =>
-        kind === "cancel" ? "İptal isteği gönderildi." : "Sonlandırma isteği gönderildi.",
-      notFound: "Oturum artık yok.",
-      changed: "Bu pid artık başka bir oturuma ait; işlem yapılmadı.",
-      unverified: "Oturum doğrulanamadı (liste kesildi); işlem yapılmadı.",
-      ownSession: "Kendi dashboard oturumunuzu durduramazsınız.",
     },
   },
 } as const;

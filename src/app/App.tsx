@@ -7,6 +7,7 @@ import { createDeleteConfirm } from "../ui/ConfirmDialog";
 import { copyText } from "./clipboard";
 import { Inspector } from "../features/inspector/Inspector";
 import { ROOT } from "../features/explorer/tree-model";
+import type { Dashboard } from "../features/dashboard/dash-open";
 import { createPasswordPrompt } from "../features/servers/PasswordPrompt";
 import { groupsOf } from "../features/servers/server-form";
 import { createQueryController } from "../features/query/query-controller";
@@ -33,15 +34,41 @@ const SHOW_SYSTEM_KEY = "pgt.showSystem";
 export default function App() {
   const prompt = createPasswordPrompt();
   const explorer = createExplorer({ api: commands, requestPassword: prompt.ask });
+  /** Sunucuyu katalog tarafında bağlar (gerekirse parola sorar); bağlıysa hemen `true`. */
+  const connectServer = async (serverId: string) => {
+    const node = [...explorer.state().nodes.values()].find((n) => n.kind === "server" && n.serverId === serverId);
+    return node ? explorer.controller.ensureConnected(node.id) : false;
+  };
+  // Dashboard tembel parçadadır: ilk "Dashboard'u aç"ta yüklenir (ana paket büyümez).
+  const [dash, setDash] = createSignal<Dashboard | null>(null);
+  let dashLoad: Promise<Dashboard> | null = null;
+  const loadDash = () =>
+    (dashLoad ??= import("../features/dashboard/dash-open").then(
+      (m) => {
+        const d = m.createDashboard({
+          api: commands,
+          tree: explorer.state,
+          tabs: query.tabs,
+          refreshServers: query.refreshServers,
+          connect: connectServer,
+          notify: toast.show,
+        });
+        setDash(d);
+        return d;
+      },
+      (err) => {
+        dashLoad = null; // sonraki denemede yeniden yüklensin
+        throw err;
+      },
+    ));
   const query = createQueryController({
     api: commands,
     notify: toast.show,
     tree: explorer.state,
-    connect: async (serverId) => {
-      const node = [...explorer.state().nodes.values()].find((n) => n.kind === "server" && n.serverId === serverId);
-      return node ? explorer.controller.ensureConnected(node.id) : false;
-    },
+    connect: connectServer,
     serversChanged: () => void explorer.controller.reloadServers().catch(() => {}),
+    // Arka uç sunucunun dashboard oturumlarını da kapatır (sil/kes/kayıt değişimi): sekmeler "bağlantı kesildi".
+    sessionsClosed: (serverId, gone) => dash()?.ctl.serverSessionsClosed(serverId, gone),
   });
   const [themePref, setThemePref] = createSignal(loadThemePreference());
   const [dialogOpen, setDialogOpen] = createSignal(false);
@@ -76,6 +103,11 @@ export default function App() {
     editServer: (serverId) => void openDialog(serverId),
     confirmDelete: deleteConfirm.ask,
     openQueryTool: (id) => void query.openFromNode(id),
+    openDashboard: (id) =>
+      void loadDash().then(
+        (d) => d.openFromNode(id),
+        (err) => toast.show(toPayload(err).message, "error"),
+      ),
     beforeServerChange: query.confirmServerChange,
     afterServerChange: (serverId, gone) => {
       query.serverSessionsClosed(serverId, gone);
@@ -201,7 +233,14 @@ export default function App() {
       </header>
       <SplitPane
         left={<ExplorerMenu explorer={explorer} deps={actionDeps} treeRef={setTreeEl} />}
-        right={<QueryTabs ctl={query} inspector={<Inspector explorer={explorer} />} />}
+        right={
+          <QueryTabs
+            ctl={query}
+            inspector={<Inspector explorer={explorer} />}
+            dash={() => dash()?.ctl ?? null}
+            onReopenDash={(id) => void dash()?.reopen(id)}
+          />
+        }
       />
       <footer class="flex h-6 shrink-0 items-center border-t border-border bg-panel px-2 text-xs text-muted">
         <StatusBar explorer={explorer} />

@@ -1,7 +1,7 @@
 // Dashboard sekmelerinin durumu (tembel parça): sekme başına bir `DashId`, bir `Poller` ve bir model sinyali. Yenileme turu,
 // bölüm listeleri, kayıp/yeniden açma ve iptal/sonlandırma akışı (onay kapısı → canlı doğrulama → `dash_signal`) buradadır.
 import { createSignal, type Accessor, type Setter } from "solid-js";
-import { t } from "../../app/strings";
+import { td } from "../../app/strings-dashboard";
 import type { ToastKind } from "../../app/toast-model";
 import type { ActivityReport } from "../../ipc/bindings/ActivityReport";
 import type { ActivityRow } from "../../ipc/bindings/ActivityRow";
@@ -440,11 +440,11 @@ export function createDashController(deps: DashControllerDeps) {
       const check = revalidate(row, live.rows);
       if (!check.ok && check.reason === "gone" && live.truncated) {
         // Liste kesildi: pid kesimin ötesinde olabilir; "oturum yok" denemez, işlem yapılmaz.
-        notify(t.dashboard.signal.unverified, "error");
+        notify(td.signal.unverified, "error");
         return "error";
       }
       if (!check.ok) {
-        notify(check.reason === "gone" ? t.dashboard.signal.notFound : t.dashboard.signal.changed, "info");
+        notify(check.reason === "gone" ? td.signal.notFound : td.signal.changed, "info");
         return check.reason === "gone" ? "notFound" : "changed";
       }
       let outcome: SignalOutcome;
@@ -458,16 +458,16 @@ export function createDashController(deps: DashControllerDeps) {
           return "error";
         }
         // Yetki hatası (SQLSTATE 42501) `code: "query"` ile gelir: dostça metin + PostgreSQL'in metni (`errorText`).
-        notify(p.code === "invalid" ? t.dashboard.signal.ownSession : errorText(p), "error");
+        notify(p.code === "invalid" ? td.signal.ownSession : errorText(p), "error");
         return "error";
       }
       if (!alive(tabId, e, gen)) return outcome === "sent" ? "sent" : "notFound";
       if (outcome === "sent") {
-        notify(t.dashboard.signal.sent(kind), "success");
+        notify(td.signal.sent(kind), "success");
         refreshNow(tabId);
         return "sent";
       }
-      notify(t.dashboard.signal.notFound, "info");
+      notify(td.signal.notFound, "info");
       return "notFound";
     } finally {
       // Kuşak değiştiyse (kayıp/yeniden açma) bayrak orada sıfırlandı; yeni kuşağın sinyaline dokunulmaz.

@@ -39,7 +39,7 @@ import { ResultGrid, type ActiveCell } from "./ResultGrid";
 import { ResultStrip } from "./ResultStrip";
 import { MAX_TAB_ROWS } from "./result-model";
 import { canCancel, canCommit, canLoadMoreRows, canRollback } from "./run-model";
-import { OBJECT_TAB_ID } from "./tabs-store";
+import { isQueryTabId } from "./tabs-store";
 import { routeError, sameScope, swapEditorState, type SavedView } from "./workspace-model";
 
 /** Arka uç geçmiş sınırı (`MAX_HISTORY`). */
@@ -61,9 +61,10 @@ type EditorPrefs = { checkEnabled: boolean; format: FormatOptions };
 export default function QueryTab(props: { ctl: QueryController }) {
   const ctl = props.ctl;
   const r = t.query.results;
+  /** Etkin sorgu sekmesi; "Nesne" ya da dashboard etkinse `null` (editör geçişi/çalıştırma/denetim yok). */
   const activeId = () => {
     const a = ctl.tabs.state.activeId;
-    return a === OBJECT_TAB_ID ? null : a;
+    return isQueryTabId(ctl.tabs.state, a) ? a : null;
   };
   /** Durumu editörde olan sekme. */
   const [shownId, setShownId] = createSignal<string | null>(null);

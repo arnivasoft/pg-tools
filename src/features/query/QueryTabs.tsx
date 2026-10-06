@@ -1,36 +1,61 @@
-// Sağ panel: sabit "Nesne" sekmesi (Inspector) + sorgu sekmeleri. Ana pakette kalır; çalışma alanı (CodeMirror,
-// ızgara) ilk sorgu sekmesi etkinleşene kadar inmeyen tembel bir parçadır.
+// Sağ panel: sabit "Nesne" sekmesi (Inspector) + sorgu sekmeleri + dashboard sekmeleri. Ana pakette kalır; çalışma
+// alanı (CodeMirror, ızgara) ilk sorgu sekmesi etkinleşene kadar, dashboard gövdesi ilk dashboard açılana kadar inmeyen
+// tembel parçalardır.
 import { Lock, X } from "lucide-solid";
 import { For, Show, Suspense, createSignal, lazy, onCleanup, onMount, type JSX } from "solid-js";
 import { t } from "../../app/strings";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
+import type { DashController } from "../dashboard/dash-controller";
 import { isProductionLabel } from "../servers/server-form";
 import type { QueryController } from "./query-controller";
-import { OBJECT_TAB_ID } from "./tabs-store";
+import { OBJECT_TAB_ID, isDashTabId, isQueryTabId } from "./tabs-store";
 import { ENV_CHOICES, canCommitAny, envLabel, envLockDefault, serverLineColor, type EnvChoice } from "./workspace-model";
 
 const QueryTab = lazy(() => import("./QueryTab"));
+// Dashboard sekme başlıkları ve panelleri: denetleyici yüklendiğinde (ilk dashboard açılırken) inen tembel parça.
+const dashTabs = () => import("../dashboard/DashTabs");
+const DashTabHeads = lazy(() => dashTabs().then((m) => ({ default: m.DashTabHeads })));
+const DashPanels = lazy(() => dashTabs().then((m) => ({ default: m.DashPanels })));
 
-export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element }) {
+export function QueryTabs(props: {
+  ctl: QueryController;
+  inspector: JSX.Element;
+  /** Tembel dashboard denetleyicisi (ilk dashboard açılırken yüklenir; o zamana kadar `null`). */
+  dash?: () => DashController | null;
+  /** Kayıp dashboard'u yeniden aç (önce sunucuyu bağlar). */
+  onReopenDash?: (tabId: string) => void;
+}) {
   const ctl = props.ctl;
   const active = () => ctl.tabs.state.activeId;
   const isObject = () => active() === OBJECT_TAB_ID;
+  const isQuery = () => isQueryTabId(ctl.tabs.state, active());
+  const isDash = (id: string) => isDashTabId(ctl.tabs.state, id);
+
+  /** Dashboard sekmesi onaysız kapanır: önce oturum (`dash_close`), sonra sekme. */
+  const closeDash = (id: string) => {
+    props.dash?.()?.close(id);
+    ctl.tabs.close(id);
+  };
+  const requestClose = (id: string) => (isDash(id) ? closeDash(id) : void ctl.requestClose(id));
 
   // WebView yeniden yüklemesi (F5, Ctrl+R, Ctrl+Shift+R) oturumları kaybettirir: her zaman engellenir.
-  // Sorgu sekmesi etkinken (ağaç dışında) F5 tüm betiği çalıştırır; ağaçta F5 düğümü yeniler.
+  // Sorgu sekmesi etkinken (ağaç dışında) F5 tüm betiği çalıştırır, dashboard etkinken onu yeniler; ağaçta F5 düğümü
+  // yeniler.
   const onKeyCapture = (e: KeyboardEvent) => {
     const k = e.key;
     const reload = k === "F5" || ((e.ctrlKey || e.metaKey) && !e.altKey && k.toLowerCase() === "r");
     if (!reload) return;
     e.preventDefault();
-    if (k !== "F5" || e.ctrlKey || e.shiftKey || e.altKey || isObject()) return;
+    const a = active();
+    if (k !== "F5" || e.ctrlKey || e.shiftKey || e.altKey || a === OBJECT_TAB_ID) return;
     const target = e.target instanceof Element ? e.target : null;
     // Yalnızca sağ paneldeyken (ya da odak hiçbir yerde değilken); ağaç, filtre kutusu, araç çubuğu: F5 çalıştırmaz.
     const here = target === null || target === document.body || target.closest("[data-query-panel]") !== null;
     if (!here || document.querySelector('[role="dialog"]')) return;
     e.stopPropagation();
-    ctl.runActive("all");
+    if (isDash(a)) props.dash?.()?.refreshNow(a);
+    else ctl.runActive("all");
   };
 
   onMount(() => {
@@ -66,7 +91,7 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
       ctl.activate(id);
     } else if (e.key === "Delete" && id !== OBJECT_TAB_ID) {
       e.preventDefault();
-      void ctl.requestClose(id);
+      requestClose(id);
     }
   };
 
@@ -74,6 +99,61 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
     `group relative flex h-8 max-w-56 shrink-0 cursor-default items-center gap-1.5 border-r border-border px-2.5 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent ${
       selected ? "bg-bg text-fg" : "text-muted hover:bg-hover"
     }`;
+
+  /** Sorgu ve dashboard sekme başlığı: sunucu işaretleri (renk çizgisi, üretim rozeti, kilit) + içerik + kapatma. */
+  const TabHead = (p: { id: string; title: string; serverId: string | null; children: JSX.Element }) => {
+    const config = () => ctl.serverConfig(p.serverId);
+    const production = () => isProductionLabel(config()?.label);
+    const line = () => serverLineColor(config());
+    return (
+      <div
+        role="tab"
+        tabIndex={0}
+        aria-selected={active() === p.id}
+        title={p.title}
+        class={tabClass(active() === p.id)}
+        onClick={() => ctl.activate(p.id)}
+        onKeyDown={(e) => onTabKey(e, p.id)}
+        onMouseDown={(e) => {
+          if (e.button === 1) e.preventDefault(); // orta tık otomatik kaydırma başlatmasın
+        }}
+        onAuxClick={(e) => {
+          if (e.button === 1) {
+            e.preventDefault();
+            requestClose(p.id);
+          }
+        }}
+      >
+        <Show when={line()}>
+          {(color) => (
+            <span aria-hidden="true" class="absolute inset-x-0 top-0" style={{ height: production() ? "3px" : "2px", background: color() }} />
+          )}
+        </Show>
+        <Show when={production()}>
+          <span class="shrink-0 rounded px-1 text-[10px] font-semibold text-white" style={{ background: line() ?? "var(--danger)" }}>
+            {config()?.label}
+          </span>
+        </Show>
+        <Show when={config()?.readOnlyLock}>
+          <Lock size={11} class="shrink-0" role="img" aria-label={t.query.ctx.locked} />
+        </Show>
+        {p.children}
+        <button
+          type="button"
+          tabIndex={-1}
+          class="ml-0.5 shrink-0 rounded p-0.5 text-muted opacity-60 hover:bg-hover hover:text-fg hover:opacity-100"
+          title={t.query.tabs.closeNamed(p.title)}
+          aria-label={t.query.tabs.closeNamed(p.title)}
+          onClick={(e) => {
+            e.stopPropagation();
+            requestClose(p.id);
+          }}
+        >
+          <X size={12} />
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div data-query-panel class="flex h-full min-h-0 flex-col">
@@ -91,50 +171,12 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
         <For each={ctl.tabs.state.tabs}>
           {(tab) => {
             const m = () => ctl.model(tab.id);
-            const config = () => ctl.serverConfig(m()?.serverId ?? null);
-            const production = () => isProductionLabel(config()?.label);
-            const line = () => serverLineColor(config());
-            const selected = () => active() === tab.id;
             const busy = () => {
               const s = m()?.run.status;
               return s === "running" || s === "cancelling";
             };
             return (
-              <div
-                role="tab"
-                tabIndex={0}
-                aria-selected={selected()}
-                title={tab.title}
-                class={tabClass(selected())}
-                onClick={() => ctl.activate(tab.id)}
-                onKeyDown={(e) => onTabKey(e, tab.id)}
-                onMouseDown={(e) => {
-                  if (e.button === 1) e.preventDefault(); // orta tık otomatik kaydırma başlatmasın
-                }}
-                onAuxClick={(e) => {
-                  if (e.button === 1) {
-                    e.preventDefault();
-                    void ctl.requestClose(tab.id);
-                  }
-                }}
-              >
-                <Show when={line()}>
-                  {(color) => (
-                    <span
-                      aria-hidden="true"
-                      class="absolute inset-x-0 top-0"
-                      style={{ height: production() ? "3px" : "2px", background: color() }}
-                    />
-                  )}
-                </Show>
-                <Show when={production()}>
-                  <span class="shrink-0 rounded px-1 text-[10px] font-semibold text-white" style={{ background: line() ?? "var(--danger)" }}>
-                    {config()?.label}
-                  </span>
-                </Show>
-                <Show when={config()?.readOnlyLock}>
-                  <Lock size={11} class="shrink-0" role="img" aria-label={t.query.ctx.locked} />
-                </Show>
+              <TabHead id={tab.id} title={tab.title} serverId={m()?.serverId ?? null}>
                 <span class="truncate" classList={{ "line-through opacity-70": !!m()?.serverGone }}>
                   {tab.title}
                 </span>
@@ -150,23 +192,17 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
                 <Show when={busy()}>
                   <span class="shrink-0 text-muted" role="img" aria-label={t.query.ctx.running}>…</span>
                 </Show>
-                <button
-                  type="button"
-                  tabIndex={-1}
-                  class="ml-0.5 shrink-0 rounded p-0.5 text-muted opacity-60 hover:bg-hover hover:text-fg hover:opacity-100"
-                  title={t.query.tabs.closeNamed(tab.title)}
-                  aria-label={t.query.tabs.closeNamed(tab.title)}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void ctl.requestClose(tab.id);
-                  }}
-                >
-                  <X size={12} />
-                </button>
-              </div>
+              </TabHead>
             );
           }}
         </For>
+        <Show when={props.dash?.()}>
+          {(dash) => (
+            <Suspense>
+              <DashTabHeads dash={dash()} tabs={ctl.tabs.state.dashboards} Head={TabHead} />
+            </Suspense>
+          )}
+        </Show>
       </div>
       {/* Gizli panel `invisible` ile saklanır (display:none kaydırma konumunu sıfırlar). */}
       <div class="relative min-h-0 flex-1">
@@ -174,11 +210,18 @@ export function QueryTabs(props: { ctl: QueryController; inspector: JSX.Element 
           {props.inspector}
         </div>
         <Show when={ctl.everQuery()}>
-          <div class="absolute inset-0 bg-bg" classList={{ "invisible pointer-events-none": isObject() }} aria-hidden={isObject()}>
+          <div class="absolute inset-0 bg-bg" classList={{ "invisible pointer-events-none": !isQuery() }} aria-hidden={!isQuery()}>
             <Suspense fallback={<p class="p-3 text-muted">{t.query.tabs.loading}</p>}>
               <QueryTab ctl={ctl} />
             </Suspense>
           </div>
+        </Show>
+        <Show when={props.dash?.()}>
+          {(dash) => (
+            <Suspense>
+              <DashPanels dash={dash()} tabs={ctl.tabs.state.dashboards} activeId={active()} onReopen={(id) => props.onReopenDash?.(id)} />
+            </Suspense>
+          )}
         </Show>
       </div>
       <CloseTxDialog ctl={ctl} />

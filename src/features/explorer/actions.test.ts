@@ -3,7 +3,7 @@ import { t } from "../../app/strings";
 import type { NodeKind } from "../../ipc/bindings/NodeKind";
 import type { TreeNode } from "../../ipc/bindings/TreeNode";
 import { IpcError } from "../../ipc/errors";
-import { actionsFor, executeAction, qualifiedParts, type ActionDeps } from "./actions";
+import { actionsFor, executeAction, groupOf, qualifiedParts, type ActionDeps } from "./actions";
 import { ROOT, emptyTree, type TreeState } from "./tree-model";
 
 const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false, locked: false };
@@ -77,11 +77,19 @@ describe("qualifiedParts / actionsFor", () => {
   });
   it("menu per node kind", () => {
     expect(actionsFor(s, node(s, "srv-down"))).toEqual(["openQueryTool", "connect", "editServer", "deleteServer", "copyName"]);
-    expect(actionsFor(s, node(s, "srv-up"))).toEqual(["openQueryTool", "refresh", "disconnect", "editServer", "deleteServer", "copyName"]);
+    expect(actionsFor(s, node(s, "srv-up"))).toEqual(["openQueryTool", "openDashboard", "refresh", "disconnect", "editServer", "deleteServer", "copyName"]);
     expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["refresh", "copyName"]);
     expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "col-id"))).toEqual(["copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "con-1"))).toEqual(["copyName", "copyDdl"]);
+  });
+  it("Dashboard: bağlı sunucuda ve veritabanında var, bağlı olmayan sunucuda ve diğer düğümlerde yok", () => {
+    expect(actionsFor(s, node(s, "srv-up"))).toContain("openDashboard");
+    expect(actionsFor(s, node(s, "db-app"))).toEqual(["openQueryTool", "openDashboard", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "srv-down"))).not.toContain("openDashboard");
+    for (const id of ["sch-app", "tbl-orders", "coll-tables", "col-id"]) expect(actionsFor(s, node(s, id))).not.toContain("openDashboard");
+    // Query Tool ile aynı menü grubunda (ayırıcısız).
+    expect(groupOf("openDashboard")).toBe(groupOf("openQueryTool"));
   });
 });
 
@@ -148,6 +156,13 @@ describe("executeAction", () => {
     const d = { ...deps(sampleTree()), openQueryTool: vi.fn() };
     await executeAction(asDeps(d), "openQueryTool", "tbl-orders");
     expect(d.openQueryTool).toHaveBeenCalledWith("tbl-orders");
+  });
+
+  it("openDashboard hands the node to the dashboard opener", async () => {
+    const d = { ...deps(sampleTree()), openDashboard: vi.fn(), openQueryTool: vi.fn() };
+    await executeAction(asDeps(d), "openDashboard", "db-app");
+    expect(d.openDashboard).toHaveBeenCalledWith("db-app");
+    expect(d.openQueryTool).not.toHaveBeenCalled();
   });
 
   it("disconnect/delete ask about open transactions first and report closed sessions", async () => {

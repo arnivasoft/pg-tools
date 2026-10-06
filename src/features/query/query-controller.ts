@@ -12,7 +12,7 @@ import { toPayload } from "../../ipc/errors";
 import type { TreeState } from "../explorer/tree-model";
 import { readStorage, writeStorage } from "../../app/storage";
 import { initialRun, runReduce, type CloseChoice, type RunEvent, type RunState } from "./run-model";
-import { createTabsStore, OBJECT_TAB_ID } from "./tabs-store";
+import { createTabsStore, isQueryTabId } from "./tabs-store";
 import {
   DRAFT_DEBOUNCE_MS, applyEnvChoice, bulkPolicy, choicePolicy, closePlan, createDebouncer, defaultOptions, initialSql,
   needsEnvPrompt, nextTxSince, openContext, pendingTransactions, restoreDraft, routeError, saveClosesSessions, toDraft,
@@ -100,6 +100,8 @@ export interface QueryControllerDeps {
   connect: (serverId: string) => Promise<boolean>;
   /** Sunucu kaydı arayüzden değiştiğinde (ortam etiketi) ağaç yenilensin. */
   serversChanged: () => void;
+  /** Arka uç sunucunun tüm oturumlarını kapattı (sorgu sekmelerinden sonra; ör. dashboard sekmeleri için). */
+  sessionsClosed?: (serverId: string, gone: boolean) => void;
 }
 
 export function createQueryController(deps: QueryControllerDeps) {
@@ -227,9 +229,10 @@ export function createQueryController(deps: QueryControllerDeps) {
     return realId;
   };
 
+  // Dashboard ya da "Nesne" sekmesi Query Tool parçasını (CodeMirror) yüklemez.
   const activate = (id: string) => {
     tabs.activate(id);
-    if (id !== OBJECT_TAB_ID) setEverQuery(true);
+    if (isQueryTabId(tabs.state, id)) setEverQuery(true);
   };
 
   // ---- ortam istemi
@@ -479,6 +482,7 @@ export function createQueryController(deps: QueryControllerDeps) {
       if (gone) patch(x.id, { serverGone: true });
       if (x.session) sessionLost(x.id);
     }
+    deps.sessionsClosed?.(serverId, gone);
   };
 
   /** Pencere kapatma isteği. `true`: kapanabilir (taslaklar yazıldı); `false`: kullanıcı vazgeçti. */
@@ -519,7 +523,7 @@ export function createQueryController(deps: QueryControllerDeps) {
 
   const rename = (id: string, title: string) => {
     tabs.rename(id, title);
-    saver.touch(id);
+    if (entries.has(id)) saver.touch(id); // dashboard sekmesinin taslağı yok
   };
 
   return {
