@@ -71,6 +71,12 @@ fn supporting_requests_parse() {
     let _: LookupRequest = roundtrip(json!({"kind": "extension_versions", "name": "citext"}));
     let _: LookupRequest = roundtrip(json!({"kind": "tables", "schema": null}));
     let _: LookupRequest = roundtrip(json!({"kind": "table_columns", "schema": "public", "table": "t"}));
+    let t: LookupRequest = roundtrip(json!({"kind": "types", "query": "int"}));
+    assert_eq!(t, LookupRequest::Types { query: Some("int".into()) });
+    let _: LookupRequest = roundtrip(json!({"kind": "types", "query": null}));
+    let c: LookupRequest = roundtrip(json!({"kind": "collations"}));
+    assert_eq!(c, LookupRequest::Collations);
+    let _: ObjectRef = roundtrip(json!({"kind": "table", "oid": 16385}));
 }
 
 #[test]

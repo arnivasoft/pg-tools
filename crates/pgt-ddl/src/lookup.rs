@@ -1,4 +1,5 @@
-//! Diyalogların açılır listeleri için salt okunur katalog sorguları (rol, şema, tablespace, eklenti, yöntem, tablo, kolon).
+//! Diyalogların açılır listeleri için salt okunur katalog sorguları (rol, şema, tablespace, eklenti, yöntem, tablo, kolon,
+//! kolon tipi, collation).
 
 use pgt_catalog::version::{PgVersion, VersionedSql};
 use pgt_core::Result;
@@ -25,6 +26,12 @@ pub enum LookupRequest {
     IndexMethods,
     Tables { schema: Option<String> },
     TableColumns { schema: String, table: String },
+    /// Kolon tipi önerileri: value = `format_type` biçiminde kullanılabilir tip ifadesi (arama yolu dışındaysa şema
+    /// nitelikli, dizi `x[]`), detail = tür (base/enum/domain/composite/range/multirange/array). `query`: büyük/küçük
+    /// harf duyarsız alt dize (önek eşleşmeleri önce); en çok 200 sonuç.
+    Types { query: Option<String> },
+    /// Kolon collation'ları: value = adla yazılabilen collation adı, detail = sağlayıcı · locale.
+    Collations,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -43,6 +50,13 @@ static EXTENSION_VERSIONS: VersionedSql = VersionedSql(&[(10, include_str!("sql/
 static METHODS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_index_methods.sql"))]);
 static TABLES: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_tables.sql"))]);
 static COLUMNS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_table_columns.sql"))]);
+static TYPES: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_types.sql"))]);
+/// ICU locale sütunu: PG 15–16 `colliculocale`, PG 17+ `colllocale`.
+static COLLATIONS: VersionedSql = VersionedSql(&[
+    (10, include_str!("sql/lookup_collations.pg10.sql")),
+    (15, include_str!("sql/lookup_collations.pg15.sql")),
+    (17, include_str!("sql/lookup_collations.sql")),
+]);
 
 /// Metin parametreleriyle (`$1`, `$2`…; `None` = NULL) çalıştırır.
 async fn fetch(mgr: &ConnectionManager, server: Uuid, db: u32, sql: &'static VersionedSql, params: Vec<Option<String>>) -> Result<Vec<Row>> {
@@ -95,6 +109,12 @@ pub async fn lookup(mgr: &ConnectionManager, server: Uuid, database_oid: u32, re
         }
         LookupRequest::Tables { schema } => items(&fetch(mgr, server, db, &TABLES, vec![schema]).await?),
         LookupRequest::TableColumns { schema, table } => items(&fetch(mgr, server, db, &COLUMNS, vec![Some(schema), Some(table)]).await?),
+        // Boş/boşluk arama metni = filtre yok.
+        LookupRequest::Types { query } => {
+            let q = query.map(|q| q.trim().to_string()).filter(|q| !q.is_empty());
+            items(&fetch(mgr, server, db, &TYPES, vec![q]).await?)
+        }
+        LookupRequest::Collations => items(&fetch(mgr, server, db, &COLLATIONS, vec![]).await?),
     })
 }
 
@@ -112,5 +132,11 @@ mod tests {
         assert_eq!(r, LookupRequest::ExtensionVersions { name: "citext".into() });
         let r: LookupRequest = serde_json::from_value(serde_json::json!({"kind": "table_columns", "schema": "a", "table": "t"})).unwrap();
         assert_eq!(r, LookupRequest::TableColumns { schema: "a".into(), table: "t".into() });
+        let r: LookupRequest = serde_json::from_value(serde_json::json!({"kind": "types", "query": "int"})).unwrap();
+        assert_eq!(r, LookupRequest::Types { query: Some("int".into()) });
+        let r: LookupRequest = serde_json::from_value(serde_json::json!({"kind": "types", "query": null})).unwrap();
+        assert_eq!(r, LookupRequest::Types { query: None });
+        let r: LookupRequest = serde_json::from_value(serde_json::json!({"kind": "collations"})).unwrap();
+        assert_eq!(r, LookupRequest::Collations);
     }
 }

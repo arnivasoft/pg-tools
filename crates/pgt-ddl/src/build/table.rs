@@ -515,8 +515,31 @@ fn validate_partition(d: &TableDef, table_cols: &HashSet<&str>, ctx: &BuildCtx, 
             PartitionKey::Expression { sql } => check_free_sql(&pj, sql, e),
         }
     }
-    // UNLOGGED bölümlenmiş tablo (PG 18 reddeder, eskiler kabul eder) ve bölümlenmiş tabloda TABLESPACE (PG 12 öncesi
-    // davranış) sürüm ayrıntısından emin olmadığımız için sunucuya bırakılır.
+    // Gerçek sunucuda doğrulandı (Task 5, PG 10–18):
+    // - PG 18 "partitioned tables cannot be unlogged"; PG 10–17 kabul eder (relpersistence = 'u' yüklenir).
+    if d.persistence == Persistence::Unlogged && ctx.version_num >= 180000 {
+        e.push(err("persistence", PARTITIONED_UNLOGGED_MSG));
+    }
+    // - PG 10–11 bölümlenmiş tablonun TABLESPACE'ini sessizce yoksayar (reltablespace 0 kalır → gidiş-dönüş bozulur);
+    //   PG 12+ "cannot specify default tablespace for partitioned relations" (veritabanının varsayılanı pg_default).
+    if let Some(ts) = &d.tablespace {
+        if ctx.version_num < 120000 {
+            e.push(version_err("tablespace", "Bölümlenmiş tabloda TABLESPACE", 12));
+        } else if ts == "pg_default" {
+            e.push(err(
+                "tablespace",
+                "Bölümlenmiş tabloda varsayılan tablespace (pg_default) açıkça belirtilemez; boş bırakın.",
+            ));
+        }
+    }
+}
+
+pub(crate) const PARTITIONED_UNLOGGED_MSG: &str =
+    "PG 18+ bölümlenmiş tablo UNLOGGED olamaz (bölümler ayrı ayrı UNLOGGED yapılabilir).";
+
+/// Tablo bölümlenmiş mi: istemcinin kurduğu tanımda `partition_by`, yüklenmiş tanımda `partition_text` dolu.
+pub(crate) fn is_partitioned(d: &TableDef) -> bool {
+    d.partition_by.is_some() || d.partition_text.is_some()
 }
 
 /// Ortak tablo doğrulaması (create ve alter'ın yeni tarafı). Hata sırası sabittir: tablo alanları, kolonlar,
@@ -701,7 +724,8 @@ pub fn drop(d: &TableDef, cascade: bool) -> Plan {
     if d.is_partition {
         notes.push(PARTITION_DROP_NOTE);
     }
-    if d.partition_by.is_some() {
+    // Yüklenmiş bölümlenmiş tabloda `partition_by` boştur; `partition_text` dolu.
+    if is_partitioned(d) {
         notes.push(PARTITIONED_DROP_NOTE);
     }
     let note = (!notes.is_empty()).then(|| notes.join("; "));
@@ -2179,5 +2203,39 @@ mod tests {
         ] {
             assert_eq!(bdrop(&o(d), true, &ctx()).unwrap_err()[0].path, path);
         }
+    }
+
+    /// Gerçek sunucu gidiş-dönüşlerinin (Task 5) ortaya çıkardığı create kuralları.
+    #[test]
+    fn partitioned_storage_rules_found_on_real_servers() {
+        // PG 18 UNLOGGED bölümlenmiş tabloyu reddeder; PG 10–17 kabul eder.
+        let ul = TableDef { persistence: Persistence::Unlogged, ..parted() };
+        let e = create_errs(&ul, &v(180000));
+        assert_eq!((e.len(), e[0].path.as_str()), (1, "persistence"), "{e:?}");
+        assert!(ok(&ul, &v(170000)).statements[0].sql.starts_with("CREATE UNLOGGED TABLE"));
+        // Sıradan UNLOGGED tablo PG 18'de serbest.
+        ok(&TableDef { persistence: Persistence::Unlogged, ..base() }, &v(180000));
+        // PG 10–11 bölümlenmiş tablonun TABLESPACE'ini sessizce yoksayar; PG 12+ pg_default'u açıkça reddeder.
+        for ver in [100000, 110000] {
+            for ts in ["fast", "pg_default"] {
+                let e = create_errs(&TableDef { tablespace: Some(ts.into()), ..parted() }, &v(ver));
+                assert_eq!((e.len(), e[0].path.as_str()), (1, "tablespace"), "{ver} {ts}: {e:?}");
+                assert!(e[0].message.contains("PG 12+"));
+            }
+        }
+        let e = create_errs(&TableDef { tablespace: Some("pg_default".into()), ..parted() }, &v(120000));
+        assert_eq!((e.len(), e[0].path.as_str()), (1, "tablespace"), "{e:?}");
+        assert!(ok(&TableDef { tablespace: Some("fast".into()), ..parted() }, &v(120000)).statements[0].sql.ends_with(" TABLESPACE fast"));
+        // Sıradan tabloda pg_default tüm sürümlerde serbest.
+        ok(&TableDef { tablespace: Some("pg_default".into()), ..base() }, &v(100000));
+    }
+
+    #[test]
+    fn loaded_partitioned_table_drop_note() {
+        // Yüklenmiş bölümlenmiş tabloda partition_by yok, partition_text var: not yine eklenir.
+        let loaded = TableDef { partition_text: Some("LIST (k)".into()), ..base() };
+        let p = bdrop(&o(loaded), false, &ctx()).unwrap();
+        assert_eq!(p.statements[0].note.as_deref(), Some(PARTITIONED_DROP_NOTE));
+        assert!(is_partitioned(&parted()) && !is_partitioned(&base()));
     }
 }

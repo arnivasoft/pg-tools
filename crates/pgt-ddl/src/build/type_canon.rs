@@ -10,7 +10,7 @@
 //!   `"char"` ≠ `char`).
 //! - Baştaki `pg_catalog.` yalnızca kalan ad bilinen bir yerleşik takma ad/kanonik ad ise atılır.
 //! - Yerleşik takma adlar `format_type` çıktısına eşlenir (bkz. `canon_builtin`); tip değiştiricileri anlamlıdır
-//!   (`timestamp(6)` ≠ `timestamp`, `numeric` ≠ `numeric(1000)`).
+//!   (`timestamp(6)` ≠ `timestamp`, `numeric` ≠ `numeric(1000)`); ölçeksiz `numeric(p)` = `numeric(p,0)`.
 //! - Dizi ekleri (`[]`, `[n]`, `[][]`) tek `[]`'a indirgenir (PG boyut/uzunluk bilgisini saklamaz).
 //!
 //! Bilinen sınırlar (bilinçli): arama yoluna bağlı eşdeğerlik çözülmez (`public.mytype` ≠ `mytype`); tırnaklı
@@ -129,7 +129,11 @@ fn canon_builtin(words: &[String], mods: Option<&[String]>, tail: &[String]) -> 
             },
             _ => None,
         },
-        "decimal" | "numeric" => plain("numeric"),
+        // PG ölçeği verilmeyen hassasiyeti `numeric(p,0)` olarak saklar (`format_type` öyle yazar).
+        "decimal" | "numeric" => match mods {
+            Some([p]) if tail.is_empty() => Some(format!("numeric({p},0)")),
+            _ => plain("numeric"),
+        },
         "varchar" | "char varying" | "character varying" | "national character varying"
         | "national char varying" => plain("character varying"),
         "char" | "character" | "nchar" | "national character" | "national char" => {
@@ -242,6 +246,10 @@ mod tests {
             ("decimal(10,2)", "numeric(10,2)"),
             ("numeric (10, 2)", "numeric(10,2)"),
             ("numeric( 10 , -2 )", "numeric(10,-2)"),
+            // Gidiş-dönüş (Task 5, gerçek sunucu): `numeric(5)` → format_type `numeric(5,0)`.
+            ("numeric(5)", "numeric(5,0)"),
+            ("decimal(7)", "numeric(7,0)"),
+            ("numeric(5,0)", "numeric(5,0)"),
             ("varchar", "character varying"),
             ("varchar(20)", "character varying(20)"),
             ("char varying(5)", "character varying(5)"),
@@ -287,6 +295,7 @@ mod tests {
         for (a, b) in [
             ("timestamp(6)", "timestamp"),
             ("numeric", "numeric(1000)"),
+            ("numeric(5)", "numeric(5,1)"),
             ("varchar(20)", "varchar(21)"),
             ("char", "char(2)"),
             ("bit", "bit varying"),

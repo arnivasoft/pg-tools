@@ -29,11 +29,18 @@
 //!   `wrap` ile yerleşir ve serbest SQL içeren her NİHAİ ifade (CHECK'li `ADD CONSTRAINT` dahil tüm kısıt
 //!   eklemeleri) ayrıca `composed_is_clean` ile taranır.
 //! - Kolon sırası değiştirilemez: fark yalnızca ekleme/silme/değişim üzerinden üretilir, sıra farkı uyarıdır.
+//! - Gerçek sunucularda (PG 10–18, Task 5) doğrulanan kurallar yerel hatadır: bölümlenmiş tabloda (yüklenmişte
+//!   `partition_text` dolu) kalıcılık değişimi (PG 10–17 sessizce yoksayar, PG 18 reddeder), PG 12 öncesi
+//!   `SET TABLESPACE` (yoksayılır), fillfactor ve PG 18 öncesi `NOT VALID` FK; PG 18'de CHECK'li tabloda sanal kolonun
+//!   `SET EXPRESSION`'ı. Üretilmiş kolonun ifadesinde geçen kolonun tip değişimi (sunucu reddeder) yalnızca uyarıdır:
+//!   ifadenin kullandığı kolonlar yerelde kesin bilinemez.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::freesql::{composed_is_clean, wrap};
-use super::table::{column_comment_sql, column_sql, has_comment, table_comment_sql, validate_table, version_err};
+use super::table::{
+    column_comment_sql, column_sql, has_comment, is_partitioned, table_comment_sql, validate_table, version_err,
+};
 use super::table_constraint::{
     ADD_CONSTRAINT_WARNING, ConstraintDiff, DROP_CONSTRAINT_NOTE, PK_DROP_WARNING, VALIDATE_NOTE, add_note,
     add_path, add_sql, check_new_oids, constraint_columns, diff as constraint_diff, drop_sql, is_pk, rename_note,
@@ -41,7 +48,7 @@ use super::table_constraint::{
 };
 use super::type_canon::canonical_type;
 use super::{BuildCtx, check_ident, check_schema_ident, err, stmt};
-use crate::model::{ColumnDef, FieldError, IdentityKind, Persistence, TableDef};
+use crate::model::{ColumnDef, ConstraintKind, FieldError, IdentityKind, Persistence, TableDef};
 use crate::plan::{Plan, Risk, Statement};
 use crate::quote::{qualified, quote_ident};
 
@@ -75,6 +82,7 @@ const COMPOSED_MSG: &str =
 const LOAD_FLAG_MSG: &str = "Bu alan yüklemeden gelir ve değiştirilemez; tanımı yeniden yükleyin.";
 const PARTITION_BY_MSG: &str =
     "Bölümleme anahtarı sonradan değiştirilemez; yalnızca tablo oluşturulurken belirlenir.";
+const PARTITIONED_PERSISTENCE_MSG: &str = "Bölümlenmiş tablonun kalıcılığı (LOGGED/UNLOGGED) değiştirilemez; bölümleri ayrı ayrı değiştirin.";
 const TABLESPACE_CLEAR_MSG: &str =
     "Tablespace kaldırılamaz; varsayılana dönmek için pg_default'u açıkça seçin.";
 
@@ -233,6 +241,38 @@ fn check_alter_rules(
     if old.tablespace.is_some() && new.tablespace.is_none() {
         e.push(err("tablespace", TABLESPACE_CLEAR_MSG));
     }
+    // Bölümlenmiş tablonun kendi depolaması yoktur (gerçek sunucuda doğrulandı, Task 5):
+    if is_partitioned(old) {
+        // PG 10–17 `SET LOGGED|UNLOGGED`'ı sessizce yoksayar (yeniden yüklemede değişmemiş görünür), PG 18 reddeder.
+        if old.persistence != new.persistence {
+            e.push(err("persistence", PARTITIONED_PERSISTENCE_MSG));
+        }
+        // PG 10–11 `SET TABLESPACE`'i sessizce yoksayar; PG 12+ yeni bölümlerin varsayılanını ayarlar.
+        if old.tablespace != new.tablespace && new.tablespace.is_some() && ctx.version_num < 120000 {
+            e.push(version_err("tablespace", "Bölümlenmiş tabloda SET TABLESPACE", 12));
+        }
+        if old.fillfactor != new.fillfactor {
+            e.push(err("fillfactor", "Bölümlenmiş tabloda fillfactor belirtilemez."));
+        }
+        // PG 11–17: "cannot add NOT VALID foreign key on partitioned table"; PG 18 kabul eder.
+        if ctx.version_num < 180000 {
+            for (i, c) in &cons.adds {
+                if c.not_valid && matches!(c.kind, ConstraintKind::ForeignKey { .. }) {
+                    e.push(version_err(
+                        &format!("constraints[{i}].notValid"),
+                        "Bölümlenmiş tabloya NOT VALID yabancı anahtar eklemek",
+                        18,
+                    ));
+                }
+            }
+        }
+    }
+    // PG 18: "SET EXPRESSION is not supported for virtual generated columns in tables with check constraints"
+    // (gerçek sunucuda doğrulandı, Task 5). Adım 8'de tabloda kalan CHECK'ler: silinmeyen eski CHECK'ler ve
+    // desteklenmeyen listesindeki CHECK'ler (ör. NOT ENFORCED).
+    let has_checks = old.constraints.iter().any(|oc| {
+        matches!(oc.kind, ConstraintKind::Check { .. }) && !cons.drops.iter().any(|d| d.oid == oc.oid)
+    }) || old.unsupported.iter().any(|u| u.starts_with("CHECK "));
     if !managed {
         for (i, oc, c) in matched {
             let Some(oc) = oc else { continue };
@@ -257,6 +297,10 @@ fn check_alter_rules(
                 (Some(og), Some(ng)) if og.expr != ng.expr && ctx.version_num < 170000 => e.push(err(
                     &p,
                     "Üretilmiş ifadeyi değiştirmek (SET EXPRESSION) PG 17+ gerektirir; kolonu silip yeniden ekleyin.",
+                )),
+                (Some(og), Some(ng)) if og.expr != ng.expr && !og.stored && has_checks => e.push(err(
+                    &p,
+                    "CHECK kısıtı olan tabloda sanal üretilmiş kolonun ifadesi değiştirilemez (PG 18); kolonu silip yeniden ekleyin ya da CHECK kısıtlarını aynı düzenlemede kaldırın.",
                 )),
                 _ => {}
             }
@@ -291,6 +335,49 @@ fn order_changed(old: &TableDef, new: &TableDef) -> bool {
                 }
                 last = Some(p);
             }
+        }
+    }
+    false
+}
+
+/// İfade metninde `name` kolonuna başvuru var mı (yaklaşık): tek tırnaklı dizgeler atlanır; tırnaksız sözcükler küçük
+/// harfe katlanarak, çift tırnaklı adlar aynen karşılaştırılır. Yalnızca uyarı üretmek için kullanılır.
+fn expr_mentions(expr: &str, name: &str) -> bool {
+    let c: Vec<char> = expr.chars().collect();
+    let mut i = 0;
+    while i < c.len() {
+        match c[i] {
+            q @ ('\'' | '"') => {
+                i += 1;
+                let mut text = String::new();
+                while i < c.len() {
+                    if c[i] == q {
+                        if c.get(i + 1) == Some(&q) {
+                            text.push(q);
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    text.push(c[i]);
+                    i += 1;
+                }
+                i += 1;
+                if q == '"' && text == name {
+                    return true;
+                }
+            }
+            ch if ch.is_alphabetic() || ch == '_' => {
+                let start = i;
+                while i < c.len() && (c[i].is_alphanumeric() || c[i] == '_' || c[i] == '$') {
+                    i += 1;
+                }
+                let w: String = c[start..i].iter().collect::<String>().to_lowercase();
+                if w == name {
+                    return true;
+                }
+            }
+            _ => i += 1,
         }
     }
     false
@@ -676,6 +763,21 @@ fn build(
                 "'{}' kısıtının kolon tipi değişiyor; kısıt yerinde kalır, PG tip değişimi sırasında onu yeniden doğrular (PRIMARY KEY/UNIQUE indeksi yeniden oluşturulur) ve tip uyumsuzsa uygulama başarısız olur.",
                 c.name.as_deref().unwrap_or_default()
             ));
+        }
+    }
+    // PG 12+ "cannot alter type of a column used by a generated column" (gerçek sunucuda doğrulandı, Task 5). İfadenin
+    // hangi kolonları kullandığı yerelde kesin bilinemez: ifadede adı geçen kolon için uyarı (yanlış pozitif zararsız).
+    for (_, oc, c) in kept.iter().filter(|(_, oc, c)| retyped(oc, c)) {
+        for (_, _, g) in &kept {
+            if let Some(gd) = &g.generated
+                && g.name != c.name
+                && (expr_mentions(&gd.expr, &oc.name) || expr_mentions(&gd.expr, &c.name))
+            {
+                warnings.push(format!(
+                    "'{}' kolonu üretilmiş '{}' kolonunun ifadesinde geçiyor; PG üretilmiş kolonun kullandığı kolonun tipini değiştirmeye izin vermez (önce üretilmiş kolonu silin, sonra yeniden ekleyin).",
+                    c.name, g.name
+                ));
+            }
         }
     }
     if pk_dropped {
@@ -2227,5 +2329,132 @@ mod tests {
         // Create hâlâ en az bir kolon ister.
         let e = crate::build::create(&o(TableDef { columns: vec![], ..base() }), &ctx()).unwrap_err();
         assert_eq!(e[0].path, "columns");
+    }
+
+    /// Yüklenmiş bölümlenmiş tablo (partition_by yok, partition_text var).
+    fn loaded_parted() -> TableDef {
+        TableDef {
+            columns: vec![ColumnDef { not_null: true, ..lc(1, "id", "integer") }, lc(2, "r", "integer")],
+            partition_text: Some("LIST (id)".into()),
+            ..base()
+        }
+    }
+
+    /// Gerçek sunucu gidiş-dönüşlerinin (Task 5) ortaya çıkardığı alter kuralları (bölümlenmiş tablo).
+    #[test]
+    fn partitioned_parent_rules_found_on_real_servers() {
+        let p = loaded_parted();
+        // Kalıcılık: PG 10–17 sessizce yoksayar, PG 18 reddeder → her sürümde hata.
+        for ver in [100000, 170000, 180000] {
+            let e = errs(&p, &with(&p, |d| d.persistence = Persistence::Unlogged), &v(ver));
+            assert_eq!((e.len(), e[0].path.as_str()), (1, "persistence"), "{ver}: {e:?}");
+        }
+        let up = TableDef { persistence: Persistence::Unlogged, ..loaded_parted() };
+        assert_eq!(errs(&up, &with(&up, |d| d.persistence = Persistence::Permanent), &ctx())[0].path, "persistence");
+        // Sıradan tabloda SET UNLOGGED serbest.
+        assert_eq!(sqls(&ok(&base(), &with(&base(), |d| d.persistence = Persistence::Unlogged), &ctx())), ["ALTER TABLE public.t SET UNLOGGED"]);
+        // SET TABLESPACE: PG 10–11 yoksayar (hata), PG 12+ geçerli.
+        let e = errs(&p, &with(&p, |d| d.tablespace = Some("fast".into())), &v(110000));
+        assert_eq!((e.len(), e[0].path.as_str()), (1, "tablespace"), "{e:?}");
+        assert_eq!(sqls(&ok(&p, &with(&p, |d| d.tablespace = Some("fast".into())), &v(120000))), ["ALTER TABLE public.t SET TABLESPACE fast"]);
+        // fillfactor: bölümlenmiş tabloda depolama parametresi yok.
+        let e = errs(&p, &with(&p, |d| d.fillfactor = Some(70)), &ctx());
+        assert_eq!((e.len(), e[0].path.as_str()), (1, "fillfactor"), "{e:?}");
+        // NOT VALID FK: PG 11–17 sunucu reddeder → hata; PG 18 geçerli. Geçerli (NOT VALID'siz) FK her sürümde serbest.
+        let fk = |not_valid| ConstraintDef {
+            oid: None,
+            name: Some("p_fk".into()),
+            kind: ConstraintKind::ForeignKey {
+                columns: vec!["r".into()],
+                ref_schema: "public".into(),
+                ref_table: "u".into(),
+                ref_columns: vec!["id".into()],
+                match_type: FkMatch::Simple,
+                on_update: FkAction::NoAction,
+                on_delete: FkAction::NoAction,
+            },
+            deferrable: false,
+            initially_deferred: false,
+            not_valid,
+        };
+        let nv = with(&p, |d| d.constraints.push(fk(true)));
+        for ver in [110000, 170000] {
+            let e = errs(&p, &nv, &v(ver));
+            assert_eq!((e.len(), e[0].path.as_str()), (1, "constraints[0].notValid"), "{ver}: {e:?}");
+            assert!(e[0].message.contains("PG 18+"));
+            ok(&p, &with(&p, |d| d.constraints.push(fk(false))), &v(ver));
+        }
+        assert!(sqls(&ok(&p, &nv, &v(180000)))[0].ends_with(" NOT VALID"));
+        // Sıradan tabloya NOT VALID FK her sürümde serbest.
+        let plain = TableDef { partition_text: None, ..loaded_parted() };
+        let p2 = ok(&plain, &with(&plain, |d| d.constraints.push(fk(true))), &v(110000));
+        assert!(sqls(&p2)[0].ends_with(" NOT VALID"));
+        // Ad, yorum, sahip bölümlenmiş tabloda serbest.
+        ok(&p, &with(&p, |d| {
+            d.name = "p2".into();
+            d.comment = Some("x".into());
+            d.owner = Some("app".into());
+        }), &v(100000));
+    }
+
+    /// PG 18: CHECK'li tabloda sanal kolonun SET EXPRESSION'ı sunucuda desteklenmez (gerçek sunucu, Task 5).
+    #[test]
+    fn virtual_set_expression_with_check_constraints() {
+        let virt = TableDef {
+            columns: vec![
+                lc(1, "a", "integer"),
+                ColumnDef { generated: Some(GeneratedDef { expr: "a * 2".into(), stored: false }), ..lc(2, "b", "integer") },
+            ],
+            ..base()
+        };
+        let check = ConstraintDef {
+            oid: Some(7),
+            name: Some("a_ck".into()),
+            kind: ConstraintKind::Check { expr: "a > 0".into(), no_inherit: false },
+            deferrable: false,
+            initially_deferred: false,
+            not_valid: false,
+        };
+        let set_expr = |d: &mut TableDef| colm(d, "b").generated.as_mut().unwrap().expr = "a * 3".into();
+        // CHECK yok: geçerli.
+        assert_eq!(sqls(&ok(&virt, &with(&virt, set_expr), &ctx())), ["ALTER TABLE public.t ALTER COLUMN b SET EXPRESSION AS (a * 3
+)"]);
+        // Kalan CHECK (ya da desteklenmeyen CHECK) varken hata.
+        let with_ck = with(&virt, |d| d.constraints.push(check.clone()));
+        let e = errs(&with_ck, &with(&with_ck, set_expr), &ctx());
+        assert_eq!((e.len(), e[0].path.as_str()), (1, "columns[1].generated"), "{e:?}");
+        let unsup = TableDef { unsupported: vec!["CHECK c (NOT ENFORCED)".into()], ..virt.clone() };
+        assert_eq!(errs(&unsup, &with(&unsup, set_expr), &ctx())[0].path, "columns[1].generated");
+        // Aynı düzenlemede CHECK silinirse (adım 3) geçerli; yeni CHECK eklemek (adım 10) engel değil.
+        let p = ok(&with_ck, &with(&virt, set_expr), &ctx());
+        assert_eq!(sqls(&p)[0], "ALTER TABLE public.t DROP CONSTRAINT a_ck");
+        let mut add = with(&virt, set_expr);
+        add.constraints.push(ConstraintDef { oid: None, ..check.clone() });
+        ok(&virt, &add, &ctx());
+        // STORED kolonda CHECK engel değil.
+        let stored = with(&with_ck, |d| colm(d, "b").generated.as_mut().unwrap().stored = true);
+        ok(&stored, &with(&stored, set_expr), &ctx());
+    }
+
+    /// PG 12+: üretilmiş kolonun kullandığı kolonun tipi değiştirilemez (gerçek sunucu, Task 5): plan uyarısı.
+    #[test]
+    fn type_change_of_column_used_by_generated_column_warns() {
+        let l = loaded();
+        // `total` = qty * 2.
+        let p = ok(&l, &with(&l, |d| colm(d, "qty").data_type = "bigint".into()), &ctx());
+        assert!(p.warnings.iter().any(|w| w.contains("'qty' kolonu üretilmiş 'total'")), "{:?}", p.warnings);
+        // Kullanılmayan kolon: uyarı yok.
+        let p = ok(&l, &with(&l, |d| colm(d, "amount").data_type = "bigint".into()), &ctx());
+        assert!(!p.warnings.iter().any(|w| w.contains("üretilmiş")), "{:?}", p.warnings);
+        // Üretilmiş kolonun kendi tipi: uyarı yok.
+        let p = ok(&l, &with(&l, |d| colm(d, "total").data_type = "numeric(12,2)".into()), &ctx());
+        assert!(!p.warnings.iter().any(|w| w.contains("ifadesinde geçiyor")), "{:?}", p.warnings);
+        assert!(expr_mentions("qty * 2", "qty"));
+        assert!(expr_mentions("\"Qty\" * 2", "Qty"));
+        assert!(!expr_mentions("\"Qty\" * 2", "qty"));
+        assert!(expr_mentions("QTY + 1", "qty"));
+        assert!(!expr_mentions("'qty' || x", "qty"));
+        assert!(!expr_mentions("qty2 + 1", "qty"));
+        assert!(!expr_mentions("'it''s qty' || x", "qty"));
     }
 }
