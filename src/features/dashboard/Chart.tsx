@@ -13,6 +13,8 @@ export interface ChartProps {
   /** Değer biçimi (eksen ve ipucu). */
   format?: (v: number) => string;
   height?: number;
+  /** Sayım değerleri: y ekseni tam sayı adımlı. */
+  integer?: boolean;
 }
 
 const PAD = { padLeft: 44, padBottom: 18, padTop: 6, padRight: 8 };
@@ -23,6 +25,9 @@ export default function Chart(props: ChartProps) {
   let canvas!: HTMLCanvasElement;
   let box!: HTMLDivElement;
   let raf = 0;
+  // Son atanan yedek bellek boyutu: yalnızca değişince atanır (atama tuvali siler ve yeniden ayırır).
+  let lastBw = 0;
+  let lastBh = 0;
   const [size, setSize] = createSignal({ w: 0, h: 0 });
   const [themeTick, setThemeTick] = createSignal(0);
   const [hoverX, setHoverX] = createSignal<number | null>(null);
@@ -46,20 +51,27 @@ export default function Chart(props: ChartProps) {
     const ctx = canvas.getContext("2d");
     if (!ctx || w <= 0 || h <= 0) return;
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.round(w * dpr);
-    canvas.height = Math.round(h * dpr);
+    const bw = Math.round(w * dpr);
+    const bh = Math.round(h * dpr);
+    if (bw !== lastBw || bh !== lastBh) {
+      canvas.width = bw;
+      canvas.height = bh;
+      lastBw = bw;
+      lastBh = bh;
+    }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
+    ctx.lineCap = "round";
     const cs = getComputedStyle(document.documentElement);
     const color = (name: string) => cs.getPropertyValue(name).trim() || "#888";
     const v = vp();
     const domain = xDomain(props.series, win());
-    const yMax = niceMax(seriesMax(props.series));
+    const yMax = niceMax(seriesMax(props.series), props.integer);
     ctx.font = "11px " + (cs.getPropertyValue("--font-sans").trim() || "sans-serif");
     ctx.textBaseline = "middle";
     ctx.textAlign = "right";
     // Izgara + y etiketleri
-    for (const t of yTicks(yMax)) {
+    for (const t of yTicks(yMax, 4, props.integer)) {
       const y = v.padTop + (h - v.padTop - v.padBottom) * (1 - t / yMax);
       ctx.strokeStyle = color("--border");
       ctx.lineWidth = 1;
@@ -186,6 +198,7 @@ export default function Chart(props: ChartProps) {
     const x = v.padLeft + ((r.points[hi].t - d[0]) / (d[1] - d[0] || 1)) * (v.width - v.padLeft - v.padRight);
     return {
       x,
+      right: x > v.width / 2,
       time: fmtTime(r.points[hi].t),
       rows: props.series.map((s) => ({ name: s.name, color: s.color, v: s.points[hi]?.v ?? null })),
     };
@@ -221,7 +234,7 @@ export default function Chart(props: ChartProps) {
           {(t) => (
             <div
               class="pointer-events-none absolute top-1 z-10 rounded border border-border bg-bg px-2 py-1 text-[11px] shadow"
-              style={{ left: `${Math.min(t().x + 8, Math.max(0, size().w - 150))}px` }}
+              style={t().right ? { right: `${Math.max(0, size().w - t().x + 8)}px` } : { left: `${t().x + 8}px` }}
             >
               <div class="text-muted">{t().time}</div>
               <For each={t().rows}>

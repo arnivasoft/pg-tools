@@ -19,9 +19,17 @@ export type PathCmd =
 /** Seçilen adım kümesi: 1/2/2.5/5/10 × 10^n. */
 const NICE_STEPS = [1, 2, 2.5, 5, 10];
 
-/** `max`'ı kapsayan "güzel" üst sınır; 0/geçersiz → 1; 87 → 100; 1234 → 2000. */
-export function niceMax(max: number): number {
+/**
+ * `max`'ı kapsayan "güzel" üst sınır; 0/geçersiz → 1; 87 → 100; 1234 → 2000.
+ * `integer`: sayım değerleri için tam sayı ekseni; max ≤ 4 → ceil(max); aksi halde {1,2,5}×10^n adımıyla yaklaşık 4 bölüm.
+ */
+export function niceMax(max: number, integer = false): number {
   if (!Number.isFinite(max) || max <= 0) return 1;
+  if (integer) {
+    if (max <= 4) return Math.max(1, Math.ceil(max));
+    const step = intStep(max);
+    return step * Math.ceil(max / step - 1e-9);
+  }
   const exp = Math.floor(Math.log10(max));
   const pow = 10 ** exp;
   const m = max / pow;
@@ -29,9 +37,21 @@ export function niceMax(max: number): number {
   return step * pow;
 }
 
-/** 0'dan `niceMax(max)`'a eşit aralıklı `count` bölüm: `count + 1` değer. */
-export function yTicks(max: number, count = 4): number[] {
-  const top = niceMax(max);
+/** Tam sayı modunda (max > 4) adım: yaklaşık 4 bölüm veren en küçük {1,2,5}×10^n. */
+function intStep(max: number): number {
+  const ideal = max / 4;
+  const pow = 10 ** Math.floor(Math.log10(ideal));
+  return ([1, 2, 5, 10].find((k) => k * pow >= ideal - 1e-9) ?? 10) * pow;
+}
+
+/** 0'dan `niceMax`'a eşit aralıklı değerler (varsayılan `count` bölüm; tam sayı modunda adım 1/2/5×10^n). */
+export function yTicks(max: number, count = 4, integer = false): number[] {
+  const top = niceMax(max, integer);
+  if (integer) {
+    const step = top <= 4 ? 1 : intStep(max);
+    const n = Math.round(top / step);
+    return Array.from({ length: n + 1 }, (_, i) => i * step);
+  }
   const n = Math.max(1, Math.floor(count));
   return Array.from({ length: n + 1 }, (_, i) => (top * i) / n);
 }
@@ -57,7 +77,7 @@ const yOf = (v: number, vp: Viewport, yMax: number) => {
 /**
  * Çizim komutları. Çizgi serisinde `null` çizgiyi keser (yeni `M`). Yığılı seride her seri kümülatif toplamın üst kenarıdır;
  * alt kenar bir önceki yığılı serinin toplamı (ilkinde 0). Boşluklu (`null`) yığılı nokta o seride kesinti yapar,
- * üstündeki serilerin toplamına 0 katar. Pencere dışındaki noktalar da üretilir (Canvas kırpar).
+ * üstündeki serilerin toplamına 0 katar. Yığılı seriler dizin olarak hizalı varsayılır (farklı uzunlukta olsa da hata vermez; eksik dizin 0 sayılır). Pencere dışındaki noktalar da üretilir (Canvas kırpar).
  */
 export function buildPaths(series: Series[], vp: Viewport, domain: [number, number], yMax: number): PathCmd[] {
   const out: PathCmd[] = [];
@@ -68,13 +88,18 @@ export function buildPaths(series: Series[], vp: Viewport, domain: [number, numb
       let run: number[] = [];
       const flush = () => {
         if (run.length === 0) return;
+        // Tek noktalı koşu: alan oluşsun diye her yana ~1 px genişletilir.
+        const dx = run.length === 1 ? 1 : 0;
+        const xs = (i: number) => xOf(s.points[i].t, vp, domain);
         run.forEach((i, k) => {
-          out.push({ s: si, area: true, op: k === 0 ? "M" : "L", x: xOf(s.points[i].t, vp, domain), y: yOf(tops[i] as number, vp, yMax) });
+          out.push({ s: si, area: true, op: k === 0 ? "M" : "L", x: xs(i) - (k === 0 ? dx : 0), y: yOf(tops[i] as number, vp, yMax) });
         });
+        if (dx) out.push({ s: si, area: true, op: "L", x: xs(run[0]) + dx, y: yOf(tops[run[0]] as number, vp, yMax) });
         for (let k = run.length - 1; k >= 0; k--) {
           const i = run[k];
-          out.push({ s: si, area: true, op: "L", x: xOf(s.points[i].t, vp, domain), y: yOf(base[i] ?? 0, vp, yMax) });
+          out.push({ s: si, area: true, op: "L", x: xs(i) + (k === run.length - 1 ? dx : 0), y: yOf(base[i] ?? 0, vp, yMax) });
         }
+        if (dx) out.push({ s: si, area: true, op: "L", x: xs(run[0]) - dx, y: yOf(base[run[0]] ?? 0, vp, yMax) });
         out.push({ s: si, area: true, op: "Z" });
         run = [];
       };
@@ -85,15 +110,24 @@ export function buildPaths(series: Series[], vp: Viewport, domain: [number, numb
       });
       return;
     }
-    let pen = false;
+    // Tek noktalı koşu (iki null arası ya da ilk örnek): yuvarlak uçla nokta görünsün diye ~0 uzunlukta bir parça eklenir.
+    let run = 0;
+    const endRun = () => {
+      if (run === 1) {
+        const m = out[out.length - 1] as { x: number; y: number };
+        out.push({ s: si, area: false, op: "L", x: m.x + 0.01, y: m.y });
+      }
+      run = 0;
+    };
     for (const p of s.points) {
       if (p.v == null) {
-        pen = false;
+        endRun();
         continue;
       }
-      out.push({ s: si, area: false, op: pen ? "L" : "M", x: xOf(p.t, vp, domain), y: yOf(p.v, vp, yMax) });
-      pen = true;
+      out.push({ s: si, area: false, op: run > 0 ? "L" : "M", x: xOf(p.t, vp, domain), y: yOf(p.v, vp, yMax) });
+      run++;
     }
+    endRun();
   });
   return out;
 }

@@ -87,3 +87,64 @@ describe("seriesMax", () => {
     expect(seriesMax([])).toBe(0);
   });
 });
+
+describe("tam sayı modu", () => {
+  it("küçük max: 1 adım", () => {
+    expect(yTicks(3, 4, true)).toEqual([0, 1, 2, 3]);
+    expect(niceMax(2.2, true)).toBe(3);
+    expect(niceMax(0.2, true)).toBe(1);
+  });
+  it("büyük max: tüm etiketler tam sayı, üst sınır max'ı kapsar", () => {
+    for (const m of [5, 7, 13, 99, 1234, 56789]) {
+      const t = yTicks(m, 4, true);
+      expect(t.every(Number.isInteger)).toBe(true);
+      expect(t[t.length - 1]).toBe(niceMax(m, true));
+      expect(t[t.length - 1]).toBeGreaterThanOrEqual(m);
+    }
+    expect(yTicks(7, 4, true)).toEqual([0, 2, 4, 6, 8]);
+  });
+  it("uç değerlerde güvenli", () => {
+    expect(niceMax(NaN, true)).toBe(1);
+    expect(niceMax(Infinity, true)).toBe(1);
+    expect(niceMax(0, true)).toBe(1);
+    expect(Number.isFinite(niceMax(1e12, true))).toBe(true);
+    expect(niceMax(1e-9, true)).toBe(1);
+  });
+});
+
+describe("niceMax uçları", () => {
+  it("çok büyük/küçük/sonsuz", () => {
+    expect(niceMax(1e9)).toBe(1e9);
+    expect(niceMax(1e-9)).toBeCloseTo(1e-9, 15);
+    expect(niceMax(Infinity)).toBe(1);
+  });
+});
+
+describe("buildPaths ek durumlar", () => {
+  it("tek noktalı çizgi koşusu nokta üretir", () => {
+    const s: Series = { name: "a", color: "--a", points: [{ t: 10, v: 5 }, { t: 20, v: null }, { t: 30, v: 5 }, { t: 40, v: 6 }, { t: 50, v: null }] };
+    const p = buildPaths([s], vp, dom, 10);
+    expect(p.map((c) => c.op)).toEqual(["M", "L", "M", "L"]);
+    expect(p[1].op === "L" && p[1].x - (p[0] as { x: number }).x).toBeCloseTo(0.01);
+    // yalnızca tek örnek (açılıştan sonraki ilk nokta)
+    expect(buildPaths([{ ...s, points: [s.points[0]] }], vp, dom, 10).map((c) => c.op)).toEqual(["M", "L"]);
+  });
+  it("tek noktalı yığılı koşu alan kazanır", () => {
+    const a: Series = { name: "a", color: "--a", stacked: true, points: [{ t: 50, v: 10 }] };
+    const p = buildPaths([a], vp, dom, 100);
+    const xs = p.filter((c) => c.op !== "Z").map((c) => (c as { x: number }).x);
+    expect(Math.max(...xs) - Math.min(...xs)).toBe(2);
+    expect(p[p.length - 1].op).toBe("Z");
+  });
+  it("sıfır genişlikli etki alanında NaN üretmez", () => {
+    const s: Series = { name: "a", color: "--a", points: [{ t: 5, v: 1 }, { t: 5, v: 2 }] };
+    const p = buildPaths([s], vp, [5, 5], 2);
+    expect(p.every((c) => c.op === "Z" || (Number.isFinite(c.x) && Number.isFinite(c.y)))).toBe(true);
+  });
+  it("farklı uzunlukta yığılı seriler hata vermez (dizin hizalı)", () => {
+    const a: Series = { name: "a", color: "--a", stacked: true, points: [{ t: 0, v: 1 }, { t: 50, v: 1 }, { t: 100, v: 1 }] };
+    const b: Series = { name: "b", color: "--b", stacked: true, points: [{ t: 0, v: 2 }] };
+    expect(() => buildPaths([a, b], vp, dom, 10)).not.toThrow();
+    expect(() => buildPaths([b, a], vp, dom, 10)).not.toThrow();
+  });
+});

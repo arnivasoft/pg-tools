@@ -106,13 +106,13 @@ export default function OverviewView(props: SectionProps) {
       </div>
       <div class="grid grid-cols-[repeat(auto-fit,minmax(320px,1fr))] gap-3">
         <For each={[
-          { title: td.overview.charts.sessions, series: sessions },
+          { title: td.overview.charts.sessions, series: sessions, integer: true },
           { title: td.overview.charts.xacts, series: xacts },
           { title: td.overview.charts.tupIn, series: tupIn },
           { title: td.overview.charts.tupOut, series: tupOut },
           { title: td.overview.charts.blocks, series: blocks },
         ]}>
-          {(c) => <Chart title={c.title} series={c.series()} />}
+          {(c) => <Chart title={c.title} series={c.series()} integer={c.integer} />}
         </For>
       </div>
     </div>
