@@ -1,0 +1,6 @@
+---
+source: crates/pgt-ddl/src/build/sequence.rs
+expression: render(&p)
+---
+[DataLoss] DROP SEQUENCE public.s CASCADE  -- Diziye bağlı nesneler (kolon varsayılanları gibi) da silinir
+WARN: Diziye bağlı nesneler (kolon varsayılanları gibi) da silinir

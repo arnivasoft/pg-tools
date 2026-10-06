@@ -1,0 +1,6 @@
+---
+source: crates/pgt-ddl/src/build/extension.rs
+expression: render(&p)
+---
+[Safe] ALTER EXTENSION pg_trgm UPDATE TO '1.6'  -- Eklentinin güncelleme betiği çalışır
+[Safe] ALTER EXTENSION pg_trgm SET SCHEMA "b b"

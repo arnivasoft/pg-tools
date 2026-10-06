@@ -21,6 +21,7 @@ pub enum Risk {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct Statement {
+    /// Tek ifade; sonda `;` YOKTUR (çalıştırıcı gerekirse ekler).
     pub sql: String,
     pub risk: Risk,
     /// Transaction içinde çalışabilir mi (`CREATE INDEX CONCURRENTLY` gibi ifadeler değildir).

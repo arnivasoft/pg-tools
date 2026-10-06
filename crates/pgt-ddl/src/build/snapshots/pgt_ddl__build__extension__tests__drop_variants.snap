@@ -1,0 +1,6 @@
+---
+source: crates/pgt-ddl/src/build/extension.rs
+expression: render(&p)
+---
+[DataLoss] DROP EXTENSION "uuid-ossp" CASCADE  -- Eklentiye bağlı nesneler (tipler, işlevler, bağımlı kolonlar) da silinir
+WARN: Eklentiye bağlı nesneler (tipler, işlevler, bağımlı kolonlar) da silinir

@@ -1,0 +1,8 @@
+---
+source: crates/pgt-ddl/src/build/extension.rs
+expression: out
+---
+[Safe] CREATE EXTENSION hstore
+[Safe] CREATE EXTENSION pg_trgm SCHEMA ext
+[Safe] CREATE EXTENSION "uuid-ossp" SCHEMA "My Ext" VERSION '1.0' CASCADE
+[Safe] CREATE EXTENSION "user" VERSION E'it''s\\1'
