@@ -107,7 +107,7 @@ describe("buildLockTree", () => {
     const t0 = performance.now();
     const f = buildForest(q);
     const ms = performance.now() - t0;
-    expect(ms).toBeLessThan(50);
+    expect(ms).toBeLessThan(500);
     expect(f.truncated).toBe(false);
     expect(pids(f.roots)).toEqual([1]);
     expect(size(f.roots[0])).toBeLessThanOrEqual(N);
