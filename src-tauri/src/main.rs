@@ -5,6 +5,7 @@ mod logging;
 mod query;
 mod state;
 mod store_cmds;
+mod window;
 
 use std::time::Duration;
 
@@ -31,6 +32,7 @@ fn main() {
             }
         })
         .setup(|app| {
+            window::init(app);
             let state = state::AppState::init();
             let manager = state.manager.clone();
             let query = state.query.clone();
@@ -56,6 +58,7 @@ fn main() {
             commands::get_properties,
             commands::get_ddl,
             commands::startup_notice,
+            window::app_ready,
             commands::delete_server,
             commands::set_show_system,
             commands::quote_identifiers,

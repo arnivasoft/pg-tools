@@ -49,6 +49,8 @@ export const commands = {
   getProperties: (id: string) => call<PropertySection[]>("get_properties", { id }),
   getDdl: (id: string) => call<string>("get_ddl", { id }),
   startupNotice: () => call<string | null>("startup_notice"),
+  /** İlk çizimden sonra: gizli ana pencereyi tema arka planıyla gösterir (bkz. src-tauri/src/window.rs). */
+  appReady: (dark: boolean) => call<null>("app_ready", { dark }),
   deleteServer: (serverId: string) => call<null>("delete_server", { serverId }),
   setShowSystem: (value: boolean) => call<null>("set_show_system", { value }),
   quoteIdentifiers: (serverId: string, names: string[]) => call<string[]>("quote_identifiers", { serverId, names }),

@@ -4,12 +4,14 @@
 .DESCRIPTION
   exe'yi geçici, boş APPDATA/LOCALAPPDATA dizinleriyle başlatır (kullanıcının gerçek yapılandırmasına ve
   loglarına dokunmaz; sunucu listesi boş, hiçbir sunucuya bağlanılmaz, parola kullanılmaz).
-  - MainWindowHandle en fazla 10 sn içinde oluşmazsa hata,
+  - ana pencere en fazla 10 sn içinde GÖRÜNÜR olmazsa hata (pencere gizli oluşturulur, ön yüz ilk çizimden sonra
+    gösterir; MainWindowHandle kullanılmaz, bkz. PgtWindow açıklaması),
   - süreç -Seconds dolmadan çıkarsa ExitCode ile hata (ör. release'de açılıştan ~1 sn sonra
     STATUS_STACK_OVERFLOW = -1073741571 / 0xC00000FD),
   - sonunda uygulama + WebView2 alt süreç ağacının tamamını kapatır (ana süreç önceden ölmüş olsa bile:
     alt süreçler üst süreç kimliği + ad + başlangıç zamanıyla bulunur),
-  - geçici %LOCALAPPDATA%\pg-tools\logs altında "panicked" / "stack overflow" geçiyorsa hata.
+  - geçici %LOCALAPPDATA%\pg-tools\logs altında "panicked" / "stack overflow" geçiyorsa hata,
+  - pencereyi ön yüz değil Rust'taki 3 sn'lik yedek zamanlayıcı gösterdiyse (logda "fallback-show") hata.
   Çıkış kodu 0 = başarılı, 1 = başarısız.
 .PARAMETER Exe      Sınanacak exe (varsayılan: target\release\pg-tools.exe)
                     Ön yüzü gömülü exe gerekir: `bun run tauri build --no-bundle` ile derleyin. Düz
@@ -38,6 +40,32 @@ function Get-Tree([int]$rootPid, [datetime]$since) {
     } while ($added)
     , $ids
 }
+
+# Görünür ana pencere denetimi. Process.MainWindowHandle KULLANILMAZ: tao'nun "Tao Thread Event Target" yardımcı
+# penceresi (16x16, WS_VISIBLE) süreç başlar başlamaz onu doldurur, yani ana pencere oluşmadan/görünmeden sıfırdan
+# farklıdır. Ana pencere ("Tauri Window" sınıfı) gizli oluşturulur ve ön yüz ilk çizimden sonra gösterir (window.rs);
+# burada o pencere görünür olana kadar beklenir. Add-Type derlemesi zamanlayıcı başlamadan önce yapılır.
+if (-not ("PgtWindow" -as [type])) { Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices; using System.Text;
+public static class PgtWindow {
+    delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    public static bool MainVisible(int pid) {
+        bool found = false;
+        EnumWindows((h, l) => {
+            uint p; GetWindowThreadProcessId(h, out p);
+            if (p != (uint)pid || !IsWindowVisible(h)) return true;
+            var c = new StringBuilder(64); GetClassName(h, c, 64);
+            if (c.ToString() == "Tauri Window") { found = true; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+}
+"@ }
 
 if (-not (Test-Path $Exe)) { Write-Output "BAŞARISIZ: exe bulunamadı: $Exe"; exit 1 }
 # Gömülü ön yüz denetimi: tauri build exe'si varlık anahtarlarını ("assets/index-…") düz metin taşır; düz cargo
@@ -68,14 +96,14 @@ try {
         $env:APPDATA = $origAppData
         $env:LOCALAPPDATA = $origLocalAppData
 
-        while (-not $proc.MainWindowHandle -or $proc.MainWindowHandle -eq 0) {
-            if ($proc.HasExited) { $failure = "pencere oluşmadan çıktı (kod $($proc.ExitCode))"; break }
-            if ($sw.Elapsed.TotalSeconds -gt 10) { $failure = "10 sn içinde ana pencere oluşmadı"; break }
-            Start-Sleep -Milliseconds 50; $proc.Refresh()
+        while (-not [PgtWindow]::MainVisible($proc.Id)) {
+            if ($proc.HasExited) { $failure = "pencere görünmeden çıktı (kod $($proc.ExitCode))"; break }
+            if ($sw.Elapsed.TotalSeconds -gt 10) { $failure = "10 sn içinde ana pencere görünmedi"; break }
+            Start-Sleep -Milliseconds 20
         }
         if (-not $failure) {
             $windowMs = $sw.ElapsedMilliseconds
-            Write-Output "Pencere $windowMs ms'de oluştu; $Seconds sn izleniyor..."
+            Write-Output "Pencere $windowMs ms'de göründü; $Seconds sn izleniyor..."
             $watch = [Diagnostics.Stopwatch]::StartNew()
             while ($watch.Elapsed.TotalSeconds -lt $Seconds) {
                 if ($proc.HasExited) {
@@ -103,9 +131,9 @@ try {
 
     $logDir = Join-Path $localappdata "pg-tools\logs"
     if (Test-Path $logDir) {
-        $hits = Get-ChildItem $logDir -File | Select-String -Pattern "panicked", "stack overflow" -SimpleMatch
+        $hits = Get-ChildItem $logDir -File | Select-String -Pattern "panicked", "stack overflow", "fallback-show" -SimpleMatch
         if ($hits) {
-            $msg = "logda panik/yığın taşması: " + (($hits | Select-Object -First 3 | ForEach-Object { $_.Line.Trim() }) -join " | ")
+            $msg = "logda panik/yığın taşması/yedek gösterim: " + (($hits | Select-Object -First 3 | ForEach-Object { $_.Line.Trim() }) -join " | ")
             $failure = if ($failure) { "$failure; $msg" } else { $msg }
         }
     } elseif (-not $failure) {

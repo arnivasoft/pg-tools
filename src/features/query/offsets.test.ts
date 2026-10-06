@@ -76,6 +76,33 @@ describe("errorRange", () => {
   it("metin sonu kırpılır", () => {
     expect(errorRange("ab", { charOffset: 0, position: 99 })).toEqual({ from: 2, to: 2 });
   });
+  describe("nitelikli ad", () => {
+    const at = (text: string, needle: string) => ({ charOffset: 0, position: [...text.slice(0, text.indexOf(needle))].length + 1 });
+    const mark = (text: string, needle: string) => {
+      const r = errorRange(text, at(text, needle))!;
+      return text.slice(r.from, r.to);
+    };
+    it("şema.tablo tamamı", () => expect(mark("select * from d001.vstokhar1", "d001")).toBe("d001.vstokhar1"));
+    it("tırnaklı parçalar ve \"\" kaçışı", () => {
+      expect(mark('select * from "Weird"."Name"', '"Weird"')).toBe('"Weird"."Name"');
+      expect(mark('select * from "a""b".c where 1', '"a""b"')).toBe('"a""b".c');
+    });
+    it("takma ad dahil edilmez", () => expect(mark("select * from app.orders o", "app")).toBe("app.orders"));
+    it("fonksiyon çağrısında yalnızca ad", () => expect(mark("select public.f(1)", "public")).toBe("public.f"));
+    it("$ ad içinde", () => expect(mark("select * from s.t$1 x", "s.")).toBe("s.t$1"));
+    it("t.* yıldızı almaz", () => expect(mark("select t.* from t", "t.")).toBe("t"));
+    it("nokta çevresinde boşluk", () => expect(mark("select * from app . orders o", "app")).toBe("app . orders"));
+    it("emoji sonrası (UTF-16)", () => {
+      const text = "select '😀', x from public.nope_tbl";
+      const r = errorRange(text, at(text, "public"))!;
+      expect(r).toEqual({ from: 20, to: 35 });
+      expect(text.slice(r.from, r.to)).toBe("public.nope_tbl");
+    });
+    it("metin sonundaki ad", () => expect(mark("select * from s.t", "s.")).toBe("s.t"));
+    it("kapanmamış tırnak tek karakter", () => expect(mark('select "abc', '"')).toBe('"'));
+    it("işleç tek karakter", () => expect(mark("select 1 ++ x", "++")).toBe("+"));
+    it("sayı eski davranış", () => expect(mark("select 12.5x", "12")).toBe("12"));
+  });
 });
 
 describe("stmtText", () => {
