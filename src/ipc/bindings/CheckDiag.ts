@@ -3,7 +3,7 @@ import type { CheckSeverity } from "./CheckSeverity";
 
 export type CheckDiag = { 
 /**
- * Kapsamdaki ifade sırası (`qt_analyze`/`qt_run` ile aynı numaralama).
+ * İfadenin **betiğin tamamındaki** sırası (0 tabanlı; `qt_analyze(…, all)` ile aynı numaralama).
  */
 stmtIndex: number, 
 /**
@@ -11,6 +11,7 @@ stmtIndex: number,
  */
 charOffset: number, 
 /**
- * İfade metninde 1 tabanlı Unicode scalar konum (betikteki yeri `char_offset + position - 1`).
+ * İfade metninde 1 tabanlı Unicode scalar konum (betikteki yeri `char_offset + position - 1`); ifade sonunu
+ * aşan konum ("end of input") son karaktere kırpılır.
  */
 position: number | null, message: string, sqlstate: string | null, severity: CheckSeverity, };

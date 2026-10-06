@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use pgt_core::ErrorPayload;
 use pgt_core::connection::Target;
-use pgt_query::check::CheckDiag;
+use pgt_query::check::{CheckDiag, CheckTarget};
 use pgt_query::complete::{CompletionItem, CompletionRequest};
 use pgt_query::error_codes::query_payload;
 use pgt_query::events::{EventSink, QueryEvent};
@@ -133,8 +133,13 @@ pub async fn qt_complete(state: State<'_, AppState>, session: Uuid, request: Com
 
 /// Parse tabanlı hata denetimi (çalıştırmaz). Meşgul/uykudaki/hatalı transaction'daki oturumda boş liste.
 #[tauri::command]
-pub async fn qt_check(state: State<'_, AppState>, session: Uuid, sql: String, scope: Scope) -> CmdResult<Vec<CheckDiag>> {
-    Box::pin(state.query.check(session, &sql, scope)).await.map_err(|e| query_payload(&e))
+pub async fn qt_check(
+    state: State<'_, AppState>,
+    session: Uuid,
+    sql: String,
+    target: CheckTarget,
+) -> CmdResult<Vec<CheckDiag>> {
+    Box::pin(state.query.check(session, &sql, target)).await.map_err(|e| query_payload(&e))
 }
 
 /// İlerleme kanalı kapanırsa (gönderim hatası) dışa aktarma iptal edilir.

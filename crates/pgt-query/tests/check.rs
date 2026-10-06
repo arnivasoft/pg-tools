@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use pgt_core::connection::{ConnectionManager, Target};
 use pgt_core::registry::Registry;
 use pgt_core::testing::{TestServer, admin_client, test_servers};
-use pgt_query::check::{CheckDiag, CheckSeverity};
+use pgt_query::check::{CheckDiag, CheckSeverity, CheckTarget};
 use pgt_query::events::{EventSink, QueryEvent};
 use pgt_query::session::{QueryManager, Scope, SessionId, SessionOptions, TxAction, TxMode, TxState};
 use tempfile::TempDir;
@@ -103,15 +103,18 @@ impl Fx {
         self.admin_one("current_setting('server_version_num')").await.parse().unwrap()
     }
 
+    /// Betiğin tamamı görünür, imleç başta.
     async fn check(&self, id: SessionId, sql: &str) -> Vec<CheckDiag> {
-        self.qm.check(id, sql, Scope::All).await.unwrap()
+        self.qm.check(id, sql, all(sql)).await.unwrap()
     }
 
-    /// Kalıcı durum özeti: tablolar, satır sayısı, dizin sayısı, dizi durumu, VACUUM sayacı.
+    /// Kalıcı durum özeti: ilişkiler (tablo/dizin/dizi), satır sayısı ve toplamı (UPDATE/DELETE/INSERT), `t`'nin kolon
+    /// sayısı (ALTER), dizi durumu (nextval), VACUUM sayacı.
     async fn snapshot(&self) -> String {
         self.admin_one(
             "(select string_agg(relname, ',' order by relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace \
-               where n.nspname = 'qc_chk') || ' rows=' || (select count(*) from qc_chk.t) \
+               where n.nspname = 'qc_chk') || ' rows=' || (select count(*) || '/' || sum(i) from qc_chk.t) \
+             || ' cols=' || (select count(*) from pg_attribute where attrelid = 'qc_chk.t'::regclass and attnum > 0) \
              || ' seq=' || (select last_value || '/' || is_called from qc_chk.s) \
              || ' vac=' || (select vacuum_count from pg_stat_user_tables where relid = 'qc_chk.t'::regclass)",
         )
@@ -119,7 +122,12 @@ impl Fx {
     }
 }
 
-/// Denetlenen ve çalıştırılmaması gereken ifadeler (Review Focus 1).
+fn all(sql: &str) -> CheckTarget {
+    CheckTarget { cursor: 0, visible_start: 0, visible_end: sql.chars().count() as u32 }
+}
+
+/// Denetlenen ve çalıştırılmaması gereken ifadeler (Review Focus 1). Sondaki nöbetçi ifade (17) hata verir: Parse
+/// zaman aşımında/iptalde kalanları atladığından teşhisinin gelmesi önceki her ifadenin Parse edildiğini kanıtlar.
 const SIDE_EFFECTS: &str = "create table qc_chk.newt(i int);
 drop table qc_chk.t;
 truncate qc_chk.t;
@@ -136,7 +144,8 @@ update qc_chk.t set i = 0;
 delete from qc_chk.t;
 alter table qc_chk.t add column j int;
 create temp table tmp_chk(i int);
-select pg_advisory_lock(4242)";
+select pg_advisory_lock(4242);
+select pgt_sentinel_nope";
 
 #[tokio::test]
 async fn check_executes_nothing() {
@@ -146,6 +155,8 @@ async fn check_executes_nothing() {
         let v = fx.version().await;
         tokio::time::sleep(Duration::from_millis(1200)).await; // istatistikler otursun
         let before = fx.snapshot().await;
+        // Autocommit geçişi asıl kanıttır: çalıştırılan bir ifade orada kalıcı olurdu. Manuel geçişte denetim
+        // savepoint'te yapılır (ROLLBACK TO yazmaları gizlerdi); orada transaction/oturum güvenliği sınanır.
         for mode in [TxMode::Autocommit, TxMode::Manual] {
             let id = fx.open(mode).await;
             let lock_timeout = fx.cell(id, "show lock_timeout").await;
@@ -154,8 +165,9 @@ async fn check_executes_nothing() {
                 assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::InTransaction);
             }
             let diags = fx.check(id, SIDE_EFFECTS).await;
-            // PG 10'da CALL yok: yalnızca sözdizimi hatası beklenir.
-            let expected: Vec<(u32, &str)> = if v < 110000 { vec![(8, "42601")] } else { vec![] };
+            // PG 10'da CALL yok: sözdizimi hatası. Nöbetçi (17) her sürümde.
+            let expected: Vec<(u32, &str)> =
+                if v < 110000 { vec![(8, "42601"), (17, "42703")] } else { vec![(17, "42703")] };
             let got: Vec<(u32, &str)> =
                 diags.iter().map(|d| (d.stmt_index, d.sqlstate.as_deref().unwrap_or(""))).collect();
             assert_eq!(got, expected, "{diags:?}");
@@ -223,7 +235,8 @@ async fn check_gives_up_on_locked_tables_quickly() {
         let diags = fx.check(id, "select * from qc_chk.locked").await;
         let took = started.elapsed();
         assert!(diags.is_empty(), "{diags:?}");
-        assert!(took <= Duration::from_millis(300), "{took:?}");
+        // 200 ms kilit beklemesi + SHOW/SET/geri yükleme gidiş-dönüşleri; matriste paralel kapsayıcılar için pay.
+        assert!(took <= Duration::from_millis(500), "{took:?}");
         tx.rollback().await.unwrap();
         assert_eq!(fx.cell(id, "show lock_timeout").await, "0");
     }
@@ -241,7 +254,8 @@ async fn run_started_during_a_check_is_not_busy() {
         // Her ifade 200 ms kilit bekler: denetim ~1 sn sürer.
         let script = vec!["select * from qc_chk.locked"; 20].join(";\n");
         let qm = fx.qm.clone();
-        let checker = tokio::spawn(async move { qm.check(id, &script, Scope::All).await });
+        let target = all(&script);
+        let checker = tokio::spawn(async move { qm.check(id, &script, target).await });
         tokio::time::sleep(Duration::from_millis(150)).await;
         let started = Instant::now();
         let mut sink = VecSink::default();
@@ -302,10 +316,51 @@ async fn positions_are_scalar_offsets_and_ddl_context_lowers_severity() {
         assert!(fx.check(id, "select $1").await.is_empty());
         assert_eq!(fx.cell(id, "select count(*) from pg_class where relname = 'later'").await, "0");
 
-        // Kapsam: imleçteki ifade.
+        // Yalnızca imleç (boş görünür alan imleçte).
         let script = "select 1;\nselect nope;\nselect 2";
-        let d = fx.qm.check(id, script, Scope::AtCursor { offset: 12 }).await.unwrap();
-        assert_eq!(d.iter().map(|d| d.char_offset).collect::<Vec<_>>(), [10]);
-        assert!(fx.qm.check(id, script, Scope::AtCursor { offset: 2 }).await.unwrap().is_empty());
+        let only = |c: u32| CheckTarget { cursor: c, visible_start: c, visible_end: c };
+        let d = fx.qm.check(id, script, only(12)).await.unwrap();
+        assert_eq!(d.iter().map(|d| (d.stmt_index, d.char_offset)).collect::<Vec<_>>(), [(1, 10)]);
+        assert!(fx.qm.check(id, script, only(2)).await.unwrap().is_empty());
+        // "end of input": konum ifade sonunu aşmaz.
+        let d = fx.check(id, "select 1 +").await;
+        assert_eq!(d.iter().map(|d| d.position).collect::<Vec<_>>(), [Some(10)]);
+    }
+}
+
+/// Uzun betik: görünür alan betiğin sonunda ve çok satırlı ifadeleri ortadan kesiyor. Kesilen ifadeler bütün
+/// denetlenir (sahte 42601 yok), `stmt_index` betik genelindedir, görünür alan dışındaki hata raporlanmaz ve imleç
+/// ifadesi her zaman önce denetlenir.
+#[tokio::test]
+async fn visible_window_of_a_long_script() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        let id = fx.open(TxMode::Autocommit).await;
+        let mut script = String::from("select nope_at_top;\n");
+        for i in 1..120 {
+            script.push_str(&format!("select {i} as a,\n  {i} as b,\n  {i} as c\nfrom qc_chk.t;\n"));
+        }
+        script.push_str("select nope_at_bottom from qc_chk.t;\n");
+        let chars = |s: &str| s.chars().count() as u32;
+        let n = chars(&script);
+        // Görünür alan: son ~8 ifade, ilk satırı bir ifadenin ortasında ("  " ile başlayan satır).
+        let cut = script.match_indices("  110 as b").next().unwrap().0;
+        let target = CheckTarget { cursor: n, visible_start: chars(&script[..cut]), visible_end: n };
+        let diags = fx.qm.check(id, &script, target).await.unwrap();
+        let got: Vec<(u32, &str)> = diags.iter().map(|d| (d.stmt_index, d.sqlstate.as_deref().unwrap())).collect();
+        assert_eq!(got, [(120, "42703")], "kesilen ifade için sahte 42601 olmamalı: {diags:?}");
+        assert_eq!(diags[0].char_offset + diags[0].position.unwrap() - 1, chars(&script[..script.find("nope_at_bottom").unwrap()]));
+
+        // İmleç betiğin başında, görünür alan sonda: imleç ifadesi de denetlenir.
+        let target = CheckTarget { cursor: 3, ..target };
+        let got: Vec<u32> = fx.qm.check(id, &script, target).await.unwrap().iter().map(|d| d.stmt_index).collect();
+        assert_eq!(got, [0, 120]);
+
+        // Görünür alan betiğin ortasında (sınır 20 ifade): alt ve üstteki hatalar denetlenmez.
+        let mid = script.match_indices("select 50 as a").next().unwrap().0;
+        let target = CheckTarget { cursor: chars(&script[..mid]), visible_start: chars(&script[..mid]), visible_end: n };
+        assert!(fx.qm.check(id, &script, target).await.unwrap().is_empty(), "20 ifade sınırı");
+        assert!(fx.qm.check(id, "select 1", CheckTarget { cursor: 0, visible_start: 5, visible_end: 1 }).await.is_err());
     }
 }

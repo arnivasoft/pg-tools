@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { CheckDiag } from "./bindings/CheckDiag";
+import type { CheckTarget } from "./bindings/CheckTarget";
 import type { ClosePolicy } from "./bindings/ClosePolicy";
 import type { CompletionItem } from "./bindings/CompletionItem";
 import type { CompletionRequest } from "./bindings/CompletionRequest";
@@ -70,7 +71,7 @@ export const commands = {
   qtSetOptions: (session: string, options: SessionOptions) => call<null>("qt_set_options", { session, options }),
   qtClose: (session: string, policy: ClosePolicy) => call<null>("qt_close", { session, policy }),
   qtComplete: (session: string, request: CompletionRequest) => call<CompletionItem[]>("qt_complete", { session, request }),
-  qtCheck: (session: string, sql: string, scope: Scope) => call<CheckDiag[]>("qt_check", { session, sql, scope }),
+  qtCheck: (session: string, sql: string, target: CheckTarget) => call<CheckDiag[]>("qt_check", { session, sql, target }),
   qtExportCsv: (session: string, sql: string, path: string, options: CsvOptions, onProgress: (rows: number) => void) =>
     call<ExportSummary>("qt_export_csv", { session, sql, path, options, onProgress: channel(onProgress) }),
 

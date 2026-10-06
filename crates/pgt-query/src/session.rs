@@ -29,7 +29,7 @@ use tokio::time::Instant;
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::check::CheckDiag;
+use crate::check::{CheckDiag, CheckTarget};
 use crate::complete::{CompletionItem, CompletionRequest, Lookup, lookup};
 use crate::parse_guard::{Background, BackgroundGuard, Parsed, RESTORE_LOCK_TIMEOUT, bounded, guarded_parse, settled};
 use crate::scoped::{Plan, Source};
@@ -490,6 +490,8 @@ struct Inner {
     /// Korumalı Parse `lock_timeout`'u geri yüklediğini doğrulayamadı: kullanıcının değeri; bir sonraki SQL'den önce
     /// uygulanır (`settle`). Yeni bağlantıda gereksizdir (sunucu varsayılanı).
     pending_lock_timeout: Option<String>,
+    /// Açık transaction'da kullanıcı `lock_timeout`'u oturum düzeyinde değiştirdi (COMMIT'te bekleyen silinir).
+    lock_timeout_set_in_tx: bool,
 }
 
 struct SessionSlot {
@@ -591,7 +593,8 @@ fn lock_open(slot: &SessionSlot) -> Result<tokio::sync::MutexGuard<'_, Inner>> {
 }
 
 /// Oturum düzeyinde `lock_timeout`'u değiştirebilen kullanıcı ifadesi mi: `SET [SESSION] lock_timeout`,
-/// `RESET lock_timeout`, `RESET ALL`, `set_config('lock_timeout', …)` (`SET LOCAL` hariç).
+/// `RESET lock_timeout`, `RESET ALL`, `DISCARD ALL`, `set_config('lock_timeout', …, false)` (`SET LOCAL` ve
+/// `set_config(…, true)` hariç).
 fn touches_lock_timeout(sql: &str) -> bool {
     use crate::lex::{Kind, lex};
     let toks: Vec<_> = lex(sql).into_iter().filter(|t| t.kind != Kind::Comment).collect();
@@ -599,10 +602,42 @@ fn touches_lock_timeout(sql: &str) -> bool {
     let names_it = |t: &crate::lex::Token| {
         matches!(t.kind, Kind::Word | Kind::Ident | Kind::Str) && t.text(sql).to_ascii_lowercase().contains("lock_timeout")
     };
-    if word(0, "set") && !word(1, "local") || word(0, "reset") {
+    if word(0, "discard") {
+        return word(1, "all");
+    }
+    if (word(0, "set") && !word(1, "local")) || word(0, "reset") {
         return (word(0, "reset") && word(1, "all")) || toks.iter().skip(1).take(2).any(names_it);
     }
-    toks.iter().any(|t| t.is_word(sql, "set_config")) && toks.iter().any(|t| t.kind == Kind::Str && names_it(t))
+    // `set_config('lock_timeout', v, false)`: üçüncü argüman `true` ise transaction'a yereldir.
+    let Some(f) = toks.iter().position(|t| t.is_word(sql, "set_config")) else { return false };
+    let Some(open) = toks.get(f + 1).filter(|t| t.kind == Kind::Punct && t.text(sql) == "(") else { return false };
+    let args: Vec<&crate::lex::Token> = toks[f + 2..]
+        .iter()
+        .take_while(|t| !(t.kind == Kind::Punct && t.text(sql) == ")" && t.depth == open.depth))
+        .filter(|t| t.depth == open.depth + 1)
+        .collect();
+    let mut parts = args.split(|t| t.kind == Kind::Punct && t.text(sql) == ",");
+    let first = parts.next().unwrap_or_default();
+    let is_local = parts.nth(1).is_some_and(|third| third.iter().any(|t| t.is_word(sql, "true")));
+    first.iter().any(|t| t.kind == Kind::Str && names_it(t)) && !is_local
+}
+
+/// Kullanıcının kendi `lock_timeout` değişikliği bekleyen eski geri yüklemeyi iptal eder — ama yalnızca kalıcı
+/// olduğunda: transaction dışında (autocommit) hemen, transaction içinde ise COMMIT ile (ROLLBACK geri alır).
+fn note_lock_timeout(pending: &mut Option<String>, set_in_tx: &mut bool, now: TxState, touched: bool, committed: bool) {
+    if touched {
+        if now == TxState::Idle {
+            *pending = None;
+        } else {
+            *set_in_tx = true;
+        }
+    }
+    if committed && *set_in_tx {
+        *pending = None;
+    }
+    if now == TxState::Idle {
+        *set_in_tx = false;
+    }
 }
 
 /// Kullanıcı işlemi için oturum kilidi: kilidi bir arka plan işlemi (tamamlama) tutuyorsa ondan vazgeçmesi istenir
@@ -915,6 +950,7 @@ impl QueryManager {
                 cursor_gen: 0,
                 dirty: false,
                 pending_lock_timeout: None,
+                lock_timeout_set_in_tx: false,
             }),
             cancel: CancelToken::default(),
             bg: Background::default(),
@@ -1049,10 +1085,7 @@ impl QueryManager {
             if ok && p.creates_session_state {
                 inner.dirty = true;
             }
-            if ok && touches_lock_timeout(text) {
-                // Kullanıcı değeri kendisi belirledi: bekleyen eski geri yükleme onu ezmesin.
-                inner.pending_lock_timeout = None;
-            }
+            let touched = ok && touches_lock_timeout(text);
             if ok && p.plan.kind != StmtKind::Select {
                 // DDL, transaction komutları ve SET/DO/CALL… (arama yolu, katalog) önbelleği bayatlatabilir.
                 slot.invalidate_completions();
@@ -1065,13 +1098,15 @@ impl QueryManager {
             } else {
                 None // alıcı gitti; ifadenin sonucu belirsiz, yoklama karar verir
             };
+            let before = slot.state();
             if let Some(ev) = event {
-                let before = slot.state();
                 slot.set_state(step(before, ev).unwrap_or(before));
             }
             if !ok || p.plan.kind == StmtKind::Tx {
                 resync(slot, exec).await;
             }
+            let committed = ok && p.tx == Some(TxOp::Commit) && before == TxState::InTransaction;
+            note_lock_timeout(&mut inner.pending_lock_timeout, &mut inner.lock_timeout_set_in_tx, slot.state(), touched, committed);
             if gone {
                 return Ok(());
             }
@@ -1211,11 +1246,14 @@ impl QueryManager {
             TxAction::Commit => "COMMIT",
             TxAction::Rollback => "ROLLBACK",
         };
+        let before = slot.state();
         let result = exec.exec_internal(sql).await;
         // Başarılı ya da başarısız, COMMIT/ROLLBACK transaction'ı bitirir.
         slot.set_state(TxState::Idle);
         exec.set_in_tx(false);
         resync(slot, exec).await;
+        let committed = result.is_ok() && op == TxAction::Commit && before == TxState::InTransaction;
+        note_lock_timeout(&mut inner.pending_lock_timeout, &mut inner.lock_timeout_set_in_tx, slot.state(), false, committed);
         result.map(|_| slot.state())
     }
 
@@ -1542,23 +1580,17 @@ impl QueryManager {
         Ok(())
     }
 
-    /// Parse tabanlı hata denetimi (tasarım §4): kapsamdaki ifadeler (en çok `CHECK_MAX_STMTS` / `CHECK_MAX_BYTES`)
+    /// Parse tabanlı hata denetimi (tasarım §4): imlecin ifadesi ve görünür alanla kesişen ifadeler (`CheckTarget`;
+    /// betiğin tamamı bölünür, bu sırayla en çok `CHECK_MAX_STMTS` / `CHECK_MAX_BYTES`)
     /// oturum bağlantısında yalnızca Parse edilir, **çalıştırılmaz** (korumalar: `parse_guard`; `Idle` doğrudan,
     /// transaction içinde savepoint, `lock_timeout` 200 ms, toplam ≤ 1 sn). Denetim bir arka plan işlemidir: oturum
     /// meşgulse, uykudaysa ya da transaction `Failed` ise beklemeden boş liste döner; sürerken bir kullanıcı işlemi
     /// başlarsa denetim iptal edilir. Kilit zaman aşımı/iptal edilen ifade için teşhis yoktur. İstek günlüğe ve
     /// geçmişe yazılmaz.
-    pub async fn check(&self, session: SessionId, sql: &str, scope: Scope) -> Result<Vec<CheckDiag>> {
+    pub async fn check(&self, session: SessionId, sql: &str, target: CheckTarget) -> Result<Vec<CheckDiag>> {
         let slot = self.slot(session)?;
-        let planned = plan_script(sql, scope, slot.guard)?;
-        if slot.state() == TxState::Failed {
-            return Ok(Vec::new());
-        }
-        let stmts = crate::check::select(
-            sql,
-            planned.into_iter().map(|p| (p.plan.index, p.plan.char_offset, p.range)),
-        );
-        if stmts.is_empty() {
+        let stmts = crate::check::select(sql, target)?;
+        if stmts.is_empty() || slot.state() == TxState::Failed {
             return Ok(Vec::new());
         }
         let Some(mut lock) = Self::lock_background(&slot).await? else { return Ok(Vec::new()) };
@@ -1573,7 +1605,10 @@ impl QueryManager {
             inner.pending_lock_timeout = Some(v);
         }
         inner.last_used = Instant::now();
-        Ok(stmts.iter().zip(batch.results).filter_map(|(s, r)| crate::check::diag(s, r)).collect())
+        let mut diags: Vec<CheckDiag> =
+            stmts.iter().zip(batch.results).filter_map(|(s, r)| crate::check::diag(s, r)).collect();
+        diags.sort_by_key(|d| d.stmt_index);
+        Ok(diags)
     }
 
     /// Satır döndüren tek bir `SELECT`/`VALUES`/`TABLE`/`WITH` sorgusunun sonucunu CSV'ye akıtır
@@ -1671,6 +1706,7 @@ impl QueryManager {
                 cursor_gen: 0,
                 dirty: false,
                 pending_lock_timeout: None,
+                lock_timeout_set_in_tx: false,
             }),
             cancel: CancelToken::default(),
             bg: Background::default(),
@@ -2085,11 +2121,21 @@ mod tests {
             "reset lock_timeout",
             "RESET ALL",
             "select set_config('lock_timeout', '1s', false)",
+            "select pg_catalog.set_config('lock_timeout', f(1, 2), false)",
+            "discard all",
             "set \"lock_timeout\" = 1",
         ] {
             assert!(touches_lock_timeout(sql), "{sql}");
         }
-        for sql in ["set local lock_timeout = 1", "set statement_timeout = 1", "select 'lock_timeout'", "reset role"] {
+        for sql in [
+            "set local lock_timeout = 1",
+            "set statement_timeout = 1",
+            "select 'lock_timeout'",
+            "reset role",
+            "select set_config('lock_timeout', '1s', true)",
+            "select set_config('statement_timeout', 'lock_timeout', false)",
+            "discard plans",
+        ] {
             assert!(!touches_lock_timeout(sql), "{sql}");
         }
     }
@@ -2325,6 +2371,24 @@ mod db_tests {
             qm.run(id, "show lock_timeout", Scope::All, 10, true, &mut rows).await.unwrap();
             assert_eq!(rows.0, ["3s"]);
             assert_eq!(pending(&qm, id), None);
+            qm.tx(id, TxAction::Rollback).await.unwrap();
+
+            // Transaction içindeki SET bekleyeni ancak COMMIT ile iptal eder; ROLLBACK etmez.
+            {
+                let _fail = FailRestore::on();
+                qm.complete(id, cte(6)).await.unwrap();
+                assert_eq!(pending(&qm, id).as_deref(), Some("3s"));
+                qm.run(id, "set lock_timeout = '5s'", Scope::All, 10, true, &mut Nop).await.unwrap();
+                assert_eq!(pending(&qm, id).as_deref(), Some("3s"), "transaction içinde silinmez");
+                qm.tx(id, TxAction::Rollback).await.unwrap();
+                assert_eq!(pending(&qm, id).as_deref(), Some("3s"), "ROLLBACK SET'i geri aldı");
+                qm.run(id, "set lock_timeout = '7s'", Scope::All, 10, true, &mut Nop).await.unwrap();
+                qm.tx(id, TxAction::Commit).await.unwrap();
+                assert_eq!(pending(&qm, id), None, "COMMIT kullanıcı değerini kalıcı yaptı");
+            }
+            let mut rows = Rows(Vec::new());
+            qm.run(id, "show lock_timeout", Scope::All, 10, true, &mut rows).await.unwrap();
+            assert_eq!(rows.0, ["7s"]);
             qm.tx(id, TxAction::Rollback).await.unwrap();
         }
     }
