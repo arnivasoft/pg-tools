@@ -106,6 +106,7 @@ export const t = {
     copyDdl: "DDL'i kopyala",
     openQueryTool: "Query Tool'da aç",
     openQueryToolShortcut: "Ctrl+Alt+Q",
+    openDashboard: "Dashboard'u aç",
     gone: "Bu öğe artık yok.",
     disconnected: "Bağlantı kesildi.",
     deleted: (name: string) => `‘${name}’ silindi.`,

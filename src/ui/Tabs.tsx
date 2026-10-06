@@ -1,10 +1,11 @@
 import { Tabs as K } from "@kobalte/core/tabs";
-import { For, type JSX } from "solid-js";
+import { For, Show, type JSX } from "solid-js";
 
 export function Tabs(props: {
   value: string;
   onChange: (value: string) => void;
-  tabs: { value: string; label: string }[];
+  /** `muted`: soluk ama seçilebilir sekme (italik; `mutedHint` ekran okuyucuya ve ipucuna nedeni söyler). */
+  tabs: { value: string; label: string; muted?: boolean; mutedHint?: string }[];
   children: JSX.Element;
   class?: string;
 }) {
@@ -16,8 +17,13 @@ export function Tabs(props: {
             <K.Trigger
               value={tab.value}
               class="border-b-2 border-transparent px-2 py-1.5 text-[13px] text-muted data-[selected]:border-accent data-[selected]:text-fg"
+              classList={{ italic: tab.muted }}
+              title={tab.muted ? tab.mutedHint : undefined}
             >
               {tab.label}
+              <Show when={tab.muted && tab.mutedHint}>
+                <span class="sr-only">{` (${tab.mutedHint})`}</span>
+              </Show>
             </K.Trigger>
           )}
         </For>

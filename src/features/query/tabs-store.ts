@@ -1,4 +1,4 @@
-// Sorgu sekmeleri: saf işlevler + ince bir Solid store sarmalayıcısı.
+// Sağ panel sekmeleri (sorgu + dashboard): saf işlevler + ince bir Solid store sarmalayıcısı.
 import { createStore } from "solid-js/store";
 
 /** Sabit, kapatılamaz "Nesne" sekmesinin kimliği (sorgu sekmelerinin önünde durur, listede yer almaz). */
@@ -11,10 +11,21 @@ export interface QueryTab {
   title: string;
 }
 
+/** Dashboard sekmesi (durumu tembel dashboard denetleyicisinde; burada yalnızca sekme kaydı). */
+export interface DashTab {
+  id: string;
+  serverId: string;
+  /** `null`: sunucu düzeyi (bakım veritabanı). */
+  databaseOid: number | null;
+  title: string;
+}
+
 export interface TabsState {
   /** Sorgu sekmeleri, görünüm sırasıyla ("Nesne" sekmesi hariç). */
   tabs: QueryTab[];
-  /** Etkin sekme: `OBJECT_TAB_ID` ya da bir sorgu sekmesinin kimliği. */
+  /** Dashboard sekmeleri; sorgu sekmelerinden sonra çizilir. */
+  dashboards: DashTab[];
+  /** Etkin sekme: `OBJECT_TAB_ID`, bir sorgu ya da bir dashboard sekmesinin kimliği. */
   activeId: string;
   /** Sekme kimliği sayacı. */
   nextId: number;
@@ -32,8 +43,39 @@ export interface OpenTabInput {
   id?: string;
 }
 
+export interface OpenDashInput {
+  serverId: string;
+  databaseOid: number | null;
+  /** Ör. "Dashboard · <sunucu>/<veritabanı>" (metin dashboard parçasında üretilir; bu modül metin içe aktarmaz). */
+  title: string;
+}
+
 export function initialTabs(): TabsState {
-  return { tabs: [], activeId: OBJECT_TAB_ID, nextId: 1, seq: {} };
+  return { tabs: [], dashboards: [], activeId: OBJECT_TAB_ID, nextId: 1, seq: {} };
+}
+
+const taken = (state: TabsState, id: string) =>
+  id === OBJECT_TAB_ID || state.tabs.some((x) => x.id === id) || state.dashboards.some((x) => x.id === id);
+
+/** Kimlik bir sorgu sekmesine mi ait (dashboard ya da "Nesne" değil)? */
+export function isQueryTabId(state: TabsState, id: string): boolean {
+  return state.tabs.some((x) => x.id === id);
+}
+
+export function isDashTabId(state: TabsState, id: string): boolean {
+  return state.dashboards.some((x) => x.id === id);
+}
+
+/** Aynı sunucu + veritabanı için dashboard zaten açıksa onu etkinleştirir; değilse yenisini ekler ve etkinleştirir. */
+export function openDashboard(state: TabsState, input: OpenDashInput): { state: TabsState; id: string; created: boolean } {
+  const same = state.dashboards.find((d) => d.serverId === input.serverId && d.databaseOid === input.databaseOid);
+  if (same) return { state: activateTab(state, same.id), id: same.id, created: false };
+  let nextId = state.nextId;
+  let id: string;
+  do id = `d${nextId++}`;
+  while (taken(state, id));
+  const tab: DashTab = { id, serverId: input.serverId, databaseOid: input.databaseOid, title: input.title };
+  return { id, created: true, state: { ...state, dashboards: [...state.dashboards, tab], activeId: id, nextId } };
 }
 
 /** Yeni sekme ekler ve etkinleştirir. */
@@ -42,15 +84,16 @@ export function openTab(state: TabsState, input: OpenTabInput): { state: TabsSta
   const n = state.seq[key] ?? 1;
   let nextId = state.nextId;
   let id = input.id;
-  if (!id || id === OBJECT_TAB_ID || state.tabs.some((t) => t.id === id)) {
+  if (!id || taken(state, id)) {
     do id = `q${nextId++}`;
-    while (state.tabs.some((t) => t.id === id));
+    while (taken(state, id));
   }
   const title = input.title?.trim() || `${key} #${n}`;
   const tab: QueryTab = { id, serverId: input.serverId, database: input.database, title };
   return {
     id,
     state: {
+      ...state,
       tabs: [...state.tabs, tab],
       activeId: id,
       nextId,
@@ -59,32 +102,44 @@ export function openTab(state: TabsState, input: OpenTabInput): { state: TabsSta
   };
 }
 
-/** Sekmeyi kapatır ("Nesne" kapatılamaz). Etkin sekme kapanırsa sağdaki, yoksa soldaki, yoksa "Nesne" etkinleşir. */
+/**
+ * Sekmeyi kapatır ("Nesne" kapatılamaz). Etkin sekme kapanırsa görünüm sırasında (önce sorgu sekmeleri, sonra
+ * dashboard'lar) sağdaki, yoksa soldaki, yoksa "Nesne" etkinleşir.
+ */
 export function closeTab(state: TabsState, id: string): TabsState {
-  const i = state.tabs.findIndex((t) => t.id === id);
+  const order = [...state.tabs.map((x) => x.id), ...state.dashboards.map((x) => x.id)];
+  const i = order.indexOf(id);
   if (i < 0) return state;
-  const tabs = state.tabs.filter((t) => t.id !== id);
+  const rest = order.filter((x) => x !== id);
   let activeId = state.activeId;
-  if (activeId === id) activeId = (tabs[i] ?? tabs[i - 1])?.id ?? OBJECT_TAB_ID;
-  return { ...state, tabs, activeId };
+  if (activeId === id) activeId = rest[i] ?? rest[i - 1] ?? OBJECT_TAB_ID;
+  return {
+    ...state,
+    tabs: state.tabs.filter((x) => x.id !== id),
+    dashboards: state.dashboards.filter((x) => x.id !== id),
+    activeId,
+  };
 }
 
-/** Boş/yalnız boşluk başlık yok sayılır. */
+/** Sorgu ya da dashboard sekmesi; boş/yalnız boşluk başlık yok sayılır. */
 export function renameTab(state: TabsState, id: string, title: string): TabsState {
   const tt = title.trim();
   if (!tt) return state;
   let changed = false;
-  const tabs = state.tabs.map((t) => {
-    if (t.id !== id || t.title === tt) return t;
-    changed = true;
-    return { ...t, title: tt };
-  });
-  return changed ? { ...state, tabs } : state;
+  const retitle = <T extends { id: string; title: string }>(list: T[]): T[] =>
+    list.map((x) => {
+      if (x.id !== id || x.title === tt) return x;
+      changed = true;
+      return { ...x, title: tt };
+    });
+  const tabs = retitle(state.tabs);
+  const dashboards = retitle(state.dashboards);
+  return changed ? { ...state, tabs, dashboards } : state;
 }
 
 export function activateTab(state: TabsState, id: string): TabsState {
   if (id === state.activeId) return state;
-  if (id !== OBJECT_TAB_ID && !state.tabs.some((t) => t.id === id)) return state;
+  if (!taken(state, id)) return state;
   return { ...state, activeId: id };
 }
 
@@ -110,6 +165,12 @@ export function createTabsStore(initial: TabsState = initialTabs()) {
       const r = openTab(state, input);
       setState(r.state);
       return r.id;
+    },
+    /** Dashboard sekmesi ekler ya da (aynı sunucu + veritabanı) var olanı etkinleştirir. */
+    openDashboard(input: OpenDashInput): { id: string; created: boolean } {
+      const r = openDashboard(state, input);
+      setState(r.state);
+      return { id: r.id, created: r.created };
     },
     close: (id: string) => apply((s) => closeTab(s, id)),
     rename: (id: string, title: string) => apply((s) => renameTab(s, id, title)),

@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 4: Dashboard Tasarımı
 
 - **Tarih:** 2026-10-06
-- **Durum:** Taslak (onay bekliyor)
+- **Durum:** Uygulandı (Plan 8–9)
 - **Kapsam:** Sunucu/veritabanı düzeyinde canlı izleme: oturumlar (`pg_stat_activity`), kilitler ve engelleme zinciri, canlı grafikler, yapılandırma, hazır transaction'lar, `pg_stat_statements`; oturum iptal/sonlandırma
 - **Önceki alt projeler:** Object Explorer (Plan 1–4), Query Tool (Plan 5–6), Editör zekâsı (Plan 7) — hepsi `main`'de.
 

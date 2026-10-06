@@ -6,10 +6,11 @@ import { toPayload } from "../../ipc/errors";
 import type { ExplorerController } from "./controller";
 import { ROOT, ancestorOfKind, isCollection, serverOf, type TreeState } from "./tree-model";
 import { canOpenQueryTool } from "../query/open-kinds";
+import { canOpenDashboard } from "../dashboard/open-kinds";
 
 export type ActionId =
   | "refresh" | "connect" | "disconnect" | "editServer" | "deleteServer"
-  | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool";
+  | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool" | "openDashboard";
 
 export interface ActionDeps {
   state: () => TreeState;
@@ -21,6 +22,8 @@ export interface ActionDeps {
   confirmDelete(name: string): Promise<boolean>;
   /** "Query Tool'da aç" (sunucu/veritabanı/şema/tablo/görünüm). */
   openQueryTool?(id: string): void;
+  /** "Dashboard'u aç" (bağlı sunucu / veritabanı). */
+  openDashboard?(id: string): void;
   /** Sunucunun sorgu oturumlarını kapatacak işlemden (silme, bağlantı kesme) önce: açık transaction'lar için sorar. */
   beforeServerChange?(serverId: string, name: string): Promise<boolean>;
   /** İşlemden sonra: o sunucunun sorgu sekmeleri oturumsuz kalır (`gone`: kayıt silindi). */
@@ -68,6 +71,7 @@ export function qualifiedParts(s: TreeState, id: string): { parts: string[]; suf
 
 export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
   const q: ActionId[] = canOpenQueryTool(node.kind) ? ["openQueryTool"] : [];
+  if (canOpenDashboard(node)) q.push("openDashboard");
   if (node.kind === "serverGroup") return ["refresh", "copyName"];
   if (node.kind === "server") {
     return node.flags.connected
@@ -85,7 +89,7 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
 
 /** Menüde ayırıcı yerleşimi için eylem grubu. */
 export function groupOf(a: ActionId): number {
-  if (a === "openQueryTool") return -1;
+  if (a === "openQueryTool" || a === "openDashboard") return -1;
   if (a === "refresh" || a === "connect" || a === "disconnect") return 0;
   if (a === "editServer" || a === "deleteServer") return 1;
   return 2;
@@ -108,6 +112,9 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
         return;
       case "openQueryTool":
         deps.openQueryTool?.(id);
+        return;
+      case "openDashboard":
+        deps.openDashboard?.(id);
         return;
       case "disconnect":
         if (node.serverId && deps.beforeServerChange && !(await deps.beforeServerChange(node.serverId, node.label))) return;
