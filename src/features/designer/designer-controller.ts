@@ -177,7 +177,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   // Kayıt sinyali: `entries` düz Map'tir (tepkisiz). Sekme denetleyici girdisinden ÖNCE çizilebilir (opener
   // `openDesigner` → `openCreate/openAlter`; store eşzamanlı akar); okuyucular bu sinyale bağlanır, girdi
   // eklenince/silinince yeniden çalışır.
-  const [registry, bump] = createSignal(0, { equals: false });
+  const [registry, bump] = createSignal<void>(undefined, { equals: false });
   const lookups = new Map<string, LookupSlot>();
   let focusSeq = 0;
 
@@ -465,7 +465,10 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       // Yeniden yükleme başarısız olursa temel bayat kalır: `needsReload` (başarıda `setBase` temizler).
       patch(e, { mode: "alter", object: { ...out.created }, kind: out.created.kind, dirty: false, needsReload: true });
     } else {
-      patch(e, { dirty: false, needsReload: true });
+      // Kimliği değişen alter (indeks yapısal yeniden kurma: DROP+CREATE → yeni oid; yeniden adlandırma) `created`
+      // döndürür: yeniden yükleme yeni nesneyle yapılır (eski oid `not_found` verirdi). Sekme anahtarı eski oid'de
+      // kalır (Plan 12'ye bırakıldı).
+      patch(e, { object: out.created ? { ...out.created } : m.object, dirty: false, needsReload: true });
     }
     await loadObject(tabId, e);
   };

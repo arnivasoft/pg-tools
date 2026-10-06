@@ -424,6 +424,36 @@ describe("designer-controller uygulama sonuçları", () => {
     expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "stale" });
   });
 
+  it("Applied(alter, created=yeni ref): indeks yeniden kuruldu → yeni oid ile yüklenir, sekme ready; created yoksa nesne korunur", async () => {
+    const s = setup();
+    const idx = (name: string): ObjectDef => ({
+      kind: "index", schema: "public", name, table: "t", method: "btree", unique: false, columns: [], include: [],
+      tablespace: null, fillfactor: null, whereClause: null, comment: null, constraint: null, valid: true,
+    } as unknown as ObjectDef);
+    const old: ObjectRef = { kind: "index", oid: 42 };
+    s.api.ddlLoad.mockResolvedValueOnce(idx("i"));
+    await s.ctl.openAlter({ tabId: "I", serverId: "S1", databaseOid: 5, object: old, refreshNodeId: "N-idx" });
+    s.ctl.edit("I", (d) => ({ ...d, method: "hash" }) as ObjectDef);
+    await settle();
+    const rebuilt: ObjectRef = { kind: "index", oid: 99 };
+    s.api.ddlApply.mockResolvedValueOnce(applied(rebuilt, 2));
+    s.api.ddlLoad.mockResolvedValueOnce(idx("i"));
+    await s.ctl.apply("I");
+    await flush();
+    expect(s.api.ddlLoad).toHaveBeenLastCalledWith("S1", 5, rebuilt);
+    expect(s.ctl.model("I")).toMatchObject({ mode: "alter", object: rebuilt, status: "ready", needsReload: false });
+
+    // created yok: aynı nesneyle yüklenir
+    s.ctl.edit("I", (d) => ({ ...d, name: "j" }) as ObjectDef);
+    await settle();
+    s.api.ddlApply.mockResolvedValueOnce(applied(null));
+    s.api.ddlLoad.mockResolvedValueOnce(idx("j"));
+    await s.ctl.apply("I");
+    await flush();
+    expect(s.api.ddlLoad).toHaveBeenLastCalledWith("S1", 5, rebuilt);
+    expect(s.ctl.model("I")).toMatchObject({ object: rebuilt, status: "ready" });
+  });
+
   it("Applied(create, created=null): mod create kalır, durum ready, outcome saklanır, yeniden yükleme yok", async () => {
     const s = setup();
     const id = await openCreate(s);

@@ -134,7 +134,7 @@ export function createDashController(deps: DashControllerDeps) {
   const entries = new Map<string, Entry>();
   // Kayıt sinyali: `entries` düz Map'tir (tepkisiz). Sekme modelden ÖNCE çizilir (dash-open `openDashboard` →
   // `open`; store eşzamanlı akar); okuyucular bu sinyale bağlanır, girdi eklenince/silinince yeniden çalışır.
-  const [registry, bump] = createSignal(0, { equals: false });
+  const [registry, bump] = createSignal<void>(undefined, { equals: false });
   const signalGate = gate<SignalRequest, boolean>(false);
 
   const model = (tabId: string): DashModel | undefined => (registry(), entries.get(tabId)?.model());
