@@ -200,3 +200,42 @@ pub enum Statements {
     Available { rows: Vec<StatementRow> },
     Unavailable { reason: String },
 }
+
+/// Oturum kimliği (arayüze UUID metni olarak gider).
+pub type DashId = uuid::Uuid;
+
+/// `DashManager::open` sonucu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DashInfo {
+    #[ts(type = "string")]
+    pub id: DashId,
+    pub version_num: u32,
+    /// Dashboard bağlantısının kendi backend pid'i (kendini durdurmayı engellemek için).
+    pub self_pid: i32,
+    /// Veritabanı düzeyinde oturumda ad; sunucu düzeyinde `None`.
+    pub database: Option<String>,
+}
+
+/// Başka bir oturuma gönderilecek sinyal türü.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SignalKind {
+    /// `pg_cancel_backend`: çalışan sorguyu iptal eder.
+    Cancel,
+    /// `pg_terminate_backend`: oturumu sonlandırır.
+    Terminate,
+}
+
+/// Sinyalin sonucu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum SignalOutcome {
+    /// Sunucu sinyali gönderdi (`true`).
+    Sent,
+    /// Böyle bir backend yok (`false`).
+    NotFound,
+}
