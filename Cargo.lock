@@ -2567,6 +2567,7 @@ version = "0.1.0"
 dependencies = [
  "pgt-catalog",
  "pgt-core",
+ "pgt-dash",
  "pgt-query",
  "serde",
  "tauri",
@@ -2616,6 +2617,20 @@ dependencies = [
  "ts-rs",
  "uuid",
  "windows-native-keyring-store",
+]
+
+[[package]]
+name = "pgt-dash"
+version = "0.1.0"
+dependencies = [
+ "pgt-core",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "ts-rs",
+ "uuid",
 ]
 
 [[package]]

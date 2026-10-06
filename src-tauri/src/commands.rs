@@ -6,6 +6,7 @@ use pgt_core::config::ServerConfig;
 use pgt_core::credentials::Credentials;
 use pgt_core::connection::{ConnectionManager, ServerInfo};
 use pgt_core::registry::Registry;
+use pgt_dash::DashManager;
 use pgt_query::session::QueryManager;
 use pgt_core::{Error, ErrorPayload};
 use tauri::State;
@@ -23,7 +24,7 @@ pub fn list_servers(state: State<'_, AppState>) -> CmdResult<Vec<ServerConfig>> 
 #[tauri::command]
 pub async fn save_server(state: State<'_, AppState>, config: ServerConfig, password: Option<String>) -> CmdResult<ServerConfig> {
     let typed = password.is_some();
-    let (saved, prev) = Box::pin(save_registered(&state.registry, &state.manager, &state.query, config, typed)).await?;
+    let (saved, prev) = Box::pin(save_registered(&state.registry, &state.manager, &state.query, &state.dash, config, typed)).await?;
     apply_saved_password(&state.credentials, prev.as_ref(), &saved, password)?;
     Ok(saved)
 }
@@ -50,6 +51,7 @@ async fn save_registered(
     registry: &RwLock<Registry>,
     manager: &ConnectionManager,
     query: &QueryManager,
+    dash: &DashManager,
     config: ServerConfig,
     password_typed: bool,
 ) -> Result<(ServerConfig, Option<ServerConfig>), Error> {
@@ -60,6 +62,7 @@ async fn save_registered(
     };
     if should_disconnect_catalog(prev.as_ref(), &saved, password_typed) {
         manager.disconnect(saved.id);
+        dash.close_server(saved.id);
     }
     if password_typed || should_close_query_sessions(prev.as_ref(), &saved) {
         query.close_sessions_of(saved.id).await;
@@ -67,10 +70,12 @@ async fn save_registered(
     Ok((saved, prev))
 }
 
-/// Önce sorgu oturumları (açık transaction'lar geri alınır), sonra katalog bağlantısı.
-async fn disconnect_and_close(manager: &ConnectionManager, query: &QueryManager, id: Uuid) {
+/// Önce sorgu oturumları (açık transaction'lar geri alınır), sonra dashboard oturumları, sonra katalog bağlantısı.
+async fn disconnect_and_close(manager: &ConnectionManager, query: &QueryManager, dash: &DashManager, id: Uuid) {
     query.close_sessions_of(id).await;
+    // Önce katalog bağlantısı: eşzamanlı `DashManager::open` bağlı olmadığını görüp kendini geri alır.
     manager.disconnect(id);
+    dash.close_server(id);
 }
 
 /// Kayıt silinemezse (bilinmeyen sunucu, salt-okunur kayıt) hiçbir oturum kapatılmaz.
@@ -79,10 +84,12 @@ async fn delete_and_close(
     manager: &ConnectionManager,
     creds: &Credentials,
     query: &QueryManager,
+    dash: &DashManager,
     id: Uuid,
 ) -> Result<(), Error> {
     delete_registered(registry, manager, creds, id)?;
     query.close_sessions_of(id).await;
+    dash.close_server(id);
     Ok(())
 }
 
@@ -183,7 +190,7 @@ fn remember_after_connect(registry: &RwLock<Registry>, creds: &Credentials, conf
 
 #[tauri::command]
 pub async fn disconnect_server(state: State<'_, AppState>, server_id: Uuid) -> CmdResult<()> {
-    Box::pin(disconnect_and_close(&state.manager, &state.query, server_id)).await;
+    Box::pin(disconnect_and_close(&state.manager, &state.query, &state.dash, server_id)).await;
     Ok(())
 }
 
@@ -220,7 +227,7 @@ fn delete_registered(registry: &RwLock<Registry>, manager: &ConnectionManager, c
 
 #[tauri::command]
 pub async fn delete_server(state: State<'_, AppState>, server_id: Uuid) -> CmdResult<()> {
-    Ok(Box::pin(delete_and_close(&state.registry, &state.manager, &state.credentials, &state.query, server_id)).await?)
+    Ok(Box::pin(delete_and_close(&state.registry, &state.manager, &state.credentials, &state.query, &state.dash, server_id)).await?)
 }
 
 #[tauri::command]
@@ -628,6 +635,11 @@ mod tests {
         assert!(!fx.table_exists(table).await, "açık transaction geri alınmalı");
     }
 
+    async fn assert_dash_closed(dash: &DashManager, id: pgt_dash::DashId) {
+        let err = Box::pin(dash.sample(id)).await.map_err(ErrorPayload::from).unwrap_err();
+        assert_eq!(err.code, "not_found", "dashboard oturumu kapanmış olmalı");
+    }
+
     async fn assert_alive(fx: &Fx, id: SessionId, pid: i32) {
         assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::InTransaction);
         assert!(fx.backend_state(pid).await.is_some());
@@ -637,7 +649,11 @@ mod tests {
     async fn delete_server_closes_query_sessions() {
         let Some(fx) = fixture().await else { return };
         let (id, pid) = session_with_open_tx(&fx, "pgt_qt8_del").await;
-        delete_and_close(&fx.registry, &fx.manager, &creds(), &fx.qm, fx.ts.config.id).await.unwrap();
+        let dash = DashManager::new(fx.manager.clone());
+        let info = Box::pin(dash.open(fx.ts.config.id, None)).await.unwrap();
+        Box::pin(dash.sample(info.id)).await.unwrap();
+        delete_and_close(&fx.registry, &fx.manager, &creds(), &fx.qm, &dash, fx.ts.config.id).await.unwrap();
+        assert_dash_closed(&dash, info.id).await;
         assert!(fx.registry.read().unwrap().get(fx.ts.config.id).is_none());
         assert_closed_and_rolled_back(&fx, id, pid, "pgt_qt8_del").await;
     }
@@ -651,14 +667,15 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
         let sid = fx.ts.config.id;
-        assert!(delete_and_close(&fx.registry, &fx.manager, &creds(), &fx.qm, sid).await.is_err());
+        let dash = DashManager::new(fx.manager.clone());
+        assert!(delete_and_close(&fx.registry, &fx.manager, &creds(), &fx.qm, &dash, sid).await.is_err());
         assert_alive(&fx, id, pid).await;
         let mut changed = fx.ts.config.clone();
         changed.read_only_lock = true;
-        assert!(save_registered(&fx.registry, &fx.manager, &fx.qm, changed, false).await.is_err());
+        assert!(save_registered(&fx.registry, &fx.manager, &fx.qm, &dash, changed, false).await.is_err());
         assert_alive(&fx, id, pid).await;
         // Bilinmeyen sunucu silme de hiçbir oturumu kapatmaz.
-        assert!(delete_and_close(&fx.registry, &fx.manager, &creds(), &fx.qm, Uuid::new_v4()).await.is_err());
+        assert!(delete_and_close(&fx.registry, &fx.manager, &creds(), &fx.qm, &dash, Uuid::new_v4()).await.is_err());
         assert_alive(&fx, id, pid).await;
         fx.qm.close(id, pgt_query::session::ClosePolicy::Rollback).await.unwrap();
     }
@@ -667,13 +684,25 @@ mod tests {
     async fn disconnect_server_closes_query_sessions() {
         let Some(fx) = fixture().await else { return };
         let (id, pid) = session_with_open_tx(&fx, "pgt_qt8_disc").await;
-        disconnect_and_close(&fx.manager, &fx.qm, fx.ts.config.id).await;
+        disconnect_and_close(&fx.manager, &fx.qm, &DashManager::new(fx.manager.clone()), fx.ts.config.id).await;
         assert_closed_and_rolled_back(&fx, id, pid, "pgt_qt8_disc").await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_server_closes_dash_sessions() {
+        let Some(fx) = fixture().await else { return };
+        let dash = DashManager::new(fx.manager.clone());
+        let sid = fx.ts.config.id;
+        let info = Box::pin(dash.open(sid, None)).await.unwrap();
+        Box::pin(dash.sample(info.id)).await.unwrap();
+        disconnect_and_close(&fx.manager, &fx.qm, &dash, sid).await;
+        assert_dash_closed(&dash, info.id).await;
     }
 
     #[tokio::test]
     async fn save_server_closes_sessions_only_for_target_lock_or_production_changes() {
         let Some(fx) = fixture().await else { return };
+        let dash = DashManager::new(fx.manager.clone());
 
         // Yalnızca ad/grup/renk: oturum açık kalır.
         let (id, pid) = session_with_open_tx(&fx, "pgt_qt8_save_meta").await;
@@ -682,7 +711,7 @@ mod tests {
         meta.group = Some("grup".into());
         meta.color = Some("blue".into());
         meta.label = Some("Test".into());
-        save_registered(&fx.registry, &fx.manager, &fx.qm, meta, false).await.unwrap();
+        save_registered(&fx.registry, &fx.manager, &fx.qm, &dash, meta, false).await.unwrap();
         assert_alive(&fx, id, pid).await;
         assert!(fx.manager.is_connected(fx.ts.config.id), "etiket/ad/renk kaydı katalog bağlantısını kesmez");
         fx.qm.close(id, pgt_query::session::ClosePolicy::Rollback).await.unwrap();
@@ -698,13 +727,21 @@ mod tests {
             // Önceki turun değişimini sıfırla (oturumlar kapalıyken); bu da bir değişim olabilir, hâlâ oturum yok.
             let mut base = fx.ts.config.clone();
             base.name = "yeni ad".into();
-            save_registered(&fx.registry, &fx.manager, &fx.qm, base.clone(), false).await.unwrap();
+            save_registered(&fx.registry, &fx.manager, &fx.qm, &dash, base.clone(), false).await.unwrap();
             fx.manager.connect(base.clone(), fx.ts.password.clone()).await.unwrap();
             let (id, pid) = session_with_open_tx(&fx, table).await;
+            let dash_id = Box::pin(dash.open(fx.ts.config.id, None)).await.unwrap().id;
             let mut new = base;
             change(&mut new);
-            save_registered(&fx.registry, &fx.manager, &fx.qm, new, false).await.unwrap();
+            save_registered(&fx.registry, &fx.manager, &fx.qm, &dash, new, false).await.unwrap();
             assert_closed_and_rolled_back(&fx, id, pid, table).await;
+            // Dashboard oturumu yalnızca katalog bağlantısı kesilince (hedef değişimi) kapanır.
+            if table == "pgt_qt8_save_port" {
+                assert_dash_closed(&dash, dash_id).await;
+            } else {
+                Box::pin(dash.sample(dash_id)).await.unwrap();
+                dash.close(dash_id);
+            }
             // Kilit/üretim değişimi katalog bağlantısını korur; hedef (port) değişimi keser.
             assert_eq!(fx.manager.is_connected(fx.ts.config.id), table != "pgt_qt8_save_port", "{table}");
         }
@@ -712,11 +749,13 @@ mod tests {
         // Yeni yazılmış parola (ör. parola değişimi): hedef aynı olsa da katalog bağlantısı kesilir, oturumlar kapanır.
         let mut base = fx.ts.config.clone();
         base.name = "yeni ad".into();
-        save_registered(&fx.registry, &fx.manager, &fx.qm, base.clone(), false).await.unwrap();
+        save_registered(&fx.registry, &fx.manager, &fx.qm, &dash, base.clone(), false).await.unwrap();
         fx.manager.connect(base.clone(), fx.ts.password.clone()).await.unwrap();
         let (id, pid) = session_with_open_tx(&fx, "pgt_qt8_save_pw").await;
-        save_registered(&fx.registry, &fx.manager, &fx.qm, base, true).await.unwrap();
+        let dash_id = Box::pin(dash.open(fx.ts.config.id, None)).await.unwrap().id;
+        save_registered(&fx.registry, &fx.manager, &fx.qm, &dash, base, true).await.unwrap();
         assert!(!fx.manager.is_connected(fx.ts.config.id), "yazılmış parola katalog bağlantısını yeniler");
         assert_closed_and_rolled_back(&fx, id, pid, "pgt_qt8_save_pw").await;
+        assert_dash_closed(&dash, dash_id).await;
     }
 }
