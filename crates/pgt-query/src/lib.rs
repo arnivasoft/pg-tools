@@ -1,5 +1,6 @@
 //! Sorgu aracı motoru. SQL metni bu crate'te asla günlüğe yazılmaz.
 
+pub mod check;
 pub mod classify;
 pub mod complete;
 pub mod error_codes;

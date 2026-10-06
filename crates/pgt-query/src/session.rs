@@ -29,6 +29,7 @@ use tokio::time::Instant;
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::check::CheckDiag;
 use crate::complete::{CompletionItem, CompletionRequest, Lookup, lookup};
 use crate::parse_guard::{Background, BackgroundGuard, Parsed, RESTORE_LOCK_TIMEOUT, bounded, guarded_parse, settled};
 use crate::scoped::{Plan, Source};
@@ -1518,12 +1519,12 @@ impl QueryManager {
                     Parsed::Columns(cols) => crate::scoped::parsed_items(&cols),
                     // Yalnızca metne bağlı kalıcı hatalar (42xxx sözdizimi/ad, 0A000 desteklenmiyor) 60 sn boş sonuç
                     // olarak saklanır ki her tuş vuruşunda yeniden denenmesin; kilit, iptal, bağlantı vb. geçicidir.
-                    Parsed::Failed(Error::Query { sqlstate: Some(code), .. })
+                    Parsed::Failed(Error::Query { sqlstate: Some(code), .. }, _)
                         if code.starts_with("42") || code == "0A000" =>
                     {
                         Vec::new()
                     }
-                    Parsed::Failed(e) => {
+                    Parsed::Failed(e, _) => {
                         tracing::debug!(code = %ErrorPayload::from(&e).code, "kolon Parse'ı başarısız");
                         continue;
                     }
@@ -1539,6 +1540,40 @@ impl QueryManager {
         }
         inner.last_used = Instant::now();
         Ok(())
+    }
+
+    /// Parse tabanlı hata denetimi (tasarım §4): kapsamdaki ifadeler (en çok `CHECK_MAX_STMTS` / `CHECK_MAX_BYTES`)
+    /// oturum bağlantısında yalnızca Parse edilir, **çalıştırılmaz** (korumalar: `parse_guard`; `Idle` doğrudan,
+    /// transaction içinde savepoint, `lock_timeout` 200 ms, toplam ≤ 1 sn). Denetim bir arka plan işlemidir: oturum
+    /// meşgulse, uykudaysa ya da transaction `Failed` ise beklemeden boş liste döner; sürerken bir kullanıcı işlemi
+    /// başlarsa denetim iptal edilir. Kilit zaman aşımı/iptal edilen ifade için teşhis yoktur. İstek günlüğe ve
+    /// geçmişe yazılmaz.
+    pub async fn check(&self, session: SessionId, sql: &str, scope: Scope) -> Result<Vec<CheckDiag>> {
+        let slot = self.slot(session)?;
+        let planned = plan_script(sql, scope, slot.guard)?;
+        if slot.state() == TxState::Failed {
+            return Ok(Vec::new());
+        }
+        let stmts = crate::check::select(
+            sql,
+            planned.into_iter().map(|p| (p.plan.index, p.plan.char_offset, p.range)),
+        );
+        if stmts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(mut lock) = Self::lock_background(&slot).await? else { return Ok(Vec::new()) };
+        let inner = &mut *lock.inner;
+        let Some(exec) = inner.exec.as_mut() else { return Ok(Vec::new()) };
+        let texts: Vec<&str> = stmts.iter().map(|s| &sql[s.range.clone()]).collect();
+        let batch = guarded_parse(exec, slot.state(), &slot.bg, &texts).await;
+        if batch.broken {
+            resync(&slot, exec).await;
+        }
+        if let Some(v) = batch.restore_lock_timeout {
+            inner.pending_lock_timeout = Some(v);
+        }
+        inner.last_used = Instant::now();
+        Ok(stmts.iter().zip(batch.results).filter_map(|(s, r)| crate::check::diag(s, r)).collect())
     }
 
     /// Satır döndüren tek bir `SELECT`/`VALUES`/`TABLE`/`WITH` sorgusunun sonucunu CSV'ye akıtır

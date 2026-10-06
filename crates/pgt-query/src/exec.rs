@@ -257,10 +257,20 @@ impl Executor {
 
     /// Yalnızca Parse/Describe (`prepare`; Bind/Execute yok): sonuç sütunlarının adları ve tür adları. Hazırlanan
     /// deyim düşürülünce kapanır. Açık imlece ve transaction izlemesine dokunmaz, NOTICE'lar atılır.
-    pub(crate) async fn prepare_described(&mut self, sql: &str) -> Result<Vec<(String, String)>> {
+    /// Hata, sunucunun `sql` içindeki 1 tabanlı karakter konumuyla (varsa) döner.
+    pub(crate) async fn prepare_described(
+        &mut self,
+        sql: &str,
+    ) -> std::result::Result<Vec<(String, String)>, (Error, Option<u32>)> {
         let prepared = with_notices(self.conn.client.prepare(sql), &mut self.conn.notices, &mut self.notices).await;
         self.notices.reset();
-        let stmt = prepared.map_err(Error::from_query)?;
+        let stmt = prepared.map_err(|e| {
+            let position = match e.as_db_error().and_then(|db| db.position()) {
+                Some(ErrorPosition::Original(n)) => Some(*n),
+                _ => None,
+            };
+            (Error::from_query(e), position)
+        })?;
         Ok(stmt.columns().iter().map(|c| (c.name().to_string(), c.type_().name().to_string())).collect())
     }
 

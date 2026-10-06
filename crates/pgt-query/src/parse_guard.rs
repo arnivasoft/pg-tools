@@ -188,8 +188,9 @@ fn ok(r: &Option<Result<TextRows>>) -> bool {
 pub(crate) enum Parsed {
     /// Sonuç sütunları (ad, tür adı); satır döndürmeyen ifadede boş.
     Columns(Vec<(String, String)>),
-    /// Sunucu Parse'ı reddetti (sözdizimi, bilinmeyen ad, kilit zaman aşımı…).
-    Failed(Error),
+    /// Sunucu Parse'ı reddetti (sözdizimi, bilinmeyen ad, kilit zaman aşımı…); konum: metin içinde 1 tabanlı
+    /// karakter (Unicode scalar) konumu.
+    Failed(Error, Option<u32>),
     /// Denenmedi (süre doldu, kullanıcı işlemi başladı, transaction hatalı, kurulum başarısız).
     Skipped,
 }
@@ -246,8 +247,8 @@ async fn in_savepoint(
         }
         match bounded(bg, handle, deadline, exec.prepare_described(sql)).await {
             Some(Ok(cols)) => batch.results.push(Parsed::Columns(cols)),
-            Some(Err(e)) => {
-                batch.results.push(Parsed::Failed(e));
+            Some(Err((e, pos))) => {
+                batch.results.push(Parsed::Failed(e, pos));
                 ready = ok(&step(exec, handle, &rollback_to).await) && ok(&step(exec, handle, LOCAL_LOCK_TIMEOUT).await);
             }
             None => break,
@@ -296,7 +297,7 @@ async fn direct(
     for sql in sqls {
         match bounded(bg, handle, deadline, exec.prepare_described(sql)).await {
             Some(Ok(cols)) => batch.results.push(Parsed::Columns(cols)),
-            Some(Err(e)) => batch.results.push(Parsed::Failed(e)),
+            Some(Err((e, pos))) => batch.results.push(Parsed::Failed(e, pos)),
             None => break,
         }
     }
