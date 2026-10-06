@@ -3,12 +3,16 @@
 
 pub mod build;
 pub mod error_codes;
+pub mod load;
+pub mod lookup;
 pub mod model;
 pub mod plan;
 pub mod quote;
 
 pub use build::{BuildCtx, ScanResult, scan_semicolons};
 pub use error_codes::{DDL_ERROR_CODES, DdlErrorCode, ddl_payload};
+pub use load::{ObjectRef, load, server_version};
+pub use lookup::{LookupItem, LookupRequest, lookup};
 pub use model::*;
 pub use plan::{Plan, PlanView, Risk, Statement, plan_hash};
 pub use quote::{qualified, quote_ident, quote_literal};

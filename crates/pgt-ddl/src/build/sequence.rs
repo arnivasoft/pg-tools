@@ -177,13 +177,17 @@ pub fn create(d: &SequenceDef) -> Plan {
 /// OWNED BY tablosu aynı şemada ve aynı sahipte olmalı. Bu yüzden taşıma/sahip değişiminde önce `OWNED BY NONE`,
 /// sonra taşıma, en sonda yeni hedefe bağlama yapılır. Sonraki ifadeler yeni adı/şemayı kullanır.
 /// Sahip `None`'a çekilemez (yok sayılır). `AS tür` değişiminde PG belirtilmeyen sınırları sıfırlar; bu yüzden
-/// tür değişince MINVALUE/MAXVALUE yeni tanımdan her zaman açıkça yazılır.
+/// tür değişince ya da artışın işareti değişince MINVALUE/MAXVALUE yeni tanımdan her zaman açıkça yazılır.
 pub fn alter(old: &SequenceDef, new: &SequenceDef) -> Plan {
     let mut statements = vec![];
     let mut warnings = vec![];
     let old_q = qualified(&old.schema, &old.name);
 
     let type_changed = old.data_type != new.data_type;
+    // Artışın işareti değişince "varsayılan" (None) sınırlar yön değiştirir (artan: 1..max, azalan: min..-1) ama
+    // PG ALTER'da belirtilmeyen sınırı eski değerinde bırakır; bu yüzden sınırlar her zaman yeniden yazılır.
+    let sign_changed = old.increment.signum() != new.increment.signum();
+    let rewrite_bounds = type_changed || sign_changed;
     let mut parts: Vec<String> = vec![];
     if type_changed {
         parts.push(format!("AS {}", type_sql(new.data_type)));
@@ -191,10 +195,10 @@ pub fn alter(old: &SequenceDef, new: &SequenceDef) -> Plan {
     if old.increment != new.increment {
         parts.push(format!("INCREMENT BY {}", new.increment));
     }
-    if type_changed || old.min_value != new.min_value {
+    if rewrite_bounds || old.min_value != new.min_value {
         parts.push(bound_sql("MINVALUE", new.min_value));
     }
-    if type_changed || old.max_value != new.max_value {
+    if rewrite_bounds || old.max_value != new.max_value {
         parts.push(bound_sql("MAXVALUE", new.max_value));
     }
     let start_changed = old.start != new.start;
@@ -455,6 +459,45 @@ mod tests {
         );
         assert!(p.warnings.is_empty() && p.statements[0].note.is_none());
         assert_eq!(p.risk(), Risk::Safe);
+    }
+
+    /// Regresyon (Task 5 gidiş-dönüşü): azalan → artan geçişte `None` sınırlar yön değiştirir, ama PG ALTER'da
+    /// belirtilmeyen sınırı eski değerinde bırakır; yeniden yazılmazsa MINVALUE eski (tür alt sınırı) kalırdı.
+    #[test]
+    fn alter_increment_sign_change_rewrites_default_bounds() {
+        let desc = SequenceDef {
+            increment: -1,
+            min_value: None,
+            max_value: None,
+            start: -1,
+            ..base()
+        };
+        let asc = SequenceDef {
+            increment: 1,
+            start: 1,
+            ..desc.clone()
+        };
+        let p = balter(&o(desc.clone()), &o(asc.clone()), &ctx()).unwrap();
+        assert_eq!(
+            sqls(&p),
+            ["ALTER SEQUENCE public.s INCREMENT BY 1 NO MINVALUE NO MAXVALUE START WITH 1"]
+        );
+        let p = balter(&o(asc), &o(desc), &ctx()).unwrap();
+        assert_eq!(
+            sqls(&p),
+            ["ALTER SEQUENCE public.s INCREMENT BY -1 NO MINVALUE NO MAXVALUE START WITH -1"]
+        );
+        // İşaret aynı kalıyorsa sınırlar yeniden yazılmaz.
+        let p = balter(
+            &o(base()),
+            &o(SequenceDef {
+                increment: 5,
+                ..base()
+            }),
+            &ctx(),
+        )
+        .unwrap();
+        assert_eq!(sqls(&p), ["ALTER SEQUENCE public.s INCREMENT BY 5"]);
     }
 
     #[test]

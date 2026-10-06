@@ -6,10 +6,15 @@ rust-version.workspace = true
 
 [dependencies]
 pgt-core.workspace = true
+pgt-catalog.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
 serde.workspace = true
 uuid.workspace = true
 ts-rs.workspace = true
 
 [dev-dependencies]
+pgt-core = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }
 serde_json.workspace = true
 insta.workspace = true

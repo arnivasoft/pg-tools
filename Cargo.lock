@@ -2638,9 +2638,12 @@ name = "pgt-ddl"
 version = "0.1.0"
 dependencies = [
  "insta",
+ "pgt-catalog",
  "pgt-core",
  "serde",
  "serde_json",
+ "tokio",
+ "tokio-postgres",
  "ts-rs",
  "uuid",
 ]
