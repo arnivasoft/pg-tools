@@ -4,7 +4,7 @@
 - **Durum:** Plan 10–11 uygulandı; Plan 12–13 kalan
 - **Kapsam:** Object Explorer'dan nesne **oluşturma, düzenleme, yeniden adlandırma, silme** (Schema, Sequence, Extension, Index, Table/Column/Constraint, View/Materialized View, Database, Role); önizlemeli, korumalı DDL uygulaması
 - **Önceki alt projeler:** Object Explorer (Plan 1–4), Query Tool (5–6), Editör zekâsı (7), Dashboard (8–9) — hepsi `main`'de.
-- **Teslim planları:** Plan 10 (arka uç çerçevesi + Schema, Sequence, Extension, Index) → Plan 11 (ön yüz çerçevesi + aynı dört tür) → Plan 12 (Table/Column/Constraint) → Plan 13 (View/MatView, Database, Role).
+- **Teslim planları:** Plan 10 (arka uç çerçevesi + Schema, Sequence, Extension, Index) → Plan 11 (ön yüz çerçevesi + aynı dört tür) → Plan 12 (Table arka ucu: kolon/kısıt farkı) → Plan 13 (Table arayüzü) → Plan 14 (View/MatView, Database, Role).
 
 ---
 
