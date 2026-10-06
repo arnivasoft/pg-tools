@@ -17,8 +17,12 @@ pub const NOTICES_PER_STMT_MAX: usize = 100;
 #[ts(export)]
 pub struct Column {
     pub name: String,
+    /// İç kısa ad (`int8`, `varchar`); sayısal hizalama gibi tür denetimleri için.
     pub type_name: String,
     pub type_oid: u32,
+    /// Kullanıcıya gösterilen ad: `pg_catalog.format_type(oid, typmod)` (`bigint`, `character varying(50)`);
+    /// sorulamazsa `type_name`.
+    pub type_display: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]

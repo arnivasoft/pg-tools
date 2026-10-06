@@ -5,8 +5,8 @@ import {
   selectAll, selectCell, selectColumn, selectRow, selectionToTsv, selRect,
 } from "./grid-model";
 
-const col = (name: string, typeName = "text"): Column => ({ name, typeName, typeOid: 0 });
-const m = (s: string) => s.length * 8;
+const col = (name: string, typeName = "text", typeDisplay = typeName): Column => ({ name, typeName, typeOid: 0, typeDisplay });
+const m = { header: (s: string) => s.length * 8, type: (s: string) => s.length * 8, cell: (s: string) => s.length * 8 };
 
 describe("displayCell", () => {
   it("NULL ile boş metni ayırır", () => {
@@ -51,6 +51,19 @@ describe("initialWidths", () => {
   it("yalnızca ilk 200 satırı örnekler", () => {
     const rows = Array.from({ length: 300 }, (_, i) => [i === 250 ? "z".repeat(40) : "a"]);
     expect(initialWidths([col("a")], rows, m)[0]).toBe(60);
+  });
+  it("kısa içerikte başlık adı ve tür etiketi kırpılmaz (kendi yazı tipleriyle ölçülür)", () => {
+    // Başlık yarı kalın sans (9 px/karakter), tür küçük sans (6), hücre eş aralıklı (7).
+    const fonts = { header: (s: string) => s.length * 9, type: (s: string) => s.length * 6, cell: (s: string) => s.length * 7 };
+    const longName = col("musteri_hesap_numarasi", "int8", "bigint");
+    const longType = col("id", "timestamptz", "timestamp with time zone");
+    const w = initialWidths([longName, longType], [["1", "2"]], fonts);
+    expect(w[0]).toBe(22 * 9 + 24); // ad, hücre ("1") ve türden geniş
+    expect(w[1]).toBe(24 * 6 + 24); // tür etiketi addan ve hücreden geniş
+  });
+  it("uzun içerik yine 480'de durur", () => {
+    const fonts = { header: (s: string) => s.length * 9, type: (s: string) => s.length * 6, cell: (s: string) => s.length * 7 };
+    expect(initialWidths([col("a", "varchar", "character varying(50)")], [["x".repeat(200)]], fonts)[0]).toBe(480);
   });
 });
 

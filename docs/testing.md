@@ -256,7 +256,7 @@ kısım (`QueryTab.tsx`, `ResultGrid.tsx`, `editor.ts`) ince tutulur ve elle/CDP
 | `confirm-model.test.ts` | Onay kararı (`decide`): WHERE'siz UPDATE/DELETE, DROP/TRUNCATE, üretim + yazma/`DO`/`CALL`, kilit; onay diyaloğu metni |
 | `run-model.test.ts` | Çalıştırma durum makinesi (`runReduce`): açılış, çalışma, iptal, onay reddi/kilit/boş betik (`runAborted`), `scriptDone` ile bitiş, eski `runId` olayları |
 | `result-model.test.ts` | Olay → sonuç (`applyEvent`): ifade başına şerit, satır parçaları, NOTICE, hata konumu, `scriptDone` bitirir, eski `runId` yok sayılır |
-| `grid-model.test.ts` | Hücre gösterimi (NULL/boş ayrımı, satır sonu, 1000 karakterde kırpma), sütun genişlikleri, seçim/kopyalama biçimi |
+| `grid-model.test.ts` | Hücre gösterimi (NULL/boş ayrımı, satır sonu, 1000 karakterde kırpma), sütun genişlikleri (başlık adı, tür etiketi ve hücre kendi yazı tipleriyle ölçülür; kısa içerikte başlık kırpılmaz), seçim/kopyalama biçimi |
 | `export.test.ts` | CSV dışa aktarma hedef seçimi (`exportTarget`: tek satır döndüren ifade), dosya adı sadeleştirme, ifade seçimi (`preferredIndex`) |
 | `history-model.test.ts` | Geçmiş girdileri (`historyEntriesFor`): hassas ifadeyi dışarıda bırakma, başarısız/iptal işareti, emoji sonrası ofsetler, arama |
 | `errors.test.ts` | `isQueryErrorCode` tür koruyucusu ve `hintFor` ipuçları (25001, `tx_failed`, `session_reset`, `locked`) |

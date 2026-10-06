@@ -28,7 +28,7 @@ export function CellPanel(props: { cell: ActiveCell | null }) {
       <div class="flex h-8 shrink-0 items-center gap-2 border-b border-border bg-panel px-3 font-sans text-[12px]">
         <span class="font-semibold">{props.cell ? props.cell.column.name : t.query.cell.title}</span>
         <Show when={props.cell}>
-          {(c) => <span class="text-muted">{c().column.typeName}</span>}
+          {(c) => <span class="text-muted">{c().column.typeDisplay}</span>}
         </Show>
         <Show when={props.cell && props.cell.value !== null}>
           <span class="text-muted">{t.query.cell.length(props.cell!.value!.length)}</span>

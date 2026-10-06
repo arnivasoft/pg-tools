@@ -188,6 +188,12 @@ const lintHover = hoverTooltip((view, pos) => {
 });
 
 const queryTheme = EditorView.theme({
+  // İmleç: `drawSelection` kendi imlecini çizer; temel temanın rengi siyahtır ve yalnızca `EditorView.darkTheme`
+  // açıkken açık renge döner. Uygulama temayı CSS değişkenleriyle değiştirdiği için koyu temada imleç arka planla
+  // aynı renkte kalıyordu: rengi ön plan değişkeninden alınır ve kalınlaştırılır.
+  ".cm-cursor, .cm-dropCursor": { borderLeftColor: "var(--fg)", borderLeftWidth: "2px", marginLeft: "-1px" },
+  // Yerel imlece düşülen durumlar için (ör. widget içinde odak).
+  ".cm-content": { caretColor: "var(--fg)" },
   ".cm-error-mark": { textDecoration: "underline wavy var(--danger)", textDecorationSkipInk: "none" },
   ".cm-error-gutter": { width: "14px", color: "var(--danger)" },
   ".cm-lint-error": { textDecoration: "underline wavy var(--danger)", textDecorationSkipInk: "none" },

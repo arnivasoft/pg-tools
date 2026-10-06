@@ -7,21 +7,36 @@ import { Button } from "../../ui/Button";
 import {
   NAV_KEYS, ROW_HEIGHT, SAMPLE_ROWS, MAX_COL_WIDTH, MIN_COL_WIDTH, displayCell, extendTo, inRect, initialWidths,
   isNumericType, moveFocus, selRect, selectAll, selectCell, selectColumn, selectRow, selectionToTsv,
-  type NavKey, type Selection,
+  type NavKey, type Selection, type TextMeasure,
 } from "./grid-model";
 import { LOAD_MORE_CHUNK, type StmtResult } from "./result-model";
 
-const HEADER_HEIGHT = ROW_HEIGHT;
+/** İki satırlı başlık: ad (12 px, satır 16) + tür (11 px, satır 14) + dikey boşluk. Satırlar 24 px kalır. */
+const HEADER_HEIGHT = 36;
 const FONT = '12px "Cascadia Mono", Consolas, monospace';
+const SANS_FALLBACK = '"Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif';
 
-let measureCtx: CanvasRenderingContext2D | null | undefined;
-function measureText(s: string): number {
-  if (measureCtx === undefined) {
-    measureCtx = document.createElement("canvas").getContext("2d");
-    if (measureCtx) measureCtx.font = FONT;
-  }
-  return measureCtx ? measureCtx.measureText(s).width : s.length * 7.2;
+type Kind = "header" | "type" | "cell";
+const measureCtx: Partial<Record<Kind, CanvasRenderingContext2D | null>> = {};
+/** Başlık/tür yazı tipi, sayfanın gerçek sans yazı tipiyle (Tailwind `font-sans`) aynıdır. */
+function fontFor(kind: Kind): string {
+  if (kind === "cell") return FONT;
+  const family = getComputedStyle(document.body).fontFamily || SANS_FALLBACK;
+  return kind === "header" ? `600 12px ${family}` : `400 11px ${family}`;
 }
+function measureWith(kind: Kind, s: string, perChar: number): number {
+  let ctx = measureCtx[kind];
+  if (ctx === undefined) {
+    ctx = measureCtx[kind] = document.createElement("canvas").getContext("2d");
+    if (ctx) ctx.font = fontFor(kind);
+  }
+  return ctx ? ctx.measureText(s).width : s.length * perChar;
+}
+const measure: TextMeasure = {
+  header: (s) => measureWith("header", s, 7.5),
+  type: (s) => measureWith("type", s, 6.5),
+  cell: (s) => measureWith("cell", s, 7.2),
+};
 
 /** Odaktaki hücre (Hücre paneli için). `value`: ham tam değer. */
 export interface ActiveCell {
@@ -52,7 +67,7 @@ export function ResultGrid(props: {
     on(columns, (cols) => {
       userResized = false;
       sizedWithRows = rows().length > 0;
-      setWidths(initialWidths(cols, rows().slice(0, SAMPLE_ROWS), measureText));
+      setWidths(initialWidths(cols, rows().slice(0, SAMPLE_ROWS), measure));
       setSel(null);
     }),
   );
@@ -66,7 +81,7 @@ export function ResultGrid(props: {
       prevRows = n;
       if (n > 0 && !sizedWithRows && !userResized) {
         sizedWithRows = true;
-        setWidths(initialWidths(columns(), rows().slice(0, SAMPLE_ROWS), measureText));
+        setWidths(initialWidths(columns(), rows().slice(0, SAMPLE_ROWS), measure));
       }
     });
   });
@@ -237,7 +252,7 @@ export function ResultGrid(props: {
     const col = columns()[c];
     if (!col) return;
     const sample = rows().slice(0, SAMPLE_ROWS).map((r) => [r[c]]);
-    setWidth(c, initialWidths([col], sample, measureText)[0]);
+    setWidth(c, initialWidths([col], sample, measure)[0]);
   };
 
   const showMore = () => props.result.more || props.result.truncated;
@@ -292,13 +307,13 @@ export function ResultGrid(props: {
                         role="columnheader"
                         aria-colindex={item.index + 1}
                         data-c={item.index}
-                        title={`${col().name} (${col().typeName})`}
-                        class="absolute top-0 flex items-center overflow-hidden border-r border-border px-2 font-sans text-[12px] font-semibold"
-                        classList={{ "justify-end": isNumericType(col().typeName) }}
+                        title={`${col().name} (${col().typeDisplay})`}
+                        class="absolute top-0 flex flex-col justify-center overflow-hidden border-r border-border px-2 font-sans"
+                        classList={{ "text-right": isNumericType(col().typeName) }}
                         style={{ left: `${item.start}px`, width: `${widths()[item.index] ?? MIN_COL_WIDTH}px`, height: `${HEADER_HEIGHT}px` }}
                       >
-                        <span class="truncate">{col().name}</span>
-                        <span class="ml-1.5 shrink-0 truncate text-[10px] font-normal text-muted">{col().typeName}</span>
+                        <span class="truncate text-[12px] font-semibold leading-4">{col().name}</span>
+                        <span class="truncate text-[11px] leading-[14px] text-muted">{col().typeDisplay}</span>
                         <div
                           data-resize
                           aria-hidden="true"
