@@ -4,7 +4,8 @@
 //! adı PostgreSQL'in kendi `pg_catalog.format_type(oid, typmod)` işleviyle üretilir (dizi, alan (domain) ve kullanıcı
 //! türleri sunucunun yazdığı gibi). Çalıştırıcı başına bir önbellek tutulur: bir ifade için yalnızca önbellekte
 //! olmayan `(oid, typmod)` çiftleri tek bir katalog sorgusuyla (`FORMAT_TYPES_SQL`) sorulur; sorgu başarısız olursa
-//! kısa ada düşülür (kullanıcının ifadesi bu yüzden asla başarısız olmaz).
+//! kısa ada düşülür (kullanıcının ifadesi bu yüzden asla başarısız olmaz; kullanıcı transaction'ında sorgu bir
+//! savepoint içinde çalışır) ve sorgu oturumun kalanında kapatılır (`Executor::resolve_type_names`).
 
 use std::collections::HashMap;
 
