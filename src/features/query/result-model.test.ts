@@ -14,7 +14,7 @@ import {
   type ResultState,
 } from "./result-model";
 
-const col = [{ name: "a", typeName: "int4", typeOid: 23 }];
+const col = [{ name: "a", typeName: "int4", typeOid: 23, typeDisplay: "integer" }];
 const started = (i: number, kind: "select" | "write" = "select"): QueryEvent => ({
   type: "started",
   stmtIndex: i,

@@ -28,6 +28,7 @@ use tokio_postgres::error::ErrorPosition;
 use crate::classify::{StmtKind, TxOp, analyze, tx_op};
 use crate::events::{Column, EventSink, NOTICES_PER_STMT_MAX, NoticeInfo, QueryEvent};
 use crate::lex::{Kind, lex};
+use crate::type_names::{FORMAT_TYPES_SQL, TypeKey, TypeNameCache};
 
 /// `ExecConfig.limit` üst sınırı; aşan değer buna kısılır.
 pub const MAX_LIMIT: u32 = 1_000_000;
@@ -187,6 +188,8 @@ pub struct Executor {
     last_path: Option<Path>,
     /// Bellekte aynı anda tutulan en çok satır (sınırın tutulduğunu doğrulamak için).
     peak_buffered: usize,
+    /// Sütun türlerinin gösterim adları (`format_type`), oturum boyunca.
+    type_names: TypeNameCache,
 }
 
 impl Executor {
@@ -198,6 +201,7 @@ impl Executor {
             notices: NoticeBuf::default(),
             last_path: None,
             peak_buffered: 0,
+            type_names: TypeNameCache::default(),
         }
     }
 
@@ -336,6 +340,10 @@ impl Executor {
             },
             Err(e) => Outcome::local(e),
         };
+        if kind != StmtKind::Select {
+            // DDL / `SET search_path` kullanıcı türlerinin adını ya da nitelemesini değiştirebilir.
+            self.type_names.forget_user_types();
+        }
         self.notices.absorb(&mut self.conn.notices);
         let dropped_notices = self.notices.dropped;
         let notices: Vec<NoticeInfo> =
@@ -417,6 +425,38 @@ impl Executor {
         }
     }
 
+    /// Önbellekte olmayan `(oid, typmod)` çiftlerinin gösterim adlarını tek bir salt okunur katalog sorgusuyla alır
+    /// (`type_names`). Kullanıcı transaction'ının içindeyse orada düz bir SELECT olarak çalışır (transaction açmaz,
+    /// kapatmaz). Başarısızlık yok sayılır (kısa ada düşülür); yalnızca iptal (57014: kullanıcı iptali ya da
+    /// `statement_timeout`) ifadenin sonucu olarak döner — iptal isteği bu sorguya denk geldiyse kullanıcının ifadesi
+    /// yine de çalıştırılmamalıdır.
+    async fn resolve_type_names(&mut self, keys: &[TypeKey]) -> PgResult<()> {
+        let missing = self.type_names.missing(keys);
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let oids: Vec<u32> = missing.iter().map(|k| k.0).collect();
+        let mods: Vec<i32> = missing.iter().map(|k| k.1).collect();
+        let result = with_notices(
+            self.conn.client.query(FORMAT_TYPES_SQL, &[&oids, &mods]),
+            &mut self.conn.notices,
+            &mut self.notices,
+        )
+        .await;
+        match result {
+            Ok(rows) => {
+                let names = rows.iter().map(|r| r.try_get::<_, Option<String>>(0).ok().flatten()).collect();
+                self.type_names.store(&missing, names);
+                Ok(())
+            }
+            Err(e) if e.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) => Err(e),
+            Err(e) => {
+                tracing::debug!(code = ?e.code().map(|c| c.code()), "tür adları alınamadı, kısa ad kullanılıyor");
+                Ok(())
+            }
+        }
+    }
+
     /// NOTICE'ları alarak `simple_query`.
     async fn simple(&mut self, sql: &str) -> PgResult<Vec<SimpleQueryMessage>> {
         with_notices(self.conn.client.simple_query(sql), &mut self.conn.notices, &mut self.notices).await
@@ -438,18 +478,26 @@ impl Executor {
     ) -> Outcome {
         let prepared =
             with_notices(self.conn.client.prepare(sql), &mut self.conn.notices, &mut self.notices).await;
-        let columns: Vec<Column> = match prepared {
-            Ok(stmt) => stmt
-                .columns()
-                .iter()
-                .map(|c| Column {
-                    name: c.name().to_string(),
-                    type_name: c.type_().name().to_string(),
-                    type_oid: c.type_().oid(),
-                })
-                .collect(),
+        let stmt = match prepared {
+            Ok(stmt) => stmt,
             Err(e) => return Outcome::failed(e, Some(0)),
         };
+        let keys: Vec<TypeKey> = stmt.columns().iter().map(|c| (c.type_().oid(), c.type_modifier())).collect();
+        if let Err(e) = self.resolve_type_names(&keys).await {
+            return Outcome::failed(e, None);
+        }
+        let columns: Vec<Column> = stmt
+            .columns()
+            .iter()
+            .zip(&keys)
+            .map(|(c, key)| Column {
+                name: c.name().to_string(),
+                type_name: c.type_().name().to_string(),
+                type_oid: c.type_().oid(),
+                type_display: self.type_names.display(*key, c.type_().name()),
+            })
+            .collect();
+        drop(stmt);
         let has_rows = !columns.is_empty();
         if !sink.send(QueryEvent::Started { stmt_index: idx, kind, columns, char_offset }) {
             return Outcome::Gone;

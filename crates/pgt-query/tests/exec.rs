@@ -110,6 +110,53 @@ async fn backend_pid(exec: &mut Executor) -> String {
     run_ok(exec, "select pg_backend_pid()", &AUTO).await.rows()[0][0].clone().unwrap()
 }
 
+fn started_types(sink: &VecSink) -> Vec<(String, String)> {
+    let QueryEvent::Started { columns, .. } = &sink.events[0] else { panic!("{:?}", sink.events) };
+    columns.iter().map(|c| (c.type_name.clone(), c.type_display.clone())).collect()
+}
+
+#[tokio::test]
+async fn columns_carry_postgres_formatted_type_names() {
+    for ts in servers() {
+        let mut f = connect(&ts).await;
+        let sql = "select 1::int8, 1.5::float8, 'x'::varchar(50), 1.5::numeric(10,2), now()::timestamptz,                    array[1,2]::int[], 'a'::char(3)";
+        let sink = run_ok(&mut f.exec, sql, &AUTO).await;
+        let display: Vec<String> = started_types(&sink).into_iter().map(|(_, d)| d).collect();
+        assert_eq!(
+            display,
+            [
+                "bigint",
+                "double precision",
+                "character varying(50)",
+                "numeric(10,2)",
+                "timestamp with time zone",
+                "integer[]",
+                "character(3)",
+            ]
+        );
+        // Kısa ad hizalama için korunur.
+        assert_eq!(started_types(&sink)[0].0, "int8");
+        assert!(!f.exec.in_tx(), "otomatik onayda transaction açık kalmaz");
+
+        // Önbellekten (aynı çiftler) ve yeni typmod ile.
+        let again = run_ok(&mut f.exec, "select 2::int8 a, 'y'::varchar(7) b", &AUTO).await;
+        let display: Vec<String> = started_types(&again).into_iter().map(|(_, d)| d).collect();
+        assert_eq!(display, ["bigint", "character varying(7)"]);
+
+        // Kullanıcı transaction'ı içinde: kullanıcı türü (sunucu RowDescription'da alan (domain) yerine taban türü
+        // bildirir, bu yüzden enum), şema nitelemesi format_type'ınki; transaction bozulmaz.
+        run_ok(&mut f.exec, "begin", &AUTO).await;
+        run_ok(&mut f.exec, "create schema pgt_fmt_s", &AUTO).await;
+        run_ok(&mut f.exec, "create type pgt_fmt_s.e as enum ('a')", &AUTO).await;
+        let user = run_ok(&mut f.exec, "select 'a'::pgt_fmt_s.e u, array['a']::pgt_fmt_s.e[] ua", &AUTO).await;
+        let display: Vec<String> = started_types(&user).into_iter().map(|(_, d)| d).collect();
+        assert_eq!(display, ["pgt_fmt_s.e", "pgt_fmt_s.e[]"]);
+        let state = run_ok(&mut f.exec, "select statement_timestamp() <> transaction_timestamp()", &AUTO).await;
+        assert_eq!(state.rows(), vec![vec![s("t")]], "hâlâ aynı transaction");
+        run_ok(&mut f.exec, "rollback", &AUTO).await;
+    }
+}
+
 #[tokio::test]
 async fn select_streams_columns_then_rows_then_done() {
     for ts in servers() {

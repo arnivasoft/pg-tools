@@ -92,7 +92,7 @@ describe("runReduce", () => {
     const s = reduce(
       [
         { type: "runStart", runId: 1 },
-        ev(1, { type: "started", stmtIndex: 0, kind: "select", columns: [{ name: "a", typeName: "int4", typeOid: 23 }], charOffset: 0 }),
+        ev(1, { type: "started", stmtIndex: 0, kind: "select", columns: [{ name: "a", typeName: "int4", typeOid: 23, typeDisplay: "integer" }], charOffset: 0 }),
         ev(1, { type: "rows", stmtIndex: 0, rows: [["1"]], more: true }),
         ev(1, { type: "done", stmtIndex: 0, tag: "SELECT 1", rowsAffected: null, rowsSent: 1, truncated: true, elapsedMs: 1, notices: [] }),
         scriptDone(1),
