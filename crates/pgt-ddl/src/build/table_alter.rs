@@ -48,6 +48,7 @@ use super::table_constraint::{
 };
 use super::type_canon::canonical_type;
 use super::{BuildCtx, check_ident, check_schema_ident, err, stmt};
+use crate::load::is_unsupported_check;
 use crate::model::{ColumnDef, ConstraintKind, FieldError, IdentityKind, Persistence, TableDef};
 use crate::plan::{Plan, Risk, Statement};
 use crate::quote::{qualified, quote_ident};
@@ -82,6 +83,7 @@ const COMPOSED_MSG: &str =
 const LOAD_FLAG_MSG: &str = "Bu alan yüklemeden gelir ve değiştirilemez; tanımı yeniden yükleyin.";
 const PARTITION_BY_MSG: &str =
     "Bölümleme anahtarı sonradan değiştirilemez; yalnızca tablo oluşturulurken belirlenir.";
+const PARTITIONED_ADD_IDENTITY_MSG: &str = "Bölümlü/kalıtımlı tabloya mevcut alt tablolar varken kimlik kolonu eklenemez (PG <17). Bölüm olup olmadığı burada bilinmediği için bölümlenmiş tabloda her zaman reddedilir; kolonu kimliksiz ekleyip ardından kimlik ekleyin (ADD GENERATED … AS IDENTITY) ya da PG 17+ kullanın.";
 const PARTITIONED_PERSISTENCE_MSG: &str = "Bölümlenmiş tablonun kalıcılığı (LOGGED/UNLOGGED) değiştirilemez; bölümleri ayrı ayrı değiştirin.";
 const TABLESPACE_CLEAR_MSG: &str =
     "Tablespace kaldırılamaz; varsayılana dönmek için pg_default'u açıkça seçin.";
@@ -267,12 +269,24 @@ fn check_alter_rules(
             }
         }
     }
+    // PG 10–16: "cannot recursively add identity column to table that has child tables" — bölümü olan bölümlenmiş
+    // tabloya kimlikli kolon EKLENEMEZ (gerçek sunucuda doğrulandı, Task 5; PG 17+ kabul eder). Bölümün varlığı yerelde
+    // bilinmediğinden yüklenmiş bölümlenmiş tabloda bölüm olduğu varsayılır. Mevcut kolona `ADD GENERATED … AS IDENTITY`
+    // her sürümde kabul edilir. Kalıtım EBEVEYNİ de (tüm sürümlerde) reddeder ama tablonun çocuğu olup olmadığı tanımda
+    // yoktur → sunucuya bırakılır.
+    if is_partitioned(old) && ctx.version_num < 170000 {
+        for (i, oc, c) in matched {
+            if oc.is_none() && c.identity.is_some() {
+                e.push(err(&format!("columns[{i}].identity"), PARTITIONED_ADD_IDENTITY_MSG));
+            }
+        }
+    }
     // PG 18: "SET EXPRESSION is not supported for virtual generated columns in tables with check constraints"
     // (gerçek sunucuda doğrulandı, Task 5). Adım 8'de tabloda kalan CHECK'ler: silinmeyen eski CHECK'ler ve
     // desteklenmeyen listesindeki CHECK'ler (ör. NOT ENFORCED).
     let has_checks = old.constraints.iter().any(|oc| {
         matches!(oc.kind, ConstraintKind::Check { .. }) && !cons.drops.iter().any(|d| d.oid == oc.oid)
-    }) || old.unsupported.iter().any(|u| u.starts_with("CHECK "));
+    }) || old.unsupported.iter().any(|u| is_unsupported_check(u));
     if !managed {
         for (i, oc, c) in matched {
             let Some(oc) = oc else { continue };
@@ -342,6 +356,8 @@ fn order_changed(old: &TableDef, new: &TableDef) -> bool {
 
 /// İfade metninde `name` kolonuna başvuru var mı (yaklaşık): tek tırnaklı dizgeler atlanır; tırnaksız sözcükler küçük
 /// harfe katlanarak, çift tırnaklı adlar aynen karşılaştırılır. Yalnızca uyarı üretmek için kullanılır.
+/// Bilinen boşluklar (uyarı olduğundan kabul): `E'..'` kaçışları ve `$$` dizgeleri ayrıştırılmaz; katlama Unicode
+/// `to_lowercase` iledir (PG yalnızca ASCII harfleri katlar).
 fn expr_mentions(expr: &str, name: &str) -> bool {
     let c: Vec<char> = expr.chars().collect();
     let mut i = 0;
@@ -2397,6 +2413,31 @@ mod tests {
         }), &v(100000));
     }
 
+    /// PG 10–16: bölümü olan bölümlenmiş tabloya kimlikli kolon eklenemez (gerçek sunucu, Task 5); PG 17+ serbest.
+    #[test]
+    fn add_identity_column_to_partitioned_parent() {
+        let p = loaded_parted();
+        let add = |k| with(&p, |d| d.columns.push(ColumnDef { identity: Some(k), not_null: true, ..col("nid", "bigint") }));
+        for ver in [100000, 120000, 160000] {
+            for k in [IdentityKind::Always, IdentityKind::ByDefault] {
+                let e = errs(&p, &add(k), &v(ver));
+                assert_eq!((e.len(), e[0].path.as_str()), (1, "columns[2].identity"), "{ver}: {e:?}");
+                assert!(e[0].message.contains("PG <17"));
+            }
+        }
+        for ver in [170000, 180000] {
+            assert!(sqls(&ok(&p, &add(IdentityKind::Always), &v(ver)))[0].contains("GENERATED ALWAYS AS IDENTITY"));
+        }
+        // Mevcut kolona kimlik eklemek (ADD GENERATED) her sürümde kabul edilir.
+        let existing = with(&p, |d| colm(d, "r").not_null = true);
+        let to_ident = with(&existing, |d| colm(d, "r").identity = Some(IdentityKind::Always));
+        let plan = ok(&existing, &to_ident, &v(100000));
+        assert!(sqls(&plan)[0].ends_with("ADD GENERATED ALWAYS AS IDENTITY"), "{:?}", sqls(&plan));
+        // Sıradan tablo (çocukları bilinmez): sunucuya bırakılır.
+        let plain = TableDef { partition_text: None, ..loaded_parted() };
+        ok(&plain, &with(&plain, |d| d.columns.push(ColumnDef { identity: Some(IdentityKind::Always), not_null: true, ..col("nid", "bigint") })), &v(100000));
+    }
+
     /// PG 18: CHECK'li tabloda sanal kolonun SET EXPRESSION'ı sunucuda desteklenmez (gerçek sunucu, Task 5).
     #[test]
     fn virtual_set_expression_with_check_constraints() {
@@ -2423,7 +2464,8 @@ mod tests {
         let with_ck = with(&virt, |d| d.constraints.push(check.clone()));
         let e = errs(&with_ck, &with(&with_ck, set_expr), &ctx());
         assert_eq!((e.len(), e[0].path.as_str()), (1, "columns[1].generated"), "{e:?}");
-        let unsup = TableDef { unsupported: vec!["CHECK c (NOT ENFORCED)".into()], ..virt.clone() };
+        // Etiket yükleyicinin sabitinden: sabit değişse de kural çalışır (tek kaynak).
+        let unsup = TableDef { unsupported: vec![format!("{} c (NOT ENFORCED)", crate::load::CHECK_LABEL)], ..virt.clone() };
         assert_eq!(errs(&unsup, &with(&unsup, set_expr), &ctx())[0].path, "columns[1].generated");
         // Aynı düzenlemede CHECK silinirse (adım 3) geçerli; yeni CHECK eklemek (adım 10) engel değil.
         let p = ok(&with_ck, &with(&virt, set_expr), &ctx());

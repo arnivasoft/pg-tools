@@ -1,7 +1,8 @@
 -- Tablo kısıtları, ad sırasıyla (C collation; eşit adda oid). $1 = tablo oid'i. PG 18+: ek olarak zamansal (WITHOUT OVERLAPS/PERIOD) ve NOT ENFORCED; NOT NULL kısıtları ('n').
 -- columns/ref_columns: conkey/confkey sırasıyla kolon adları. include: PK/UNIQUE indeksinde anahtar sayısından sonraki
 -- kolonlar. check_expr: pg_get_expr(conbin, conrelid, pretty). extra: modellenmeyen özellikler (dolu ise kısıt
--- "desteklenmeyen" listesine gider ve alter ona dokunmaz).
+-- "desteklenmeyen" listesine gider ve alter ona dokunmaz); PK/UNIQUE indeksinin varsayılan dışı tablespace'i ve
+-- depolama seçenekleri de buradadır (DROP+ADD bunları kaybederdi).
 SELECT con.oid AS oid,
        con.conname::text AS name,
        con.contype::text AS contype,
@@ -24,6 +25,11 @@ SELECT con.oid AS oid,
        con.condeferred AS initially_deferred,
        con.convalidated AS validated,
        NULLIF(concat_ws(', ',
+           (SELECT NULLIF(concat_ws(', ',
+                   CASE WHEN ic.reltablespace <> 0 THEN 'USING INDEX TABLESPACE ' || quote_ident(its.spcname) END,
+                   CASE WHEN ic.reloptions IS NOT NULL THEN 'WITH (' || array_to_string(ic.reloptions, ', ') || ')' END), '')
+            FROM pg_class ic LEFT JOIN pg_tablespace its ON its.oid = ic.reltablespace
+            WHERE con.contype IN ('p', 'u') AND ic.oid = con.conindid),
            CASE WHEN con.confdelsetcols IS NOT NULL THEN 'ON DELETE SET NULL/DEFAULT (kolon listesi)' END,
            CASE WHEN con.conperiod THEN 'WITHOUT OVERLAPS / PERIOD' END,
            CASE WHEN NOT con.conenforced THEN 'NOT ENFORCED' END), '') AS extra

@@ -867,7 +867,9 @@ async fn unsup_body(ts: TestServer) {
                           CONSTRAINT ex_no_overlap EXCLUDE USING gist (r WITH &&)) WITH (autovacuum_enabled = false);
          CREATE CONSTRAINT TRIGGER ex_ct AFTER INSERT ON ex DEFERRABLE FOR EACH ROW EXECUTE PROCEDURE trg();
          CREATE TYPE ct AS (x int, y text);
-         CREATE TABLE typed OF ct;",
+         CREATE TABLE typed OF ct;
+         CREATE TABLE ix (a int, b int, c int, CONSTRAINT ix_pk PRIMARY KEY (a) WITH (fillfactor = 70),
+                          CONSTRAINT ix_u UNIQUE (b) USING INDEX TABLESPACE pg_default, CONSTRAINT ix_c UNIQUE (c));",
     )
     .await;
     let mut expect_unsup = vec![
@@ -909,6 +911,12 @@ async fn unsup_body(ts: TestServer) {
     assert_eq!(got, expect_unsup);
     assert_eq!(l.constraints.iter().map(|c| c.name.as_deref().unwrap()).collect::<Vec<_>>(), ["ex_pkey"], "yalnızca modellenen kısıtlar");
     assert_noop(&env, &l);
+    // PK/UNIQUE indeks seçenekleri modellenmez: DROP+ADD bunları kaybederdi → desteklenmeyen listesine gider.
+    // `USING INDEX TABLESPACE pg_default` varsayılandır (reltablespace 0) → modellenir.
+    let ix = tload(&env, "public", "ix").await;
+    assert_eq!(ix.unsupported, ["PRIMARY KEY ix_pk (WITH (fillfactor=70))"]);
+    assert_eq!(ix.constraints.iter().map(|c| c.name.as_deref().unwrap()).collect::<Vec<_>>(), ["ix_c", "ix_u"]);
+    assert_noop(&env, &ix);
     let typed = tload(&env, "public", "typed").await;
     // Katalog oturumu search_path = pg_catalog: kullanıcı tipleri şema nitelikli yazılır.
     assert_eq!(typed.unsupported, ["OF public.ct (tipli tablo)"]);
@@ -1131,7 +1139,9 @@ async fn lookup_body(ts: TestServer) {
            CREATE TABLE my_table (a int);
            CREATE SCHEMA hidden;
            CREATE TYPE hidden.my_hidden AS ENUM ('b');
-           CREATE COLLATION hidden.my_coll (locale = 'C');"#,
+           CREATE COLLATION hidden.my_coll (locale = 'C');
+           CREATE COLLATION public.dup_coll (locale = 'C');
+           CREATE COLLATION hidden.dup_coll (locale = 'C');"#,
     )
     .await;
     let ask = |req| {
@@ -1185,7 +1195,20 @@ async fn lookup_body(ts: TestServer) {
     for want in ["C", "POSIX", "default"] {
         assert!(names.contains(&want), "{want} yok");
     }
-    assert!(!names.contains(&"my_coll"), "arama yolunda görünmeyen collation listelenmez");
+    // Kullanıcı şemasındaki collation listelenir (şema detail'de); birden fazla şemadaki ad (belirsiz) listelenmez.
+    let mine = colls.iter().find(|c| c.value == "my_coll").expect("hidden.my_coll listede");
+    assert!(mine.detail.as_deref().unwrap().contains("şema hidden"), "{mine:?}");
+    assert!(!names.contains(&"dup_coll"), "belirsiz ad listelenmez");
+    // Değerler niteliksiz ad: kullanıcı şemasındaki collation detail'de şemayı taşır, değerde değil.
+    assert!(!colls.iter().any(|c| c.value.starts_with("hidden.") || c.value.starts_with("public.")));
+    if env.try_sql("CREATE COLLATION public.tr_ci (provider = icu, locale = 'tr-TR')").await.is_ok() {
+        let colls = ask(LookupRequest::Collations).await;
+        let tr = colls.iter().find(|c| c.value == "tr_ci").expect("tr_ci listede");
+        let d = tr.detail.as_deref().unwrap();
+        assert!(d.starts_with("icu") && d.contains("şema public"), "{d}");
+    } else {
+        eprintln!("PG {}: ICU yok, tr_ci collation testi atlandı", v / 10000);
+    }
     let mut sorted = names.clone();
     sorted.dedup();
     assert_eq!(sorted.len(), names.len(), "yinelenen ad yok");
@@ -1300,15 +1323,45 @@ async fn prules_body(ts: TestServer) {
     env.sql("CREATE TABLE ref (id int PRIMARY KEY)").await;
     let base = || parted(table("public", "p", vec![nn(c("k", "integer")), c("r", "integer")], vec![]), PartitionStrategy::List, vec![key("k")]);
 
-    // 1) Kimlik kolonu bölümlenmiş tabloda (create + ADD COLUMN) tüm sürümlerde kabul edilir.
+    // 1) Kimlik kolonu bölümlenmiş tabloda: CREATE her sürümde kabul edilir. Bölüm VARKEN kimlikli kolon EKLEMEK
+    //    PG 10–16'da reddedilir ("cannot recursively add identity column…") → yerel kapı; PG 17+ kabul eder.
+    //    Mevcut kolona ADD GENERATED, SET GENERATED ve DROP IDENTITY bölüm varken her sürümde geçerlidir.
     let pid = with(&base(), |d| {
         d.name = "pid".into();
         d.columns.push(ident(c("id", "bigint"), IdentityKind::Always));
+        d.columns.push(nn(c("x", "bigint")));
     });
     let l = create_and_check(&env, &pid).await;
-    let l = alter_and_check(&env, &l, &with(&l, |d| d.columns.push(ident(c("id2", "integer"), IdentityKind::ByDefault)))).await;
-    assert_eq!(l.columns.last().unwrap().identity, Some(IdentityKind::ByDefault));
-    eprintln!("PG {major}: bölümlenmiş tabloda kimlik kolonu kabul edildi (create + ADD COLUMN)");
+    env.sql("CREATE TABLE pid1 PARTITION OF pid FOR VALUES IN (1)").await;
+    let add_ident = with(&l, |d| d.columns.push(ident(c("id2", "integer"), IdentityKind::ByDefault)));
+    let raw = env.try_sql("ALTER TABLE pid ADD COLUMN raw_id bigint GENERATED BY DEFAULT AS IDENTITY").await;
+    if v < 170000 {
+        assert!(raw.unwrap_err().contains("cannot recursively add identity column"));
+        assert_eq!(alter_errs(&env, &l, &add_ident)[0].path, "columns[4].identity");
+        eprintln!("PG {major}: bölümü olan tabloya kimlikli kolon eklemek sunucuda reddedildi → yerel kapı doğrulandı");
+    } else {
+        raw.unwrap();
+        env.sql("ALTER TABLE pid DROP COLUMN raw_id").await;
+        let l2 = alter_and_check(&env, &tload(&env, "public", "pid").await, &with(&tload(&env, "public", "pid").await, |d| d.columns.push(ident(c("id2", "integer"), IdentityKind::ByDefault)))).await;
+        assert_eq!(l2.columns.last().unwrap().identity, Some(IdentityKind::ByDefault));
+        env.sql("ALTER TABLE pid DROP COLUMN id2").await;
+        eprintln!("PG {major}: bölümü olan tabloya kimlikli kolon eklendi (PG 17+)");
+    }
+    let l = tload(&env, "public", "pid").await;
+    let l = alter_and_check(&env, &l, &with(&l, |d| col_mut(d, "x").identity = Some(IdentityKind::Always))).await;
+    let l = alter_and_check(&env, &l, &with(&l, |d| col_mut(d, "id").identity = Some(IdentityKind::ByDefault))).await;
+    alter_and_check(&env, &l, &with(&l, |d| col_mut(d, "x").identity = None)).await;
+    // Bölüme doğrudan ekleme: PG 10–16'da bölüm kimliği miras almaz (NULL ihlali), PG 17+ alır.
+    let direct = env.try_sql("INSERT INTO pid1 (k, x) VALUES (1, 1)").await;
+    assert_eq!(direct.is_ok(), v >= 170000, "{direct:?}");
+    eprintln!("PG {major}: bölüme doğrudan INSERT kimlik değeri {}", if direct.is_ok() { "aldı" } else { "almadı (NULL ihlali)" });
+    // Kalıtım ebeveyni (çocuğu varken) kimlikli kolon eklemeyi her sürümde reddeder; tanım çocukları bilmez → sunucu.
+    env.sql("CREATE TABLE ip (k int); CREATE TABLE ip1 () INHERITS (ip)").await;
+    let ip = tload(&env, "public", "ip").await;
+    let p = alter_plan(&env, &ip, &with(&ip, |d| d.columns.push(ident(c("id", "bigint"), IdentityKind::Always))));
+    let err = env.try_exec_tx(&p).await.unwrap_err();
+    assert!(err.contains("cannot recursively add identity column"), "{err}");
+    eprintln!("PG {major}: kalıtım ebeveynine kimlikli kolon eklemek sunucuda reddedildi (sunucuya bırakılır)");
 
     // 2) Bölümlenmiş tablodan FK: PG 10 yerel hata, PG 11+ sunucuda geçerli.
     let pf = with(&base(), |d| {
@@ -1405,6 +1458,12 @@ async fn prules_body(ts: TestServer) {
         assert_eq!(r.tablespace.as_deref(), Some("pgt_ddl_tb_ts"));
         let r = alter_and_check(&env, &r, &with(&r, |d| d.tablespace = Some("pg_default".into()))).await;
         assert_eq!(r.tablespace, None);
+        // PK/UNIQUE indeksi varsayılan dışı tablespace'te: modellenmez → desteklenmeyen (DROP+ADD kaybederdi).
+        env.sql("CREATE TABLE its (a int, CONSTRAINT its_u UNIQUE (a) USING INDEX TABLESPACE pgt_ddl_tb_ts)").await;
+        let its = tload(&env, "public", "its").await;
+        assert_eq!(its.unsupported, ["UNIQUE its_u (USING INDEX TABLESPACE pgt_ddl_tb_ts)"]);
+        assert!(its.constraints.is_empty());
+        env.sql("DROP TABLE its").await;
         let pdef = TableDef { tablespace: Some("pgt_ddl_tb_ts".into()), ..with(&base(), |d| d.name = "pts2".into()) };
         if v >= 120000 {
             let l = create_and_check(&env, &pdef).await;
@@ -1560,13 +1619,16 @@ async fn probe_body(ts: TestServer) {
     assert_eq!(p.statements.len(), 3, "{:?}", sqls(&p));
     alter_and_check(&env, &l3, &new).await;
     // Probe B (FK korunursa): yerel hata.
-    env.sql("ALTER TABLE tree2 ADD CONSTRAINT tree_self2 FOREIGN KEY (x) REFERENCES tree2 (x)").await;
+    // Yerel kolonu (pa) kalan, hedef kolonu (x) silinen kendine başvuran FK: hedef kolon yolunda hata.
+    env.sql("ALTER TABLE tree2 ADD CONSTRAINT tree_self2 FOREIGN KEY (pa) REFERENCES tree2 (x)").await;
     let l4b = tload(&env, "public", "tree2").await;
-    let e = alter_errs(&env, &l4b, &with(&l4b, |d| {
+    let new = with(&l4b, |d| {
         d.columns.retain(|c| c.name != "x");
         d.constraints.retain(|c| c.name.as_deref() != Some("tree_x"));
-    }));
-    assert!(e.iter().any(|x| x.path.contains("refColumns") || x.path.contains("columns")), "{e:?}");
+    });
+    assert_eq!(new.constraints[0].name.as_deref(), Some("tree_self2"));
+    let e = alter_errs(&env, &l4b, &new);
+    assert_eq!(e.iter().map(|x| x.path.as_str()).collect::<Vec<_>>(), ["constraints[0].refColumns[0]"], "{e:?}");
 }
 
 // ================================================================================================================

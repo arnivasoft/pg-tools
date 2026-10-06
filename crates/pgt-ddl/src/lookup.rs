@@ -30,7 +30,8 @@ pub enum LookupRequest {
     /// nitelikli, dizi `x[]`), detail = tür (base/enum/domain/composite/range/multirange/array). `query`: büyük/küçük
     /// harf duyarsız alt dize (önek eşleşmeleri önce); en çok 200 sonuç.
     Types { query: Option<String> },
-    /// Kolon collation'ları: value = adla yazılabilen collation adı, detail = sağlayıcı · locale.
+    /// Kolon collation'ları (pg_catalog + kullanıcı şemaları): value = niteliksiz ad (üretici tek tanımlayıcı yazar;
+    /// birden fazla şemada bulunan adlar listelenmez), detail = sağlayıcı · locale [· şema].
     Collations,
 }
 

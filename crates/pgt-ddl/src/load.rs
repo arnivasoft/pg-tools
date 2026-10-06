@@ -281,6 +281,15 @@ fn fk_action(c: &str) -> Option<FkAction> {
     }
 }
 
+/// `unsupported` listesindeki CHECK kısıtı etiketinin türü (`"CHECK ad (ayrıntı)"`). Alter'ın PG 18 sanal kolon
+/// kuralı bu listede CHECK arar: etiket ve arama tek kaynaktan (bkz. `is_unsupported_check`).
+pub(crate) const CHECK_LABEL: &str = "CHECK";
+
+/// `unsupported` girdisi bir CHECK kısıtı mı (yükleyicinin `CHECK_LABEL` etiketiyle).
+pub(crate) fn is_unsupported_check(entry: &str) -> bool {
+    entry.strip_prefix(CHECK_LABEL).is_some_and(|rest| rest.starts_with(' '))
+}
+
 /// Kısıt satırının yükleme sonucu.
 #[derive(Debug, PartialEq)]
 enum LoadedConstraint {
@@ -306,7 +315,7 @@ fn constraint_from_row(r: &Row) -> LoadedConstraint {
     let label = match contype.as_str() {
         "p" => "PRIMARY KEY",
         "u" => "UNIQUE",
-        "c" => "CHECK",
+        "c" => CHECK_LABEL,
         "f" => "FOREIGN KEY",
         "x" => return unsupported("EXCLUDE", None),
         "t" => return unsupported("CONSTRAINT TRIGGER", None),
@@ -475,6 +484,13 @@ mod tests {
         assert_eq!(strip_outer_parens("(x = ')')"), "x = ')'");
         assert_eq!(strip_outer_parens("(\"a)\" > 1)"), "\"a)\" > 1");
         assert_eq!(strip_outer_parens("a > 0"), "a > 0");
+    }
+
+    #[test]
+    fn unsupported_check_label_is_single_source() {
+        assert!(is_unsupported_check(&format!("{CHECK_LABEL} c (NOT ENFORCED)")));
+        assert!(!is_unsupported_check(&format!("{CHECK_LABEL}X c")));
+        assert!(!is_unsupported_check("EXCLUDE c"));
     }
 
     #[test]

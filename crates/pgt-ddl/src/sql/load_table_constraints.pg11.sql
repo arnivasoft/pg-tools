@@ -1,7 +1,8 @@
 -- Tablo kısıtları, ad sırasıyla (C collation; eşit adda oid). $1 = tablo oid'i. PG 11–14: INCLUDE ve conparentid var; NULLS NOT DISTINCT yok.
 -- columns/ref_columns: conkey/confkey sırasıyla kolon adları. include: PK/UNIQUE indeksinde anahtar sayısından sonraki
 -- kolonlar. check_expr: pg_get_expr(conbin, conrelid, pretty). extra: modellenmeyen özellikler (dolu ise kısıt
--- "desteklenmeyen" listesine gider ve alter ona dokunmaz).
+-- "desteklenmeyen" listesine gider ve alter ona dokunmaz); PK/UNIQUE indeksinin varsayılan dışı tablespace'i ve
+-- depolama seçenekleri de buradadır (DROP+ADD bunları kaybederdi).
 SELECT con.oid AS oid,
        con.conname::text AS name,
        con.contype::text AS contype,
@@ -23,7 +24,12 @@ SELECT con.oid AS oid,
        con.condeferrable AS deferrable,
        con.condeferred AS initially_deferred,
        con.convalidated AS validated,
-       NULL::text AS extra
+       NULLIF(concat_ws(', ',
+           (SELECT NULLIF(concat_ws(', ',
+                   CASE WHEN ic.reltablespace <> 0 THEN 'USING INDEX TABLESPACE ' || quote_ident(its.spcname) END,
+                   CASE WHEN ic.reloptions IS NOT NULL THEN 'WITH (' || array_to_string(ic.reloptions, ', ') || ')' END), '')
+            FROM pg_class ic LEFT JOIN pg_tablespace its ON its.oid = ic.reltablespace
+            WHERE con.contype IN ('p', 'u') AND ic.oid = con.conindid)), '') AS extra
 FROM pg_constraint con
 LEFT JOIN pg_class rc ON rc.oid = con.confrelid
 LEFT JOIN pg_namespace rn ON rn.oid = rc.relnamespace

@@ -522,6 +522,9 @@ fn validate_partition(d: &TableDef, table_cols: &HashSet<&str>, ctx: &BuildCtx, 
     }
     // - PG 10–11 bölümlenmiş tablonun TABLESPACE'ini sessizce yoksayar (reltablespace 0 kalır → gidiş-dönüş bozulur);
     //   PG 12+ "cannot specify default tablespace for partitioned relations" (veritabanının varsayılanı pg_default).
+    // Kapı yaklaşıktır: sunucu belirtilen tablespace'i VERİTABANININ varsayılan tablespace'iyle karşılaştırır, `pg_default`
+    // adıyla değil. Varsayılanı başka olan veritabanında `pg_default` aslında kabul edilir, varsayılan olan başka bir ad
+    // ise sunucuda reddedilir (uygulama geri alınır). Yerelde veritabanının varsayılanı bilinmez.
     if let Some(ts) = &d.tablespace {
         if ctx.version_num < 120000 {
             e.push(version_err("tablespace", "Bölümlenmiş tabloda TABLESPACE", 12));
