@@ -2619,6 +2619,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pgt-dash"
+version = "0.1.0"
+dependencies = [
+ "pgt-core",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
 name = "pgt-query"
 version = "0.1.0"
 dependencies = [
