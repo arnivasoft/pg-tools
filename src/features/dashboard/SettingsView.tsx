@@ -55,7 +55,7 @@ export default function SettingsView(props: SectionProps) {
       key: "pending", header: s.cols.pending, width: 170,
       cell: (r) =>
         r.pendingRestart ? (
-          <span class={`${badgeClass} border-[color:var(--srv-amber)] text-[color:var(--srv-amber)]`} title={s.pendingRestartTitle}>
+          <span class={`${badgeClass} border-[color:var(--srv-amber)] text-warn-text`} title={s.pendingRestartTitle}>
             {s.pendingRestart}
           </span>
         ) : (

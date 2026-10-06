@@ -11,7 +11,7 @@ import { durationTone, stateTone, type DurationTone, type StateTone } from "./ta
 const toneClass: Record<StateTone, string> = {
   active: "border-accent text-accent",
   idle: "border-border text-muted",
-  warn: "border-[color:var(--srv-amber)] text-[color:var(--srv-amber)]",
+  warn: "border-[color:var(--srv-amber)] text-warn-text",
   danger: "border-danger text-danger",
   muted: "border-border text-muted",
 };
@@ -28,7 +28,7 @@ export function StateBadge(props: { state: string | null }) {
 const durClass: Record<DurationTone, string> = {
   none: "text-muted",
   normal: "",
-  warn: "text-[color:var(--srv-amber)]",
+  warn: "text-warn-text",
   danger: "text-danger font-medium",
 };
 

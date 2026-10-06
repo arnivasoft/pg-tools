@@ -13,6 +13,9 @@
   --selected: #dbe6fd;
   --hover: #eceef2;
   --danger: #c62828;
+  /* Dolgu --danger üstündeki metin; --srv-amber metin olarak açık temada okunmaz: koyu kehribar metin tonu. */
+  --danger-fg: #ffffff;
+  --warn-text: #92400e;
   --syn-keyword: #7c3aed;
   --syn-string: #0f766e;
   --syn-number: #b45309;
@@ -40,6 +43,8 @@
   --selected: #22324f;
   --hover: #232731;
   --danger: #ef5350;
+  --danger-fg: #1a0505;
+  --warn-text: #fbbf24;
   --syn-keyword: #c4a7ff;
   --syn-string: #5eead4;
   --syn-number: #fbbf24;
@@ -79,6 +84,8 @@
   --color-selected: var(--selected);
   --color-hover: var(--hover);
   --color-danger: var(--danger);
+  --color-danger-fg: var(--danger-fg);
+  --color-warn-text: var(--warn-text);
 }
 
 html,

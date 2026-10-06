@@ -51,7 +51,7 @@ export default function SignalDialog(props: { dash: DashController; tabId: strin
           </Button>
           <Button
             variant="primary"
-            class={terminate() ? "!bg-danger !text-white" : ""}
+            class={terminate() ? "!bg-danger !text-danger-fg" : ""}
             disabled={busy()}
             onClick={() => g.answer(true)}
           >

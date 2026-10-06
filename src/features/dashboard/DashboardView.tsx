@@ -68,6 +68,7 @@ export default function DashboardView(props: { dash: DashController; tabId: stri
             label: td.sections[s.value],
             // Eklenti yok/yüklü değil: sekme soluk ama tıklanabilir (neden metni görünsün).
             muted: s.value === "statements" && stmtMuted(),
+            mutedHint: td.statements.unavailable,
           })),
         );
         return (
