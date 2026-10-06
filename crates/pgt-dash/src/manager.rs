@@ -21,6 +21,15 @@ use crate::types::{
 const CANCEL: &str = "SELECT pg_cancel_backend($1)";
 const TERMINATE: &str = "SELECT pg_terminate_backend($1)";
 
+/// Hata sonrası yeniden deneme ilkesi. Bağlantı yoksa/kapalıysa sorgudan önce yeniden açmak her zaman güvenlidir.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Retry {
+    /// Salt okunur sorgular: bağlantı kopması hatasında bir kez yeniden denenir.
+    Once,
+    /// Yan etkili ifadeler (sinyal): ifade gönderildikten sonra asla yeniden çalıştırılmaz.
+    BeforeSendOnly,
+}
+
 type BoxFut<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 /// Canlı bağlantı. `DedicatedConn.notices` alıcısı bilerek düşürülür: pgt-core sürücüsü alıcısız kanala
@@ -90,37 +99,37 @@ impl DashManager {
 
     pub async fn sample(&self, id: DashId) -> Result<Sample> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, _, _, db| Box::pin(queries::sample(c, db))).await
+        self.with_conn(&s, Retry::Once, |c, _, _, db| Box::pin(queries::sample(c, db))).await
     }
 
     pub async fn overview(&self, id: DashId) -> Result<Overview> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, _, _, db| Box::pin(queries::overview(c, db))).await
+        self.with_conn(&s, Retry::Once, |c, _, _, db| Box::pin(queries::overview(c, db))).await
     }
 
     pub async fn activity(&self, id: DashId) -> Result<Vec<ActivityRow>> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, v, _, db| Box::pin(queries::activity(c, v, db))).await
+        self.with_conn(&s, Retry::Once, |c, v, _, db| Box::pin(queries::activity(c, v, db))).await
     }
 
     pub async fn locks(&self, id: DashId) -> Result<LockReport> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, _, _, db| Box::pin(queries::locks(c, db))).await
+        self.with_conn(&s, Retry::Once, |c, _, _, db| Box::pin(queries::locks(c, db))).await
     }
 
     pub async fn settings(&self, id: DashId) -> Result<Vec<Setting>> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, _, _, _| Box::pin(queries::settings(c))).await
+        self.with_conn(&s, Retry::Once, |c, _, _, _| Box::pin(queries::settings(c))).await
     }
 
     pub async fn prepared(&self, id: DashId) -> Result<Vec<PreparedXact>> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, _, _, _| Box::pin(queries::prepared(c))).await
+        self.with_conn(&s, Retry::Once, |c, _, _, _| Box::pin(queries::prepared(c))).await
     }
 
     pub async fn statements(&self, id: DashId, order: StatementsOrder) -> Result<Statements> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, v, _, db| Box::pin(queries::statements(c, v, db, order))).await
+        self.with_conn(&s, Retry::Once, |c, v, _, db| Box::pin(queries::statements(c, v, db, order))).await
     }
 
     /// Başka bir backend'e iptal/sonlandırma sinyali gönderir. Yetki hataları (42501) ve diğer SQL hataları
@@ -131,7 +140,7 @@ impl DashManager {
             SignalKind::Cancel => CANCEL,
             SignalKind::Terminate => TERMINATE,
         };
-        self.with_conn(&s, |c, _, self_pid, _| {
+        self.with_conn(&s, Retry::BeforeSendOnly, |c, _, self_pid, _| {
             Box::pin(async move {
                 if pid == self_pid {
                     return Err(Error::Invalid("Kendi dashboard oturumunuzu durduramazsınız.".into()));
@@ -158,6 +167,7 @@ impl DashManager {
     async fn with_conn<T>(
         &self,
         s: &DashSession,
+        retry: Retry,
         mut f: impl for<'a> FnMut(&'a Client, u32, i32, Option<&'a str>) -> BoxFut<'a, T>,
     ) -> Result<T> {
         let mut guard = s.conn.lock().await;
@@ -166,11 +176,25 @@ impl DashManager {
                 *guard = None;
                 let live = self.connect(s.server, s.target).await?;
                 s.self_pid.store(backend_pid(&live.client).await?, Ordering::Relaxed);
+                // Yeniden adlandırılmış veritabanı sessizce eski adla süzülmesin; oturum kayıtlı kalır.
+                if let Some(name) = &s.db_name {
+                    let now: String = live
+                        .client
+                        .query_one("SELECT current_database()::text", &[])
+                        .await
+                        .map_err(Error::from_query)?
+                        .get(0);
+                    if &now != name {
+                        return Err(Error::NotFound(format!(
+                            "Veritabanı adı değişmiş ({name} -> {now}); dashboard'u yeniden açın."
+                        )));
+                    }
+                }
                 *guard = Some(live);
             }
             let live = guard.as_ref().expect("bağlantı yukarıda kuruldu");
             match f(&live.client, live.version_num, s.self_pid.load(Ordering::Relaxed), s.db_name.as_deref()).await {
-                Err(e) if attempt == 0 && (live.client.is_closed() || is_connection_error(&e)) => {
+                Err(e) if attempt == 0 && should_retry(retry, live.client.is_closed(), &e) => {
                     tracing::debug!("dashboard bağlantısı koptu, yeniden açılıyor");
                     *guard = None;
                 }
@@ -185,11 +209,34 @@ async fn backend_pid(c: &Client) -> Result<i32> {
     Ok(c.query_one("SELECT pg_backend_pid()", &[]).await.map_err(Error::from_query)?.get(0))
 }
 
-/// Bağlantı kopması/sonlandırılması belirtisi: SQLSTATE yok (G/Ç hatası) ya da 08*/57P0[123].
-fn is_connection_error(e: &Error) -> bool {
-    match e {
-        Error::Query { sqlstate: None, .. } => true,
-        Error::Query { sqlstate: Some(c), .. } => c.starts_with("08") || matches!(c.as_str(), "57P01" | "57P02" | "57P03"),
-        _ => false,
+/// Hata sonrası yeniden deneme kararı. Yalnızca bağlantı kopması sayılır: istemci kapandıysa ya da SQLSTATE
+/// sınıfı 08 / 57P01-03 ise. SQLSTATE'siz hata tek başına yetmez (istemci tarafı çözümleme hataları da öyledir).
+fn should_retry(retry: Retry, client_closed: bool, e: &Error) -> bool {
+    if retry == Retry::BeforeSendOnly {
+        return false;
+    }
+    client_closed
+        || matches!(e, Error::Query { sqlstate: Some(c), .. }
+            if c.starts_with("08") || matches!(c.as_str(), "57P01" | "57P02" | "57P03"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn q(code: Option<&str>) -> Error {
+        Error::Query { sqlstate: code.map(str::to_string), message: "x".into(), detail: None, hint: None }
+    }
+
+    #[test]
+    fn retry_decision() {
+        assert!(should_retry(Retry::Once, true, &q(None)));
+        assert!(should_retry(Retry::Once, false, &q(Some("57P01"))));
+        assert!(should_retry(Retry::Once, false, &q(Some("08006"))));
+        assert!(!should_retry(Retry::Once, false, &q(None)), "SQLSTATE'siz hata tek başına bağlantı kaybı değildir");
+        assert!(!should_retry(Retry::Once, false, &q(Some("42501"))));
+        // Sinyal: bağlantı kopsa bile ifade yeniden çalıştırılmaz.
+        assert!(!should_retry(Retry::BeforeSendOnly, true, &q(Some("57P01"))));
+        assert!(!should_retry(Retry::BeforeSendOnly, true, &q(None)));
     }
 }

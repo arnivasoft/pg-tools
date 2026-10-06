@@ -5,7 +5,8 @@
  */
 export type DashInfo = { id: string, versionNum: number, 
 /**
- * Dashboard bağlantısının kendi backend pid'i (kendini durdurmayı engellemek için).
+ * Açılıştaki backend pid'i. Yeniden bağlanınca değişir (bayatlayabilir); arayüz kendi oturumunu
+ * `ActivityRow.is_self` ile tanımalıdır. `signal` güncel pid'i sunucu tarafında kontrol eder.
  */
 selfPid: number, 
 /**

@@ -212,7 +212,8 @@ pub struct DashInfo {
     #[ts(type = "string")]
     pub id: DashId,
     pub version_num: u32,
-    /// Dashboard bağlantısının kendi backend pid'i (kendini durdurmayı engellemek için).
+    /// Açılıştaki backend pid'i. Yeniden bağlanınca değişir (bayatlayabilir); arayüz kendi oturumunu
+    /// `ActivityRow.is_self` ile tanımalıdır. `signal` güncel pid'i sunucu tarafında kontrol eder.
     pub self_pid: i32,
     /// Veritabanı düzeyinde oturumda ad; sunucu düzeyinde `None`.
     pub database: Option<String>,

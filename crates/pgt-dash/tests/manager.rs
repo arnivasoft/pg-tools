@@ -99,9 +99,23 @@ async fn cancel_and_terminate_real_sessions() {
             // A: uzun sorgu iptal edilir, oturum yaşar.
             let a = Arc::new(admin_client(&s, &s.config.maintenance_db).await);
             let pid_a: i32 = a.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0);
+            let probe = admin_client(&s, &s.config.maintenance_db).await;
             let a2 = a.clone();
             let sleeper = tokio::spawn(async move { a2.batch_execute("SELECT pg_sleep(30)").await });
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            let mut seen = false;
+            for _ in 0..50 {
+                let n: i64 = probe
+                    .query_one("SELECT count(*) FROM pg_stat_activity WHERE pid = $1 AND state = 'active'", &[&pid_a])
+                    .await
+                    .unwrap()
+                    .get(0);
+                if n == 1 {
+                    seen = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert!(seen, "uyuyan sorgu 5 sn içinde active görülmedi");
             assert_eq!(dm.signal(info.id, pid_a, SignalKind::Cancel).await.unwrap(), SignalOutcome::Sent);
             let err = sleeper.await.unwrap().unwrap_err();
             assert_eq!(err.code().map(|c| c.code()), Some("57014"));
