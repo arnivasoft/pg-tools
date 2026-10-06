@@ -50,7 +50,7 @@
 
 ---
 
-### Görev 1: `SessionProfile::Dashboard` (pgt-core)
+### Task 1: `SessionProfile::Dashboard` (pgt-core)
 
 **Dosyalar:**
 - Değiştir: `crates/pgt-core/src/connection.rs` (profil, `application_name`, `profile_session_options`, `profile_session_sets`, `validate_profile`, `settings_ok_for` ve bunların birim testleri)
@@ -109,7 +109,7 @@ git commit -m "feat(core): Dashboard oturum profili (salt okunur, 10 sn, lock_ti
 
 ---
 
-### Görev 2: `pgt-dash` iskeleti, yazılı yapılar ve örnek/oturum sorguları
+### Task 2: `pgt-dash` iskeleti, yazılı yapılar ve örnek/oturum sorguları
 
 **Dosyalar:**
 - Oluştur: `crates/pgt-dash/Cargo.toml`, `crates/pgt-dash/src/lib.rs`, `types.rs`, `queries.rs`, `sql/sample.sql`, `sql/overview.sql`, `sql/activity.sql`, `sql/activity.pg13.sql`
@@ -275,7 +275,7 @@ async fn activity_hides_other_users_queries_without_privilege() {
 
 ---
 
-### Görev 3: Kilitler, yapılandırma, hazır transaction'lar, sorgu istatistikleri
+### Task 3: Kilitler, yapılandırma, hazır transaction'lar, sorgu istatistikleri
 
 **Dosyalar:**
 - Oluştur: `sql/locks_sessions.sql`, `sql/locks.sql`, `sql/settings.sql`, `sql/prepared.sql`, `sql/statements_ext.sql`, `sql/statements.sql` (PG 10–12), `sql/statements.pg13.sql`
@@ -449,7 +449,7 @@ async fn statements_unavailable_without_extension() {
 
 ---
 
-### Görev 4: `DashManager` — yaşam döngüsü, yeniden bağlanma, iptal/sonlandırma
+### Task 4: `DashManager` — yaşam döngüsü, yeniden bağlanma, iptal/sonlandırma
 
 **Dosyalar:**
 - Oluştur: `crates/pgt-dash/src/manager.rs`
@@ -543,7 +543,7 @@ async fn reconnects_after_the_dash_connection_is_killed() {
 
 ---
 
-### Görev 5: Tauri `dash_*` komutları ve entegrasyon
+### Task 5: Tauri `dash_*` komutları ve entegrasyon
 
 **Dosyalar:**
 - Oluştur: `src-tauri/src/dash.rs`
