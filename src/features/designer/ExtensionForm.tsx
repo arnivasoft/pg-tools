@@ -121,7 +121,7 @@ export default function ExtensionForm(props: FormProps) {
                   onInput={(ev) => patch({ version: normalizeEmpty(ev.currentTarget.value) })}
                 />
                 <datalist id={versionList}>
-                  <For each={versionName() === null ? [] : (versions() ?? [])}>{(i) => <option value={i.value} />}</For>
+                  <For each={versionName() === null ? [] : (versions.loading ? [] : (versions() ?? []))}>{(i) => <option value={i.value} />}</For>
                 </datalist>
               </>
             )}

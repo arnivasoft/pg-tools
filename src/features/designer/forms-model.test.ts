@@ -100,3 +100,11 @@ describe("alan yolu sözleşmesi", () => {
     expect(g.general).toEqual(["o"]);
   });
 });
+
+describe("sahip girdisi (normalizeEmpty)", () => {
+  it("yazım sırasında sondaki boşluk korunur, yalnız boşluk → null", () => {
+    expect(normalizeEmpty("my ")).toBe("my ");
+    expect(normalizeEmpty("my role")).toBe("my role");
+    expect(normalizeEmpty("   ")).toBeNull();
+  });
+});

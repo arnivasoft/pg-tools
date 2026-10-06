@@ -749,6 +749,13 @@ describe("designer-controller yaşam döngüsü", () => {
     s.ctl.focusField(id, "name");
     expect(s.ctl.focusRequest(id)).toEqual({ field: "name", seq: 2 });
     expect(s.ctl.focusRequest("yok")).toBeNull();
+    // Tüketim: eski seq yeni isteği silmez; aynı seq bir kez temizler (yeniden bağlanan form tekrar odaklamaz).
+    s.ctl.consumeFocus(id, 1);
+    expect(s.ctl.focusRequest(id)).toEqual({ field: "name", seq: 2 });
+    s.ctl.consumeFocus(id, 2);
+    expect(s.ctl.focusRequest(id)).toBeNull();
+    s.ctl.consumeFocus(id, 2);
+    expect(s.ctl.focusRequest(id)).toBeNull();
   });
 });
 

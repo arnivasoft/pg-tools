@@ -621,6 +621,11 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       return m ? gateFor(m, false) : { kind: "blocked", reason: "disconnected" };
     },
     focusRequest: (tabId: string): FocusRequest | null => entries.get(tabId)?.focus() ?? null,
+    /** Odak isteği uygulandı: yalnızca hâlâ aynı `seq` bekliyorsa temizler (yeni istek ezilmez); yeniden bağlanan form eski isteği tekrar uygulamaz. */
+    consumeFocus: (tabId: string, seq: number) => {
+      const e = entries.get(tabId);
+      if (e?.focus()?.seq === seq) e.setFocus(null);
+    },
     requestFocus,
     /** `requestFocus` ile aynı (Task 4 adı). */
     focusField: requestFocus,

@@ -14,10 +14,7 @@ import type { FormEntry } from "./FormParts";
 import { EXTENSION_PATHS, SCHEMA_PATHS } from "./forms-model";
 import SqlPreview from "./SqlPreview";
 
-/**
- * Tür → form (tembel bileşen + bilinen alan yolları). Task 5 schema/extension, Task 6 sequence/index bağlar; eksik tür için yalnızca geçici "form henüz
- * yok" notu gösterilir (Task 5–6 dört türü bağlayınca not kaldırılır).
- */
+// Tür → form (tembel bileşen + bilinen alan yolları); eksik tür geçici "form henüz yok" notu gösterir (Task 6 kaldırır).
 const FORMS: Partial<Record<ObjectKind, FormEntry>> = {
   schema: { view: lazy(() => import("./SchemaForm")), paths: SCHEMA_PATHS },
   extension: { view: lazy(() => import("./ExtensionForm")), paths: EXTENSION_PATHS },
@@ -34,7 +31,6 @@ function StatusBadge(props: { model: DesignerModel }) {
   const live = () => key() === "ready" || key() === "done";
   return (
     <span
-      aria-label={`${tdes.view.statusLabel}: ${tdes.view.status[key()]}`}
       class="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-border px-2 text-[12px]"
       classList={{ "text-danger": danger(), "text-muted": !danger() && !live(), "text-fg": live() }}
     >
@@ -43,6 +39,7 @@ function StatusBadge(props: { model: DesignerModel }) {
         class="h-1.5 w-1.5 rounded-full"
         classList={{ "bg-accent": live(), "bg-danger": danger(), "bg-muted": !danger() && !live() }}
       />
+      <span class="sr-only">{tdes.view.statusLabel}: </span>
       {tdes.view.status[key()]}
     </span>
   );
@@ -66,7 +63,7 @@ export default function DesignerView(props: {
         // Genel hatalar: `old.`, üst-düzey `columns` ve formun bilmediği yollar (form yoksa hepsi).
         const issues = createMemo(() => groupIssues(m().view?.errors ?? [], entry()?.paths ?? new Set<string>()));
         const done = () => m().mode === "create" && m().outcome?.outcome === "applied";
-        const readOnly = () => m().status !== "ready" || m().applying || done();
+        const readOnly = () => m().locked || m().status !== "ready" || m().applying || done();
         const canReload = () => !m().applying && m().status !== "gone" && m().status !== "loading";
         const reload = () => {
           if (!canReload()) return;

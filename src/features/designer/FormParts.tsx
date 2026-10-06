@@ -5,6 +5,7 @@ import { tdes } from "../../app/strings-designer";
 import { inputClass } from "../../ui/Field";
 import type { DesignerController, DesignerModel } from "./designer-controller";
 import { issuesFor, type FieldIssues } from "./designer-model";
+import { normalizeEmpty } from "./forms-model";
 
 /** Her tür formunun aldığı prop'lar. `readOnly`: sekme düzenlenemez (yükleniyor/kesik/uygulanıyor/kilit dışı nedenler). */
 export interface FormProps {
@@ -62,13 +63,22 @@ export function FieldRow(props: {
 export const invalidClass = (invalid: boolean) => (invalid ? " !border-danger" : "");
 
 /**
- * Denetleyiciden gelen odak isteği (`requestFocus`) bu alana (`field`) ise denetimi odaklar; form bağlandığında zaten
- * bekleyen istek de uygulanır. Devre dışı denetim odaklanamaz (istek sessizce atlanır).
+ * Denetleyiciden gelen odak isteği (`requestFocus`) bu alana (`field`) ise denetimi odaklar; bekleyen istek form bağlandığında
+ * ya da düzenlenebilir olduğunda bir kez uygulanır.
  */
-export function createFocusOnRequest(props: { designer: DesignerController; tabId: string }, field: string, el: () => HTMLElement | undefined) {
+export function createFocusOnRequest(
+  props: { designer: DesignerController; tabId: string; readOnly: boolean },
+  field: string,
+  el: () => HTMLElement | undefined,
+) {
   createEffect(() => {
     const req = props.designer.focusRequest(props.tabId);
-    if (req && req.field === field) el()?.focus();
+    // Form düzenlenebilir olana (yüklendi/uygulama bitti) kadar istek bekler; uygulanınca tüketilir (yeniden bağlanma tekrar odaklamaz).
+    if (!req || req.field !== field || props.readOnly) return;
+    const node = el();
+    if (!node) return;
+    node.focus();
+    props.designer.consumeFocus(props.tabId, req.seq);
   });
 }
 
@@ -106,8 +116,8 @@ export function OwnerSelect(props: {
             disabled={props.disabled}
             value={props.value ?? ""}
             onInput={(ev) => {
-              const v = ev.currentTarget.value.trim();
-              props.onChange(v === "" ? null : v);
+              // Yazıldığı gibi (boşluk içeren rol adı yazılabilsin); yalnızca boş/boşluk → varsayılan.
+              props.onChange(normalizeEmpty(ev.currentTarget.value));
             }}
           />
           <datalist id={listId}>
