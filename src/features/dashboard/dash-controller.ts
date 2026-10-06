@@ -224,8 +224,9 @@ export function createDashController(deps: DashControllerDeps) {
     const head = Promise.all([
       request(tabId, e, gen, "overview", api.dashOverview(id), (_, overview) => ({ overview }), false),
       request(tabId, e, gen, "overview", api.dashSample(id), (cur, s) => {
-        cur.ring.push(s);
-        return { rates: toRates(cur.ring.samples(), cur.intervalMs / 1000) };
+        // Örnek, turun başladığı andaki aralıkla kaydedilir (aralık sonradan değişse de çifti doğru eşikle ölçülür).
+        cur.ring.push(s, m.intervalMs / 1000);
+        return { rates: toRates(cur.ring.samples(), cur.intervalMs / 1000, undefined, cur.ring.intervals()) };
       }, false),
     ]).then(([a, b]) => {
       if (a && b && alive(tabId, e, gen)) update(e, (cur) => ({ ...cur, sectionError: clearError(cur, "overview") }));

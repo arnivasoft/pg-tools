@@ -13,18 +13,29 @@ export interface RateSeries {
 /**
  * Bellekte en çok `MAX_SAMPLES` örnek tutar; dolunca en eski düşer. Her `push`/`clear` yeni bir dizi kurar: `samples()`
  * değişmez bir anlık görüntüdür (Solid tüketicileri başvuru değişimini görür; eski görüntü sonradan değişmez).
+ * Her örnekle alındığı andaki beklenen aralık (sn) da tutulur (`intervals()`, `samples()` ile aynı dizinler): aralık
+ * kısaltılınca eski örnek çiftleri yeni (kısa) eşikle boşluk sayılmasın.
  */
 export class SampleRing {
   private buf: readonly Sample[] = [];
-  push(s: Sample): void {
+  private ivs: readonly (number | undefined)[] = [];
+  push(s: Sample, intervalSec?: number): void {
     const next = [...this.buf, s];
-    this.buf = next.length > MAX_SAMPLES ? next.slice(next.length - MAX_SAMPLES) : next;
+    const ivs = [...this.ivs, intervalSec];
+    const drop = Math.max(0, next.length - MAX_SAMPLES);
+    this.buf = drop ? next.slice(drop) : next;
+    this.ivs = drop ? ivs.slice(drop) : ivs;
   }
   clear(): void {
     this.buf = [];
+    this.ivs = [];
   }
   samples(): readonly Sample[] {
     return this.buf;
+  }
+  /** Örnek başına beklenen aralık (sn); verilmediyse `undefined`. */
+  intervals(): readonly (number | undefined)[] {
+    return this.ivs;
   }
 }
 
@@ -35,15 +46,19 @@ const COUNTERS: [keyof RateSeries, keyof Sample][] = [
 
 /**
  * Ardışık örneklerden saniyelik oranlar; ilk örnek yalnızca taban çizgisidir (nokta üretmez). Sayaç geriye gittiyse
- * (`pg_stat_reset`, yeniden bağlanma), zaman ilerlemediyse ya da aralık `gapFactor * intervalSec`'ten uzunsa (uyku) o nokta null.
+ * (`pg_stat_reset`, yeniden bağlanma), zaman ilerlemediyse ya da aralık eşikten uzunsa (uyku) o nokta null. Eşik çift başına
+ * `gapFactor * max(önceki aralık, şimdiki aralık)`; örnek başına aralık (`intervals`) yoksa `intervalSec` kullanılır.
  */
-export function toRates(samples: readonly Sample[], intervalSec: number, gapFactor = 5): RateSeries {
+export function toRates(
+  samples: readonly Sample[], intervalSec: number, gapFactor = 5, intervals?: readonly (number | undefined)[],
+): RateSeries {
   const out: RateSeries = { commit: [], rollback: [], ins: [], upd: [], del: [], ret: [], fetched: [], read: [], hit: [] };
   for (let i = 1; i < samples.length; i++) {
     const prev = samples[i - 1];
     const cur = samples[i];
     const dt = cur.at - prev.at;
-    const gap = dt <= 0 || dt > gapFactor * intervalSec;
+    const expected = Math.max(intervals?.[i - 1] ?? intervalSec, intervals?.[i] ?? intervalSec);
+    const gap = dt <= 0 || dt > gapFactor * expected;
     for (const [key, field] of COUNTERS) {
       const dv = cur[field] - prev[field];
       out[key].push({ t: cur.at, v: gap || dv < 0 ? null : dv / dt });

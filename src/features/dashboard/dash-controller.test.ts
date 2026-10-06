@@ -183,6 +183,30 @@ describe("dash-controller açma ve tur", () => {
     expect(s.ctl.model(id)?.intervalMs).toBe(10_000);
   });
 
+  it("aralık kısaltılınca grafik geçmişi silinmez: örnek, alındığı andaki aralıkla kaydedilir", async () => {
+    const s = setup();
+    let at = 5000;
+    let step = 10;
+    s.api.dashSample.mockImplementation(async () => {
+      at += step;
+      return { ...sample(), at, xactCommit: at };
+    });
+    const id = await s.ctl.open({ serverId: "S1", serverName: "srv", databaseOid: null });
+    s.ctl.setIntervalMs(id, 10_000);
+    s.ctl.setActive(id);
+    await flush();
+    await vi.advanceTimersByTimeAsync(10_000);
+    s.ctl.setIntervalMs(id, 1000);
+    step = 1;
+    await vi.advanceTimersByTimeAsync(2000);
+    const m = s.ctl.model(id)!;
+    expect(m.ring.intervals().slice(0, 2)).toEqual([10, 10]);
+    expect(m.ring.intervals().at(-1)).toBe(1);
+    // dt 10 çifti (10 sn aralıkta alınmış) 1 sn aralığa geçince de boşluk sayılmaz
+    expect(m.rates.commit[0].v).toBe(1);
+    expect(m.rates.commit.every((p) => p.v !== null)).toBe(true);
+  });
+
   it("aralık 1 sn ise liste 5 sn'de bir; geçersiz aralık sınırlanır (0/negatif → 1 sn, NaN → 2 sn)", async () => {
     const s = setup();
     const id = await openActive(s);

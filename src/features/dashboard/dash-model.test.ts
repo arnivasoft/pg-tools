@@ -48,6 +48,18 @@ describe("toRates", () => {
     const r = toRates([smp(100), smp(100, { xactCommit: 5 }), smp(99, { xactCommit: 9 })], 2);
     expect(r.commit.map((p) => p.v)).toEqual([null, null]);
   });
+  it("aralık kısaltılınca (10 sn → 1 sn) eski çiftler korunur; gerçek uyku yine boşluk", () => {
+    const samples = [smp(0), smp(10, { xactCommit: 10 }), smp(20, { xactCommit: 20 }), smp(21, { xactCommit: 21 }),
+      smp(22, { xactCommit: 22 }), smp(82, { xactCommit: 82 })];
+    const ivs = [10, 10, 10, 1, 1, 1];
+    // güncel aralık 1 sn; örnek başına aralıklar olmasaydı dt 10 çiftleri boşluk olurdu
+    expect(toRates(samples, 1).commit.map((p) => p.v)).toEqual([null, null, 1, 1, null]);
+    expect(toRates(samples, 1, 5, ivs).commit.map((p) => p.v)).toEqual([1, 1, 1, 1, null]);
+  });
+  it("örnek başına aralık eksikse geçirilen aralık kullanılır", () => {
+    expect(toRates([smp(0), smp(10, { xactCommit: 10 })], 1, 5, [undefined, 10]).commit[0].v).toBe(1);
+    expect(toRates([smp(0), smp(10, { xactCommit: 10 })], 1, 5, []).commit[0].v).toBeNull();
+  });
   it("değişmeyen sayaç 0 oranı verir (null değil)", () => {
     expect(toRates([smp(0), smp(2)], 2).commit[0].v).toBe(0);
   });
@@ -61,6 +73,15 @@ describe("SampleRing", () => {
     expect(ring.samples()).toHaveLength(300);
     expect(ring.samples()[0].at).toBe(5);
     expect(ring.samples()[299].at).toBe(304);
+  });
+  it("aralıklar örneklerle aynı dizinde tutulur ve birlikte düşer", () => {
+    const ring = new SampleRing();
+    for (let i = 0; i < 305; i++) ring.push(smp(i), i < 3 ? 10 : 2);
+    expect(ring.intervals()).toHaveLength(300);
+    expect(ring.intervals()[0]).toBe(2);
+    ring.clear();
+    ring.push(smp(1));
+    expect(ring.intervals()).toEqual([undefined]);
   });
   it("clear boşaltır ve yeniden doldurulabilir", () => {
     const ring = new SampleRing();
