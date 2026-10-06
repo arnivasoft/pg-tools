@@ -285,6 +285,29 @@ kullanıcı işaretlemeli. Dashboard bağlantıları sunucuda `application_name 
 - [ ] Aynı sunucuda iki dashboard sekmesi (sunucu + veritabanı) açıkken biri kapanınca diğeri etkilenmez. **[—]**
 - [ ] Uygulama açıkken F5/Ctrl+R sayfayı yeniden yüklemez (Plan 6 ile aynı davranış); kapatma penceresi dashboard bağlantılarını temizler (uygulamayı kapattıktan sonra sunucuda `pg-tools dash` bağlantısı kalmaz). **[—]**
 
+## Nesne diyalogları (Plan 11)
+
+Ön koşul: bağlı bir sunucu ve veritabanı; designer sekmesi Explorer menüsünden açılır (Task 4). Aşağıdaki kutucuklar GUI üzerinden elle uygulanmadı; sürüm öncesi işaretlenmelidir.
+
+### Sekme kabuğu
+- [ ] Designer sekmesi sorgu ve dashboard sekmelerinden sonra çizilir (kalem-cetvel simgesi); sunucu renk çizgisi, üretim rozeti ve kilit simgesi sorgu sekmesindekiyle aynıdır. **[—]**
+- [ ] Formda değişiklik yapılınca sekmede nokta görünür (ekran okuyucu "kaydedilmemiş değişiklikler" okur); bağlantı kesilince/sunucu silinince başlık soluklaşır ("gone"da üstü çizili). **[—]**
+- [ ] Kirli designer sekmesini kapat (×, orta tık, Delete): "Kaydedilmemiş değişiklikler atılsın mı?" diyaloğu, odak **Vazgeç**'te, Enter sekmeyi kapatmaz; "Değişiklikleri at ve kapat" kapatır. Temiz sekme onaysız kapanır. **[—]**
+- [ ] Designer etkinken F5 sayfayı yeniden yüklemez, sorgu çalıştırmaz, önizlemeyi hemen yeniler; Ctrl+R/Ctrl+Shift+R sayfayı yeniden yüklemez. Ctrl+F davranışı değişmez. **[—]**
+- [ ] Designer etkinken sorgu paneli ve "Nesne" paneli görünmez/tıklanamaz; designer'dan sorgu sekmesine geçince editör/ızgara kaydırma konumu korunur, designer'a dönünce form ve önizleme olduğu gibi durur. **[—]**
+- [ ] **Bilinçli karar:** pencere kapatılırken kirli designer sekmeleri için uyarı **gösterilmez** (açık transaction toplu onayına eklenmez); kaydedilmemiş taslaklar kaybolur, uçuştaki uygulama arka uçta iptal edilir. Kapatma sonrası sunucuda `pg-tools` DDL oturumu kalmadığını doğrula. **[—]**
+
+### Önizleme ve uygulama çubuğu
+- [ ] Önizleme salt okunur; metin yalnızca arka ucun ifadeleri (`;` ile, aralarında boş satır). İfade listesinde sıra, risk rozeti (Güvenli / Yıkıcı / Veri kaybı olabilir), "transaction dışı" rozeti ve not görünür; uyarılar şeridi okunur. **[—]**
+- [ ] Boş durumlar: hatalı form → "Formu tamamlayın"; değişiklik yok → "Değişiklik yok"; ilk önizleme beklerken → "Önizleme hazırlanıyor…"; yazarken eski önizleme soluk kalır ("Yenileniyor…"), titreme yok. **[—]**
+- [ ] **Kopyala** betiği panoya koyar ("SQL panoya kopyalandı."); pano hatasında hata bildirimi. **[—]**
+- [ ] Yıkıcı planda "Etkisini anladım" işaretlenmeden **Uygula** kapalı; Uygula kırmızıdır. Üretim etiketli sunucuda veri kaybı planında ayrıca "Onaylamak için sunucu adını yazın: <ad>" alanı (büyük/küçük harf duyarlı); ad alanında Enter gönderim yapmaz. **[—]**
+- [ ] Uygulama sürerken Uygula "Uygulanıyor…" ve kapalı, **İptal** görünür ve uçuştaki uygulamayı iptal eder; çift tık ikinci istek üretmez. **[—]**
+- [ ] Kilitli sunucuda Uygula ve lock_timeout kapalı (`title`: "Sunucu salt okunur kilitli"), önizleme ve Kopyala serbest. **[—]**
+- [ ] Başarısız uygulamada ilgili ifade satırları önizlemede kırmızı zeminle vurgulanır, listede "başarısız" rozeti; `committed > 0` ise "N ifade kalıcı oldu" uyarısı ve "Yeniden yükle" şeridi; `55P03` → "Kilit beklerken zaman aşımı". **[—]**
+- [ ] lock_timeout seçici (1 sn / 5 sn / 30 sn / sınırsız) uygulamada kullanılır (başka oturumda `lock table … in access exclusive mode` tutarken 1 sn ile zaman aşımı). **[—]**
+- [ ] **Yeniden yükle**: kirli formda "Kaydedilmemiş değişiklikler atılsın mı?" onayı (odak Vazgeç); temizken doğrudan yükler. İlk yükleme hatasında "Yeniden dene". **[—]**
+
 ## Ölçümler
 
 | Tarih | Makine | Paket (MB) | Açılış (ms) | Toplam özel WS (MB) | Rust özel WS (MB) |

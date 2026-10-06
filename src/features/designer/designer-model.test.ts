@@ -8,7 +8,8 @@ import type { Risk } from "../../ipc/bindings/Risk";
 import type { Statement } from "../../ipc/bindings/Statement";
 import {
   addColumn, addInclude, applyGate, applyOptionsFor, canSubmit, cloneDef, confirmFlags, defName, defsEqual, groupIssues,
-  isSafeIntegerString, issuesFor, kindLabel, moveColumn, removeColumn, removeInclude, scriptWithRanges, updateColumn,
+  isSafeIntegerString, issuesFor, kindLabel, moveColumn, previewEmptyState, removeColumn, removeInclude, scriptWithRanges,
+  statementRangesToLineRanges, updateColumn,
   type ApplyGate, type ConfirmState, type GateInput,
 } from "./designer-model";
 
@@ -380,5 +381,40 @@ describe("indeks kolon işlemleri", () => {
     expect(d.include).toEqual(["x", "y"]);
     expect(removeInclude(d, 2)).toBe(d);
     expect(removeInclude(d, -1)).toBe(d);
+  });
+});
+
+describe("statementRangesToLineRanges", () => {
+  it("birleşik betikte her ifadenin satırları (1 tabanlı, kapsayıcı)", () => {
+    const { text, ranges } = scriptWithRanges([stmt("CREATE SCHEMA a"), stmt("A\nB\nC"), stmt("DROP SCHEMA b")]);
+    // 1: CREATE…;  2: boş  3-5: A,B,C;  6: boş  7: DROP…;
+    expect(statementRangesToLineRanges(text, ranges)).toEqual([{ from: 1, to: 1 }, { from: 3, to: 5 }, { from: 7, to: 7 }]);
+  });
+  it("sondaki satır sonu sonraki satıra taşmaz; boş ifade ve boş metin", () => {
+    expect(statementRangesToLineRanges("A\n;", [[0, 2]])).toEqual([{ from: 1, to: 1 }]);
+    expect(statementRangesToLineRanges("A;\n\n;", [[0, 1], [4, 4]])).toEqual([{ from: 1, to: 1 }, { from: 3, to: 3 }]);
+    expect(statementRangesToLineRanges("", [])).toEqual([]);
+  });
+  it("metin dışı aralık son satıra kırpılır", () => {
+    expect(statementRangesToLineRanges("A\nB", [[2, 50]])).toEqual([{ from: 2, to: 2 }]);
+    expect(statementRangesToLineRanges("A\nB", [[-5, 0]])).toEqual([{ from: 1, to: 1 }]);
+  });
+});
+
+describe("previewEmptyState", () => {
+  it("görünüm yokken: bekliyorsa hazırlanıyor; değilse create → formu tamamlayın, alter → değişiklik yok", () => {
+    expect(previewEmptyState(null, true, "create")).toBe("pending");
+    expect(previewEmptyState(null, true, "alter")).toBe("pending");
+    expect(previewEmptyState(null, false, "create")).toBe("incomplete");
+    expect(previewEmptyState(null, false, "alter")).toBe("noChanges");
+  });
+  it("hatalı görünüm (empty=true da taşır) → formu tamamlayın; boş → değişiklik yok; ifadeli → null", () => {
+    expect(previewEmptyState(view({ errors: [fe("name")], empty: true, statements: [] }), false, "alter")).toBe("incomplete");
+    expect(previewEmptyState(view({ empty: true, statements: [] }), false, "alter")).toBe("noChanges");
+    expect(previewEmptyState(view(), false, "create")).toBeNull();
+  });
+  it("bekleyen önizlemede eski görünüm gösterilmeye devam eder", () => {
+    expect(previewEmptyState(view(), true, "create")).toBeNull();
+    expect(previewEmptyState(view({ empty: true, statements: [] }), true, "alter")).toBe("noChanges");
   });
 });

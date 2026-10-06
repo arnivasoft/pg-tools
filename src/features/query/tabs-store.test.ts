@@ -6,13 +6,16 @@ import {
   createTabsStore,
   initialTabs,
   isDashTabId,
+  isDesignerTabId,
   isQueryTabId,
   moveTab,
   openDashboard,
+  openDesigner,
   openTab,
   renameTab,
   type TabsState,
 } from "./tabs-store";
+import { designerTabKey } from "../designer/designer-model";
 
 const open3 = () => {
   let s = initialTabs();
@@ -174,6 +177,128 @@ describe("tabs-store dashboard sekmeleri", () => {
     const moved = moveTab(a.state, ids[2], 0);
     expect(moved.dashboards).toBe(a.state.dashboards);
     expect(moveTab(a.state, a.id, 0)).toBe(a.state);
+  });
+});
+
+describe("tabs-store designer sekmeleri", () => {
+  // Anahtar designer parçasında üretilir (`designerTabKey`); sekme deposu yalnızca aynı anahtarı tekilleştirir.
+  const alter = (s: TabsState, oid = 10, serverId = "s1", databaseOid = 5) => {
+    const t = { serverId, databaseOid, object: { kind: "sequence" as const, oid } };
+    return openDesigner(s, { serverId, databaseOid, title: `Düzenle: ${oid}`, key: designerTabKey(s.designers, t) });
+  };
+  const create = (s: TabsState, schemaOid: number | null = 3, tableOid: number | null = null) => {
+    const t = { serverId: "s1", databaseOid: 5, create: { kind: "index" as const, context: { schemaOid, tableOid } } };
+    return openDesigner(s, { serverId: "s1", databaseOid: 5, title: "Oluştur: Index", key: designerTabKey(s.designers, t) });
+  };
+
+  it("açılan designer etkin olur; anahtar ve başlık; kimlik diğer türlerle çakışmaz", () => {
+    const { s, ids } = open3();
+    const d = openDashboard(s, { serverId: "s1", databaseOid: null, title: "D" });
+    const a = alter(d.state);
+    expect(a.created).toBe(true);
+    expect(a.state.activeId).toBe(a.id);
+    expect([...ids, d.id, OBJECT_TAB_ID]).not.toContain(a.id);
+    expect(a.state.designers[0]).toEqual({ id: a.id, serverId: "s1", databaseOid: 5, title: "Düzenle: 10", key: "alter:sequence:s1:5:10", where: null });
+    expect(isDesignerTabId(a.state, a.id)).toBe(true);
+    expect(isDesignerTabId(a.state, ids[0])).toBe(false);
+    expect(isDesignerTabId(a.state, d.id)).toBe(false);
+    expect(isQueryTabId(a.state, a.id)).toBe(false);
+    expect(isDashTabId(a.state, a.id)).toBe(false);
+    // Sonra açılan sorgu sekmesi designer kimliğini alamaz (`taken()` üç türü kapsar).
+    const q = openTab(a.state, { serverId: "s1", serverName: "prod", database: "a", id: a.id });
+    expect(q.id).not.toBe(a.id);
+    expect(q.state.designers).toHaveLength(1);
+  });
+
+  it("designer kimliği var olan (geri yüklenmiş) sorgu/dashboard kimliğini atlar", () => {
+    const q = openTab(initialTabs(), { serverId: "s1", serverName: "prod", database: "a", id: "e1" });
+    const a = alter(q.state);
+    expect(a.id).not.toBe("e1");
+    const d = openDashboard({ ...a.state, nextId: 1 }, { serverId: "s1", databaseOid: 1, title: "D" });
+    const b = alter({ ...d.state, nextId: 1 }, 11);
+    expect(new Set([q.id, a.id, d.id, b.id]).size).toBe(4);
+  });
+
+  it("alter: aynı nesne ikinci kez açılınca var olan etkinleşir (created=false)", () => {
+    const a = alter(initialTabs());
+    const s = activateTab(a.state, OBJECT_TAB_ID);
+    const again = alter(s);
+    expect(again.created).toBe(false);
+    expect(again.id).toBe(a.id);
+    expect(again.state.designers).toHaveLength(1);
+    expect(again.state.activeId).toBe(a.id);
+    // Farklı oid / sunucu / veritabanı ayrı sekmedir.
+    expect(alter(again.state, 11).created).toBe(true);
+    expect(alter(again.state, 10, "s2").created).toBe(true);
+    expect(alter(again.state, 10, "s1", 6).created).toBe(true);
+  });
+
+  it("create: aynı bağlamda her açılış yeni sekme, n artar", () => {
+    const a = create(initialTabs());
+    const b = create(a.state);
+    expect(a.created && b.created).toBe(true);
+    expect(b.id).not.toBe(a.id);
+    expect(b.state.designers.map((x) => x.key)).toEqual(["create:index:s1:5:3::1", "create:index:s1:5:3::2"]);
+    // Farklı bağlam kendi sayacından başlar; tablo bağlamı anahtarda.
+    const c = create(b.state, 3, 99);
+    expect(c.state.designers[2].key).toBe("create:index:s1:5:3:99:1");
+    const n = create(c.state, null);
+    expect(n.state.designers[3].key).toBe("create:index:s1:5:::1");
+    // Kapanan sekmeden sonra numara açık olanların en büyüğünden devam eder (anahtar çakışmaz).
+    const closed = closeTab(b.state, a.id);
+    expect(create(closed).state.designers.map((x) => x.key)).toEqual(["create:index:s1:5:3::2", "create:index:s1:5:3::3"]);
+  });
+
+  it("kapanınca görünüm sırası: sorgu → dashboard → designer → Nesne", () => {
+    const { s: s0, ids } = open3();
+    const d = openDashboard(s0, { serverId: "s1", databaseOid: null, title: "D" });
+    const a = alter(d.state, 1);
+    const b = alter(a.state, 2);
+    let s = b.state;
+    // Son dashboard kapanınca sağındaki ilk designer.
+    s = closeTab(activateTab(s, d.id), d.id);
+    expect(s.activeId).toBe(a.id);
+    // Designer kapanınca sağdaki designer.
+    s = closeTab(s, a.id);
+    expect(s.activeId).toBe(b.id);
+    // Son designer kapanınca soldaki sorgu sekmesi.
+    s = closeTab(s, b.id);
+    expect(s.activeId).toBe(ids[2]);
+    expect(s.designers).toEqual([]);
+    // Son sorgu sekmesi kapanınca (dashboard yok) sağdaki designer.
+    const c = alter(s, 3);
+    s = closeTab(activateTab(c.state, ids[2]), ids[2]);
+    expect(s.activeId).toBe(c.id);
+    // Yalnız designer kalmışken: soldaki sorgu, en son Nesne.
+    s = closeTab(closeTab(s, ids[0]), ids[1]);
+    expect(s.activeId).toBe(c.id);
+    expect(closeTab(s, c.id).activeId).toBe(OBJECT_TAB_ID);
+  });
+
+  it("yeniden adlandırma ve etkinleştirme designer kimliğini tanır", () => {
+    const a = alter(initialTabs());
+    const r = renameTab(a.state, a.id, " Düzenle: yeni ");
+    expect(r.designers[0].title).toBe("Düzenle: yeni");
+    expect(r.designers[0].key).toBe(a.state.designers[0].key);
+    expect(renameTab(a.state, a.id, "  ")).toBe(a.state);
+    const s = activateTab(a.state, OBJECT_TAB_ID);
+    expect(activateTab(s, a.id).activeId).toBe(a.id);
+    // Sorgu sekmesi sıralaması designer'lara dokunmaz.
+    expect(moveTab(a.state, a.id, 0)).toBe(a.state);
+  });
+
+  it("store: openDesigner var olanı yeniden kullanır", () => {
+    const store = createTabsStore();
+    const input = { serverId: "s", databaseOid: 1, title: "E", where: "s/db", key: "alter:schema:s:1:7" };
+    const a = store.openDesigner(input);
+    expect(a.created).toBe(true);
+    expect(store.state.designers[0].where).toBe("s/db");
+    store.activate(OBJECT_TAB_ID);
+    expect(store.openDesigner(input)).toEqual({ id: a.id, created: false });
+    expect(store.state.activeId).toBe(a.id);
+    store.close(a.id);
+    expect(store.state.designers).toHaveLength(0);
+    expect(store.state.activeId).toBe(OBJECT_TAB_ID);
   });
 });
 

@@ -1,11 +1,13 @@
 // Nesne diyaloglarının saf modeli: hata eşleme, uygulama kapısı (güvenlik), betik aralıkları, indeks kolon işlemleri.
 // İstemci SQL üretmez; yalnızca arka ucun döndürdüğü PlanView'i yorumlar.
 import type { ApplyOptions } from "../../ipc/bindings/ApplyOptions";
+import type { DdlCreate } from "../../ipc/bindings/DdlCreate";
 import type { FieldError } from "../../ipc/bindings/FieldError";
 import type { IndexColumn } from "../../ipc/bindings/IndexColumn";
 import type { IndexDef } from "../../ipc/bindings/IndexDef";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
+import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Statement } from "../../ipc/bindings/Statement";
 
@@ -196,4 +198,70 @@ export function addInclude(d: IndexDef, name: string): IndexDef {
 export function removeInclude(d: IndexDef, i: number): IndexDef {
   if (!inRange(i, d.include.length)) return d;
   return { ...d, include: d.include.filter((_, k) => k !== i) };
+}
+
+// ---- Önizleme görünümü (SqlPreview) ----
+
+/**
+ * Her ifadenin satır aralığı (1 tabanlı, kapsayıcı) — `scriptWithRanges` metni ve aralıkları üzerinden. Satır
+ * dekorasyonu (başarısız ifade vurgusu) için; aralık metin dışındaysa metnin son satırına kırpılır.
+ */
+export function statementRangesToLineRanges(text: string, ranges: ReadonlyArray<readonly [number, number]>): Array<{ from: number; to: number }> {
+  // Satır başlangıç ofsetleri: lineOf(i) = i'den küçük-eşit son başlangıcın sırası.
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) starts.push(i + 1);
+  const lineOf = (offset: number) => {
+    const o = Math.max(0, Math.min(offset, text.length));
+    let lo = 0;
+    let hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid]! <= o) lo = mid; else hi = mid - 1;
+    }
+    return lo + 1;
+  };
+  return ranges.map(([a, b]) => {
+    const from = lineOf(a);
+    // Bitiş dışlayıcı: son karakterin satırı (boş ifadede başlangıç satırı).
+    return { from, to: Math.max(from, lineOf(b > a ? b - 1 : a)) };
+  });
+}
+
+/**
+ * Önizleme alanının boş durumu (null: betik gösterilir). Bekleyen önizlemede eski görünüm (varsa) gösterilmeye devam
+ * eder; yalnızca hiç görünüm yokken "hazırlanıyor". Görünüm yokken: create → "formu tamamlayın", alter → "değişiklik
+ * yok" (yüklenen tanım = taslak). Geçersiz tanım `empty = true` da taşır: önce `errors` bakılır.
+ */
+export type PreviewEmptyState = "pending" | "incomplete" | "noChanges";
+export function previewEmptyState(view: PlanView | null, pending: boolean, mode: "create" | "alter"): PreviewEmptyState | null {
+  if (!view) return pending ? "pending" : mode === "create" ? "incomplete" : "noChanges";
+  if (view.errors.length > 0) return "incomplete";
+  if (view.empty || view.statements.length === 0) return "noChanges";
+  return null;
+}
+
+// ---- Sekme anahtarı ----
+
+/** Designer sekmesinin hedefi: yeni nesne (`create`) ya da var olan nesne (`object`). */
+export type DesignerTarget = { serverId: string; databaseOid: number } & (
+  | { create: DdlCreate; object?: undefined }
+  | { object: ObjectRef; create?: undefined }
+);
+
+/**
+ * Sekme tekilleştirme anahtarı (`DesignerTab.key`). Alter: `alter:<kind>:<sunucu>:<db>:<oid>` — aynı nesne tek sekme.
+ * Create: `create:<kind>:<sunucu>:<db>:<şema>:<tablo>:<n>` — aynı bağlamda birden çok "yeni" sekmesi serbest; `n` açık
+ * create sekmelerinin en büyüğünden bir fazladır (anahtar her açılışta benzersiz).
+ */
+export function designerTabKey(open: ReadonlyArray<{ key: string }>, t: DesignerTarget): string {
+  if (t.object) return `alter:${t.object.kind}:${t.serverId}:${t.databaseOid}:${t.object.oid}`;
+  const c = t.create;
+  const prefix = `create:${c.kind}:${t.serverId}:${t.databaseOid}:${c.context.schemaOid ?? ""}:${c.context.tableOid ?? ""}:`;
+  let n = 1;
+  for (const d of open) {
+    if (!d.key.startsWith(prefix)) continue;
+    const k = Number(d.key.slice(prefix.length));
+    if (Number.isInteger(k) && k >= n) n = k + 1;
+  }
+  return `${prefix}${n}`;
 }

@@ -1,6 +1,104 @@
 // Nesne diyaloğu (designer) metinleri. Yalnızca tembel designer parçası içe aktarır: ana pakette durmasın diye ayrı
 // modüldedir (ana paketin designer metinleri `t.menu.*`). PostgreSQL terimleri İngilizce kalır.
+import type { Risk } from "../ipc/bindings/Risk";
+
 export const tdes = {
+  loading: "Yükleniyor…",
+  /** Sekme başlıkları (`kind`: `kindLabel` çıktısı, ör. "Index"). */
+  tab: {
+    create: (kind: string, server: string, database?: string | null) =>
+      `Oluştur: ${kind} · ${database ? `${server}/${database}` : server}`,
+    edit: (_kind: string, name: string) => `Düzenle: ${name}`,
+    dirty: "kaydedilmemiş değişiklikler",
+  },
+  /** Kirli sekmeyi kapatma / yeniden yükleme onayı (odak Vazgeç'te). */
+  discard: {
+    title: "Kaydedilmemiş değişiklikler",
+    closeMessage: (title: string) => `"${title}" sekmesinde kaydedilmemiş değişiklikler var. Kaydedilmemiş değişiklikler atılsın mı?`,
+    reloadMessage: "Tanım yeniden yüklenince formdaki kaydedilmemiş değişiklikler kaybolur. Kaydedilmemiş değişiklikler atılsın mı?",
+    close: "Değişiklikleri at ve kapat",
+    reload: "Değişiklikleri at ve yükle",
+  },
+  /** Üst çubuk ve şeritler. */
+  view: {
+    statusLabel: "Durum",
+    status: {
+      loading: "Yükleniyor",
+      ready: "Hazır",
+      error: "Yüklenemedi",
+      disconnected: "Bağlantı kesildi",
+      gone: "Nesne yok",
+      done: "Tamamlandı",
+    },
+    mode: { create: "Yeni", alter: "Düzenle" },
+    reload: "Yeniden yükle",
+    retry: "Yeniden dene",
+    reloadTitle: "Tanımı sunucudan yeniden yükle",
+    loadError: "Tanım yüklenemedi",
+    needsReload: "Nesnenin sunucudaki tanımı değişmiş olabilir; devam etmeden önce yeniden yükleyin.",
+    disconnected: "Sunucu bağlantısı kesildi; sekme salt okunur. Sunucuyu yeniden bağlayıp Yeniden yükle'ye basın.",
+    done: "Nesne oluşturuldu, ancak ağaçta bulunamadı. Sekmeyi kapatabilirsiniz.",
+    readOnly: "Salt okunur",
+    formMissing: "Bu tür için form henüz yok.",
+  },
+  preview: {
+    title: "SQL önizleme",
+    copy: "Kopyala",
+    copyTitle: "SQL betiğini panoya kopyala",
+    copied: "SQL panoya kopyalandı.",
+    copyFailed: "SQL panoya kopyalanamadı.",
+    pending: "Önizleme hazırlanıyor…",
+    refreshing: "Yenileniyor…",
+    incomplete: "Formu tamamlayın",
+    incompleteNote: "Önizleme için formdaki eksik ya da hatalı alanları düzeltin.",
+    noChanges: "Değişiklik yok",
+    lastSent: "Gönderilen son betik (başarısız ifade işaretli)",
+    statements: "İfadeler",
+    statement: (i: number) => `${i + 1}. ifade`,
+    failedBadge: "başarısız",
+    nonTx: "transaction dışı",
+    nonTxTitle: "Bu ifade transaction içinde çalışamaz; hata olursa önceki ifadeler geri alınmaz.",
+    warnings: "Uyarılar",
+    general: "Düzeltilmesi gerekenler",
+    error: "Önizleme alınamadı",
+  },
+  risk: {
+    safe: "Güvenli",
+    destructive: "Yıkıcı",
+    data_loss: "Veri kaybı olabilir",
+  } satisfies Record<Risk, string>,
+  bar: {
+    risk: "Risk",
+    lockTimeout: "lock_timeout",
+    lockTimeoutTitle: "Kilit bekleme sınırı (aşılırsa ifade iptal edilir)",
+    lockChoice: (ms: number) => (ms === 0 ? "sınırsız" : `${ms / 1000} sn`),
+    confirm: "Etkisini anladım",
+    typeName: (name: string) => `Onaylamak için sunucu adını yazın: ${name}`,
+    typeNameLabel: "Sunucu adı",
+    noServerName: "Sunucu adı bilinmiyor; bu değişiklik onaylanamaz.",
+    apply: "Uygula",
+    applying: "Uygulanıyor…",
+    cancel: "İptal",
+    cancelTitle: "Süren uygulamayı iptal et",
+    openScript: "Query Tool'da aç",
+    openScriptTitle: "Betiği yeni sorgu sekmesine koy (çalıştırmaz)",
+    close: "Kapat",
+    lockedTitle: "Sunucu salt okunur kilitli",
+    /** Uygula kapalıyken `title` gerekçesi (`ApplyGate.reason`). */
+    blocked: {
+      locked: "Sunucu salt okunur kilitli",
+      disconnected: "Sunucu bağlantısı yok",
+      loading: "Tanım yükleniyor",
+      busy: "Uygulama sürüyor",
+      pending: "Önizleme bekleniyor",
+      stale: "Önizleme güncel değil",
+      invalid: "Formdaki hataları düzeltin",
+      empty: "Uygulanacak değişiklik yok",
+    },
+    needsConfirm: "Uygulamak için etkisini anladığınızı onaylayın",
+    needsName: "Uygulamak için onaylayıp sunucu adını yazın",
+    position: (n: number) => `ifade metninde ${n}. karakter`,
+  },
   apply: {
     applied: (n: number) => `Değişiklikler uygulandı (${n} ifade).`,
     committed: (n: number) => `Hata öncesi ${n} ifade kalıcı oldu; nesne kısmen değişmiş olabilir.`,
@@ -18,5 +116,13 @@ export const tdes = {
     gone: "Nesne artık yok.",
     serverGone: "Sunucu kaydı silindi.",
     dropped: "Nesne silindi.",
+  },
+  /** Ortak form parçaları. */
+  form: {
+    owner: "Sahip (OWNER)",
+    ownerHint: "Boş bırakılırsa bağlanan rol sahip olur.",
+    ownerPlaceholder: "varsayılan",
+    comment: "Yorum (COMMENT)",
+    freeSql: "Bu alan SQL ifadesi olarak olduğu gibi çalıştırılır; yalnızca güvendiğiniz metni yazın.",
   },
 } as const;
