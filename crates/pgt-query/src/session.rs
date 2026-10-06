@@ -589,6 +589,21 @@ fn lock_open(slot: &SessionSlot) -> Result<tokio::sync::MutexGuard<'_, Inner>> {
     Ok(inner)
 }
 
+/// Oturum düzeyinde `lock_timeout`'u değiştirebilen kullanıcı ifadesi mi: `SET [SESSION] lock_timeout`,
+/// `RESET lock_timeout`, `RESET ALL`, `set_config('lock_timeout', …)` (`SET LOCAL` hariç).
+fn touches_lock_timeout(sql: &str) -> bool {
+    use crate::lex::{Kind, lex};
+    let toks: Vec<_> = lex(sql).into_iter().filter(|t| t.kind != Kind::Comment).collect();
+    let word = |i: usize, w: &str| toks.get(i).is_some_and(|t| t.is_word(sql, w));
+    let names_it = |t: &crate::lex::Token| {
+        matches!(t.kind, Kind::Word | Kind::Ident | Kind::Str) && t.text(sql).to_ascii_lowercase().contains("lock_timeout")
+    };
+    if word(0, "set") && !word(1, "local") || word(0, "reset") {
+        return (word(0, "reset") && word(1, "all")) || toks.iter().skip(1).take(2).any(names_it);
+    }
+    toks.iter().any(|t| t.is_word(sql, "set_config")) && toks.iter().any(|t| t.kind == Kind::Str && names_it(t))
+}
+
 /// Kullanıcı işlemi için oturum kilidi: kilidi bir arka plan işlemi (tamamlama) tutuyorsa ondan vazgeçmesi istenir
 /// ve en çok `BACKGROUND_YIELD_WAIT` beklenir; başka bir işlem tutuyorsa (kısa bir yeniden denemeden sonra) `BUSY`.
 /// Kilit alınınca bekleyen `lock_timeout` geri yüklemesi uygulanır.
@@ -630,6 +645,11 @@ async fn settle(slot: &SessionSlot, inner: &mut Inner) {
         inner.pending_lock_timeout = None; // yeniden bağlanınca sunucu varsayılanı geçerli
         return;
     };
+    // Yalnızca transaction dışında (oturum düzeyinde) uygulanır: kullanıcı transaction'ında `set_config` geri
+    // alınabilir ya da hata transaction'ı bozabilir. Aksi halde bekler.
+    if slot.state() != TxState::Idle || exec.cursor_open() || exec.in_tx() {
+        return;
+    }
     let handle = exec.cancel_handle();
     if !crate::parse_guard::fail_restore()
         && matches!(settled(&handle, exec.query_text(RESTORE_LOCK_TIMEOUT, &[&value])).await, Some(Ok(_)))
@@ -1027,6 +1047,10 @@ impl QueryManager {
             let ok = outcome == StmtOutcome::Completed;
             if ok && p.creates_session_state {
                 inner.dirty = true;
+            }
+            if ok && touches_lock_timeout(text) {
+                // Kullanıcı değeri kendisi belirledi: bekleyen eski geri yükleme onu ezmesin.
+                inner.pending_lock_timeout = None;
             }
             if ok && p.plan.kind != StmtKind::Select {
                 // DDL, transaction komutları ve SET/DO/CALL… (arama yolu, katalog) önbelleği bayatlatabilir.
@@ -2019,6 +2043,23 @@ mod tests {
     }
 
     #[test]
+    fn lock_timeout_touching_statements() {
+        for sql in [
+            "set lock_timeout = '5s'",
+            "SET SESSION lock_timeout TO 0",
+            "reset lock_timeout",
+            "RESET ALL",
+            "select set_config('lock_timeout', '1s', false)",
+            "set \"lock_timeout\" = 1",
+        ] {
+            assert!(touches_lock_timeout(sql), "{sql}");
+        }
+        for sql in ["set local lock_timeout = 1", "set statement_timeout = 1", "select 'lock_timeout'", "reset role"] {
+            assert!(!touches_lock_timeout(sql), "{sql}");
+        }
+    }
+
+    #[test]
     fn auto_begin_is_skipped_only_for_transaction_boundaries() {
         for (sql, skip) in [
             ("begin", true), ("start transaction", true), ("commit", true), ("rollback", true), ("end", true),
@@ -2215,6 +2256,41 @@ mod db_tests {
                 assert_eq!(pending(&qm, id), None);
             }
             assert_eq!(show(&qm, id).await, "0");
+
+            // Kullanıcının kendi SET'i bekleyen eski değeri iptal eder.
+            let id = qm.open(ts.config.id, Target::Maintenance, opts).await.unwrap();
+            qm.run(id, "set lock_timeout = '3s'", Scope::All, 10, true, &mut Nop).await.unwrap();
+            {
+                let _fail = FailRestore::on();
+                qm.complete(id, cte(4)).await.unwrap();
+                assert_eq!(pending(&qm, id).as_deref(), Some("3s"));
+                // settle başarısız (durumlu oturum: bekler), sonra kullanıcının SET'i başarılı.
+                qm.run(id, "set lock_timeout = '5s'", Scope::All, 10, true, &mut Nop).await.unwrap();
+                assert_eq!(pending(&qm, id), None);
+            }
+            assert_eq!(show(&qm, id).await, "5s");
+
+            // Kullanıcı transaction'ında bekleyen değer uygulanmaz; transaction bitince uygulanır.
+            let manual = SessionOptions { mode: TxMode::Manual, statement_timeout_ms: 0 };
+            let id = qm.open(ts.config.id, Target::Maintenance, manual).await.unwrap();
+            qm.run(id, "set lock_timeout = '3s'", Scope::All, 10, true, &mut Nop).await.unwrap();
+            qm.tx(id, TxAction::Commit).await.unwrap();
+            {
+                let _fail = FailRestore::on();
+                qm.complete(id, cte(5)).await.unwrap();
+                assert_eq!(pending(&qm, id).as_deref(), Some("3s"));
+                qm.run(id, "select 1", Scope::All, 10, true, &mut Nop).await.unwrap(); // otomatik BEGIN
+            }
+            assert_eq!(qm.tx_state(id).unwrap(), TxState::InTransaction);
+            qm.run(id, "select 2", Scope::All, 10, true, &mut Nop).await.unwrap();
+            assert_eq!(pending(&qm, id).as_deref(), Some("3s"), "transaction içinde uygulanmamalı");
+            qm.tx(id, TxAction::Rollback).await.unwrap();
+            assert_eq!(pending(&qm, id).as_deref(), Some("3s"));
+            let mut rows = Rows(Vec::new());
+            qm.run(id, "show lock_timeout", Scope::All, 10, true, &mut rows).await.unwrap();
+            assert_eq!(rows.0, ["3s"]);
+            assert_eq!(pending(&qm, id), None);
+            qm.tx(id, TxAction::Rollback).await.unwrap();
         }
     }
 }

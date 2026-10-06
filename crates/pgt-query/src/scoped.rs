@@ -268,7 +268,9 @@ pub(crate) fn finish(target: &Target, mut items: Vec<CompletionItem>) -> Vec<Com
 pub(crate) fn assemble(targets: &[Target], bases: Vec<Option<Vec<CompletionItem>>>) -> Vec<CompletionItem> {
     let mut out = Vec::new();
     for (t, base) in targets.iter().zip(bases) {
-        // Parse sonucu yoksa (meşgul, süre, hata) açık kolon listesi gösterilir.
+        // Parse sonucu yoksa ya da boşsa (meşgul, süre, önbelleğe alınmış hata: ör. dış bloğa başvuran LATERAL
+        // gövde, 42P10) açık kolon listesi gösterilir.
+        let base = base.filter(|b| !b.is_empty() || t.known.is_none());
         if let Some(base) = base.or_else(|| t.known.as_deref().map(fixed_items)) {
             out.extend(finish(t, base));
         }
@@ -365,8 +367,10 @@ select 1, 2, 3
 select a, b from t
 ) AS pgt_s(x)".into()));
         assert_eq!(t.known, Some(names(&["x"])));
-        let got: Vec<String> = assemble(&[t], vec![None]).into_iter().map(|i| i.label).collect();
+        let got: Vec<String> = assemble(std::slice::from_ref(&t), vec![None]).into_iter().map(|i| i.label).collect();
         assert_eq!(got, ["x"], "Parse sonucu yoksa bilinen adlar");
+        let got: Vec<String> = assemble(&[t], vec![Some(vec![])]).into_iter().map(|i| i.label).collect();
+        assert_eq!(got, ["x"], "önbellekteki Parse hatası (boş) da bilinen adlara düşer");
         // Alt sorgu bir CTE'ye başvuruyor.
         let t = one("with a(\"V\") as (select 1) select s.| from (select * from a) s", "s");
         assert_eq!(

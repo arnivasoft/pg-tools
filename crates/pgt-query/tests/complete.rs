@@ -402,6 +402,12 @@ async fn scoped_cte_and_subquery_columns_come_from_parse_without_executing() {
         assert_eq!(labels(&cols), ["m", "?column?"]);
         let cols = fx.complete(id, scoped("select s.| from (select id, note from qc_app.orders) s(k)", "s")).await;
         assert_eq!(labels(&cols), ["k", "note"]);
+        // Parse başarısız (önbelleğe alınan hata) ama açık liste biliniyor: liste gösterilir.
+        let lateral = "select s.| from qc_app.orders t, lateral (select t.id + 1) s(x)";
+        assert_eq!(labels(&fx.complete(id, scoped(lateral, "s")).await), ["x"]);
+        assert_eq!(labels(&fx.complete(id, scoped(lateral, "s")).await), ["x"], "önbellekten de");
+        let too_many = "select s.| from (select 1) s(a, b)";
+        assert_eq!(labels(&fx.complete(id, scoped(too_many, "s")).await), ["a", "b"]);
         // Tabloyu gölgeleyen CTE (RECURSIVE yok): gövdedeki ad tablodur.
         fx.run(id, "set search_path = qc_app").await;
         let cols = fx.complete(id, scoped("with orders as (select id, note from orders) select o.| from orders o", "o")).await;
