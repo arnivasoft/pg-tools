@@ -30,7 +30,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::complete::{CompletionItem, CompletionRequest, Lookup, lookup};
-use crate::parse_guard::{Background, Parsed, bounded, guarded_parse};
+use crate::parse_guard::{Background, BackgroundGuard, Parsed, RESTORE_LOCK_TIMEOUT, bounded, guarded_parse, settled};
 use crate::scoped::{Plan, Source};
 use crate::classify::{Danger, StmtKind, TxOp, analyze as classify, tx_op};
 use crate::events::{EventSink, QueryEvent};
@@ -65,6 +65,8 @@ const COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
 const COMPLETION_CACHE_MAX: usize = 256;
 /// Kullanıcı işleminin, kilidi tutan arka plan işleminin (tamamlama) bırakmasını en çok bekleyeceği süre.
 const BACKGROUND_YIELD_WAIT: Duration = Duration::from_secs(3);
+/// Kilit meşgulken (arka plan bayrakları henüz kurulmamış olabilir) kullanıcı işleminin deneme sayısı (~2 ms arayla).
+const BUSY_RETRIES: u32 = 4;
 
 const PROBE: &str = "SELECT statement_timestamp() <> transaction_timestamp()";
 /// Oturumlar zorla kapatılırken ROLLBACK ve kilit için en çok bekleme.
@@ -484,6 +486,9 @@ struct Inner {
     /// tablo, advisory kilit, DO/CALL, transaction komutu…). Böyle bir oturum boşta uyutulmaz; bağlantısı koparsa
     /// yeniden bağlanırken bir kez `SESSION_RESET_MESSAGE` döner.
     dirty: bool,
+    /// Korumalı Parse `lock_timeout`'u geri yüklediğini doğrulayamadı: kullanıcının değeri; bir sonraki SQL'den önce
+    /// uygulanır (`settle`). Yeni bağlantıda gereksizdir (sunucu varsayılanı).
+    pending_lock_timeout: Option<String>,
 }
 
 struct SessionSlot {
@@ -585,16 +590,73 @@ fn lock_open(slot: &SessionSlot) -> Result<tokio::sync::MutexGuard<'_, Inner>> {
 }
 
 /// Kullanıcı işlemi için oturum kilidi: kilidi bir arka plan işlemi (tamamlama) tutuyorsa ondan vazgeçmesi istenir
-/// ve en çok `BACKGROUND_YIELD_WAIT` beklenir; başka bir işlem tutuyorsa beklemeden `BUSY`.
+/// ve en çok `BACKGROUND_YIELD_WAIT` beklenir; başka bir işlem tutuyorsa (kısa bir yeniden denemeden sonra) `BUSY`.
+/// Kilit alınınca bekleyen `lock_timeout` geri yüklemesi uygulanır.
 async fn lock_user(slot: &SessionSlot) -> Result<tokio::sync::MutexGuard<'_, Inner>> {
-    match lock_open(slot) {
-        Err(e) if slot.bg.request_abort() => match tokio::time::timeout(BACKGROUND_YIELD_WAIT, slot.inner.lock()).await {
-            Ok(_) if slot.cancel.closed() => Err(session_gone()),
-            Ok(inner) => Ok(inner),
-            Err(_) => Err(e),
-        },
-        r => r,
+    let mut inner = acquire_user(slot).await?;
+    settle(slot, &mut inner).await;
+    Ok(inner)
+}
+
+async fn acquire_user(slot: &SessionSlot) -> Result<tokio::sync::MutexGuard<'_, Inner>> {
+    // Arka plan işlemi bayraklarını kilidi aldıktan hemen sonra kurar ve kilidi bırakmadan hemen önce düşürür; bu
+    // pencerelerde `request_abort` `false` döner. Birkaç kısa yeniden deneme pencereyi kapatır.
+    for attempt in 0..BUSY_RETRIES {
+        match lock_open(slot) {
+            Err(e) if matches!(e, Error::Invalid(_)) => {
+                if slot.bg.request_abort() {
+                    return match tokio::time::timeout(BACKGROUND_YIELD_WAIT, slot.inner.lock()).await {
+                        Ok(_) if slot.cancel.closed() => Err(session_gone()),
+                        Ok(inner) => Ok(inner),
+                        Err(_) => Err(e),
+                    };
+                }
+                if attempt + 1 == BUSY_RETRIES {
+                    return Err(e);
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            r => return r,
+        }
     }
+    Err(busy())
+}
+
+/// Bekleyen `lock_timeout` geri yüklemesini uygular. Başarısızsa ve oturum durumsuz/boştaysa bağlantı bırakılır
+/// (sonraki işlem sessizce yeniden bağlanır, değer sunucu varsayılanına döner); aksi halde sonraki sefere kalır.
+async fn settle(slot: &SessionSlot, inner: &mut Inner) {
+    let Some(value) = inner.pending_lock_timeout.clone() else { return };
+    let Some(exec) = inner.exec.as_mut().filter(|e| !e.is_closed()) else {
+        inner.pending_lock_timeout = None; // yeniden bağlanınca sunucu varsayılanı geçerli
+        return;
+    };
+    let handle = exec.cancel_handle();
+    if !crate::parse_guard::fail_restore()
+        && matches!(settled(&handle, exec.query_text(RESTORE_LOCK_TIMEOUT, &[&value])).await, Some(Ok(_)))
+    {
+        inner.pending_lock_timeout = None;
+        return;
+    }
+    if !inner.dirty && slot.state() == TxState::Idle && !exec.cursor_open() {
+        tracing::warn!(server = %slot.server, "lock_timeout geri yüklenemedi; bağlantı bırakıldı (yeniden bağlanacak)");
+        disarm(inner);
+        inner.exec = None;
+        inner.pending_lock_timeout = None;
+    } else {
+        tracing::warn!(server = %slot.server, "lock_timeout geri yüklenemedi; sonraki işlemde yeniden denenecek");
+    }
+}
+
+/// Kilidi tutan arka plan işlemi: bekçi alanı önce düşer (bayraklar kilit bırakılmadan temizlenir).
+struct BgLock<'a> {
+    _bg: BackgroundGuard<'a>,
+    inner: tokio::sync::MutexGuard<'a, Inner>,
+}
+
+/// Kilidi beklemeden alabilen arka plan işlemi; kilidi alamayan deneme bayraklara dokunmaz.
+fn try_background(slot: &SessionSlot) -> Option<BgLock<'_>> {
+    let inner = slot.inner.try_lock().ok()?;
+    Some(BgLock { _bg: slot.bg.begin(), inner })
 }
 
 /// Oturumu zorla kapatır: kapalı işaretler (çalışan ifade iptal edilir), kilidi en çok `FORCE_CLOSE_WAIT`
@@ -602,6 +664,7 @@ async fn lock_user(slot: &SessionSlot) -> Result<tokio::sync::MutexGuard<'_, Inn
 /// bitince `finish` bağlantıyı bırakır (sunucu transaction'ı geri alır). Oturum haritadan önceden çıkarılmalıdır.
 async fn force_close(slot: &SessionSlot) {
     slot.cancel.close();
+    slot.bg.request_abort();
     let Ok(mut inner) = tokio::time::timeout(FORCE_CLOSE_WAIT, slot.inner.lock()).await else {
         tracing::warn!(server = %slot.server, "sorgu oturumu zamanında durmadı; bitince kapanacak");
         return;
@@ -830,6 +893,7 @@ impl QueryManager {
                 cursor_timer: None,
                 cursor_gen: 0,
                 dirty: false,
+                pending_lock_timeout: None,
             }),
             cancel: CancelToken::default(),
             bg: Background::default(),
@@ -1020,6 +1084,7 @@ impl QueryManager {
         if inner.exec.is_none() {
             let conn = self.mgr.open_dedicated(slot.server, slot.target, slot.profile(&inner.opts)).await?;
             inner.exec = Some(Executor::new(conn));
+            inner.pending_lock_timeout = None;
             inner.applied_timeout = Some(inner.opts.statement_timeout_ms);
             slot.set_state(TxState::Idle);
             tracing::debug!(server = %slot.server, "sorgu oturumu yeniden bağlandı");
@@ -1299,24 +1364,25 @@ impl QueryManager {
 
     /// Arka plan işlemi için kilit: meşgulse, transaction hatalıysa, bağlantı kopmuşsa ya da oturum uykudaysa
     /// `None` (uykudaki oturum uyandırılmaz: bağlantı kurmak kilidi uzun tutar ve boşta uykuyu boşa çıkarır;
-    /// kopan bağlantının bildirimi sonraki `run`a kalır).
-    fn lock_background(slot: &SessionSlot) -> Result<Option<tokio::sync::MutexGuard<'_, Inner>>> {
-        let Ok(inner) = slot.inner.try_lock() else { return Ok(None) };
+    /// kopan bağlantının bildirimi sonraki `run`a kalır). Bekleyen `lock_timeout` geri yüklemesi önce uygulanır.
+    async fn lock_background(slot: &SessionSlot) -> Result<Option<BgLock<'_>>> {
+        let Some(mut lock) = try_background(slot) else { return Ok(None) };
         if slot.cancel.closed() {
             return Err(session_gone());
         }
-        if slot.state() == TxState::Failed || inner.exec.as_ref().is_none_or(Executor::is_closed) {
+        settle(slot, &mut lock.inner).await;
+        if slot.state() == TxState::Failed || lock.inner.exec.as_ref().is_none_or(Executor::is_closed) {
             return Ok(None);
         }
-        Ok(Some(inner))
+        Ok(Some(lock))
     }
 
     async fn complete_request(slot: &SessionSlot, req: CompletionRequest) -> Result<Vec<CompletionItem>> {
         if let Some(items) = cache_get(&slot.completions().requests, &req) {
             return Ok(items);
         }
-        let _bg = slot.bg.begin();
-        let Some(mut inner) = Self::lock_background(slot)? else { return Ok(Vec::new()) };
+        let Some(mut lock) = Self::lock_background(slot).await? else { return Ok(Vec::new()) };
+        let inner = &mut *lock.inner;
         let Some(exec) = inner.exec.as_mut() else { return Ok(Vec::new()) };
         let deadline = Instant::now() + COMPLETION_TIMEOUT;
         let items = match Self::catalog_lookup(slot, exec, Lookup::Request(&req), deadline).await {
@@ -1383,8 +1449,8 @@ impl QueryManager {
         targets: &[crate::scoped::Target],
         bases: &mut [Option<Vec<CompletionItem>>],
     ) -> Result<()> {
-        let _bg = slot.bg.begin();
-        let Some(mut inner) = Self::lock_background(slot)? else { return Ok(()) };
+        let Some(mut lock) = Self::lock_background(slot).await? else { return Ok(()) };
+        let inner = &mut *lock.inner;
         let Some(exec) = inner.exec.as_mut() else { return Ok(()) };
         let deadline = Instant::now() + COMPLETION_TIMEOUT;
         for (t, base) in targets.iter().zip(bases.iter_mut()) {
@@ -1419,18 +1485,23 @@ impl QueryManager {
             if batch.broken {
                 resync(slot, exec).await;
             }
+            if let Some(v) = batch.restore_lock_timeout {
+                inner.pending_lock_timeout = Some(v);
+            }
             let mut cache = slot.completions();
             for (sql, r) in sqls.iter().zip(batch.results) {
                 let items = match r {
                     Parsed::Columns(cols) => crate::scoped::parsed_items(&cols),
-                    // Kilit beklemesi ve iptal geçicidir; diğer Parse hataları (bozuk ya da dış bloğa başvuran
-                    // gövde) 60 sn boş sonuç olarak saklanır ki her tuş vuruşunda yeniden denenmesin.
-                    Parsed::Failed(Error::Query { sqlstate: Some(code), .. }) if code == "55P03" || code == "57014" => {
-                        continue;
+                    // Yalnızca metne bağlı kalıcı hatalar (42xxx sözdizimi/ad, 0A000 desteklenmiyor) 60 sn boş sonuç
+                    // olarak saklanır ki her tuş vuruşunda yeniden denenmesin; kilit, iptal, bağlantı vb. geçicidir.
+                    Parsed::Failed(Error::Query { sqlstate: Some(code), .. })
+                        if code.starts_with("42") || code == "0A000" =>
+                    {
+                        Vec::new()
                     }
                     Parsed::Failed(e) => {
                         tracing::debug!(code = %ErrorPayload::from(&e).code, "kolon Parse'ı başarısız");
-                        Vec::new()
+                        continue;
                     }
                     Parsed::Skipped => continue,
                 };
@@ -1540,6 +1611,7 @@ impl QueryManager {
                 cursor_timer: None,
                 cursor_gen: 0,
                 dirty: false,
+                pending_lock_timeout: None,
             }),
             cancel: CancelToken::default(),
             bg: Background::default(),
@@ -1803,8 +1875,7 @@ mod tests {
         let worker = {
             let slot = slot.clone();
             tokio::spawn(async move {
-                let _bg = slot.bg.begin();
-                let held = slot.inner.lock().await;
+                let held = try_background(&slot).expect("kilit boş");
                 ready_tx.send(()).unwrap();
                 while !slot.bg.aborted() {
                     tokio::time::sleep(Duration::from_millis(1)).await;
@@ -1813,7 +1884,15 @@ mod tests {
             })
         };
         ready_rx.await.unwrap();
-        assert!(lock_user(&slot).await.is_ok(), "arka plan işlemi kilidi bırakmalı");
+        // Üst üste binen ikinci arka plan denemeleri (yazarken art arda tamamlama) kilidi alamaz ve ilk
+        // işlemin bayraklarına dokunmaz.
+        assert!(try_background(&slot).is_none());
+        for _ in 0..3 {
+            assert!(qm.complete(id, CompletionRequest::Schemas { include_system: false }).await.unwrap().is_empty());
+        }
+        let started = std::time::Instant::now();
+        assert!(lock_user(&slot).await.is_ok(), "arka plan işlemi kilidi bırakmalı; çalıştırma BUSY almamalı");
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
         worker.await.unwrap();
         assert!(!slot.bg.request_abort(), "arka plan işlemi bitti");
 
@@ -2043,5 +2122,99 @@ mod tests {
         assert_eq!(msgs[1].1.as_deref(), Some("canceling statement due to user request"));
         assert_eq!(msgs[2].0, "canceling statement due to user request");
         assert!(is_cancel_error(&Error::Query { sqlstate: Some("57014".into()), message: String::new(), detail: None, hint: None }));
+    }
+}
+
+/// Bekleyen `lock_timeout` geri yüklemesini gerçek sunucuda sınar (`PGT_TEST_URLS` yoksa atlanır).
+#[cfg(test)]
+mod db_tests {
+    use std::sync::atomic::Ordering;
+
+    use pgt_core::testing::test_servers;
+
+    use super::*;
+    use crate::parse_guard::{TEST_FAIL_RESTORE, TEST_SERIAL};
+
+    struct Nop;
+    impl EventSink for Nop {
+        fn send(&mut self, _: QueryEvent) -> bool {
+            true
+        }
+    }
+
+    struct Rows(Vec<String>);
+    impl EventSink for Rows {
+        fn send(&mut self, ev: QueryEvent) -> bool {
+            if let QueryEvent::Rows { rows, .. } = ev {
+                self.0.extend(rows.into_iter().filter_map(|r| r.into_iter().next().flatten()));
+            }
+            true
+        }
+    }
+
+    struct FailRestore;
+    impl FailRestore {
+        fn on() -> FailRestore {
+            TEST_FAIL_RESTORE.store(true, Ordering::SeqCst);
+            FailRestore
+        }
+    }
+    impl Drop for FailRestore {
+        fn drop(&mut self) {
+            TEST_FAIL_RESTORE.store(false, Ordering::SeqCst);
+        }
+    }
+
+    async fn show(qm: &QueryManager, id: SessionId) -> String {
+        let mut rows = Rows(Vec::new());
+        qm.run(id, "show lock_timeout", Scope::All, 10, true, &mut rows).await.unwrap();
+        rows.0.pop().unwrap()
+    }
+
+    fn pending(qm: &QueryManager, id: SessionId) -> Option<String> {
+        qm.slot(id).unwrap().inner.try_lock().unwrap().pending_lock_timeout.clone()
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_lock_timeout_restore_is_applied_before_the_next_user_sql() {
+        let _serial = TEST_SERIAL.lock().await;
+        for ts in test_servers() {
+            let dir = tempfile::tempdir().unwrap();
+            let mut registry = Registry::load(dir.path().join("servers.json")).unwrap().registry;
+            registry.upsert(ts.config.clone()).unwrap();
+            let mgr = Arc::new(ConnectionManager::new());
+            mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+            let qm = QueryManager::new(mgr, Arc::new(RwLock::new(registry)));
+            let opts = SessionOptions { mode: TxMode::Autocommit, statement_timeout_ms: 0 };
+            let cte = |n: u32| CompletionRequest::Scoped {
+                sql: format!("with c as (select {n} as v) select c. from c"),
+                offset: 34 + n.to_string().len() as u32,
+                prefix: "c".into(),
+            };
+
+            // Durumlu oturum (kullanıcı SET'i): bekleyen değer sonraki `run`dan önce uygulanır.
+            let id = qm.open(ts.config.id, Target::Maintenance, opts).await.unwrap();
+            qm.run(id, "set lock_timeout = '3s'", Scope::All, 10, true, &mut Nop).await.unwrap();
+            {
+                let _fail = FailRestore::on();
+                let items = qm.complete(id, cte(1)).await.unwrap();
+                assert_eq!(items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["v"]);
+            }
+            assert_eq!(pending(&qm, id).as_deref(), Some("3s"));
+            assert_eq!(show(&qm, id).await, "3s");
+            assert_eq!(pending(&qm, id), None);
+
+            // Durumsuz oturum: geri yükleme yine başarısızsa bağlantı bırakılır, sonraki işlem yeniden bağlanır.
+            let id = qm.open(ts.config.id, Target::Maintenance, opts).await.unwrap();
+            {
+                let _fail = FailRestore::on();
+                qm.complete(id, cte(2)).await.unwrap();
+                assert_eq!(pending(&qm, id).as_deref(), Some("0"));
+                qm.complete(id, cte(3)).await.unwrap();
+                assert!(qm.is_asleep(id).unwrap(), "bağlantı bırakılmalı");
+                assert_eq!(pending(&qm, id), None);
+            }
+            assert_eq!(show(&qm, id).await, "0");
+        }
     }
 }

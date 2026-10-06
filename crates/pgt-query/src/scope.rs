@@ -17,7 +17,8 @@ use crate::lex::{lex, Kind, Token};
 pub enum ScopeItem {
     /// `columns`: alias kolon listesi (`t x(a, b)`); PostgreSQL gibi katalog kolonlarının ilk N'ini yeniden adlandırır.
     Relation { alias: Option<String>, schema: Option<String>, name: String, columns: Option<Vec<String>> },
-    Cte { name: String, body: Range<usize>, columns: Option<Vec<String>> },
+    /// `recursive`: `WITH RECURSIVE` ile mi tanımlandı.
+    Cte { name: String, body: Range<usize>, columns: Option<Vec<String>>, recursive: bool },
     Subquery { alias: String, body: Range<usize>, columns: Option<Vec<String>> },
     /// `columns`: alias kolon listesi (`unnest(a) as u(v, n)`, `f() as x(a int, b text)` → `a`, `b`).
     Function { alias: Option<String>, name: String, columns: Option<Vec<String>> },
@@ -371,7 +372,8 @@ impl Cx<'_> {
             return;
         }
         let mut p = 1;
-        if els.get(p).is_some_and(|e| self.word_is(e, "recursive")) {
+        let recursive = els.get(p).is_some_and(|e| self.word_is(e, "recursive"));
+        if recursive {
             p += 1;
         }
         loop {
@@ -390,7 +392,7 @@ impl Cx<'_> {
                 p += 1;
             }
             let Some(El::Group { open, close }) = els.get(p) else { return };
-            out.push(ScopeItem::Cte { name, body: self.body(*open, *close), columns });
+            out.push(ScopeItem::Cte { name, body: self.body(*open, *close), columns, recursive });
             p += 1;
             if els.get(p).is_some_and(|e| self.punct_is(e, ",")) {
                 p += 1;
@@ -668,7 +670,8 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0], rel(None, None, "r"));
         match &items[1] {
-            ScopeItem::Cte { name, body, columns } => {
+            ScopeItem::Cte { name, body, columns, recursive } => {
+                assert!(recursive);
                 assert_eq!(name, "r");
                 assert_eq!(&sql[body.clone()], "select 1,2 union all select a+1,b from r where a<3");
                 assert_eq!(columns, &Some(vec!["a".to_string(), "b".to_string()]));
@@ -690,8 +693,9 @@ mod tests {
         let names: Vec<&str> = items[2..]
             .iter()
             .map(|i| match i {
-                ScopeItem::Cte { name, columns, .. } => {
+                ScopeItem::Cte { name, columns, recursive, .. } => {
                     assert!(columns.is_none());
+                    assert!(!recursive);
                     name.as_str()
                 }
                 other => panic!("{other:?}"),

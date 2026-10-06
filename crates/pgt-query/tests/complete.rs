@@ -397,8 +397,16 @@ async fn scoped_cte_and_subquery_columns_come_from_parse_without_executing() {
         assert_eq!(labels(&cols), ["p", "q"]);
         let cols = fx.complete(id, scoped("select s.| from (select id as k, note from qc_app.orders) s", "s")).await;
         assert_eq!(labels(&cols), ["k", "note"]);
+        // Açık kolon listesi yalnızca ilk N kolonu adlandırır (PostgreSQL gibi).
         let cols = fx.complete(id, scoped("with c(m) as (select 1, 2) select z.| from c z", "z")).await;
-        assert_eq!(labels(&cols), ["m"], "açık kolon listesi Parse gerektirmez");
+        assert_eq!(labels(&cols), ["m", "?column?"]);
+        let cols = fx.complete(id, scoped("select s.| from (select id, note from qc_app.orders) s(k)", "s")).await;
+        assert_eq!(labels(&cols), ["k", "note"]);
+        // Tabloyu gölgeleyen CTE (RECURSIVE yok): gövdedeki ad tablodur.
+        fx.run(id, "set search_path = qc_app").await;
+        let cols = fx.complete(id, scoped("with orders as (select id, note from orders) select o.| from orders o", "o")).await;
+        assert_eq!(labels(&cols), ["id", "note"]);
+        fx.run(id, "set search_path = public").await;
         // Bozuk gövde: boş, oturum etkilenmez.
         assert!(fx.complete(id, scoped("select s.| from (select nope from qc_app.orders) s", "s")).await.is_empty());
         // Kullanıcının lock_timeout'u geri yüklendi.

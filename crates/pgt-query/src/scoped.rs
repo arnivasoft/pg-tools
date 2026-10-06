@@ -29,6 +29,8 @@ pub(crate) struct Target {
     pub source: Source,
     /// Alias kolon listesi: kaynağın ilk N kolonunu yeniden adlandırır (PostgreSQL kuralı).
     pub rename: Option<Vec<String>>,
+    /// Kaynak (Parse) sonuçsuz kalırsa gösterilecek bilinen adlar (CTE/alt sorgunun açık kolon listesi).
+    pub known: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,37 +101,31 @@ pub(crate) fn plan(sql: &str, offset: u32, prefix: &str) -> Plan {
 }
 
 fn target(stmt: &str, items: &[ScopeItem], item: &ScopeItem) -> Target {
-    let (source, rename) = match item {
+    let all = ctes(items);
+    let cte_target = |name: &str| {
+        let c = all.iter().find(|c| c.name == name).copied();
+        c.map(|c| (Source::Parse(cte_sql(stmt, &all, c)), c.columns.cloned()))
+    };
+    let (source, rename, known) = match item {
         ScopeItem::Relation { schema, name, columns, .. } => {
-            let cte = schema.is_none().then(|| find_cte(items, name)).flatten();
-            match cte {
-                Some(c) => (cte_source(stmt, items, c), columns.clone()),
-                None => (Source::Catalog { schema: schema.clone(), name: name.clone() }, columns.clone()),
+            match schema.is_none().then(|| cte_target(name)).flatten() {
+                Some((source, known)) => (source, columns.clone(), known),
+                None => (Source::Catalog { schema: schema.clone(), name: name.clone() }, columns.clone(), None),
             }
         }
-        ScopeItem::Cte { .. } => (cte_source(stmt, items, item), None),
-        ScopeItem::Subquery { body, columns, .. } => match columns {
-            Some(c) => (Source::Fixed(c.clone()), None),
-            None => (Source::Parse(subquery_sql(stmt, items, body)), None),
+        ScopeItem::Cte { name, columns, .. } => match cte_target(name) {
+            Some((source, known)) => (source, None, known),
+            None => (Source::Fixed(columns.clone().unwrap_or_default()), None, None),
         },
+        ScopeItem::Subquery { body, columns, .. } => {
+            (Source::Parse(subquery_sql(stmt, &all, body, columns.as_ref())), None, columns.clone())
+        }
         ScopeItem::Function { alias, name, columns } => {
             let cols = columns.clone().unwrap_or_else(|| vec![alias.clone().unwrap_or_else(|| name.clone())]);
-            (Source::Fixed(cols), None)
+            (Source::Fixed(cols), None, None)
         }
     };
-    Target { qualifier: None, source, rename }
-}
-
-fn find_cte<'a>(items: &'a [ScopeItem], name: &str) -> Option<&'a ScopeItem> {
-    items.iter().find(|i| matches!(i, ScopeItem::Cte { name: n, .. } if n == name))
-}
-
-fn cte_source(stmt: &str, items: &[ScopeItem], cte: &ScopeItem) -> Source {
-    match cte {
-        ScopeItem::Cte { columns: Some(c), .. } => Source::Fixed(c.clone()),
-        ScopeItem::Cte { name, .. } => Source::Parse(cte_sql(stmt, items, name)),
-        _ => Source::Fixed(Vec::new()),
-    }
+    Target { qualifier: None, source, rename, known }
 }
 
 /// Metin aralığındaki ad belirteçleri (karşılaştırma biçiminde).
@@ -142,77 +138,93 @@ fn refs(stmt: &str, body: &Range<usize>) -> Vec<String> {
         .collect()
 }
 
-/// Kapsamdaki bir CTE: (ad, gövde aralığı, açık kolon listesi).
-type CteRef<'a> = (&'a str, &'a Range<usize>, Option<&'a Vec<String>>);
+/// Kapsamdaki bir CTE.
+#[derive(Debug, Clone, Copy)]
+struct CteRef<'a> {
+    name: &'a str,
+    body: &'a Range<usize>,
+    columns: Option<&'a Vec<String>>,
+    recursive: bool,
+}
+
+impl CteRef<'_> {
+    /// `at` aralığındaki metinden bu CTE'ye başvurulabilir mi: `RECURSIVE` yoksa yalnızca metinde daha önce
+    /// biten (önceki) CTE'ler; kendine başvuru yalnızca `RECURSIVE` ile.
+    fn visible_from(&self, at: &Range<usize>) -> bool {
+        self.recursive || self.body.end <= at.start
+    }
+}
 
 /// Kapsamdaki CTE'ler (aynı ad bir kez; iç blok önce).
 fn ctes(items: &[ScopeItem]) -> Vec<CteRef<'_>> {
     let mut out: Vec<CteRef<'_>> = Vec::new();
     for i in items {
-        if let ScopeItem::Cte { name, body, columns } = i
-            && !out.iter().any(|(n, ..)| n == name)
+        if let ScopeItem::Cte { name, body, columns, recursive } = i
+            && !out.iter().any(|c| c.name == name)
         {
-            out.push((name, body, columns.as_ref()));
+            out.push(CteRef { name, body, columns: columns.as_ref(), recursive: *recursive });
         }
     }
     out
 }
 
-/// `seed` adlarının (ve bağımlılıklarının) başvurduğu CTE'ler, metin sırasıyla.
-fn closure<'a>(
-    stmt: &str,
-    all: &[CteRef<'a>],
-    seed: &[String],
-) -> Vec<CteRef<'a>> {
-    let mut need: Vec<CteRef<'a>> = Vec::new();
-    let mut queue: Vec<String> = seed.to_vec();
-    while let Some(r) = queue.pop() {
-        if need.iter().any(|(n, ..)| *n == r) {
+/// `from` aralığındaki metnin (ve eklenen CTE'lerin gövdelerinin) başvurduğu görünür CTE'ler, `need`'e eklenir;
+/// sonuç metin sırasıyla.
+fn closure<'a>(stmt: &str, all: &[CteRef<'a>], mut need: Vec<CteRef<'a>>, from: &Range<usize>) -> Vec<CteRef<'a>> {
+    let mut queue: Vec<(String, Range<usize>)> = refs(stmt, from).into_iter().map(|r| (r, from.clone())).collect();
+    for c in &need {
+        queue.extend(refs(stmt, c.body).into_iter().map(|r| (r, c.body.clone())));
+    }
+    while let Some((r, at)) = queue.pop() {
+        if need.iter().any(|c| c.name == r) {
             continue;
         }
-        if let Some(c) = all.iter().find(|(n, ..)| *n == r) {
+        if let Some(c) = all.iter().find(|c| c.name == r && c.visible_from(&at)) {
             need.push(*c);
-            queue.extend(refs(stmt, c.1));
+            queue.extend(refs(stmt, c.body).into_iter().map(|x| (x, c.body.clone())));
         }
     }
-    need.sort_by_key(|(_, b, _)| b.start);
+    need.sort_by_key(|c| c.body.start);
     need
 }
 
+fn col_list(cols: Option<&Vec<String>>) -> String {
+    cols.map_or_else(String::new, |c| format!("({})", c.iter().map(|x| quote_ident(x)).collect::<Vec<_>>().join(", ")))
+}
+
+/// `WITH [RECURSIVE] …`: RECURSIVE yalnızca kullanıcı yazdıysa.
 fn with_clause(stmt: &str, need: &[CteRef<'_>]) -> String {
-    // Kendine ya da metinde sonra gelen bir CTE'ye başvuru varsa RECURSIVE gerekir.
-    let recursive = need.iter().any(|(_, body, _)| {
-        let r = refs(stmt, body);
-        need.iter().any(|(n, b, _)| b.start >= body.start && r.iter().any(|x| x == n))
-    });
+    let recursive = need.iter().any(|c| c.recursive);
     let parts: Vec<String> = need
         .iter()
-        .map(|(name, body, cols)| {
-            let cols = cols.map_or_else(String::new, |c| {
-                format!("({})", c.iter().map(|x| quote_ident(x)).collect::<Vec<_>>().join(", "))
-            });
-            format!("{}{cols} AS (\n{}\n)", quote_ident(name), stmt.get((*body).clone()).unwrap_or(""))
+        .map(|c| {
+            let body = stmt.get(c.body.clone()).unwrap_or("");
+            format!("{}{} AS (
+{body}
+)", quote_ident(c.name), col_list(c.columns))
         })
         .collect();
     format!("WITH {}{}", if recursive { "RECURSIVE " } else { "" }, parts.join(", "))
 }
 
-/// `WITH <bağımlılıklar>, ad AS (gövde) SELECT * FROM ad`.
-fn cte_sql(stmt: &str, items: &[ScopeItem], name: &str) -> String {
-    let all = ctes(items);
-    let need = closure(stmt, &all, &[name.to_string()]);
-    format!("{} SELECT * FROM {}", with_clause(stmt, &need), quote_ident(name))
+/// `WITH <bağımlılıklar>, ad[(kolonlar)] AS (gövde) SELECT * FROM ad` (açık kolon listesi ilk N kolonu adlandırır).
+fn cte_sql(stmt: &str, all: &[CteRef<'_>], target: CteRef<'_>) -> String {
+    // Hedefin kendi gövdesindeki başvurular hedefin konumundan değerlendirilir (kendine yalnızca RECURSIVE ile).
+    let need = closure(stmt, all, vec![target], target.body);
+    format!("{} SELECT * FROM {}", with_clause(stmt, &need), quote_ident(target.name))
 }
 
-/// Bağımlılık yoksa gövdenin kendisi; varsa `WITH … SELECT * FROM (gövde) AS pgt_s`.
-fn subquery_sql(stmt: &str, items: &[ScopeItem], body: &Range<usize>) -> String {
+/// Bağımlılık ve kolon listesi yoksa gövdenin kendisi; aksi halde `[WITH …] SELECT * FROM (gövde) AS pgt_s[(kolonlar)]`.
+fn subquery_sql(stmt: &str, all: &[CteRef<'_>], body: &Range<usize>, columns: Option<&Vec<String>>) -> String {
     let text = stmt.get(body.clone()).unwrap_or("");
-    let all = ctes(items);
-    let need = closure(stmt, &all, &refs(stmt, body));
-    if need.is_empty() {
+    let need = closure(stmt, all, Vec::new(), body);
+    if need.is_empty() && columns.is_none() {
         return text.to_string();
     }
-    format!("{} SELECT * FROM (\n{text}\n) AS pgt_s", with_clause(stmt, &need))
+    let with = if need.is_empty() { String::new() } else { format!("{} ", with_clause(stmt, &need)) };
+    format!("{with}SELECT * FROM (
+{text}
+) AS pgt_s{}", col_list(columns))
 }
 
 /// Parse sonucu kolonları öğelere çevirir.
@@ -256,7 +268,8 @@ pub(crate) fn finish(target: &Target, mut items: Vec<CompletionItem>) -> Vec<Com
 pub(crate) fn assemble(targets: &[Target], bases: Vec<Option<Vec<CompletionItem>>>) -> Vec<CompletionItem> {
     let mut out = Vec::new();
     for (t, base) in targets.iter().zip(bases) {
-        if let Some(base) = base {
+        // Parse sonucu yoksa (meşgul, süre, hata) açık kolon listesi gösterilir.
+        if let Some(base) = base.or_else(|| t.known.as_deref().map(fixed_items)) {
             out.extend(finish(t, base));
         }
         if out.len() >= COMPLETION_LIMIT {
@@ -336,23 +349,60 @@ mod tests {
             t.source,
             Source::Parse("WITH a AS (\nselect 1 v\n), b AS (\nselect v from a\n) SELECT * FROM b".into())
         );
-        // Açık kolon listesi Parse gerektirmez; ilişki alias'ının listesi yeniden adlandırır.
-        let t = one("with c(p, q) as (select 1, 2) select z.| from c z(r)", "z");
-        assert_eq!(t.source, Source::Fixed(names(&["p", "q"])));
+        // Açık kolon listesi Parse metnine girer (ilk N kolonu adlandırır); Parse sonuçsuzsa bilinen adlar;
+        // ilişki alias'ının listesi ayrıca yeniden adlandırır.
+        let t = one("with c(p, q) as (select 1, 2, 3) select z.| from c z(r)", "z");
+        assert_eq!(t.source, Source::Parse("WITH c(p, q) AS (
+select 1, 2, 3
+) SELECT * FROM c".into()));
         assert_eq!(t.rename, Some(names(&["r"])));
+        assert_eq!(t.known, Some(names(&["p", "q"])));
         let t = one("select s.| from (select a, b from t) s", "s");
         assert_eq!(t.source, Source::Parse("select a, b from t".into()));
-        let t = one("select s.| from (select a from t) s(x)", "s");
-        assert_eq!(t.source, Source::Fixed(names(&["x"])));
+        assert_eq!(t.known, None);
+        let t = one("select s.| from (select a, b from t) s(x)", "s");
+        assert_eq!(t.source, Source::Parse("SELECT * FROM (
+select a, b from t
+) AS pgt_s(x)".into()));
+        assert_eq!(t.known, Some(names(&["x"])));
+        let got: Vec<String> = assemble(&[t], vec![None]).into_iter().map(|i| i.label).collect();
+        assert_eq!(got, ["x"], "Parse sonucu yoksa bilinen adlar");
         // Alt sorgu bir CTE'ye başvuruyor.
         let t = one("with a(\"V\") as (select 1) select s.| from (select * from a) s", "s");
         assert_eq!(
             t.source,
             Source::Parse("WITH a(\"V\") AS (\nselect 1\n) SELECT * FROM (\nselect * from a\n) AS pgt_s".into())
         );
-        // Kendine başvuran CTE: RECURSIVE.
+        // Kendine başvuran CTE: RECURSIVE (kullanıcı yazdığı için).
         let t = one("with recursive r as (select 1 n union all select n + 1 from r) select r.| from r", "r");
         assert!(matches!(&t.source, Source::Parse(s) if s.starts_with("WITH RECURSIVE r AS")), "{t:?}");
+    }
+
+    #[test]
+    fn non_recursive_with_sees_only_earlier_ctes() {
+        // Tabloyu gölgeleyen CTE: gövdedeki `orders` tablodur, RECURSIVE eklenmez.
+        let t = one("with orders as (select * from orders where x) select o.| from orders o", "o");
+        assert_eq!(
+            t.source,
+            Source::Parse("WITH orders AS (
+select * from orders where x
+) SELECT * FROM orders".into())
+        );
+        // İleri başvuru (RECURSIVE yok): `b` sonraki CTE değil tablodur.
+        let t = one("with a as (select * from b), b as (select 1 z) select a.| from a", "a");
+        assert_eq!(t.source, Source::Parse("WITH a AS (
+select * from b
+) SELECT * FROM a".into()));
+        // RECURSIVE ile ileri başvuru eklenir.
+        let t = one("with recursive a as (select * from b), b as (select 1 z) select a.| from a", "a");
+        assert_eq!(
+            t.source,
+            Source::Parse("WITH RECURSIVE a AS (
+select * from b
+), b AS (
+select 1 z
+) SELECT * FROM a".into())
+        );
     }
 
     #[test]
@@ -377,12 +427,17 @@ mod tests {
 
     #[test]
     fn rename_qualify_and_cap() {
-        let t = Target { qualifier: Some("Ö".into()), source: Source::Fixed(vec![]), rename: Some(names(&["A"])) };
+        let t = Target {
+            qualifier: Some("Ö".into()),
+            source: Source::Fixed(vec![]),
+            rename: Some(names(&["A"])),
+            known: None,
+        };
         let items = finish(&t, fixed_items(&names(&["x", "y"])));
         let got: Vec<(&str, &str)> = items.iter().map(|i| (i.label.as_str(), i.quoted.as_str())).collect();
         assert_eq!(got, [("Ö.A", "\"Ö\".\"A\""), ("Ö.y", "\"Ö\".y")]);
         let many: Vec<String> = (0..400).map(|i| format!("c{i}")).collect();
-        let t = Target { qualifier: Some("a".into()), source: Source::Fixed(vec![]), rename: None };
+        let t = Target { qualifier: Some("a".into()), source: Source::Fixed(vec![]), rename: None, known: None };
         let out = assemble(&[t.clone(), t], vec![Some(fixed_items(&many)), Some(fixed_items(&many))]);
         assert_eq!(out.len(), COMPLETION_LIMIT);
     }

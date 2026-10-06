@@ -145,9 +145,11 @@ kodlarla gelir (`query`, `not_found`, `not_connected`, `unknown_server`, `invali
   rol zaman aşımını oturum için ezer (spec gereği; politika kararı Plan 6+).
 
 ## Diğer
-- Tamamlama oturum meşgulken ya da uyurken (idle reap) **boş liste** döner; beklemez. Ama tamamlama sürerken
-  (en çok 5 sn) oturum kilidini tutar: bu sırada başlatılan `qt_run` `busy` alır (arayüz tamamlamayı yazarken
-  iptal etmeli / kısa tutmalı).
+- Tamamlama oturum meşgulken ya da uyurken (idle reap) **boş liste** döner; beklemez. Tamamlama sürerken oturum
+  kilidini tutar ama bir arka plan işlemidir (Plan 7): bu sırada başlayan kullanıcı işlemi (`qt_run`, `qt_more`,
+  `qt_tx`, `qt_set_options`, CSV dışa aktarma, kapatma) tamamlamadan vazgeçmesini ister ve kilidi **en çok 3 sn**
+  bekler (tipik olarak hemen alır); `busy` yalnızca kilidi başka bir kullanıcı işlemi tutuyorsa (ya da 3 sn
+  dolarsa) döner. Arayüz yine de çalıştırmadan önce `closeCompletion` çağırır.
 - `CompletionKind::Function` hiçbir zaman üretilmez (fonksiyon tamamlaması yok); tür ileride kullanılmak üzere durur.
 - `qt_set_options` açık ızgara imlecini kapatır: sonrasında o ızgarada `more()` hata verir (arayüz "daha fazla"
   düğmesini kapatmalı).
