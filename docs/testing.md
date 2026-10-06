@@ -264,7 +264,8 @@ kısım (`QueryTab.tsx`, `ResultGrid.tsx`, `editor.ts`) ince tutulur ve elle/CDP
 | `tabs-store.test.ts` | Sekme deposu: Nesne sekmesi, başlık `<sunucu>/<db> #n`, kimlik çakışması, kapatma/seçim, sıra |
 | `workspace-model.test.ts` | Çalışma alanı: `openContext`/`initialSql`, ortam istemi, `saveClosesSessions` (arka uçla aynı kural), `closePlan`/`bulkPolicy`, `routeError`, taslak dönüşümü, `swapEditorState`, zamanlayıcı biçimi |
 | `check-model.test.ts` | Yazarken denetim (Plan 7): kapı (açık+boşta, Failed/meşgul/oturumsuz değil), 600 ms debounce, sürüm sayacıyla eski sonucun yok sayılması, sırasız sonuçlar, aynı hedefte yeniden istek yok, emojili UTF-16 eşleme, düzenlemede işaret temizleme |
-| `format-edit.test.ts` | Biçimlendir komutu (Plan 7): aralık (seçim/tümü), seçim boşluklarının korunması, imleç eşleme, tek geri alma adımı (`EditorState` + `history`) |
+| `format-edit.test.ts` | Biçimlendir komutu (Plan 7): aralık (seçim/tümü), seçim boşluklarının korunması, dize/yorum/tırnaklı ad içinde ya da belirteç ortasında başlayan/biten seçimin ifadeye genişletilmesi (`safeFormatSelection`), imleç eşleme, tek geri alma adımı (`EditorState` + `history`) |
+| `settings-saver.test.ts` | Editör ayarları kaydı: değer hemen uygulanır, yazımlar sıralı (son yazım kazanır, önceki değişiklik kaybolmaz), başarısız yazım geri alınır |
 | `query-controller.test.ts` | Denetleyici (sahte api + sahte zamanlayıcılar): kapanan sekmenin taslağı geri gelmez, sunucusu silinen sekme taslak yazmaz |
 
 Ayrıca `src/features/explorer/actions.test.ts` (menüdeki `openQueryTool` ve kısayol etiketi) ve
