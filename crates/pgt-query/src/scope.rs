@@ -2,6 +2,7 @@
 //! (tablo, CTE, alt sorgu, fonksiyon kaynağı) bulur. Tam bir ayrıştırıcı değildir; bozuk
 //! sözdiziminde o ana kadar toplanan öğeler döner, hiçbir girdide panik etmez.
 //! Tüm ofsetler UTF-8 bayt ofsetidir (çağıran Unicode scalar ofsetinden dönüştürür).
+//! Yalnızca imleci içeren ifadeye bakılır: derinlik 0'daki `;` ifade sınırıdır.
 //! SQL metni günlüğe yazılmaz.
 //!
 //! Tanımlayıcı katlama: tırnaksız adlar yalnızca ASCII A-Z için küçük harfe katlanır
@@ -14,10 +15,12 @@ use crate::lex::{lex, Kind, Token};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopeItem {
-    Relation { alias: Option<String>, schema: Option<String>, name: String },
+    /// `columns`: alias kolon listesi (`t x(a, b)`); PostgreSQL gibi katalog kolonlarının ilk N'ini yeniden adlandırır.
+    Relation { alias: Option<String>, schema: Option<String>, name: String, columns: Option<Vec<String>> },
     Cte { name: String, body: Range<usize>, columns: Option<Vec<String>> },
     Subquery { alias: String, body: Range<usize>, columns: Option<Vec<String>> },
-    Function { alias: Option<String>, name: String },
+    /// `columns`: alias kolon listesi (`unnest(a) as u(v, n)`, `f() as x(a int, b text)` → `a`, `b`).
+    Function { alias: Option<String>, name: String, columns: Option<Vec<String>> },
 }
 
 impl ScopeItem {
@@ -56,16 +59,30 @@ pub fn resolve<'a>(items: &'a [ScopeItem], qualifier: &str) -> Option<&'a ScopeI
         .or_else(|| items.iter().find(|i| i.name() == Some(q.as_str())))
 }
 
-/// Alias olamayacak anahtar sözcükler (küçük harfle).
+/// Alias olamayacak anahtar sözcükler (küçük harfle): PostgreSQL'in ayrılmış ve `type_func_name` sözcükleri
+/// (AS'siz tablo alias'ı olamazlar) ile ilişki adından sonra bağlamsal olarak gelen birkaç ayrılmamış sözcük
+/// (`set`, `values`, `overriding`, `ordinality`, `repeatable`, `conflict`).
 fn is_kw(lower: &str) -> bool {
     matches!(
         lower,
-        "where" | "on" | "using" | "join" | "inner" | "left" | "right" | "full" | "cross" | "natural"
-            | "outer" | "group" | "order" | "having" | "limit" | "offset" | "union" | "intersect"
-            | "except" | "window" | "fetch" | "for" | "returning" | "set" | "values" | "lateral"
-            | "only" | "tablesample" | "select" | "from" | "into" | "with" | "as" | "when" | "then"
-            | "else" | "end" | "and" | "or" | "not" | "is" | "in" | "like" | "ilike" | "between"
-            | "do" | "ordinality"
+        // ayrılmış
+        "all" | "analyse" | "analyze" | "and" | "any" | "array" | "as" | "asc" | "asymmetric" | "both"
+            | "case" | "cast" | "check" | "collate" | "column" | "constraint" | "create" | "current_catalog"
+            | "current_date" | "current_role" | "current_time" | "current_timestamp" | "current_user"
+            | "default" | "deferrable" | "desc" | "distinct" | "do" | "else" | "end" | "except" | "false"
+            | "fetch" | "for" | "foreign" | "from" | "grant" | "group" | "having" | "in" | "initially"
+            | "intersect" | "into" | "lateral" | "leading" | "limit" | "localtime" | "localtimestamp"
+            | "not" | "null" | "offset" | "on" | "only" | "or" | "order" | "placing" | "primary"
+            | "references" | "returning" | "select" | "session_user" | "some" | "symmetric"
+            | "system_user" | "table" | "then" | "to" | "trailing" | "true" | "union" | "unique" | "user"
+            | "using" | "variadic" | "when" | "where" | "window" | "with"
+            // type_func_name
+            | "authorization" | "binary" | "collation" | "concurrently" | "cross" | "current_schema"
+            | "freeze" | "full" | "ilike" | "inner" | "is" | "isnull" | "join" | "left" | "like"
+            | "natural" | "notnull" | "outer" | "overlaps" | "right" | "similar" | "tablesample"
+            | "verbose"
+            // bağlamsal
+            | "set" | "values" | "overriding" | "ordinality" | "repeatable" | "conflict" | "between"
     )
 }
 
@@ -154,13 +171,22 @@ impl Cx<'_> {
         start..end.max(start)
     }
 
+    /// Parantez içindeki kolon adları: her virgülden sonraki ilk ad (`(a int, b text)` → `a`, `b`).
     fn group_cols(&self, open: usize, close: usize) -> Vec<String> {
         let d = self.toks[open].depth + 1;
-        (open + 1..close.min(self.toks.len()))
-            .map(|i| &self.toks[i])
-            .filter(|t| t.depth == d && self.is_name(t))
-            .map(|t| ident_norm(t.text(self.sql)))
-            .collect()
+        let mut expect = true;
+        let mut out = Vec::new();
+        for t in self.toks.iter().take(close.min(self.toks.len())).skip(open + 1).filter(|t| t.depth == d) {
+            if t.kind == Kind::Punct && t.text(self.sql) == "," {
+                expect = true;
+            } else if expect {
+                if self.is_name(t) {
+                    out.push(ident_norm(t.text(self.sql)));
+                }
+                expect = false;
+            }
+        }
+        out
     }
 
     fn group_is_query(&self, open: usize) -> bool {
@@ -217,6 +243,27 @@ impl Cx<'_> {
             }
             Some(El::Tok(i)) => {
                 let t = &self.toks[*i];
+                // `ROWS FROM (f(...), g(...)) [WITH ORDINALITY] [AS] alias [(kolonlar)]`
+                if allow_fn
+                    && t.is_word(self.sql, "rows")
+                    && els.get(p + 1).is_some_and(|e| self.word_is(e, "from"))
+                    && let Some(El::Group { open, .. }) = els.get(p + 2)
+                {
+                    let name = self
+                        .toks
+                        .get(open + 1)
+                        .filter(|f| self.is_name(f))
+                        .map_or_else(|| "rows".to_string(), |f| ident_norm(f.text(self.sql)));
+                    let mut q = p + 3;
+                    if els.get(q).is_some_and(|e| self.word_is(e, "with"))
+                        && els.get(q + 1).is_some_and(|e| self.word_is(e, "ordinality"))
+                    {
+                        q += 2;
+                    }
+                    let (alias, columns, nq) = self.parse_alias(els, q);
+                    out.push(ScopeItem::Function { alias, name, columns });
+                    return nq;
+                }
                 if !self.is_name(t) || (t.kind == Kind::Word && is_kw(&t.text(self.sql).to_ascii_lowercase())) {
                     return p;
                 }
@@ -239,12 +286,35 @@ impl Cx<'_> {
                     {
                         q += 2;
                     }
-                    let (alias, _, nq) = self.parse_alias(els, q);
-                    out.push(ScopeItem::Function { alias, name });
+                    let (alias, columns, nq) = self.parse_alias(els, q);
+                    out.push(ScopeItem::Function { alias, name, columns });
                     return nq;
                 }
-                let (alias, _, nq) = self.parse_alias(els, q);
-                out.push(ScopeItem::Relation { alias, schema: parts.pop(), name });
+                // Kalıtım yıldızı: `from t * x`.
+                if els.get(q).is_some_and(|e| self.punct_is(e, "*")) {
+                    q += 1;
+                }
+                let (mut alias, mut columns, mut nq) = self.parse_alias(els, q);
+                // `TABLESAMPLE yöntem (argümanlar) [REPEATABLE (tohum)]` alias'tan sonra gelir; yanlış sırada
+                // (`t tablesample system (1) s`) yazılmış alias da kabul edilir.
+                if els.get(nq).is_some_and(|e| self.word_is(e, "tablesample")) {
+                    nq += 1;
+                    if self.name_at(els, nq).is_some() {
+                        nq += 1;
+                    }
+                    if matches!(els.get(nq), Some(El::Group { .. })) {
+                        nq += 1;
+                    }
+                    if els.get(nq).is_some_and(|e| self.word_is(e, "repeatable"))
+                        && matches!(els.get(nq + 1), Some(El::Group { .. }))
+                    {
+                        nq += 2;
+                    }
+                    if alias.is_none() {
+                        (alias, columns, nq) = self.parse_alias(els, nq);
+                    }
+                }
+                out.push(ScopeItem::Relation { alias, schema: parts.pop(), name, columns });
                 nq
             }
             None => p,
@@ -337,9 +407,14 @@ pub fn scope_at(sql: &str, offset: usize) -> Vec<ScopeItem> {
     let toks: Vec<Token> = lex(sql).into_iter().filter(|t| t.kind != Kind::Comment).collect();
     let cx = Cx { sql, toks };
 
+    // İmleci içeren ifade: derinlik 0'daki `;` belirteçleri arası [stmt_lo, n).
+    let is_semi = |t: &Token| t.kind == Kind::Punct && t.depth == 0 && t.text(sql) == ";";
+    let stmt_lo = cx.toks.iter().rposition(|t| is_semi(t) && t.end <= offset).map_or(0, |i| i + 1);
+    let n = cx.toks.iter().skip(stmt_lo).position(is_semi).map_or(cx.toks.len(), |i| stmt_lo + i);
+
     // İmleci çevreleyen açık parantezler (dıştan içe).
     let mut stack: Vec<usize> = Vec::new();
-    for (i, t) in cx.toks.iter().enumerate() {
+    for (i, t) in cx.toks.iter().enumerate().take(n).skip(stmt_lo) {
         if t.start >= offset {
             break;
         }
@@ -355,10 +430,9 @@ pub fn scope_at(sql: &str, offset: usize) -> Vec<ScopeItem> {
     }
 
     // Düzeyler (dıştan içe): (token aralığı, imleç/alt grup konumu).
-    let n = cx.toks.len();
     let mut levels: Vec<(usize, usize, usize)> = Vec::new();
     let first_ref = stack.first().map_or(offset, |&o| cx.toks[o].start);
-    levels.push((0, n, first_ref));
+    levels.push((stmt_lo, n, first_ref));
     for (k, &open) in stack.iter().enumerate() {
         let r = stack.get(k + 1).map_or(offset, |&o| cx.toks[o].start);
         levels.push((open + 1, cx.matching_close(open, n), r));
@@ -401,11 +475,24 @@ mod tests {
             alias: alias.map(Into::into),
             schema: schema.map(Into::into),
             name: name.into(),
+            columns: None,
         }
     }
 
+    fn cols(c: &[&str]) -> Option<Vec<String>> {
+        Some(c.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn relc(alias: &str, name: &str, c: &[&str]) -> ScopeItem {
+        ScopeItem::Relation { alias: Some(alias.into()), schema: None, name: name.into(), columns: cols(c) }
+    }
+
     fn func(alias: Option<&str>, name: &str) -> ScopeItem {
-        ScopeItem::Function { alias: alias.map(Into::into), name: name.into() }
+        ScopeItem::Function { alias: alias.map(Into::into), name: name.into(), columns: None }
+    }
+
+    fn funcc(alias: &str, name: &str, c: &[&str]) -> ScopeItem {
+        ScopeItem::Function { alias: Some(alias.into()), name: name.into(), columns: cols(c) }
     }
 
     #[test]
@@ -465,7 +552,7 @@ mod tests {
         assert_eq!(at("select | from generate_series(1,3)"), [func(None, "generate_series")]);
         assert_eq!(
             at("select | from unnest(a) with ordinality as u(x, n)"),
-            [func(Some("u"), "unnest")]
+            [funcc("u", "unnest", &["x", "n"])]
         );
         assert_eq!(at("select | from pg_catalog.pg_get_keywords() k"), [func(Some("k"), "pg_get_keywords")]);
     }
@@ -481,6 +568,59 @@ mod tests {
             let items = at(&format!("select | from t {tail}"));
             assert_eq!(items.first(), Some(&rel(None, None, "t")), "{tail}");
         }
+    }
+
+    #[test]
+    fn statement_boundary() {
+        assert_eq!(at("select | from t1; select 1 from t2"), [rel(None, None, "t1")]);
+        assert_eq!(at("select 1 from t1; select | from t2"), [rel(None, None, "t2")]);
+        assert_eq!(at("with c as (select 1) select 1; select | from t"), [rel(None, None, "t")]);
+        // Parantez içindeki `;` sınır değildir (bozuk metin); dolar-tırnak içindeki de.
+        assert_eq!(at("select | from t where x = $$;$$"), [rel(None, None, "t")]);
+    }
+
+    #[test]
+    fn non_alias_keywords_after_insert_target() {
+        for tail in [
+            "default values returning |",
+            "overriding system value values (1) returning |",
+            "table u returning |",
+            "select 1 returning |",
+        ] {
+            assert_eq!(at(&format!("insert into t {tail}")).first(), Some(&rel(None, None, "t")), "{tail}");
+        }
+        assert_eq!(at("insert into t as a default values returning a.|"), [rel(Some("a"), None, "t")]);
+    }
+
+    #[test]
+    fn tablesample_and_rows_from() {
+        assert_eq!(at("select | from t s tablesample system (10)"), [rel(Some("s"), None, "t")]);
+        assert_eq!(at("select | from t tablesample system (10) s"), [rel(Some("s"), None, "t")]);
+        assert_eq!(
+            at("select | from t tablesample bernoulli (5) repeatable (1) s, u"),
+            [rel(Some("s"), None, "t"), rel(None, None, "u")]
+        );
+        assert_eq!(at("select | from t s tablesample system (1) where x"), [rel(Some("s"), None, "t")]);
+        assert_eq!(
+            at("select | from rows from (f(1), g(2)) with ordinality as r(a, b, n)"),
+            [funcc("r", "f", &["a", "b", "n"])]
+        );
+        assert_eq!(at("select | from rows from (f(1)) r"), [func(Some("r"), "f")]);
+        // `rows` adlı tablo hâlâ ilişkidir.
+        assert_eq!(at("select | from rows r"), [rel(Some("r"), None, "rows")]);
+    }
+
+    #[test]
+    fn column_alias_lists() {
+        assert_eq!(at("select x.| from t x(a, b)"), [relc("x", "t", &["a", "b"])]);
+        assert_eq!(at("select x.| from t as x (\"A\", B)"), [relc("x", "t", &["A", "b"])]);
+        assert_eq!(at("select u.| from unnest(a) as u(v, n)"), [funcc("u", "unnest", &["v", "n"])]);
+        // Kolon tanım listesi: yalnızca adlar.
+        assert_eq!(
+            at("select x.| from f() as x(a int, b character varying(3), c text[])"),
+            [funcc("x", "f", &["a", "b", "c"])]
+        );
+        assert_eq!(at("select | from t * x"), [rel(Some("x"), None, "t")]);
     }
 
     #[test]
