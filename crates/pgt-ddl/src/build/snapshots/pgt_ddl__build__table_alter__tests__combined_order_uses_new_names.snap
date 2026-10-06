@@ -1,0 +1,27 @@
+---
+source: crates/pgt-ddl/src/build/table_alter.rs
+expression: render(&p)
+---
+[Safe] ALTER TABLE public.t RENAME TO t2  -- Tabloya adla başvuran fonksiyonlar ve uygulama sorguları etkilenir
+[Safe] ALTER TABLE public.t2 SET SCHEMA s2  -- Tablonun indeksleri, kısıtları ve kolonlarına bağlı diziler de taşınır; adla başvuran bağımlılar etkilenir
+[DataLoss] ALTER TABLE s2.t2 DROP COLUMN note  -- Kolondaki veri kalıcı silinir
+[DataLoss] ALTER TABLE s2.t2 ALTER COLUMN caption TYPE character varying(100) COLLATE "C"  -- Tabloyu yeniden yazar; bağlı indeks/kısıtlar yeniden oluşturulur; otomatik dönüşüm yoksa USING gerekir (USING ifadesi eski kolon adlarını kullanır)
+[DataLoss] ALTER TABLE s2.t2 ALTER COLUMN amount TYPE bigint USING (amount::bigint
+)  -- Tabloyu yeniden yazar; bağlı indeks/kısıtlar yeniden oluşturulur; USING ifadesi eski kolon adlarını kullanır
+[Safe] ALTER TABLE s2.t2 RENAME COLUMN caption TO full_name  -- Kolona adla başvuran fonksiyonlar ve uygulama sorguları etkilenir
+[Safe] ALTER TABLE s2.t2 ADD COLUMN extra integer DEFAULT (1
+) NOT NULL
+[Destructive] ALTER TABLE s2.t2 ALTER COLUMN total SET EXPRESSION AS (qty * 3
+)  -- Tüm satırlar için değer yeni ifadeyle yeniden hesaplanır
+[Safe] ALTER TABLE s2.t2 ALTER COLUMN amount SET DEFAULT (5
+)
+[Destructive] ALTER TABLE s2.t2 ALTER COLUMN amount SET NOT NULL  -- Tabloyu tarar; NULL değer içeren satır varsa başarısız olur
+[Safe] ALTER TABLE s2.t2 ALTER COLUMN seq SET GENERATED ALWAYS
+[Safe] ALTER TABLE s2.t2 OWNER TO bob
+[Safe] ALTER TABLE s2.t2 SET TABLESPACE slow  -- Tabloyu yeniden yazar; ACCESS EXCLUSIVE kilidi alır
+[Destructive] ALTER TABLE s2.t2 SET UNLOGGED  -- Tabloyu yeniden yazar; ACCESS EXCLUSIVE kilidi alır
+[Safe] ALTER TABLE s2.t2 SET (fillfactor = 80)  -- Yalnızca yeni yazılan sayfaları etkiler; mevcut sayfalar için VACUUM FULL gerekir
+[Safe] COMMENT ON TABLE s2.t2 IS 'Yeni'
+[Safe] COMMENT ON COLUMN s2.t2.full_name IS 'isim'
+WARN: Tablo yeniden yazılır: işlem boyunca ACCESS EXCLUSIVE kilidi alınır ve tablo okuma ve yazmaya kapalı kalır; büyük tablolarda uzun sürer
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')

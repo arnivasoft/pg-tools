@@ -1,0 +1,31 @@
+---
+source: crates/pgt-ddl/src/build/table.rs
+expression: out
+---
+## düz cascade=false
+[DataLoss] DROP TABLE public.t
+
+## düz cascade=true
+[DataLoss] DROP TABLE public.t CASCADE  -- Bağımlı görünümler, yabancı anahtarlar da silinir
+WARN: Bağımlı görünümler, yabancı anahtarlar da silinir
+
+## bölüm tablosu cascade=false
+[DataLoss] DROP TABLE public.t  -- Bu tablo bir bölümdür: verisiyle birlikte silinir ve ana tablodan kalkar
+
+## bölüm tablosu cascade=true
+[DataLoss] DROP TABLE public.t CASCADE  -- Bağımlı görünümler, yabancı anahtarlar da silinir; Bu tablo bir bölümdür: verisiyle birlikte silinir ve ana tablodan kalkar
+WARN: Bağımlı görünümler, yabancı anahtarlar da silinir
+
+## bölümlenmiş tablo cascade=false
+[DataLoss] DROP TABLE public.t  -- Bölümlenmiş tablo: tüm bölümleri ve verileri de silinir
+
+## bölümlenmiş tablo cascade=true
+[DataLoss] DROP TABLE public.t CASCADE  -- Bağımlı görünümler, yabancı anahtarlar da silinir; Bölümlenmiş tablo: tüm bölümleri ve verileri de silinir
+WARN: Bağımlı görünümler, yabancı anahtarlar da silinir
+
+## anahtar sözcük cascade=false
+[DataLoss] DROP TABLE "My S"."order"
+
+## anahtar sözcük cascade=true
+[DataLoss] DROP TABLE "My S"."order" CASCADE  -- Bağımlı görünümler, yabancı anahtarlar da silinir
+WARN: Bağımlı görünümler, yabancı anahtarlar da silinir

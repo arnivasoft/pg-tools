@@ -3,4 +3,4 @@
 /**
  * Desteklenen nesne türleri.
  */
-export type ObjectKind = "schema" | "sequence" | "extension" | "index";
+export type ObjectKind = "schema" | "sequence" | "extension" | "index" | "table";

@@ -15,11 +15,12 @@ import { FORM_PATHS } from "./forms-model";
 import SqlPreview from "./SqlPreview";
 
 // Tür → form (tembel bileşen + bilinen alan yolları; kök yol alt yolları da kapsar: `columns` ⊃ `columns[1].key`).
-const FORMS: Record<ObjectKind, FormEntry> = {
-  schema: { view: lazy(() => import("./SchemaForm")), paths: FORM_PATHS.schema },
-  extension: { view: lazy(() => import("./ExtensionForm")), paths: FORM_PATHS.extension },
-  sequence: { view: lazy(() => import("./SequenceForm")), paths: FORM_PATHS.sequence },
-  index: { view: lazy(() => import("./IndexForm")), paths: FORM_PATHS.index },
+// `table` formu Plan 13'te gelir; o zamana dek yuva boş ve `formMissing` koruması gösterilir.
+const FORMS: Partial<Record<ObjectKind, FormEntry>> = {
+  schema: { view: lazy(() => import("./SchemaForm")), paths: FORM_PATHS.schema! },
+  extension: { view: lazy(() => import("./ExtensionForm")), paths: FORM_PATHS.extension! },
+  sequence: { view: lazy(() => import("./SequenceForm")), paths: FORM_PATHS.sequence! },
+  index: { view: lazy(() => import("./IndexForm")), paths: FORM_PATHS.index! },
 };
 
 type StatusKey = keyof typeof tdes.view.status;
@@ -63,7 +64,7 @@ export default function DesignerView(props: {
         const [askReload, setAskReload] = createSignal(false);
         const entry = () => FORMS[m().kind];
         // Genel hatalar: `old.`, üst-düzey `columns` ve formun bilmediği yollar.
-        const issues = createMemo(() => groupIssues(m().view?.errors ?? [], entry().paths));
+        const issues = createMemo(() => groupIssues(m().view?.errors ?? [], entry()?.paths ?? new Set<string>()));
         const done = () => m().mode === "create" && m().outcome?.outcome === "applied";
         const readOnly = () => m().locked || m().status !== "ready" || m().applying || done();
         const canReload = () => !m().applying && m().status !== "gone" && m().status !== "loading";
@@ -119,10 +120,13 @@ export default function DesignerView(props: {
             </Show>
             <div class="flex min-h-0 flex-1">
               <section aria-label={kindLabel(m().kind)} class="min-w-0 flex-1 overflow-auto p-3">
-                <Show when={m().draft !== null}>
+                <Show when={m().draft !== null && !entry()}>
+                  <p class="text-muted">{v.formMissing}</p>
+                </Show>
+                <Show when={m().draft !== null && entry()}>
                   <Suspense fallback={<p class="text-muted">{tdes.loading}</p>}>
                     <Dynamic
-                      component={entry().view}
+                      component={entry()!.view}
                       designer={props.designer}
                       tabId={props.tabId}
                       model={m()}

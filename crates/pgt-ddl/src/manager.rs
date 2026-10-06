@@ -117,6 +117,8 @@ const FIND_SEQUENCE_SQL: &str = "SELECT c.oid FROM pg_class c JOIN pg_namespace 
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'S'";
 const FIND_INDEX_SQL: &str = "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('i', 'I')";
+const FIND_TABLE_SQL: &str = "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r', 'p')";
 
 /// Çağıran gelecek düşerse sunucudaki ifadeyi iptal eder (`armed` yalnızca çalıştırıcı bitince kapanır).
 struct CancelOnDrop {
@@ -137,12 +139,14 @@ impl Drop for CancelOnDrop {
 }
 
 /// Alter sonrası nesnenin kimliği (şema/ad) değiştiyse ya da indeks yeniden kuruluyorsa (oid değişir) yeniden aranır.
+/// Tablo yeniden adlandırma/şema taşıma oid'i korur; yeni adla arama aynı oid'i döndürür (arayüz yeni adla yeniler).
 fn identity_changed(old: &ObjectDef, new: &ObjectDef) -> bool {
     match (old, new) {
         (ObjectDef::Schema(a), ObjectDef::Schema(b)) => a.name != b.name,
         (ObjectDef::Extension(a), ObjectDef::Extension(b)) => a.name != b.name,
         (ObjectDef::Sequence(a), ObjectDef::Sequence(b)) => (&a.schema, &a.name) != (&b.schema, &b.name),
         (ObjectDef::Index(_), ObjectDef::Index(_)) => true,
+        (ObjectDef::Table(a), ObjectDef::Table(b)) => (&a.schema, &a.name) != (&b.schema, &b.name),
         _ => false,
     }
 }
@@ -366,6 +370,7 @@ impl DdlManager {
             ObjectDef::Extension(d) => (ObjectKind::Extension, FIND_EXTENSION_SQL, None, d.name.clone()),
             ObjectDef::Sequence(d) => (ObjectKind::Sequence, FIND_SEQUENCE_SQL, Some(d.schema.clone()), d.name.clone()),
             ObjectDef::Index(d) => (ObjectKind::Index, FIND_INDEX_SQL, Some(d.schema.clone()), d.name.clone()),
+            ObjectDef::Table(d) => (ObjectKind::Table, FIND_TABLE_SQL, Some(d.schema.clone()), d.name.clone()),
         };
         let row = self
             .mgr
@@ -393,7 +398,8 @@ impl DdlManager {
     }
 
     /// "Yeni …" diyaloğunun önceden doldurulmuş tanımı. Şema/tablo adları oid'den katalogdan çözülür.
-    /// Geçersiz bağlam (sequence için şema yok, indeks için tablo yok, şema/eklenti için tablo) → `Invalid`.
+    /// Geçersiz bağlam (sequence/tablo için şema yok ya da tablo var, indeks için tablo yok, şema/eklenti için tablo)
+    /// → `Invalid`.
     pub async fn defaults(&self, server: Uuid, database_oid: u32, kind: ObjectKind, ctx: CreateContext) -> Result<ObjectDef> {
         let invalid = |m: &str| Err(Error::Invalid(m.to_string()));
         Ok(match kind {
@@ -422,6 +428,28 @@ impl DdlManager {
                     cycle: false,
                     owned_by: None,
                     comment: None,
+                })
+            }
+            ObjectKind::Table => {
+                let (Some(schema_oid), None) = (ctx.schema_oid, ctx.table_oid) else {
+                    return invalid("Tablo yalnızca bir şema altında oluşturulabilir.");
+                };
+                let schema = self.schema_name(server, database_oid, schema_oid).await?;
+                ObjectDef::Table(TableDef {
+                    schema,
+                    name: String::new(),
+                    owner: None,
+                    tablespace: None,
+                    persistence: Persistence::Permanent,
+                    columns: vec![],
+                    constraints: vec![],
+                    partition_by: None,
+                    fillfactor: None,
+                    comment: None,
+                    partition_text: None,
+                    is_partition: false,
+                    inherits: false,
+                    unsupported: vec![],
                 })
             }
             ObjectKind::Index => {
@@ -545,6 +573,42 @@ mod tests {
         assert_eq!(bad.hash, crate::plan_hash(&[]));
         let noop = plan_view(&PlanRequest::Alter { object: ObjectRef { kind: ObjectKind::Schema, oid: 1 }, old: schema("a"), new: schema("a") }, 160000);
         assert!(noop.empty && noop.errors.is_empty());
+    }
+
+    fn table(schema: &str, name: &str) -> ObjectDef {
+        ObjectDef::Table(TableDef {
+            schema: schema.into(),
+            name: name.into(),
+            owner: None,
+            tablespace: None,
+            persistence: Persistence::Permanent,
+            columns: vec![],
+            constraints: vec![],
+            partition_by: None,
+            fillfactor: None,
+            comment: None,
+            partition_text: None,
+            is_partition: false,
+            inherits: false,
+            unsupported: vec![],
+        })
+    }
+
+    #[test]
+    fn table_identity_is_schema_and_name() {
+        let base = table("public", "t");
+        assert!(!identity_changed(&base, &base));
+        let ObjectDef::Table(mut commented) = base.clone() else { unreachable!() };
+        commented.comment = Some("c".into());
+        commented.persistence = Persistence::Unlogged;
+        assert!(!identity_changed(&base, &ObjectDef::Table(commented)));
+        assert!(identity_changed(&base, &table("public", "u")));
+        assert!(identity_changed(&base, &table("other", "t")));
+        // Tür uyuşmazlığı kimlik değişimi sayılmaz (nesne denetimi zaten reddeder).
+        assert!(!identity_changed(&base, &schema("t")));
+        // Tablo isteği yöneticinin saf yolunda tablo üreticisine ulaşır (kolonsuz create: alan hatası).
+        let v = plan_view(&PlanRequest::Create { def: base, concurrently: false }, 160000);
+        assert!(v.empty && v.errors.iter().any(|e| e.path == "columns"), "{v:?}");
     }
 
     #[test]

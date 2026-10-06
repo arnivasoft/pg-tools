@@ -13,7 +13,7 @@ import type { Statement } from "../../ipc/bindings/Statement";
 
 export type DesignerKind = ObjectKind;
 
-const KIND_LABELS: Record<ObjectKind, string> = { schema: "Schema", sequence: "Sequence", extension: "Extension", index: "Index" };
+const KIND_LABELS: Record<ObjectKind, string> = { schema: "Schema", sequence: "Sequence", extension: "Extension", index: "Index", table: "Table" };
 export function kindLabel(kind: ObjectKind): string {
   return KIND_LABELS[kind];
 }
@@ -21,7 +21,7 @@ export function kindLabel(kind: ObjectKind): string {
 /** Başlıkta/mesajlarda görünen ad; sequence ve indeks şema nitelikli, ad boşsa boş. */
 export function defName(def: ObjectDef): string {
   if (!def.name) return "";
-  return def.kind === "sequence" || def.kind === "index" ? `${def.schema}.${def.name}` : def.name;
+  return def.kind === "sequence" || def.kind === "index" || def.kind === "table" ? `${def.schema}.${def.name}` : def.name;
 }
 
 export function cloneDef<T extends ObjectDef>(def: T): T {

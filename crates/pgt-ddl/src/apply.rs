@@ -32,6 +32,9 @@ const LOCK_TIMEOUT_HINT: &str = "Nesneyi kullanan oturumları kontrol edin ya da
 const BOUNDS_HINT: &str =
     "Sequence'in başlangıç/mevcut değeri yeni MINVALUE/MAXVALUE sınırlarının dışında; START/RESTART ya da sınır değerlerini gözden geçirin.";
 
+/// Serbest SQL tarayıcısının varsayımı (bkz. `sqlscan`); her ifade öncesi (transaction dışı olanlar dahil) yeniden kurulur.
+const SCS_ON: &str = "SET standard_conforming_strings = on";
+
 /// Oturum ayarlarını açıkça kurar. `SessionProfile::Ddl` aynı değerleri `options` ile de gönderir, ancak
 /// havuzlayıcılar başlangıç parametrelerini sessizce yok sayabilir (`lock_timeout` doğrulanamaz): uygulayıcı
 /// hiçbir ifadeden önce bu dört ayarı kendisi `SET` eder.
@@ -212,6 +215,10 @@ pub(crate) async fn run_statements(client: &Client, statements: &[Statement], re
             if reg.cancelled() {
                 return RunResult::Failed { failed_index: idx(i), committed, error: cancelled_error(), outcome_unknown: false, position: None };
             }
+            if let Err(e) = client.batch_execute(SCS_ON).await {
+                let (error, position) = statement_error(e, reg);
+                return RunResult::Failed { failed_index: idx(i), committed, error, outcome_unknown: false, position };
+            }
             if let Err(e) = client.batch_execute(&statements[i].sql).await {
                 let (error, position) = statement_error(e, reg);
                 return RunResult::Failed { failed_index: idx(i), committed, error, outcome_unknown: false, position };
@@ -232,6 +239,13 @@ pub(crate) async fn run_statements(client: &Client, statements: &[Statement], re
             if reg.cancelled() {
                 rollback(client).await;
                 return RunResult::Failed { failed_index: idx(k), committed, error: cancelled_error(), outcome_unknown: false, position: None };
+            }
+            // Önceki ifadenin çalıştırdığı serbest SQL (ör. `set_config`) `standard_conforming_strings`'i kapatmış
+            // olabilir; yerel tarayıcı bunun AÇIK olduğunu varsayar → her ifadeden önce yeniden kur.
+            if let Err(e) = client.batch_execute(SCS_ON).await {
+                let (error, position) = statement_error(e, reg);
+                rollback(client).await;
+                return RunResult::Failed { failed_index: idx(k), committed, error, outcome_unknown: false, position };
             }
             if let Err(e) = client.batch_execute(&s.sql).await {
                 let (error, position) = statement_error(e, reg);

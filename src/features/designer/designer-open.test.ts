@@ -30,10 +30,10 @@ function tree(): TreeState {
 }
 
 const createTarget: DdlTarget = {
-  serverId: "S1", databaseOid: 5, object: null, create: { kind: "sequence", context: { schemaOid: 10, tableOid: null } }, refreshNodeId: "coll-seq",
+  serverId: "S1", databaseOid: 5, object: null, create: { kind: "sequence", context: { schemaOid: 10, tableOid: null } }, focus: null, refreshNodeId: "coll-seq",
 };
 const objectTarget: DdlTarget = {
-  serverId: "S1", databaseOid: 5, object: { kind: "sequence", oid: 77 }, create: null, refreshNodeId: "coll-seq",
+  serverId: "S1", databaseOid: 5, object: { kind: "sequence", oid: 77 }, create: null, focus: null, refreshNodeId: "coll-seq",
 };
 
 function setup(target: DdlTarget | ((id: string) => Promise<DdlTarget>), cfg: ServerConfig = server()) {
@@ -133,8 +133,23 @@ describe("designer-open", () => {
     });
   });
 
+  it("focus (kolon/kısıt) hedefinde drop ve rename reddedilir; edit açılır", async () => {
+    const focused: DdlTarget = { ...objectTarget, focus: { kind: "column", id: 1 } };
+    for (const mode of ["drop", "rename"] as const) {
+      const { opener, deps, store } = setup(focused);
+      await opener.open("seq", mode);
+      expect(deps.notify).toHaveBeenCalledWith(tdes.open.none, "info");
+      expect(deps.openDrop).not.toHaveBeenCalled();
+      expect(deps.connect).not.toHaveBeenCalled();
+      expect(store.state.designers).toHaveLength(0);
+    }
+    const { opener, store } = setup(focused);
+    await opener.open("seq", "edit");
+    expect(store.state.designers).toHaveLength(1);
+  });
+
   it("ddlTargetOf hedef vermezse / databaseOid yoksa bildirir, sekme açmaz", async () => {
-    const empty: DdlTarget = { serverId: "S1", databaseOid: 5, object: null, create: null, refreshNodeId: null };
+    const empty: DdlTarget = { serverId: "S1", databaseOid: 5, object: null, create: null, focus: null, refreshNodeId: null };
     for (const [target, mode] of [
       [empty, "edit"], [empty, "create"], [createTarget, "edit"], [objectTarget, "create"],
       [{ ...objectTarget, databaseOid: null }, "edit"], [{ ...createTarget, databaseOid: null }, "create"],

@@ -38,20 +38,36 @@ pub async fn version_num(ts: &TestServer) -> u32 {
     v as u32
 }
 
+/// Nesne testlerinin varsayılan ad öneki (`tests/roundtrip.rs`); tablo testleri `pgt_ddl_tb` kullanır.
+pub const RT_PREFIX: &str = "pgt_ddl_rt";
+
 /// Geçici veritabanı adı: `pgt_ddl_rt_<ana sürüm>_<etiket>` (testler paralel koşar; her test kendi veritabanını alır).
 pub async fn db_name(ts: &TestServer, tag: &str) -> String {
-    format!("pgt_ddl_rt_{}_{tag}", version_num(ts).await / 10_000)
+    db_name_in(ts, RT_PREFIX, tag).await
+}
+
+/// Önekli veritabanı adı: `<önek>_<ana sürüm>_<etiket>`.
+pub async fn db_name_in(ts: &TestServer, prefix: &str, tag: &str) -> String {
+    format!("{prefix}_{}_{tag}", version_num(ts).await / 10_000)
 }
 
 pub fn role_name(tag: &str) -> String {
-    format!("pgt_ddl_rt_role_{tag}")
+    role_name_in(RT_PREFIX, tag)
+}
+
+pub fn role_name_in(prefix: &str, tag: &str) -> String {
+    format!("{prefix}_role_{tag}")
 }
 
 /// Veritabanını ve test rolünü siler (önce veritabanı: rol nesne sahibi olabilir).
 pub async fn cleanup(ts: &TestServer, tag: &str) {
+    cleanup_in(ts, RT_PREFIX, tag).await
+}
+
+pub async fn cleanup_in(ts: &TestServer, prefix: &str, tag: &str) {
     let admin = admin_client(ts, &ts.config.maintenance_db).await;
-    drop_database(&admin, &db_name(ts, tag).await).await;
-    admin.batch_execute(&format!("DROP ROLE IF EXISTS {}", role_name(tag))).await.unwrap();
+    drop_database(&admin, &db_name_in(ts, prefix, tag).await).await;
+    admin.batch_execute(&format!("DROP ROLE IF EXISTS {}", role_name_in(prefix, tag))).await.unwrap();
 }
 
 pub struct Env {
@@ -66,10 +82,15 @@ pub struct Env {
 
 /// Önceki çalıştırmanın artıklarını temizler, veritabanı ve rolü kurar, salt okunur katalog bağlantısını açar.
 pub async fn setup(ts: &TestServer, tag: &str) -> Env {
-    cleanup(ts, tag).await;
-    let name = db_name(ts, tag).await;
+    setup_in(ts, RT_PREFIX, tag).await
+}
+
+/// `setup` ile aynı; veritabanı/rol adları `prefix` ile.
+pub async fn setup_in(ts: &TestServer, prefix: &str, tag: &str) -> Env {
+    cleanup_in(ts, prefix, tag).await;
+    let name = db_name_in(ts, prefix, tag).await;
     let maint = admin_client(ts, &ts.config.maintenance_db).await;
-    let role = role_name(tag);
+    let role = role_name_in(prefix, tag);
     maint.batch_execute(&format!("CREATE ROLE {role}")).await.unwrap();
     maint.batch_execute(&format!("CREATE DATABASE {name} TEMPLATE template0 ENCODING 'UTF8'")).await.unwrap();
     let admin = admin_client(ts, &name).await;
@@ -92,6 +113,30 @@ impl Env {
                 panic!("ifade başarısız: {}\n  hata: {}", s.sql, db_message(&e));
             }
         }
+    }
+
+    /// Planı uygulayıcı gibi TEK transaction'da çalıştırır; ilk hatada geri alır ve sunucu iletisini döndürür.
+    pub async fn try_exec_tx(&self, plan: &Plan) -> Result<(), String> {
+        self.admin.batch_execute("BEGIN").await.unwrap();
+        for s in &plan.statements {
+            if let Err(e) = self.admin.batch_execute(&s.sql).await {
+                self.admin.batch_execute("ROLLBACK").await.unwrap();
+                return Err(format!("{}\n  ifade: {}", db_message(&e), s.sql));
+            }
+        }
+        self.admin.batch_execute("COMMIT").await.map_err(|e| db_message(&e))
+    }
+
+    /// `try_exec_tx`; hata panik.
+    pub async fn exec_tx(&self, plan: &Plan) {
+        if let Err(e) = self.try_exec_tx(plan).await {
+            panic!("plan başarısız: {e}");
+        }
+    }
+
+    /// Ham SQL; sunucu hatası iletisiyle döner (beklenen ret denemeleri için).
+    pub async fn try_sql(&self, sql: &str) -> Result<(), String> {
+        self.admin.batch_execute(sql).await.map_err(|e| db_message(&e))
     }
 
     pub async fn sql(&self, sql: &str) {

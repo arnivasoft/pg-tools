@@ -19,5 +19,5 @@ pub use lookup::{LookupItem, LookupRequest, lookup};
 pub use manager::{ApplyOptions, ApplyOutcome, CreateContext, DdlManager, PlanRequest};
 pub use model::*;
 pub use plan::{Plan, PlanView, Risk, Statement, plan_hash};
-pub use target::{DdlCreate, DdlTarget, target_of};
+pub use target::{DdlCreate, DdlFocus, DdlTarget, target_of};
 pub use quote::{qualified, quote_ident, quote_literal};

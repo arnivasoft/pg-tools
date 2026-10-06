@@ -261,3 +261,9 @@ async fn drop_table_variants()                    // DROP, CASCADE bağımlı FK
 - Docker matrisi PG 10–18 yeşil (Table gidiş-dönüş + yönetici testleri); kapsayıcılar silinir.
 - Saldırgan yeniden inceleme (Table tip dilbilgisi + serbest SQL kapıları) Plan 10'daki Index incelemesi gibi yapılır (final incelemeden ÖNCE ayrı görev olarak planlanır; ledger'a not).
 - Final inceleme sonrası `main`'e yerel birleştirme **yalnızca kullanıcı onayıyla**.
+
+## Plan 13 için notlar (Task 7 sonrası)
+
+- Bölüm düğümleri Table olarak düzenlenebilir (`isPartition`: kolon/kısıt değişikliği doğrulama hatası).
+- `defaults(Table)` `columns = []` döndürür; `create` en az bir kolon ister.
+- `DdlTarget.focus` doluyken drop/rename reddedilir (`designer-open.ts`); Plan 13 bu korumayı korumalı. `DesignerView`'daki `formMissing` geçici koruması Plan 13'te kaldırılır.

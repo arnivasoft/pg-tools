@@ -1,0 +1,226 @@
+---
+source: crates/pgt-ddl/src/build/table_constraint.rs
+expression: out
+---
+## PK ekle
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## PK adsız + INCLUDE
+[Safe] ALTER TABLE public.t ADD PRIMARY KEY (id) INCLUDE (code)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## UNIQUE ekle
+[Safe] ALTER TABLE public.t ADD CONSTRAINT u UNIQUE (code, qty)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## UNIQUE NULLS NOT DISTINCT + INCLUDE
+[Safe] ALTER TABLE public.t ADD CONSTRAINT u UNIQUE NULLS NOT DISTINCT (code) INCLUDE (note)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## UNIQUE DEFERRABLE INITIALLY DEFERRED
+[Safe] ALTER TABLE public.t ADD CONSTRAINT u UNIQUE (code) DEFERRABLE INITIALLY DEFERRED  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## CHECK ekle
+[Safe] ALTER TABLE public.t ADD CONSTRAINT c CHECK (qty > 0
+)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## CHECK adsız
+[Safe] ALTER TABLE public.t ADD CHECK (qty > 0
+)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## CHECK NO INHERIT NOT VALID
+[Safe] ALTER TABLE public.t ADD CONSTRAINT c CHECK (qty > 0
+) NO INHERIT NOT VALID  -- NOT VALID: mevcut satırlar denetlenmez, yalnızca yeni satırlar; sonra VALIDATE CONSTRAINT ile doğrulanabilir
+
+## FK ekle
+[Safe] ALTER TABLE public.t ADD CONSTRAINT f FOREIGN KEY (org_id) REFERENCES public.org (id) ON UPDATE NO ACTION ON DELETE NO ACTION  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## FK MATCH FULL + eylemler + DEFERRABLE + NOT VALID
+[Safe] ALTER TABLE public.t ADD CONSTRAINT f FOREIGN KEY (org_id) REFERENCES "S 2".org (id) MATCH FULL ON UPDATE CASCADE ON DELETE SET NULL DEFERRABLE NOT VALID  -- NOT VALID: mevcut satırlar denetlenmez, yalnızca yeni satırlar; sonra VALIDATE CONSTRAINT ile doğrulanabilir
+
+## UNIQUE sil
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_code_key  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+
+## CHECK sil
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_qty_check  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+
+## FK sil
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_org_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+
+## PK + ona bağlı kendi FK'si sil (FK önce)
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_parent_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_pkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+WARN: Birincil anahtar düşürülüyor: ona bağlı yabancı anahtarlar (başka tablolardaki ya da bu tablodaki, planda yeniden kurulmayan) varsa uygulama 2BP01 hatasıyla durur; önce bağımlı yabancı anahtarları kaldırın. Bu tablonun aynı kolon kümesine başvuran kendi yabancı anahtarları planda otomatik olarak düşürülüp yeniden eklenir
+
+## PK ad
+[Safe] ALTER TABLE public.t RENAME CONSTRAINT t_pkey TO t_pk  -- Kısıtın indeksi de aynı adla yeniden adlandırılır; kısıta/indekse adla başvuran betikler etkilenir
+
+## UNIQUE ad
+[Safe] ALTER TABLE public.t RENAME CONSTRAINT t_code_key TO "Kod"  -- Kısıtın indeksi de aynı adla yeniden adlandırılır; kısıta/indekse adla başvuran betikler etkilenir
+
+## CHECK ad
+[Safe] ALTER TABLE public.t RENAME CONSTRAINT t_qty_check TO qty_pos  -- Kısıta adla başvuran betikler etkilenir
+
+## FK ad
+[Safe] ALTER TABLE public.t RENAME CONSTRAINT t_org_fkey TO org_ref  -- Kısıta adla başvuran betikler etkilenir
+
+## PK kolonları (ona başvuran kendi FK'si de yeniden kurulur)
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_parent_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_pkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_pkey PRIMARY KEY (id, code)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_parent_fkey FOREIGN KEY (parent_id) REFERENCES public.t (id) ON UPDATE NO ACTION ON DELETE NO ACTION  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+WARN: Birincil anahtar düşürülüyor: ona bağlı yabancı anahtarlar (başka tablolardaki ya da bu tablodaki, planda yeniden kurulmayan) varsa uygulama 2BP01 hatasıyla durur; önce bağımlı yabancı anahtarları kaldırın. Bu tablonun aynı kolon kümesine başvuran kendi yabancı anahtarları planda otomatik olarak düşürülüp yeniden eklenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## UNIQUE kolonları
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_code_key  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_code_key UNIQUE (code, qty) INCLUDE (note)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## UNIQUE INCLUDE
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_code_key  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_code_key UNIQUE (code)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## UNIQUE NULLS NOT DISTINCT
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_code_key  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_code_key UNIQUE NULLS NOT DISTINCT (code) INCLUDE (note)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## UNIQUE DEFERRABLE
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_code_key  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_code_key UNIQUE (code) INCLUDE (note) DEFERRABLE  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## FK INITIALLY DEFERRED
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_org_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_org_fkey FOREIGN KEY (org_id) REFERENCES public.org (id) ON UPDATE NO ACTION ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## CHECK ifadesi
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_qty_check  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_qty_check CHECK (qty > 0
+)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## CHECK ifadesi yalnız boşluk farkı (metin eşitliği)
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_qty_check  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_qty_check CHECK (qty>=0
+)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## CHECK NO INHERIT
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_qty_check  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_qty_check CHECK (qty >= 0
+) NO INHERIT  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## FK ON DELETE
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_org_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_org_fkey FOREIGN KEY (org_id) REFERENCES public.org (id) ON UPDATE NO ACTION ON DELETE CASCADE  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## FK ON UPDATE
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_org_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_org_fkey FOREIGN KEY (org_id) REFERENCES public.org (id) ON UPDATE RESTRICT ON DELETE NO ACTION  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## FK MATCH
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_org_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_org_fkey FOREIGN KEY (org_id) REFERENCES public.org (id) MATCH FULL ON UPDATE NO ACTION ON DELETE NO ACTION  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## FK hedef şema
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_org_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_org_fkey FOREIGN KEY (org_id) REFERENCES crm.org (id) ON UPDATE NO ACTION ON DELETE NO ACTION  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## FK hedef tablo
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_org_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_org_fkey FOREIGN KEY (org_id) REFERENCES public."Org" (id) ON UPDATE NO ACTION ON DELETE NO ACTION  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## FK hedef kolonlar
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_org_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_org_fkey FOREIGN KEY (org_id) REFERENCES public.org (org_no) ON UPDATE NO ACTION ON DELETE NO ACTION  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## FK yerel kolonlar
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_org_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_org_fkey FOREIGN KEY (qty) REFERENCES public.org (id) ON UPDATE NO ACTION ON DELETE NO ACTION  -- Mevcut satırları tarar; işlem boyunca tablo ve hedef tablo kilitlenir; hedef tablo/kolonlar sunucuda denetlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## tür değişimi (aynı oid: CHECK → UNIQUE)
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_qty_check  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_qty_check UNIQUE (qty)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## ad + yapısal: eski adla DROP, yeni adla ADD
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_qty_check  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT qty_pos CHECK (qty > 0
+)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## yapısal + adı kaldırılmış: sunucu adlandırır
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_qty_check  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CHECK (qty > 0
+)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## FK VALIDATE
+[Safe] ALTER TABLE public.t VALIDATE CONSTRAINT t_org_fkey  -- Tabloyu tarar (yazmaları engellemeyen SHARE UPDATE EXCLUSIVE kilidiyle); kurala uymayan satır varsa başarısız olur
+
+## CHECK VALIDATE
+[Safe] ALTER TABLE public.t VALIDATE CONSTRAINT t_qty_check  -- Tabloyu tarar (yazmaları engellemeyen SHARE UPDATE EXCLUSIVE kilidiyle); kurala uymayan satır varsa başarısız olur
+
+## ad + VALIDATE (yeni adla, ad değişiminden sonra)
+[Safe] ALTER TABLE public.t RENAME CONSTRAINT t_org_fkey TO org_ref  -- Kısıta adla başvuran betikler etkilenir
+[Safe] ALTER TABLE public.t VALIDATE CONSTRAINT org_ref  -- Tabloyu tarar (yazmaları engellemeyen SHARE UPDATE EXCLUSIVE kilidiyle); kurala uymayan satır varsa başarısız olur
+
+## doğrulanmamış + yapısal, NOT VALID kalır
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_qty_check  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_qty_check CHECK (qty > 0
+) NOT VALID  -- NOT VALID: mevcut satırlar denetlenmez, yalnızca yeni satırlar; sonra VALIDATE CONSTRAINT ile doğrulanabilir
+
+## doğrulanmamış + yapısal + doğrulanmış istenir
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_qty_check  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_qty_check CHECK (qty > 0
+)  -- Mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo kilitlenir
+WARN: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+WARN: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+
+## doğrulanmış + yapısal + NOT VALID ile yeniden ekleme
+[Destructive] ALTER TABLE public.t DROP CONSTRAINT t_org_fkey  -- Kısıt kaldırılır (PRIMARY KEY/UNIQUE ise indeksi de); başka yabancı anahtarlar bu kısıta bağlıysa uygulama 2BP01 hatasıyla durur (CASCADE sunulmaz)
+[Safe] ALTER TABLE public.t ADD CONSTRAINT t_org_fkey FOREIGN KEY (org_id) REFERENCES public.org (id) ON UPDATE NO ACTION ON DELETE CASCADE NOT VALID  -- NOT VALID: mevcut satırlar denetlenmez, yalnızca yeni satırlar; sonra VALIDATE CONSTRAINT ile doğrulanabilir

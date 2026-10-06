@@ -3,8 +3,9 @@ import type { ExtensionDef } from "./ExtensionDef";
 import type { IndexDef } from "./IndexDef";
 import type { SchemaDef } from "./SchemaDef";
 import type { SequenceDef } from "./SequenceDef";
+import type { TableDef } from "./TableDef";
 
 /**
  * Arayüz ile arka uç arasındaki nesne tanımı (`kind` etiketi nesne türüdür).
  */
-export type ObjectDef = { "kind": "schema" } & SchemaDef | { "kind": "sequence" } & SequenceDef | { "kind": "extension" } & ExtensionDef | { "kind": "index" } & IndexDef;
+export type ObjectDef = { "kind": "schema" } & SchemaDef | { "kind": "sequence" } & SequenceDef | { "kind": "extension" } & ExtensionDef | { "kind": "index" } & IndexDef | { "kind": "table" } & TableDef;

@@ -37,6 +37,10 @@ pub struct ScanResult {
     /// Bölge dışında bir `'` ya da `$`, ASCII rakamın hemen ardından geliyor (`1$$…`, `1'x'`). PG sayı belirteci
     /// ile tarayıcının tanımlayıcı varsayımı burada ayrışabilir; çağıran bunu RED sayar.
     pub digit_adjacent_quote: bool,
+    /// E'…' olmayan (sıradan, `B'`/`X'`/`U&'` dahil) tek tırnaklı dizenin içinde `\` var. Tarayıcı
+    /// `standard_conforming_strings = on` varsayar; uygulama sırasında çalışan bir ifade ayarı kapatırsa sonraki
+    /// ifadelerde `\` kaçış olur ve bölge sınırları kayar. Çağıran bunu RED sayar (kaçış gerekiyorsa `E'…'`).
+    pub backslash_in_plain_string: bool,
 }
 
 impl ScanResult {
@@ -65,14 +69,35 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
     let mut min_depth: i32 = 0;
     let mut ends_in_comment = false;
     let mut digit_quote = false;
+    let mut plain_backslash = false;
     while i < n {
-        // `1'x'` ve `1e'x'` (üstel gibi görünen E dizesi öneki) de dahil.
-        if (b[i] == b'\'' || b[i] == b'$')
-            && i > 0
-            && (b[i - 1].is_ascii_digit()
-                || (b[i] == b'\'' && matches!(b[i - 1], b'e' | b'E') && i > 1 && b[i - 2].is_ascii_digit()))
-        {
-            digit_quote = true;
+        if (b[i] == b'\'' || b[i] == b'$') && i > 0 {
+            // `1'x'` ve `1e'x'` (üstel gibi görünen E dizesi öneki) de dahil.
+            if b[i - 1].is_ascii_digit()
+                || (b[i] == b'\'' && matches!(b[i - 1], b'e' | b'E') && i > 1 && b[i - 2].is_ascii_digit())
+            {
+                digit_quote = true;
+            }
+            // Sayı gibi başlayan belirteç (`0xAF`, `0b1`, `0o7`, `1_000`, `1.5e3`): PG 16+ bunu sayı olarak okur ve
+            // ardından gelen `$`/`'` yeni bir dize açar; tarayıcı ise `AF$` gibi bir tanımlayıcı sanabilir.
+            let mut j = i;
+            while j > 0 && (b[j - 1].is_ascii_alphanumeric() || b[j - 1] == b'_') {
+                j -= 1;
+            }
+            if j < i && b[j].is_ascii_digit() {
+                digit_quote = true;
+            }
+            // Yalnız `$` sonra önekli dize (`$e'…'`, `$b'…'`, `$u&'…'`): PG `$`'ı tek karakterli belirteç sayıp
+            // öneki dizenin parçası yapar, tarayıcı `$`'ı tanımlayıcı parçası sanar → RED.
+            if b[i] == b'\'' {
+                let pre = if b[i - 1] == b'&' && i >= 2 && matches!(b[i - 2], b'u' | b'U') { 2 } else { 1 };
+                if (pre == 2 || matches!(b[i - 1], b'e' | b'E' | b'b' | b'B' | b'x' | b'X' | b'n' | b'N'))
+                    && i > pre
+                    && b[i - pre - 1] == b'$'
+                {
+                    digit_quote = true;
+                }
+            }
         }
         match b[i] {
             b'(' => {
@@ -98,6 +123,9 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
                 while i < n {
                     if escape && b[i] == b'\\' {
                         i += 2;
+                    } else if !escape && b[i] == b'\\' {
+                        plain_backslash = true;
+                        i += 1;
                     } else if b[i] == b'\'' {
                         if i + 1 < n && b[i + 1] == b'\'' {
                             i += 2;
@@ -176,6 +204,7 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
         final_paren_depth: depth,
         ends_in_line_comment: ends_in_comment,
         digit_adjacent_quote: digit_quote,
+        backslash_in_plain_string: plain_backslash,
     }
 }
 
@@ -358,5 +387,101 @@ mod tests {
             assert!(scan_semicolons(s).is_clean(), "{s}");
         }
         assert!(!scan_semicolons("a;").is_clean());
+    }
+
+    fn d(s: &str) -> bool {
+        scan_semicolons(s).digit_adjacent_quote
+    }
+    fn clean(s: &str) -> bool {
+        let r = scan_semicolons(s);
+        r.outer_semicolons == 0 && !r.unterminated
+    }
+
+    #[test]
+    fn scan_hex_literal_then_dollar_quote_is_digit_adjacent() {
+        for s in ["0xAF$$ x; y $$", "0Xff$t$ x; y $t$", "0b1$$ ; $$", "0o7$$ ; $$", "1_000$$ ; $$", "1.5e3$$ ; $$"] {
+            assert!(d(s), "{s}");
+        }
+        // Harfle başlayan tanımlayıcı etkilenmez.
+        assert!(!d("x $$a$$"));
+    }
+
+    #[test]
+    fn scan_hex_literal_then_quote_boundaries() {
+        for s in ["0xAF'x;y'", "0b1'x;y'", "0o7'x;y'", "1_000'x;y'"] {
+            assert!(d(s), "{s}");
+        }
+    }
+
+    #[test]
+    fn scan_lone_dollar_then_e_string_is_escape_string() {
+        for s in [r"$e'\' ; x'", r"$E'\' ; x'", "$b'x'", "$x'1F'", "$n'a'", "$u&'a'"] {
+            assert!(d(s), "{s}");
+        }
+        // `$` olmadan e'…' önceki davranışı korur.
+        assert!(!d("a = e'x'"));
+    }
+
+    #[test]
+    fn scan_unicode_escape_string_backslash_does_not_escape_quote() {
+        let r = scan_semicolons(r"U&'\' ; x'");
+        assert_eq!(r.outer_semicolons, 1);
+        assert!(r.unterminated && r.backslash_in_plain_string);
+        let r = scan_semicolons("u&'a''b'");
+        assert!(r.is_clean() && !r.backslash_in_plain_string);
+    }
+
+    #[test]
+    fn scan_unicode_escape_identifier_doubling() {
+        assert!(clean(r#"U&"a"";b""#));
+        assert!(clean(r#"U&"x" UESCAPE '!'"#));
+    }
+
+    #[test]
+    fn scan_bit_and_hex_strings_doubled_quote_boundaries() {
+        for s in ["B'01''10'", "X'1F''2'", "N'a;b'"] {
+            assert!(clean(s), "{s}");
+        }
+    }
+
+    #[test]
+    fn scan_unterminated_prefixed_strings() {
+        for s in ["U&'abc", "U&\"abc", "B'01", "X'1F", "N'x", r"E'\", "E'\\ş"] {
+            assert!(u(s), "{s}");
+        }
+    }
+
+    #[test]
+    fn scan_dollar_tag_case_and_prefix_overlap() {
+        assert!(u("$a$ x $A$"));
+        assert!(clean("$ab$ $a$ ; $ab$"));
+        assert!(clean("$a$ $$a$"));
+        assert!(clean("$a$ b$a$"));
+        assert_eq!(c("$a$ ; $a$ ;"), 1);
+    }
+
+    #[test]
+    fn scan_e_string_after_dot_and_quote() {
+        assert!(clean(r"x.e'\''"));
+        assert!(clean(r#""x"e'\''"#));
+        // `1.e'x'`: ya işaretlenir ya da sınırlar sunucuyla aynı kalır (sıfır dış `;`, kapalı bölge).
+        let r = scan_semicolons("1.e'x'");
+        assert!(r.digit_adjacent_quote || (r.outer_semicolons == 0 && !r.unterminated));
+    }
+
+    #[test]
+    fn scan_cr_only_line_comment_then_code() {
+        assert_eq!(c("a -- c\r; b"), 1);
+    }
+
+    #[test]
+    fn plain_string_backslash_is_reported_but_e_strings_are_not() {
+        let b = |s: &str| scan_semicolons(s).backslash_in_plain_string;
+        for s in [r"'\'", r"'a\'b' || 'c'", r"x = 'a\b'", r"U&'\0041'", r"B'\'"] {
+            assert!(b(s), "{s}");
+        }
+        for s in [r"E'\''", r"e'a\\'", "'a'", r#""a\b""#, r"$$a\b$$", "-- 'a\\b\n", r"/* 'a\ */", "'a''b'"] {
+            assert!(!b(s), "{s}");
+        }
     }
 }

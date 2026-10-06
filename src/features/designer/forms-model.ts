@@ -30,7 +30,7 @@ export const INDEX_PATHS: ReadonlySet<string> = new Set([
   "name", "method", "unique", "columns", "include", "tablespace", "fillfactor", "whereClause", "comment", "constraint",
 ]);
 /** Tür → bilinen yollar (`FORMS` tablosu bunu kullanır; her `ObjectKind` için bir form olmalı — testte denetlenir). */
-export const FORM_PATHS: Record<ObjectKind, ReadonlySet<string>> = {
+export const FORM_PATHS: Partial<Record<ObjectKind, ReadonlySet<string>>> = {
   schema: SCHEMA_PATHS,
   extension: EXTENSION_PATHS,
   sequence: SEQUENCE_PATHS,
