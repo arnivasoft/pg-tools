@@ -1,7 +1,7 @@
 // Dashboard sekmesinin gövdesi (tembel parça): üst çubuk (aralık, Duraklat/Sürdür, Yenile, durum), kayıp/silinmiş
 // şeridi ve bölüm sekmeleri. Bölüm gövdeleri kendi dosyalarındadır ve ayrı tembel parçalar olarak yüklenir.
 import { Pause, Play, RefreshCw, RotateCcw } from "lucide-solid";
-import { For, Show, Suspense, lazy, type Component } from "solid-js";
+import { For, Show, Suspense, createMemo, lazy, type Component } from "solid-js";
 import { td } from "../../app/strings-dashboard";
 import { Button } from "../../ui/Button";
 import { TabPanel, Tabs } from "../../ui/Tabs";
@@ -60,6 +60,16 @@ export default function DashboardView(props: { dash: DashController; tabId: stri
       {(m) => {
         const ready = () => m().status === "ready";
         const where = () => (m().info?.database ? `${m().serverName}/${m().info?.database}` : m().serverName);
+        // Sekme tetikleyicileri yalnızca soluk bayrağı değişince yeniden kurulur (her yamada değil: odak kaybolmasın).
+        const stmtMuted = createMemo(() => m().statements?.kind === "unavailable");
+        const sectionTabs = createMemo(() =>
+          SECTIONS.map((s) => ({
+            value: s.value,
+            label: td.sections[s.value],
+            // Eklenti yok/yüklü değil: sekme soluk ama tıklanabilir (neden metni görünsün).
+            muted: s.value === "statements" && stmtMuted(),
+          })),
+        );
         return (
           <div ref={root} class="flex h-full min-h-0 flex-col">
             <div class="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-panel px-2">
@@ -112,12 +122,7 @@ export default function DashboardView(props: { dash: DashController; tabId: stri
                 if (s) props.dash.setSection(props.tabId, s.value);
               }}
               class="min-h-0 flex-1"
-              tabs={SECTIONS.map((s) => ({
-                value: s.value,
-                label: td.sections[s.value],
-                // Eklenti yok/yüklü değil: sekme soluk ama tıklanabilir (neden metni görünsün).
-                muted: s.value === "statements" && m().statements?.kind === "unavailable",
-              }))}
+              tabs={sectionTabs()}
             >
               <For each={SECTIONS}>
                 {(s) => (

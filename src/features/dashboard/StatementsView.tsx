@@ -43,7 +43,8 @@ export default function StatementsView(props: SectionProps) {
   const [selected, setSelected] = createSignal<string | null>(null);
   let detailEl: HTMLDivElement | undefined;
 
-  const result = () => props.model.statements;
+  // Başvuru önce: model her yamada yeni nesnedir; liste yalnızca yeni `statements` gelince yeniden türetilir.
+  const result = createMemo(() => props.model.statements);
   const keyed = createMemo<Item[]>(() => {
     const r = result();
     return r?.kind === "available" ? r.rows.map((row, i) => ({ row, key: keyOf(row, i) })) : [];
