@@ -115,7 +115,27 @@ export const tdes = {
   open: {
     none: "Bu düğüm için düzenleme yok.",
     locked: "Sunucu salt okunur kilitli; nesne değiştirilemez.",
-    dropPending: "Silme henüz hazır değil.",
+  },
+  /** Silme diyaloğu (sekme açmaz). */
+  drop: {
+    title: (kind: string, name: string) => `Sil: ${kind} ${name}`,
+    loading: "Tanım yükleniyor…",
+    pending: "Önizleme hazırlanıyor…",
+    statements: "Çalıştırılacak ifadeler",
+    warnings: "Uyarılar",
+    previewError: "Önizleme alınamadı",
+    cascade: "Bağımlı nesnelerle birlikte sil (CASCADE)",
+    cascadeHint: "Bu nesneye bağlı tüm nesneler de silinir; veri kaybı olabilir.",
+    dependents: "Bağımlı nesneler var; CASCADE ile silin ya da bağımlıları kaldırın.",
+    dependentsDetail: "Bağımlı nesneler",
+    stale: "Nesne değişti ya da artık yok; Gezgini yenileyin.",
+    submit: "Sil",
+    submitting: "Siliniyor…",
+    cancel: "Vazgeç",
+    cancelApply: "İptal",
+    close: "Kapat",
+    reload: "Yeniden yükle",
+    done: (name: string) => `${name} silindi.`,
   },
   status: {
     gone: "Nesne artık yok.",

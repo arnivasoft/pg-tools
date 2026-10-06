@@ -10,7 +10,6 @@ import { createRoot, createEffect, on } from "solid-js";
 import { t } from "../../app/strings";
 import { tdes } from "../../app/strings-designer";
 import type { ToastKind } from "../../app/toast-model";
-import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { Api } from "../../ipc/commands";
 import { errorText, toPayload } from "../../ipc/errors";
@@ -22,8 +21,9 @@ import type { TabsStore } from "../query/tabs-store";
 import { isProductionLabel } from "../servers/server-form";
 import { createDesignerController, type DesignerController, type DesignerControllerDeps } from "./designer-controller";
 import { designerTabKey, kindLabel } from "./designer-model";
+import type { DropInput } from "./drop-controller";
 
-export interface DropInput { serverId: string; databaseOid: number; object: ObjectRef; refreshNodeId: string | null; name: string }
+export type { DropInput };
 
 export interface DesignerOpenDeps {
   designer: DesignerController;
@@ -109,7 +109,7 @@ export interface DesignerDeps extends Omit<DesignerOpenDeps, "designer" | "openD
   query: Pick<QueryController, "servers" | "openScript">;
   /** Uygulama sonrası düğüm yenilemesi (`refreshNodeId`; düğüm artık yoksa denetleyicinin hata yolu). */
   explorer: Pick<ExplorerController, "refresh">;
-  /** Silme diyaloğu (Task 7); verilmezse "henüz hazır değil" bildirimi. */
+  /** Silme diyaloğu; verilmezse denetleyicinin tek örnek diyaloğu (`ctl.drop`, DesignerPanels çizer). */
   openDrop?: DesignerOpenDeps["openDrop"];
 }
 
@@ -131,7 +131,7 @@ export function createDesigner(deps: DesignerDeps) {
   const opener = createDesignerOpener({
     ...deps,
     designer: ctl,
-    openDrop: deps.openDrop ?? (() => deps.notify(tdes.open.dropPending, "info")),
+    openDrop: deps.openDrop ?? ctl.drop.open,
   });
   return {
     ctl,

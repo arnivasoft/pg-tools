@@ -8,7 +8,7 @@ import { Button } from "../../ui/Button";
 import { inputClass } from "../../ui/Field";
 import type { DesignerController, DesignerModel } from "./designer-controller";
 import { canSubmit, scriptWithRanges, type ApplyGate } from "./designer-model";
-import { RiskBadge } from "./SqlPreview";
+import { RiskBadge } from "./RiskBadge";
 
 /** lock_timeout seçenekleri (ms; 0 = sınırsız). */
 const LOCK_TIMEOUTS = [1000, 5000, 30000, 0];

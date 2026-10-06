@@ -33,6 +33,8 @@ import { errorText, toPayload } from "../../ipc/errors";
 import {
   applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, localBlock, type ApplyGate, type ConfirmState,
 } from "./designer-model";
+import { createDropController } from "./drop-controller";
+import { dropRequest, matchesObject } from "./drop-model";
 import { classifyError, designerErrorText, failedText } from "./errors";
 import { PREVIEW_DELAY_MS, createPreviewer, type PreviewDeps, type Previewer } from "./preview";
 
@@ -103,7 +105,8 @@ const emptyConfirm = (): ConfirmState => ({ checked: false, typedName: "" });
 
 /**
  * Taslaktan istek: create → `{create, def, concurrently}`; alter → `{alter, object, old: original, new: draft}`;
- * `"drop"` → `{drop, object, def: original, cascade}`. Tanımlar derin kopyalanır (istek nesnesi modelle paylaşılmaz).
+ * `"drop"` → `{drop, object, def: original, cascade}` (`dropRequest`; silme diyaloğuyla tek tanım). Tanımlar derin
+ * kopyalanır (istek nesnesi modelle paylaşılmaz).
  */
 export function planRequest(
   m: Pick<DesignerModel, "mode" | "kind" | "object" | "original" | "draft" | "concurrently" | "cascade">,
@@ -111,7 +114,7 @@ export function planRequest(
 ): PlanRequest | null {
   if (op === "drop") {
     return m.mode === "alter" && m.object && m.original
-      ? { op: "drop", object: { ...m.object }, def: cloneDef(m.original), cascade: m.cascade }
+      ? dropRequest(m.object, m.original, m.cascade)
       : null;
   }
   if (!m.draft) return null;
@@ -536,6 +539,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   const serverChanged = (serverId: string) => {
     const info = deps.serverInfo(serverId);
     if (!info) return;
+    drop.serverChanged(serverId);
     for (const e of entries.values()) {
       const m = e.model();
       if (m.serverId !== serverId) continue;
@@ -547,6 +551,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   /** Arka uç sunucunun oturumlarını kapattı (sil/kes/kilit): sekmeler `disconnected`/`gone`, lookup önbelleği düşer. */
   const serverSessionsClosed = (serverId: string, gone: boolean) => {
     dropLookups(serverId);
+    drop.serverSessionsClosed(serverId);
     for (const e of entries.values()) {
       const m = e.model();
       if (m.serverId !== serverId || m.status === "gone") continue;
@@ -559,8 +564,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     dropLookups(serverId, databaseOid);
     for (const e of entries.values()) {
       const m = e.model();
-      if (m.serverId !== serverId || m.databaseOid !== databaseOid || m.mode !== "alter" || !m.object) continue;
-      if (m.object.kind !== object.kind || m.object.oid !== object.oid || m.status === "gone") continue;
+      if (!matchesObject(m, { serverId, databaseOid, object }) || m.status === "gone") continue;
       markDown(e, "gone", tdes.status.dropped);
     }
   };
@@ -575,6 +579,18 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const m = e.model();
     if (m.applying && m.applyId) cancelQuietly(m.applyId);
   };
+
+  // ---- silme diyaloğu (tek örnek; sekme açmaz). Başarıda aynı nesnenin alter sekmeleri `gone`.
+  const drop = createDropController({
+    api,
+    notify,
+    serverInfo: deps.serverInfo,
+    refreshNode: (id) => refresh(id),
+    objectDropped,
+    lockTimeoutMs: DEFAULT_LOCK_TIMEOUT_MS,
+    previewDeps: pd,
+    newId,
+  });
 
   // ---- lookup
   /** Sunucu/veritabanı başına önbellek; aynı istek tek uçuşta; hata önbelleğe alınmaz. Bilinmeyen sekme → []. */
@@ -623,6 +639,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     serverChanged,
     serverSessionsClosed,
     objectDropped,
+    drop,
     close,
     isDirty: (tabId: string) => model(tabId)?.dirty ?? false,
     peekApplyGate: (tabId: string): ApplyGate => {

@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 5: Nesne Oluşturma / Düzenleme Diyalogları Tasarımı
 
 - **Tarih:** 2026-10-06
-- **Durum:** Taslak (onay bekliyor)
+- **Durum:** Plan 10–11 uygulandı; Plan 12–13 kalan
 - **Kapsam:** Object Explorer'dan nesne **oluşturma, düzenleme, yeniden adlandırma, silme** (Schema, Sequence, Extension, Index, Table/Column/Constraint, View/Materialized View, Database, Role); önizlemeli, korumalı DDL uygulaması
 - **Önceki alt projeler:** Object Explorer (Plan 1–4), Query Tool (5–6), Editör zekâsı (7), Dashboard (8–9) — hepsi `main`'de.
 - **Teslim planları:** Plan 10 (arka uç çerçevesi + Schema, Sequence, Extension, Index) → Plan 11 (ön yüz çerçevesi + aynı dört tür) → Plan 12 (Table/Column/Constraint) → Plan 13 (View/MatView, Database, Role).
