@@ -345,6 +345,22 @@ describe("dash-controller kayıp / kapatma", () => {
     expect(s.ctl.model(b)?.status).toBe("ready");
   });
 
+  it("serverSessionsClosed eski DashId'yi bir kez kapatır (gone=false ve gone=true)", async () => {
+    const s = setup();
+    const a = await openActive(s, "S1");
+    const b = await s.ctl.open({ serverId: "S2", serverName: "other", databaseOid: null });
+    const idA = s.ctl.model(a)!.info!.id;
+    const idB = s.ctl.model(b)!.info!.id;
+    s.ctl.serverSessionsClosed("S1", false);
+    s.ctl.serverSessionsClosed("S2", true);
+    expect(s.api.dashClose.mock.calls).toEqual([[idA], [idB]]);
+    // Zaten kayıp/silinmiş sekmede yeniden çağrı kapatma göndermez.
+    s.ctl.serverSessionsClosed("S1", false);
+    s.ctl.serverSessionsClosed("S1", true);
+    s.ctl.serverSessionsClosed("S2", true);
+    expect(s.api.dashClose).toHaveBeenCalledTimes(2);
+  });
+
   it("serverSessionsClosed sırasında uçuştaki yanıt yoksayılır", async () => {
     const s = setup();
     const d = deferred<Overview>();

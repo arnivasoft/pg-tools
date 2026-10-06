@@ -350,6 +350,9 @@ export function createDashController(deps: DashControllerDeps) {
       e.gen++;
       patch(e, { status: gone ? "gone" : "lost", info: null, signaling: false });
       syncPoller(e);
+      // Arka uç her durumda kapatmaz (ör. yalnızca kilit/etiket değişimi): eski kimlik açık kalmasın. Kapanmışsa
+      // `not_found` döner, zararsız.
+      if (m.info) void api.dashClose(m.info.id).catch(() => {});
     }
   };
 

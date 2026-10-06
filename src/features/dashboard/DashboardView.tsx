@@ -48,7 +48,6 @@ function StatusBadge(props: { model: DashModel }) {
 }
 
 export default function DashboardView(props: { dash: DashController; tabId: string; onReopen: (tabId: string) => void }) {
-  const d = td;
   const model = () => props.dash.model(props.tabId);
   return (
     <Show when={model()}>
@@ -65,39 +64,39 @@ export default function DashboardView(props: { dash: DashController; tabId: stri
               <div class="ml-auto flex items-center gap-1">
                 <select
                   class={selectClass}
-                  aria-label={d.bar.interval}
-                  title={d.bar.interval}
+                  aria-label={td.bar.interval}
+                  title={td.bar.interval}
                   value={String(m().intervalMs / 1000)}
                   onChange={(ev) => props.dash.setIntervalMs(props.tabId, Number(ev.currentTarget.value) * 1000)}
                 >
-                  <For each={INTERVALS}>{(n) => <option value={String(n)}>{d.bar.seconds(n)}</option>}</For>
+                  <For each={INTERVALS}>{(n) => <option value={String(n)}>{td.bar.seconds(n)}</option>}</For>
                 </select>
-                <Button variant="ghost" onClick={() => props.dash.setPaused(props.tabId, !m().paused)} aria-pressed={m().paused}>
+                <Button variant="ghost" onClick={() => props.dash.setPaused(props.tabId, !m().paused)}>
                   <Show when={m().paused} fallback={<Pause size={14} />}>
                     <Play size={14} />
                   </Show>
-                  {m().paused ? d.bar.resume : d.bar.pause}
+                  {m().paused ? td.bar.resume : td.bar.pause}
                 </Button>
                 <Button variant="ghost" disabled={!ready()} onClick={() => props.dash.refreshNow(props.tabId)}>
-                  <RefreshCw size={14} /> {d.bar.refresh}
+                  <RefreshCw size={14} /> {td.bar.refresh}
                 </Button>
               </div>
             </div>
             <Show when={m().status === "lost"}>
               <div role="alert" class="m-2 flex shrink-0 items-center gap-3 rounded border border-danger px-3 py-2 text-[13px]">
                 <div class="min-w-0 flex-1">
-                  <p class="font-medium text-danger">{d.status.lost}</p>
-                  <p class="text-muted">{m().error ?? d.lostNote}</p>
+                  <p class="font-medium text-danger">{td.status.lost}</p>
+                  <p class="text-muted">{m().error ?? td.lostNote}</p>
                 </div>
                 <Button onClick={() => props.onReopen(props.tabId)}>
-                  <RotateCcw size={14} /> {d.reopen}
+                  <RotateCcw size={14} /> {td.reopen}
                 </Button>
               </div>
             </Show>
             <Show when={m().status === "gone"}>
               <div role="alert" class="m-2 shrink-0 rounded border border-border px-3 py-2 text-[13px]">
-                <p class="font-medium text-danger">{d.status.gone}</p>
-                <p class="text-muted">{d.goneNote}</p>
+                <p class="font-medium text-danger">{td.status.gone}</p>
+                <p class="text-muted">{td.goneNote}</p>
               </div>
             </Show>
             <Tabs
@@ -107,12 +106,12 @@ export default function DashboardView(props: { dash: DashController; tabId: stri
                 if (s) props.dash.setSection(props.tabId, s.value);
               }}
               class="min-h-0 flex-1"
-              tabs={SECTIONS.map((s) => ({ value: s.value, label: d.sections[s.value] }))}
+              tabs={SECTIONS.map((s) => ({ value: s.value, label: td.sections[s.value] }))}
             >
               <For each={SECTIONS}>
                 {(s) => (
                   <TabPanel value={s.value} class="min-h-0 flex-1 overflow-auto">
-                    <Suspense fallback={<p class="p-3 text-muted">{d.loading}</p>}>
+                    <Suspense fallback={<p class="p-3 text-muted">{td.loading}</p>}>
                       <s.view dash={props.dash} model={m()} />
                     </Suspense>
                   </TabPanel>
