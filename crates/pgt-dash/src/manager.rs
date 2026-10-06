@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use crate::queries;
 use crate::types::{
-    ActivityRow, DashId, DashInfo, LockReport, Overview, PreparedXact, Sample, Setting, SignalKind,
-    SignalOutcome, Statements, StatementsOrder,
+    ActivityRow, DashId, DashInfo, LockReport, Overview, PreparedXact, Sample, Setting, SignalKind, SignalOutcome,
+    Statements, StatementsOrder,
 };
 
 const CANCEL: &str = "SELECT pg_cancel_backend($1)";
@@ -47,10 +47,7 @@ pub struct DashManager {
 
 impl DashManager {
     pub fn new(manager: Arc<ConnectionManager>) -> Self {
-        Self {
-            manager,
-            sessions: StdMutex::new(HashMap::new()),
-        }
+        Self { manager, sessions: StdMutex::new(HashMap::new()) }
     }
 
     /// Dashboard oturumu açar. `database_oid = Some(oid)` ise ad, bağlantı kurulunca `current_database()` ile
@@ -70,19 +67,9 @@ impl DashManager {
             None => None,
         };
         let id = Uuid::new_v4();
-        let info = DashInfo {
-            id,
-            version_num: live.version_num,
-            self_pid: pid,
-            database: db_name.clone(),
-        };
-        let session = DashSession {
-            server,
-            target,
-            db_name,
-            conn: tokio::sync::Mutex::new(Some(live)),
-            self_pid: AtomicI32::new(pid),
-        };
+        let info = DashInfo { id, version_num: live.version_num, self_pid: pid, database: db_name.clone() };
+        let session =
+            DashSession { server, target, db_name, conn: tokio::sync::Mutex::new(Some(live)), self_pid: AtomicI32::new(pid) };
         self.sessions.lock().unwrap().insert(id, Arc::new(session));
         Ok(info)
     }
@@ -94,10 +81,7 @@ impl DashManager {
 
     /// Sunucu bağlantısı kesilince o sunucunun tüm dashboard oturumlarını düşürür.
     pub fn close_server(&self, server: Uuid) {
-        self.sessions
-            .lock()
-            .unwrap()
-            .retain(|_, s| s.server != server);
+        self.sessions.lock().unwrap().retain(|_, s| s.server != server);
     }
 
     pub fn close_all(&self) {
@@ -106,46 +90,37 @@ impl DashManager {
 
     pub async fn sample(&self, id: DashId) -> Result<Sample> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, _, _, db| Box::pin(queries::sample(c, db)))
-            .await
+        self.with_conn(&s, |c, _, _, db| Box::pin(queries::sample(c, db))).await
     }
 
     pub async fn overview(&self, id: DashId) -> Result<Overview> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, _, _, db| Box::pin(queries::overview(c, db)))
-            .await
+        self.with_conn(&s, |c, _, _, db| Box::pin(queries::overview(c, db))).await
     }
 
     pub async fn activity(&self, id: DashId) -> Result<Vec<ActivityRow>> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, v, _, db| Box::pin(queries::activity(c, v, db)))
-            .await
+        self.with_conn(&s, |c, v, _, db| Box::pin(queries::activity(c, v, db))).await
     }
 
     pub async fn locks(&self, id: DashId) -> Result<LockReport> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, _, _, db| Box::pin(queries::locks(c, db)))
-            .await
+        self.with_conn(&s, |c, _, _, db| Box::pin(queries::locks(c, db))).await
     }
 
     pub async fn settings(&self, id: DashId) -> Result<Vec<Setting>> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, _, _, _| Box::pin(queries::settings(c)))
-            .await
+        self.with_conn(&s, |c, _, _, _| Box::pin(queries::settings(c))).await
     }
 
     pub async fn prepared(&self, id: DashId) -> Result<Vec<PreparedXact>> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, _, _, _| Box::pin(queries::prepared(c)))
-            .await
+        self.with_conn(&s, |c, _, _, _| Box::pin(queries::prepared(c))).await
     }
 
     pub async fn statements(&self, id: DashId, order: StatementsOrder) -> Result<Statements> {
         let s = self.session(id)?;
-        self.with_conn(&s, |c, v, _, db| {
-            Box::pin(queries::statements(c, v, db, order))
-        })
-        .await
+        self.with_conn(&s, |c, v, _, db| Box::pin(queries::statements(c, v, db, order))).await
     }
 
     /// Başka bir backend'e iptal/sonlandırma sinyali gönderir. Yetki hataları (42501) ve diğer SQL hataları
@@ -159,40 +134,23 @@ impl DashManager {
         self.with_conn(&s, |c, _, self_pid, _| {
             Box::pin(async move {
                 if pid == self_pid {
-                    return Err(Error::Invalid(
-                        "Kendi dashboard oturumunuzu durduramazsınız.".into(),
-                    ));
+                    return Err(Error::Invalid("Kendi dashboard oturumunuzu durduramazsınız.".into()));
                 }
                 let row = c.query_one(sql, &[&pid]).await.map_err(Error::from_query)?;
-                Ok(if row.get::<_, bool>(0) {
-                    SignalOutcome::Sent
-                } else {
-                    SignalOutcome::NotFound
-                })
+                Ok(if row.get::<_, bool>(0) { SignalOutcome::Sent } else { SignalOutcome::NotFound })
             })
         })
         .await
     }
 
     fn session(&self, id: DashId) -> Result<Arc<DashSession>> {
-        self.sessions
-            .lock()
-            .unwrap()
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| Error::NotFound(format!("Dashboard oturumu {id}")))
+        self.sessions.lock().unwrap().get(&id).cloned().ok_or_else(|| Error::NotFound(format!("Dashboard oturumu {id}")))
     }
 
     async fn connect(&self, server: Uuid, target: Target) -> Result<Live> {
-        let conn = self
-            .manager
-            .open_dedicated(server, target, SessionProfile::Dashboard)
-            .await?;
+        let conn = self.manager.open_dedicated(server, target, SessionProfile::Dashboard).await?;
         // `notices` alıcısı burada düşer (bkz. `Live`).
-        Ok(Live {
-            version_num: conn.info.version_num,
-            client: conn.client,
-        })
+        Ok(Live { version_num: conn.info.version_num, client: conn.client })
     }
 
     /// Tüm sorgular buradan geçer: kilit tek uçuşu zorlar; bağlantı yoksa/kapalıysa yeniden açılır
@@ -207,19 +165,11 @@ impl DashManager {
             if guard.as_ref().is_none_or(|l| l.client.is_closed()) {
                 *guard = None;
                 let live = self.connect(s.server, s.target).await?;
-                s.self_pid
-                    .store(backend_pid(&live.client).await?, Ordering::Relaxed);
+                s.self_pid.store(backend_pid(&live.client).await?, Ordering::Relaxed);
                 *guard = Some(live);
             }
             let live = guard.as_ref().expect("bağlantı yukarıda kuruldu");
-            match f(
-                &live.client,
-                live.version_num,
-                s.self_pid.load(Ordering::Relaxed),
-                s.db_name.as_deref(),
-            )
-            .await
-            {
+            match f(&live.client, live.version_num, s.self_pid.load(Ordering::Relaxed), s.db_name.as_deref()).await {
                 Err(e) if attempt == 0 && (live.client.is_closed() || is_connection_error(&e)) => {
                     tracing::debug!("dashboard bağlantısı koptu, yeniden açılıyor");
                     *guard = None;
@@ -232,19 +182,14 @@ impl DashManager {
 }
 
 async fn backend_pid(c: &Client) -> Result<i32> {
-    Ok(c.query_one("SELECT pg_backend_pid()", &[])
-        .await
-        .map_err(Error::from_query)?
-        .get(0))
+    Ok(c.query_one("SELECT pg_backend_pid()", &[]).await.map_err(Error::from_query)?.get(0))
 }
 
 /// Bağlantı kopması/sonlandırılması belirtisi: SQLSTATE yok (G/Ç hatası) ya da 08*/57P0[123].
 fn is_connection_error(e: &Error) -> bool {
     match e {
         Error::Query { sqlstate: None, .. } => true,
-        Error::Query {
-            sqlstate: Some(c), ..
-        } => c.starts_with("08") || matches!(c.as_str(), "57P01" | "57P02" | "57P03"),
+        Error::Query { sqlstate: Some(c), .. } => c.starts_with("08") || matches!(c.as_str(), "57P01" | "57P02" | "57P03"),
         _ => false,
     }
 }
