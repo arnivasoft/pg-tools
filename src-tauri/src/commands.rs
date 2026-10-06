@@ -6,6 +6,7 @@ use pgt_core::config::ServerConfig;
 use pgt_core::credentials::Credentials;
 use pgt_core::connection::{ConnectionManager, ServerInfo};
 use pgt_core::registry::Registry;
+use pgt_dash::DashManager;
 use pgt_query::session::QueryManager;
 use pgt_core::{Error, ErrorPayload};
 use tauri::State;
@@ -67,9 +68,10 @@ async fn save_registered(
     Ok((saved, prev))
 }
 
-/// Önce sorgu oturumları (açık transaction'lar geri alınır), sonra katalog bağlantısı.
-async fn disconnect_and_close(manager: &ConnectionManager, query: &QueryManager, id: Uuid) {
+/// Önce sorgu oturumları (açık transaction'lar geri alınır), sonra dashboard oturumları, sonra katalog bağlantısı.
+async fn disconnect_and_close(manager: &ConnectionManager, query: &QueryManager, dash: &DashManager, id: Uuid) {
     query.close_sessions_of(id).await;
+    dash.close_server(id);
     manager.disconnect(id);
 }
 
@@ -183,7 +185,7 @@ fn remember_after_connect(registry: &RwLock<Registry>, creds: &Credentials, conf
 
 #[tauri::command]
 pub async fn disconnect_server(state: State<'_, AppState>, server_id: Uuid) -> CmdResult<()> {
-    Box::pin(disconnect_and_close(&state.manager, &state.query, server_id)).await;
+    Box::pin(disconnect_and_close(&state.manager, &state.query, &state.dash, server_id)).await;
     Ok(())
 }
 
@@ -667,8 +669,20 @@ mod tests {
     async fn disconnect_server_closes_query_sessions() {
         let Some(fx) = fixture().await else { return };
         let (id, pid) = session_with_open_tx(&fx, "pgt_qt8_disc").await;
-        disconnect_and_close(&fx.manager, &fx.qm, fx.ts.config.id).await;
+        disconnect_and_close(&fx.manager, &fx.qm, &DashManager::new(fx.manager.clone()), fx.ts.config.id).await;
         assert_closed_and_rolled_back(&fx, id, pid, "pgt_qt8_disc").await;
+    }
+
+    #[tokio::test]
+    async fn disconnect_server_closes_dash_sessions() {
+        let Some(fx) = fixture().await else { return };
+        let dash = DashManager::new(fx.manager.clone());
+        let sid = fx.ts.config.id;
+        let info = Box::pin(dash.open(sid, None)).await.unwrap();
+        Box::pin(dash.sample(info.id)).await.unwrap();
+        disconnect_and_close(&fx.manager, &fx.qm, &dash, sid).await;
+        let err = Box::pin(dash.sample(info.id)).await.map_err(ErrorPayload::from).unwrap_err();
+        assert_eq!(err.code, "not_found", "dashboard oturumu kapanmış olmalı");
     }
 
     #[tokio::test]

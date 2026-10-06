@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod dash;
 mod logging;
 mod query;
 mod state;
@@ -28,6 +29,8 @@ fn main() {
                 && let Some(state) = webview.app_handle().try_state::<state::AppState>()
             {
                 let query = state.query.clone();
+                // Dashboard kimlikleri de arayüzle birlikte kaybolur: sahipsiz bağlantı kalmasın.
+                state.dash.close_all();
                 tauri::async_runtime::spawn(async move { query::close_all_on_reload(&query).await });
             }
         })
@@ -78,6 +81,16 @@ fn main() {
             query::qt_check,
             query::qt_format,
             query::qt_export_csv,
+            dash::dash_open,
+            dash::dash_close,
+            dash::dash_sample,
+            dash::dash_overview,
+            dash::dash_activity,
+            dash::dash_locks,
+            dash::dash_settings,
+            dash::dash_prepared,
+            dash::dash_statements,
+            dash::dash_signal,
             store_cmds::qt_history_push_many,
             store_cmds::qt_history_list,
             store_cmds::qt_history_clear,
@@ -94,7 +107,9 @@ fn main() {
         .run(|app, event| {
             // Kapanışta açık sorgu oturumları kapatılır: açık transaction'lar ROLLBACK edilir (en iyi çaba, sınırlı bekleme).
             if let tauri::RunEvent::Exit = event {
-                let query = app.state::<state::AppState>().query.clone();
+                let state = app.state::<state::AppState>();
+                let query = state.query.clone();
+                state.dash.close_all();
                 // Zaman aşımı geleceği çalışma zamanı İÇİNDE kurulmalı: dışarıda `tokio::time::timeout` "no reactor running" ile panikler.
                 tauri::async_runtime::block_on(async move {
                     let _ = tokio::time::timeout(Duration::from_secs(7), query.close_all()).await;
