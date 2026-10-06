@@ -8,7 +8,7 @@ import type { LockRow } from "../../ipc/bindings/LockRow";
 import { DataTable, type DataColumn } from "./DataTable";
 import type { SectionProps } from "./DashboardView";
 import { formatDuration } from "./dash-model";
-import { buildLockTree, countWaiters, type LockNode } from "./lock-tree";
+import { buildLockTree, countWaiters, pendingLocksByPid, type LockNode } from "./lock-tree";
 import { Banner, SignalButtons, StateBadge } from "./parts";
 import { resolveSignalRow } from "./signal-model";
 import { oneLine } from "./table-model";
@@ -27,10 +27,11 @@ function Badge(props: { children: JSX.Element; title?: string; danger?: boolean 
   );
 }
 
-function TreeNode(props: SectionProps & { node: LockNode; depth: number }) {
+function TreeNode(props: SectionProps & { node: LockNode; depth: number; pending: Map<number, string[]> }) {
   const l = td.locks;
   const node = () => props.node;
   const waiters = () => countWaiters(node());
+  const waitsOn = () => props.pending.get(node().pid)?.join(", ") ?? "";
   const row = () => {
     const s = node().session;
     return s ? resolveSignalRow(s, props.model.activity?.rows) : null;
@@ -62,6 +63,11 @@ function TreeNode(props: SectionProps & { node: LockNode; depth: number }) {
                 <span>{s().user ?? td.sessions.unknown}</span>
                 <span class="text-muted">{s().application}</span>
                 <StateBadge state={s().state} />
+                <Show when={waitsOn()}>
+                  <span class="font-mono text-muted" title={l.waitsOn}>
+                    {waitsOn()}
+                  </span>
+                </Show>
                 <Show when={s().blockedBy.length > 0 && s().waitSecs != null}>
                   <span class="text-muted">{l.waited(formatDuration(s().waitSecs))}</span>
                 </Show>
@@ -96,7 +102,9 @@ function TreeNode(props: SectionProps & { node: LockNode; depth: number }) {
       <Show when={node().children.length > 0}>
         <ul class="ml-4 flex flex-col border-l border-border pl-2">
           <For each={node().children}>
-            {(c) => <TreeNode dash={props.dash} model={props.model} node={c} depth={props.depth + 1} />}
+            {(c) => (
+              <TreeNode dash={props.dash} model={props.model} node={c} depth={props.depth + 1} pending={props.pending} />
+            )}
           </For>
         </ul>
       </Show>
@@ -107,8 +115,12 @@ function TreeNode(props: SectionProps & { node: LockNode; depth: number }) {
 export default function LocksView(props: SectionProps) {
   const l = td.locks;
   const [selected, setSelected] = createSignal<number | null>(null);
-  const report = () => props.model.locks;
-  const tree = createMemo(() => buildLockTree(report()?.sessions ?? []));
+  // Başvuru önce: model her yamada yeni nesnedir; ağaç/tablo yalnızca yeni kilit raporu gelince yeniden kurulur.
+  const report = createMemo(() => props.model.locks);
+  const sessions = createMemo(() => report()?.sessions);
+  const forest = createMemo(() => buildLockTree(sessions() ?? []));
+  const tree = () => forest().roots;
+  const pending = createMemo(() => pendingLocksByPid(report()?.locks ?? []));
   const flat = createMemo<FlatLock[]>(() => (report()?.locks ?? []).map((r, id) => ({ ...r, id })));
 
   const columns: DataColumn<FlatLock>[] = [
@@ -133,11 +145,16 @@ export default function LocksView(props: SectionProps) {
       <Show when={report()?.truncated}>
         <Banner kind="info">{l.truncated}</Banner>
       </Show>
+      <Show when={forest().truncated}>
+        <Banner kind="info">{l.treeTruncated}</Banner>
+      </Show>
       <Show when={report()} fallback={<p class="p-3 text-muted">{props.model.sectionError.locks ? "" : l.waiting}</p>}>
         <div class="max-h-[50%] shrink-0 overflow-auto border-b border-border p-2">
           <Show when={tree().length > 0} fallback={<p class="p-1 text-[13px] text-muted">{l.empty}</p>}>
             <ul aria-label={l.treeLabel} class="flex flex-col gap-0.5">
-              <For each={tree()}>{(n) => <TreeNode dash={props.dash} model={props.model} node={n} depth={0} />}</For>
+              <For each={tree()}>
+                {(n) => <TreeNode dash={props.dash} model={props.model} node={n} depth={0} pending={pending()} />}
+              </For>
             </ul>
           </Show>
         </div>

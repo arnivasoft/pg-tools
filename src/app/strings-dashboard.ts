@@ -123,6 +123,8 @@ export const td = {
     waited: (s: string) => `${s} bekliyor`,
     root: "Engelleyen",
     truncated: "Kilit listesi kesildi; bazı kilitler görünmüyor.",
+    treeTruncated: "Engelleme ağacı çok büyük; yalnızca bir kısmı gösteriliyor.",
+    waitsOn: "Beklediği kilit",
     flatEmpty: "Kilit yok.",
     waiting: "Kilitler bekleniyor…",
     cols: { pid: "pid", locktype: "Tür", mode: "Mod", granted: "Verildi", object: "Nesne" },
