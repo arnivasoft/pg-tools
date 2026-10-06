@@ -29,7 +29,7 @@ use tokio_postgres::error::ErrorPosition;
 use crate::classify::{StmtKind, TxOp, analyze, tx_op};
 use crate::events::{Column, EventSink, NOTICES_PER_STMT_MAX, NoticeInfo, QueryEvent};
 use crate::lex::{Kind, lex};
-use crate::type_names::{FORMAT_TYPES_SQL, TypeKey, TypeNameCache};
+use crate::type_names::{FORMAT_TYPES_SQL, TypeKey, TypeNameCache, after_failure};
 
 /// `ExecConfig.limit` üst sınırı; aşan değer buna kısılır.
 pub const MAX_LIMIT: u32 = 1_000_000;
@@ -198,9 +198,11 @@ pub struct Executor {
     peak_buffered: usize,
     /// Sütun türlerinin gösterim adları (`format_type`), oturum boyunca.
     type_names: TypeNameCache,
-    /// Ad sorgusu iptal dışı bir nedenle başarısız oldu (ör. kısıtlı rolde `format_type` yetkisi yok): oturumun
-    /// kalanında sorulmaz, kısa adlar kullanılır.
+    /// Ad sorgusu kalıcı olarak (ör. kısıtlı rolde `format_type` yetkisi yok) ya da art arda birkaç kez başarısız
+    /// oldu: oturumun kalanında sorulmaz, kısa adlar kullanılır.
     type_names_off: bool,
+    /// Ad sorgusunun art arda (geçici) başarısızlık sayısı; başarıda sıfırlanır (bkz. `after_failure`).
+    type_name_failures: u32,
     /// Sunucuya gönderilen ad sorgusu sayısı (testler: kapatıldıktan sonra yeniden denenmiyor mu).
     type_name_queries: u32,
 }
@@ -216,6 +218,7 @@ impl Executor {
             peak_buffered: 0,
             type_names: TypeNameCache::default(),
             type_names_off: false,
+            type_name_failures: 0,
             type_name_queries: 0,
         }
     }
@@ -447,10 +450,10 @@ impl Executor {
     }
 
     /// Önbellekte olmayan `(oid, typmod)` çiftlerinin gösterim adlarını tek bir salt okunur katalog sorgusuyla alır
-    /// (`type_names`). Başarısızlık kullanıcının ifadesini etkilemez (kısa ada düşülür) ve ad sorgusu oturumun kalanında
-    /// kapatılır (`type_names_off`; ör. kısıtlı rolde `format_type` üzerinde EXECUTE yok — her ifadede yeniden
-    /// denenmez). Yalnızca iptal (57014: kullanıcı iptali ya da `statement_timeout`) ifadenin sonucu olarak döner —
-    /// iptal isteği bu sorguya denk geldiyse kullanıcının ifadesi yine de çalıştırılmamalıdır.
+    /// (`type_names`). Başarısızlık kullanıcının ifadesini etkilemez (kısa ada düşülür); yetki/tanım hatasında (sınıf 42,
+    /// ör. kısıtlı rolde `format_type` üzerinde EXECUTE yok) hemen, diğer hatalarda art arda birkaç kez sonra ad sorgusu
+    /// oturumun kalanında kapatılır (`type_names_off`, kural `type_names::after_failure`). Yalnızca iptal (57014:
+    /// kullanıcı iptali ya da `statement_timeout`) ifadenin sonucu olarak döner — iptal isteği bu sorguya denk geldiyse kullanıcının ifadesi yine de çalıştırılmamalıdır.
     ///
     /// Kullanıcı transaction'ının içindeyse sorgu çağrıya özgü `SAVEPOINT pgt_tn_<n>` içinde çalışır: başarısız olursa
     /// `ROLLBACK TO` + `RELEASE` ile yalnızca alt transaction geri alınır, kullanıcının transaction'ı bozulmaz (aksi
@@ -469,6 +472,12 @@ impl Executor {
             match self.batch(&format!("SAVEPOINT {name}")).await {
                 Ok(()) => Some(name),
                 Err(e) if is_cancel(&e) => return Err(e),
+                Err(e) if e.code() == Some(&tokio_postgres::error::SqlState::NO_ACTIVE_SQL_TRANSACTION) => {
+                    // İzleme yanılmış: transaction yok (25P01, hiçbir durum değişmedi). Otomatik onaydaki gibi
+                    // korumasız sorulur (sorgu kendi örtük transaction'ında çalışır).
+                    self.in_tx = false;
+                    None
+                }
                 Err(e) => {
                     // Savepoint açılamadı (transaction zaten hatalı, izleme yanılmış…): korumasız sorgu kullanıcı
                     // transaction'ını bozabileceğinden bu ifade için sorulmaz; kısa ad kullanılır.
@@ -492,6 +501,7 @@ impl Executor {
             Ok(rows) => {
                 let names = rows.iter().map(|r| r.try_get::<_, Option<String>>(0).ok().flatten()).collect();
                 self.type_names.store(&missing, names);
+                self.type_name_failures = 0;
                 None
             }
             Err(e) => Some(e),
@@ -521,11 +531,11 @@ impl Executor {
             None => Ok(()),
             Some(e) if is_cancel(&e) => Err(e),
             Some(e) => {
-                self.type_names_off = true;
-                tracing::debug!(
-                    code = ?e.code().map(|c| c.code()),
-                    "tür adları alınamadı, oturum boyunca kısa ad kullanılacak"
-                );
+                let code = e.code().map(|c| c.code());
+                let (failures, off) = after_failure(code, self.type_name_failures);
+                self.type_name_failures = failures;
+                self.type_names_off = off;
+                tracing::debug!(?code, failures, off, "tür adları alınamadı, kısa ad kullanılıyor");
                 Ok(())
             }
         }
@@ -1105,6 +1115,23 @@ mod db_tests {
             exec.close_cursor().await.unwrap();
             run(&mut exec, "rollback", &auto).await;
             assert!(!temp_table_exists(&mut exec, "hidden_tx").await, "COMMIT edilmemeli");
+        }
+    }
+
+    /// İzleme "transaction var" sanıyor ama yok: tür adı savepoint'i 25P01 ile reddedilir, izleme düzelir ve ad
+    /// otomatik onaydaki gibi (korumasız) sorulur.
+    #[tokio::test]
+    async fn type_name_savepoint_25p01_fixes_tracking_and_still_resolves() {
+        for ts in test_servers() {
+            let (_mgr, mut exec) = executor(&ts).await;
+            exec.set_in_tx(true);
+            let auto = ExecConfig { limit: 5, chunk: 5, autocommit: true };
+            let sink = run(&mut exec, "select 1::int8 a", &auto).await;
+            let Some(QueryEvent::Started { columns, .. }) = sink.0.first() else { panic!("{:?}", sink.0) };
+            assert_eq!(columns[0].type_display, "bigint");
+            assert_eq!(exec.type_name_queries(), 1);
+            assert!(!exec.in_tx(), "izleme düzeltildi");
+            assert!(!exec.type_names_off);
         }
     }
 

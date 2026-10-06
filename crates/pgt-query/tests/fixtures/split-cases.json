@@ -284,5 +284,44 @@
       "select U&'\\'",
       "select 2"
     ]
+  },
+  {
+    "sql": "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN true THEN 1 END; SELECT 2; END; SELECT 3",
+    "stmts": [
+      "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN true THEN 1 END; SELECT 2; END",
+      "SELECT 3"
+    ]
+  },
+  {
+    "sql": "select 1; select $t$ a; b $T$; c",
+    "stmts": [
+      "select 1",
+      "select $t$ a; b $T$; c"
+    ]
+  },
+  {
+    "sql": "select 1; /* a /* b */ ; select 2",
+    "stmts": [
+      "select 1"
+    ]
+  },
+  {
+    "sql": "select 1 /* a /* b */; x",
+    "stmts": [
+      "select 1 /* a /* b */; x"
+    ]
+  },
+  {
+    "sql": "create function f(a int) returns int language sql begin atomic select case when a > 0 then 1 end; end case; select 9",
+    "stmts": [
+      "create function f(a int) returns int language sql begin atomic select case when a > 0 then 1 end; end case",
+      "select 9"
+    ]
+  },
+  {
+    "sql": "create function f() returns int language sql begin atomic select 1; select 2;",
+    "stmts": [
+      "create function f() returns int language sql begin atomic select 1; select 2;"
+    ]
   }
 ]

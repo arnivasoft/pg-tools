@@ -5,7 +5,8 @@
 //! türleri sunucunun yazdığı gibi). Çalıştırıcı başına bir önbellek tutulur: bir ifade için yalnızca önbellekte
 //! olmayan `(oid, typmod)` çiftleri tek bir katalog sorgusuyla (`FORMAT_TYPES_SQL`) sorulur; sorgu başarısız olursa
 //! kısa ada düşülür (kullanıcının ifadesi bu yüzden asla başarısız olmaz; kullanıcı transaction'ında sorgu bir
-//! savepoint içinde çalışır) ve sorgu oturumun kalanında kapatılır (`Executor::resolve_type_names`).
+//! savepoint içinde çalışır); kalıcı ya da art arda yinelenen hatada sorgu oturumun kalanında kapatılır
+//! (`after_failure`, `Executor::resolve_type_names`).
 
 use std::collections::HashMap;
 
@@ -23,6 +24,19 @@ pub(crate) const CACHE_MAX: usize = 4096;
 const FIRST_NORMAL_OID: u32 = 16384;
 
 pub(crate) type TypeKey = (u32, i32);
+
+/// Geçici (sınıf 42 dışı) hatalarda ad sorgusunun kapatılmasından önceki en çok art arda başarısızlık.
+pub(crate) const TRANSIENT_FAILURES_MAX: u32 = 3;
+
+/// İptal dışı bir ad sorgusu başarısızlığından sonra: yeni art arda başarısızlık sayısı ve sorgu oturum boyunca
+/// kapatılmalı mı. Sınıf 42 (yetki 42501, tanımsız işlev 42883, tanımsız nesne 42P01 …) kalıcıdır: hemen kapatılır.
+/// Diğerleri (bağlantı, kaynak, seri hale getirme …) geçici sayılır: `TRANSIENT_FAILURES_MAX` art arda olunca kapatılır.
+/// Sayaç başarılı bir sorguda sıfırlanır (çağıran).
+pub(crate) fn after_failure(sqlstate: Option<&str>, consecutive: u32) -> (u32, bool) {
+    let failures = consecutive.saturating_add(1);
+    let permanent = sqlstate.is_some_and(|c| c.starts_with("42"));
+    (failures, permanent || failures >= TRANSIENT_FAILURES_MAX)
+}
 
 #[derive(Default)]
 pub(crate) struct TypeNameCache {
@@ -80,6 +94,25 @@ mod tests {
 
     fn some(s: &str) -> Option<String> {
         Some(s.to_string())
+    }
+
+    #[test]
+    fn permission_and_definition_errors_disable_immediately() {
+        for code in ["42501", "42883", "42P01", "42704"] {
+            assert_eq!(after_failure(Some(code), 0), (1, true), "{code}");
+        }
+    }
+
+    #[test]
+    fn transient_errors_disable_after_consecutive_failures() {
+        for code in [Some("53200"), Some("40001"), Some("08006"), Some("XX000"), None] {
+            assert_eq!(after_failure(code, 0), (1, false), "{code:?}");
+            assert_eq!(after_failure(code, 1), (2, false), "{code:?}");
+            assert_eq!(after_failure(code, 2), (TRANSIENT_FAILURES_MAX, true), "{code:?}");
+        }
+        // Başarı sayacı sıfırlar (çağıran 0'dan sürdürür): tek geçici hata yine kapatmaz.
+        assert_eq!(after_failure(Some("53200"), 0), (1, false));
+        assert_eq!(after_failure(Some("53200"), u32::MAX), (u32::MAX, true), "taşma yok");
     }
 
     #[test]

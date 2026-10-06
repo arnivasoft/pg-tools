@@ -60,17 +60,18 @@ describe("lexSql (lex.rs karşılığı)", () => {
   });
 });
 
-/** Baştaki ASCII boşluk ve yorumlar (arka uç ifadesi ilk yorum-dışı belirteçte başlar). */
-const LEADING = /^(?:[ \t\n\f\r]+|--[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)*/;
-
-/** `statementBounds` ile metindeki ifadeler (yalnız boşluk/yorum içeren parçalar atlanır). */
+/**
+ * `statementBounds` ile metindeki ifadeler. Arka uç ifadesi ilk yorum-dışı belirteçte başlar: baştaki yorumlar atlanır
+ * (kapanmamış iç içe yorum dahil), yalnız boşluk/yorum içeren parçalar ifade sayılmaz.
+ */
 function frontEndStatements(sql: string): string[] {
   const out: string[] = [];
   let pos = 0;
   for (;;) {
     const b = statementBounds(sql, pos);
-    const body = sql.slice(b.from, b.to).replace(LEADING, "").trimEnd();
-    if (body !== "") out.push(body);
+    const seg = sql.slice(b.from, b.to);
+    const first = lexSql(seg).find((t) => t.kind !== "comment");
+    if (first) out.push(seg.slice(first.start).trimEnd());
     if (b.to >= sql.length) break;
     pos = b.to + 1;
   }
