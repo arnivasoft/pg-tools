@@ -2,21 +2,42 @@
 //! gibi yerleştirilir, bu yüzden bu işlev bir GÜVENLİK KAPISIDIR; açıkça izin verilmeyen her şey reddedilir.
 //!
 //! ```text
-//! tip        := sözcük ( ' ' sözcük )* dizi*          (sözcükler arasında TEK ASCII boşluk; baş/son boşluk yok)
-//! sözcük     := ad ( '.' ad )? değiştirici?            (en çok `şema.tip`; değiştirici tüm tipte en çok bir kez)
-//! ad         := [A-Za-z_][A-Za-z0-9_$]*  |  '"' ( [^"denetim] | '""' )+ '"'     (her biri en çok 63 bayt)
-//! değiştirici:= '(' ' '* rakam+ ' '* ( ',' ' '* rakam+ ' '* )* ')'       (sözcüğe bitişik)
-//! dizi       := '[' rakam* ']'                         (yalnızca sonda, bitişik)
+//! tip         := baş dizi*                               (dizi ekleri yalnızca sonda, bitişik)
+//! baş         := yerleşik                                 (kapalı küme, büyük/küçük harf duyarsız, tırnaksız sözcükler)
+//!              | ad ('.' ad)? değiştirici?               (tek ad, en çok `şema.tip`)
+//! yerleşik    := 'double precision'                      (değiştirici almaz)
+//!              | ('character' | 'char') (' varying')? değiştirici?
+//!              | 'national' (' character' | ' char') (' varying')? değiştirici?
+//!              | 'bit' (' varying')? değiştirici?
+//!              | ('timestamp' | 'time') değiştirici? (' with time zone' | ' without time zone')?
+//!              | 'interval' değiştirici?                 (değiştiriciden sonra alan yok)
+//!              | 'interval ' alan değiştirici?
+//! alan        := year | month | day | hour | minute | second | year to month | day to hour | day to minute
+//!              | day to second | hour to minute | hour to second | minute to second
+//! ad          := [A-Za-z_][A-Za-z0-9_$]*  |  '"' ( [^"] | '""' )+ '"'          (her biri en çok 63 bayt)
+//! değiştirici := '(' ' '* rakam+ ' '* ( ',' ' '* '-'? rakam+ ' '* )? ')'       (ada bitişik; tüm tipte en çok bir)
+//! dizi        := '[' rakam* ']'
 //! ```
 //!
-//! Ek kısıtlar: en çok 128 karakter; tırnaksız adda `$$` yok (dolar tırnak açılışına benzemesin); NUL ve tüm denetim
-//! karakterleri (Unicode Cc, ör. `\u{85}`) her yerde yasak. Anahtar sözcük denetimi yapılmaz: tipin varlığı sunucuda
-//! denetlenir (uygulamada hata; transaction geri alınır).
+//! Sözcükler arasında TEK ASCII boşluk. Yerleşik kalıplar dışındaki her ek sözcük reddedilir: tip alanından kolon
+//! tanımına `NOT NULL`, `DEFAULT …`, `REFERENCES …`, `COLLATE …`, `USING …`, `GENERATED …` gibi yan tümceler sızamaz.
+//!
+//! Ek kısıtlar: en çok 128 karakter; tırnaksız adda `$$` ve rakamdan hemen sonra `$` yok (dolar tırnak/parametreye
+//! benzemesin; nihai ifade tarayıcısı da reddederdi); NUL ve tüm denetim karakterleri (Unicode Cc, ör. `\u{85}`) her
+//! yerde yasak; tırnaklı adda sıfır genişlikli/yön denetimi biçim karakterleri (`U+200B–U+200F`, `U+2028–U+202E`,
+//! `U+2060–U+2064`, `U+FEFF`) yasak. Tipin varlığı sunucuda denetlenir (uygulamada hata; transaction geri alınır).
+//!
+//! Bilinen yanlış retler (bilinçli): sözcüklü değiştiriciler (ör. PostGIS `geometry(Point,4326)`), üçten fazla parçalı
+//! ad, değiştirici ile ad arasında boşluk (`numeric (10)`), `setof`/`array` sözdizimi. Negatif ölçek
+//! (`numeric(10,-2)`, PG 15+) yalnızca İKİNCİ sayıda tek `-` ile kabul edilir.
 
 use super::MAX_IDENT_BYTES;
 
 /// Tip metninin karakter üst sınırı.
 pub const MAX_TYPE_CHARS: usize = 128;
+
+const UNKNOWN_MULTIWORD: &str = "Bilinmeyen çok sözcüklü tip; kullanıcı tipleri tek ad olmalı (gerekirse çift tırnak). Tip alanına NOT NULL, DEFAULT, COLLATE gibi ek yan tümceler yazılamaz.";
+const MODIFIER_PLACE: &str = "Veri tipinde en çok bir değiştirici listesi olabilir ve yalnızca izin verilen yerde: ör. numeric(10,2), character varying(50), timestamp(3) with time zone, interval day to second(3).";
 
 /// Tip ifadesini doğrular; hata iletisi doğrudan alan hatası olarak gösterilebilir (Türkçe).
 pub fn validate_type(s: &str) -> Result<(), String> {
@@ -50,6 +71,19 @@ struct Parser {
     i: usize,
 }
 
+/// Sıfır genişlikli ve yön denetimi biçim karakterleri (görsel aldatma).
+fn is_spoofing_format(c: char) -> bool {
+    matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{feff}')
+}
+
+fn is_bare_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_'
+}
+
+fn is_bare_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$'
+}
+
 /// Dilbilgisi dışı karakter için ileti (sık saldırı karakterlerine özel açıklama).
 fn unexpected(ch: char) -> String {
     match ch {
@@ -60,13 +94,14 @@ fn unexpected(ch: char) -> String {
         '/' => "Veri tipi '/' içeremez (yorum yasak).".into(),
         '$' => "Veri tipinde '$' yalnızca tırnaksız adın içinde kullanılabilir.".into(),
         '"' => "Çift tırnak (\") yalnızca tırnaklı adın başında olabilir.".into(),
-        '(' | ')' => "Veri tipinde parantez yalnızca ada bitişik tek bir değiştirici listesinde olabilir, ör. numeric(10,2).".into(),
+        '(' | ')' => MODIFIER_PLACE.into(),
         '[' | ']' => "Veri tipinde köşeli parantez yalnızca sondaki dizi ekinde ([] ya da [n]) olabilir.".into(),
         '.' => "Veri tipinde nokta yalnızca iki ad arasında olabilir (şema.tip).".into(),
         ' ' => "Veri tipinde sözcükler arasında tek boşluk olmalı.".into(),
         c if c.is_ascii_digit() => "Veri tipinde ad rakamla başlayamaz.".into(),
         c if !c.is_ascii() => format!(
-            "Veri tipinde '{c}' karakteri tırnaksız kullanılamaz; tırnaksız ad yalnızca ASCII harf, rakam, _ ve $ içerebilir (diğer karakterler için çift tırnak kullanın)."
+            "Veri tipinde U+{:04X} karakteri tırnaksız kullanılamaz; tırnaksız ad yalnızca ASCII harf, rakam, _ ve $ içerebilir (diğer karakterler için çift tırnak kullanın).",
+            c as u32
         ),
         c => format!("Veri tipinde '{c}' karakteri kullanılamaz."),
     }
@@ -77,29 +112,126 @@ impl Parser {
         self.c.get(self.i).copied()
     }
 
-    fn parse(&mut self) -> Result<(), String> {
-        let mut has_modifier = false;
-        loop {
-            self.name()?;
-            if self.peek() == Some('(') {
-                if has_modifier {
-                    return Err("Veri tipinde en çok bir değiştirici listesi (parantez) olabilir.".into());
-                }
-                self.modifiers()?;
-                has_modifier = true;
-            }
-            match self.peek() {
-                None => return Ok(()),
-                Some(' ') => {
-                    self.i += 1;
-                    if self.peek() == Some(' ') {
-                        return Err("Veri tipinde sözcükler arasında tek boşluk olmalı.".into());
-                    }
-                }
-                Some('[') => return self.arrays(),
-                Some(c) => return Err(unexpected(c)),
-            }
+    /// Konumda tırnaksız bir sözcük varsa (sınır dahil) küçük harfli hâli ve bitiş konumu.
+    fn word_at(&self, at: usize) -> Option<(String, usize)> {
+        let mut j = at;
+        if !matches!(self.c.get(j), Some(&c) if is_bare_start(c)) {
+            return None;
         }
+        while matches!(self.c.get(j), Some(&c) if is_bare_char(c)) {
+            j += 1;
+        }
+        Some((self.c[at..j].iter().collect::<String>().to_ascii_lowercase(), j))
+    }
+
+    /// `' ' w` (büyük/küçük harf duyarsız, tam sözcük) varsa tüketir.
+    fn eat_word(&mut self, w: &str) -> bool {
+        if self.peek() != Some(' ') {
+            return false;
+        }
+        match self.word_at(self.i + 1) {
+            Some((x, end)) if x == w => {
+                self.i = end;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn eat_any(&mut self, ws: &[&'static str]) -> Option<&'static str> {
+        ws.iter().copied().find(|w| self.eat_word(w))
+    }
+
+    fn opt_modifiers(&mut self) -> Result<bool, String> {
+        if self.peek() == Some('(') {
+            self.modifiers()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn parse(&mut self) -> Result<(), String> {
+        let first = match self.word_at(0) {
+            Some((w, end)) if !matches!(self.c.get(end), Some('.') | Some('"')) => Some(w),
+            _ => None,
+        };
+        let builtin = match first.as_deref() {
+            Some("double") if self.c.get(6) == Some(&' ') => {
+                self.i = 6;
+                if self.c.get(7) == Some(&' ') {
+                    return Err(unexpected(' '));
+                }
+                if !self.eat_word("precision") {
+                    return Err(UNKNOWN_MULTIWORD.into());
+                }
+                true
+            }
+            Some("national") if self.c.get(8) != Some(&' ') => false,
+            Some(w @ ("character" | "char" | "bit" | "national")) => {
+                self.i = w.len();
+                if w == "national" && self.eat_any(&["character", "char"]).is_none() {
+                    return Err("national ardından character ya da char gelmeli.".into());
+                }
+                self.eat_word("varying");
+                self.opt_modifiers()?;
+                true
+            }
+            Some(w @ ("timestamp" | "time")) => {
+                self.i = w.len();
+                self.opt_modifiers()?;
+                if self.eat_any(&["with", "without"]).is_some()
+                    && !(self.eat_word("time") && self.eat_word("zone"))
+                {
+                    return Err("Saat dilimi yan tümcesi 'with time zone' ya da 'without time zone' olmalı.".into());
+                }
+                true
+            }
+            Some("interval") => {
+                self.i = "interval".len();
+                if !self.opt_modifiers()? {
+                    self.interval_fields()?;
+                    self.opt_modifiers()?;
+                }
+                true
+            }
+            _ => false,
+        };
+        if !builtin {
+            self.name()?;
+            self.opt_modifiers()?;
+        }
+        match self.peek() {
+            None => Ok(()),
+            Some('[') => self.arrays(),
+            Some(' ') => match self.c.get(self.i + 1) {
+                Some(&c) if is_bare_start(c) || c == '"' => Err(UNKNOWN_MULTIWORD.into()),
+                Some(&c) => Err(unexpected(c)),
+                None => Err(unexpected(' ')),
+            },
+            Some(c) => Err(unexpected(c)),
+        }
+    }
+
+    /// `interval` alanları (isteğe bağlı): sabit küme.
+    fn interval_fields(&mut self) -> Result<(), String> {
+        let Some(f) = self.eat_any(&["year", "month", "day", "hour", "minute", "second"]) else {
+            return Ok(());
+        };
+        if !self.eat_word("to") {
+            return Ok(());
+        }
+        let allowed: &[&'static str] = match f {
+            "year" => &["month"],
+            "day" => &["hour", "minute", "second"],
+            "hour" => &["minute", "second"],
+            "minute" => &["second"],
+            _ => &[],
+        };
+        if self.eat_any(allowed).is_none() {
+            return Err("Geçersiz interval alanı: year to month, day to hour|minute|second, hour to minute|second ya da minute to second olmalı.".into());
+        }
+        Ok(())
     }
 
     /// `ad ( '.' ad )?`
@@ -121,7 +253,7 @@ impl Parser {
     fn part(&mut self) -> Result<(), String> {
         match self.peek() {
             Some('"') => self.quoted(),
-            Some(c) if c.is_ascii_alphabetic() || c == '_' => self.bare(),
+            Some(c) if is_bare_start(c) => self.bare(),
             Some('.') => Err("Veri tipinde nokta yalnızca iki ad arasında olabilir (şema.tip); noktadan önce ve sonra ad gelmeli.".into()),
             Some(c) => Err(unexpected(c)),
             None => Err("Veri tipinde ad bekleniyordu.".into()),
@@ -130,7 +262,10 @@ impl Parser {
 
     fn bare(&mut self) -> Result<(), String> {
         let start = self.i;
-        while matches!(self.peek(), Some(c) if c.is_ascii_alphanumeric() || c == '_' || c == '$') {
+        while matches!(self.peek(), Some(c) if is_bare_char(c)) {
+            if self.peek() == Some('$') && self.c[self.i - 1].is_ascii_digit() {
+                return Err("Veri tipinde rakamdan hemen sonra '$' gelemez (ör. x1$); adı çift tırnakla yazın.".into());
+            }
             self.i += 1;
         }
         let word: String = self.c[start..self.i].iter().collect();
@@ -154,6 +289,12 @@ impl Parser {
                     self.i += 1;
                     break;
                 }
+                Some(c) if is_spoofing_format(c) => {
+                    return Err(format!(
+                        "Veri tipinde tırnaklı ad görünmez/yön denetimi karakteri (U+{:04X}) içeremez.",
+                        c as u32
+                    ));
+                }
                 // Denetim karakterleri en başta reddedildi; burada her karakter adın parçasıdır.
                 Some(c) => {
                     bytes += c.len_utf8();
@@ -167,12 +308,15 @@ impl Parser {
         check_len(bytes)
     }
 
-    /// `'(' ' '* rakam+ ' '* ( ',' ' '* rakam+ ' '* )* ')'`
+    /// `'(' ' '* rakam+ ' '* ( ',' ' '* '-'? rakam+ ' '* )? ')'` — en çok iki sayı; yalnızca ikincisi (ölçek) negatif olabilir.
     fn modifiers(&mut self) -> Result<(), String> {
-        const ONLY: &str = "Veri tipi değiştirici listesi yalnızca rakam, virgül ve boşluk içerebilir, ör. numeric(10,2).";
+        const ONLY: &str = "Veri tipi değiştirici listesi yalnızca rakam, virgül ve boşluk içerebilir (en çok iki sayı; yalnızca ikincisi '-' ile negatif olabilir), ör. numeric(10,2).";
         self.i += 1; // `(`
-        loop {
+        for k in 0..2 {
             self.spaces();
+            if k == 1 && self.peek() == Some('-') {
+                self.i += 1;
+            }
             let start = self.i;
             while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
                 self.i += 1;
@@ -186,7 +330,7 @@ impl Parser {
             }
             self.spaces();
             match self.peek() {
-                Some(',') => self.i += 1,
+                Some(',') if k == 0 => self.i += 1,
                 Some(')') => {
                     self.i += 1;
                     return Ok(());
@@ -195,6 +339,7 @@ impl Parser {
                 Some(_) => return Err(ONLY.into()),
             }
         }
+        unreachable!("döngü ikinci sayıdan sonra döner")
     }
 
     fn spaces(&mut self) {
@@ -282,11 +427,56 @@ mod tests {
             "Integer",
             "INTEGER",
             "a$",
+            "a1b$",
+            // Yerleşik çok sözcüklü kalıplar (büyük/küçük harf duyarsız)
+            "Double Precision",
+            "DOUBLE PRECISION[]",
+            "character",
+            "character(10)",
+            "char(1)",
+            "char varying(3)",
+            "CHARACTER VARYING(50)",
+            "national character varying(10)",
+            "national char(2)",
+            "national character",
+            "bit",
+            "bit(8)",
+            "bit varying",
+            "timestamp",
+            "timestamp(3)",
+            "time",
+            "TIME WITH TIME ZONE",
+            "timestamp with time zone[]",
+            "interval",
+            "interval year",
+            "interval month",
+            "interval day",
+            "interval hour",
+            "interval minute",
+            "interval second",
+            "interval second(3)",
+            "interval day to hour",
+            "interval day to minute",
+            "interval day to second",
+            "interval hour to minute",
+            "interval hour to second",
+            "interval minute to second",
+            "interval minute to second(2)[]",
+            // Tek ad olarak yerleşik sözcükler (kullanıcı tipi ya da şema nitelikli)
+            "national",
+            "double",
+            "public.double",
+            "char.x",
+            "\"double\"",
+            "timestamptz(3)",
+            // Negatif ölçek yalnızca ikinci sayıda (PG 15+)
+            "numeric(10,-2)",
+            "numeric(10, -2)",
         ] {
             assert_eq!(validate_type(t), Ok(()), "{t:?}");
         }
         // Tam 128 karakter: sınırda kabul.
-        let t = format!("a{}", " b".repeat(63)) + "c";
+        let t = format!("{}.{}[]", "a".repeat(63), "b".repeat(62));
         assert_eq!(t.chars().count(), 128);
         assert_eq!(validate_type(&t), Ok(()));
         // 63 baytlık ad kabul.
@@ -351,7 +541,14 @@ mod tests {
             "numeric 1)",
             "numeric)",
             "numeric (10)",
-            "numeric(10,-2)",
+            "numeric(-10,2)",
+            "numeric(-2)",
+            "numeric(10,--2)",
+            "numeric(10,- 2)",
+            "numeric(10,-)",
+            "numeric(10,-a)",
+            "numeric(1,2,3)",
+            "numeric(1,2,-3)",
             "numeric(1.5)",
             "numeric(1e2)",
             "f(x)",
@@ -419,9 +616,82 @@ mod tests {
             "int#",
             "int`",
             "int+1",
+            // Yan tümce sızdırma (inceleme bulgusu): tip alanı kolon tanımına ek sözcük taşıyamaz.
+            "integer NOT NULL",
+            "INTEGER NOT NULL",
+            "Integer not null",
+            "integer null",
+            "integer PRIMARY KEY",
+            "integer UNIQUE",
+            "integer REFERENCES u",
+            "integer DEFAULT pg_sleep(100)",
+            "integer DEFAULT current_user",
+            "integer USING pg_terminate_backend(1)",
+            "integer USING c",
+            "integer GENERATED ALWAYS AS IDENTITY",
+            "text COLLATE \"C\"",
+            "text COLLATE C",
+            "integer CONSTRAINT x CHECK",
+            "integer CHECK",
+            "setof integer",
+            "SETOF integer",
+            "integer array[3]",
+            "integer ARRAY",
+            "x varying with time zone(1)",
+            "x varying",
+            "double precision(5)",
+            "double precision not null",
+            "double x",
+            "\"double\" precision",
+            "public.mytype not null",
+            "\"My Type\" not null",
+            "numeric(10,2) not null",
+            "text[] not null",
+            "character varying(50) not null",
+            "character(1) varying",
+            "char varying varying",
+            "national varchar",
+            "national character varying(10) collate x",
+            "bit varying(5) default 1",
+            "timestamp with time zone(3)",
+            "timestamp(3) with time zone not null",
+            "timestamp with time",
+            "timestamp with zone",
+            "timestamp without",
+            "timestamp with local time zone",
+            "timestamp  with time zone",
+            "time zone",
+            "interval(2) year",
+            "interval year(2) to month",
+            "interval year to day",
+            "interval month to year",
+            "interval second to minute",
+            "interval day to",
+            "interval to second",
+            "interval week",
+            "interval day to second(3) not null",
+            "interval day(3)(4)",
+            "integer\u{a0}not null",
+            // Rakamdan sonra `$`
+            "x1$",
+            "int4$",
+            "a1$b",
+            "public.x1$",
+            // Tırnaklı adda görünmez/yön denetimi karakterleri
+            "\"a\u{200b}b\"",
+            "\"a\u{200f}b\"",
+            "\"a\u{2028}b\"",
+            "\"a\u{202e}b\"",
+            "\"a\u{2060}b\"",
+            "\"a\u{2064}b\"",
+            "\"\u{feff}a\"",
         ] {
             let r = validate_type(t);
             assert!(r.is_err(), "kabul edilmemeli: {t:?}");
+        }
+        // Görünmez karakterlerin hemen dışındaki biçim karakterleri tırnak içinde serbesttir.
+        for t in ["\"a\u{200a}b\"", "\"a\u{2027}\"","\"a\u{202f}b\"", "\"a\u{2065}b\""] {
+            assert_eq!(validate_type(t), Ok(()), "{t:?}");
         }
         // Uzun adlar: 64 bayt (tırnaklı ya da tırnaksız) red.
         assert!(validate_type(&"a".repeat(64)).is_err());
@@ -463,5 +733,19 @@ mod tests {
         assert!(m("a$$b").contains("$$"));
         assert!(m(&"a".repeat(64)).contains("63"));
         assert!(m("text\\").contains("'\\'"));
+        assert!(m("tür").contains("U+00FC"), "{}", m("tür"));
+        assert!(!m("tür").contains('ü'));
+        for t in ["integer NOT NULL", "Integer not null", "setof integer", "integer array[3]", "x varying with time zone(1)"] {
+            assert!(m(t).contains("Bilinmeyen çok sözcüklü tip"), "{t}: {}", m(t));
+        }
+        assert!(m("double precision(5)").contains("bir değiştirici"));
+        assert!(m("timestamp with time zone(3)").contains("timestamp(3) with time zone"));
+        assert!(m("timestamp with time").contains("with time zone"));
+        assert!(m("interval year to day").contains("interval"));
+        assert!(m("x1$").contains("rakamdan hemen sonra"));
+        assert!(m("int4$").contains("rakamdan hemen sonra"));
+        assert!(m("\"a\u{202e}b\"").contains("U+202E"));
+        assert!(m("numeric(-1)").contains("negatif"));
+        assert!(m("national varchar").contains("national"));
     }
 }

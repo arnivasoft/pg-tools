@@ -592,17 +592,19 @@ mod tests {
             o.remove(k);
         }
         for c in v["columns"].as_array_mut().unwrap() {
-            c.as_object_mut().unwrap().remove("using");
+            for k in ["using", "attnum"] {
+                c.as_object_mut().unwrap().remove(k);
+            }
         }
         for c in v["constraints"].as_array_mut().unwrap() {
-            for k in ["deferrable", "initiallyDeferred", "notValid"] {
+            for k in ["deferrable", "initiallyDeferred", "notValid", "oid"] {
                 c.as_object_mut().unwrap().remove(k);
             }
         }
         let ObjectDef::Table(t) = serde_json::from_value::<ObjectDef>(v).unwrap() else { panic!() };
         assert_eq!((t.partition_text, t.is_partition, t.inherits, t.unsupported.len()), (None, false, false, 0));
-        assert!(t.columns.iter().all(|c| c.using.is_none()));
-        assert!(t.constraints.iter().all(|c| !c.deferrable && !c.initially_deferred && !c.not_valid));
+        assert!(t.columns.iter().all(|c| c.using.is_none() && c.attnum.is_none()));
+        assert!(t.constraints.iter().all(|c| !c.deferrable && !c.initially_deferred && !c.not_valid && c.oid.is_none()));
     }
 
     #[test]
