@@ -15,6 +15,10 @@ pub const PRODUCTION_CONFIRMATION_REQUIRED: &str = "Üretim sunucusunda veri kay
 pub const PLAN_CHANGED: &str = "Plan önizlemeden sonra değişti; lütfen yeniden önizleyin.";
 /// Tanım doğrulamadan geçmedi (alan hataları önizlemede ayrıca döner).
 pub const INVALID_DEF: &str = "Nesne tanımı geçersiz.";
+/// Boş plan uygulanmak istendi; kodlu değildir (düz `invalid`).
+pub const NO_CHANGES: &str = "Değişiklik yok";
+/// Aynı `apply_id` ile süren bir uygulama var; kodlu değildir (düz `invalid`).
+pub const APPLY_ID_IN_USE: &str = "Bu uygulama kimliği zaten kullanımda.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]

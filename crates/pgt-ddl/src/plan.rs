@@ -67,9 +67,38 @@ pub struct PlanView {
     pub empty: bool,
 }
 
+impl PlanView {
+    /// Üretici sonucundan önizleme: doğrulama hataları `errors`'ta döner (ifade yok, hash boş planın hash'i).
+    pub fn from_build(result: std::result::Result<Plan, Vec<FieldError>>) -> Self {
+        let (plan, errors) = match result {
+            Ok(plan) => (plan, vec![]),
+            Err(errors) => (Plan::default(), errors),
+        };
+        PlanView {
+            empty: plan.statements.is_empty(),
+            hash: plan_hash(&plan.statements),
+            risk: plan.risk(),
+            statements: plan.statements,
+            warnings: plan.warnings,
+            errors,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_build_puts_errors_in_view() {
+        let e = FieldError { path: "name".into(), message: "boş".into() };
+        let v = PlanView::from_build(Err(vec![e.clone()]));
+        assert_eq!((v.errors, v.empty, v.hash, v.risk), (vec![e], true, plan_hash(&[]), Risk::Safe));
+        let p = Plan { statements: vec![st("DROP X", Risk::Destructive)], warnings: vec!["w".into()] };
+        let v = PlanView::from_build(Ok(p.clone()));
+        assert_eq!((v.hash, v.risk, v.empty, v.warnings), (plan_hash(&p.statements), Risk::Destructive, false, p.warnings));
+        assert!(v.errors.is_empty());
+    }
 
     fn st(sql: &str, risk: Risk) -> Statement {
         Statement { sql: sql.into(), risk, transactional: true, note: None }
