@@ -1,0 +1,8 @@
+---
+source: crates/pgt-ddl/src/build/index.rs
+expression: "render(&balter(&o(base()), &o(IndexDef { unique: true, ..base() }),\n&cctx()).unwrap())"
+---
+[Destructive non-tx] DROP INDEX CONCURRENTLY public.t_a_idx  -- Transaction dışında çalışır; hata olursa geçersiz (INVALID) indeks kalabilir
+[Safe non-tx] CREATE UNIQUE INDEX CONCURRENTLY t_a_idx ON public.t USING btree (a)  -- Transaction dışında çalışır; hata olursa geçersiz (INVALID) indeks kalabilir
+WARN: İndeks yeniden oluşturulur; oluşturma süresince sorgular yavaşlayabilir
+WARN: CONCURRENTLY bölümlenmiş (partitioned) tablolarda desteklenmez; tablo bölümlenmişse ifade hata verir

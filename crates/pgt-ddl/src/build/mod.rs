@@ -8,13 +8,14 @@
 //! (alan sınırlarında kapanma/açılma kaymasını yakalamak için). Tarayıcı `standard_conforming_strings = on` varsayar.
 
 pub mod extension;
+pub mod index;
 pub mod schema;
 pub mod sequence;
 mod sqlscan;
 
 pub use sqlscan::{ScanResult, scan_semicolons};
 
-use crate::model::{FieldError, ObjectDef, ObjectKind};
+use crate::model::{FieldError, ObjectDef};
 use crate::plan::{Plan, Risk, Statement};
 
 /// PG tanımlayıcı üst sınırı (BAYT, UTF-8).
@@ -23,9 +24,9 @@ pub const MAX_IDENT_BYTES: usize = 63;
 /// Üreticilerin bağlamı.
 #[derive(Debug, Clone, Default)]
 pub struct BuildCtx {
-    /// `server_version_num` (ör. 160002). Şu an sürüme özel kapı yok; indeks üreticisi (INCLUDE PG 11+) kullanacak.
+    /// `server_version_num` (ör. 160002). İndeks üreticisi INCLUDE kapısı (PG 11+) için kullanır.
     pub version_num: u32,
-    /// `CREATE INDEX CONCURRENTLY` istenir mi (yalnızca indeks üreticisi kullanır).
+    /// `CREATE INDEX CONCURRENTLY` istenir mi (indeks üreticisi: CREATE/DROP INDEX CONCURRENTLY).
     pub concurrently: bool,
 }
 
@@ -87,10 +88,6 @@ pub(crate) fn stmt(sql: String, risk: Risk, note: Option<&str>) -> Statement {
     }
 }
 
-fn unsupported(kind: ObjectKind) -> Vec<FieldError> {
-    vec![err("kind", format!("{kind:?} türü henüz desteklenmiyor."))]
-}
-
 fn mismatch(old: &ObjectDef, new: &ObjectDef) -> Vec<FieldError> {
     vec![err(
         "kind",
@@ -99,13 +96,12 @@ fn mismatch(old: &ObjectDef, new: &ObjectDef) -> Vec<FieldError> {
 }
 
 /// Alan düzeyi doğrulama; boş liste = geçerli.
-pub fn validate(def: &ObjectDef, _ctx: &BuildCtx) -> Vec<FieldError> {
+pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
     match def {
         ObjectDef::Schema(d) => schema::validate(d),
         ObjectDef::Sequence(d) => sequence::validate(d),
         ObjectDef::Extension(d) => extension::validate(d),
-        // Task 4 indeks üreticisi bunu değiştirecek.
-        ObjectDef::Index(_) => unsupported(ObjectKind::Index),
+        ObjectDef::Index(d) => index::validate(d, ctx),
     }
 }
 
@@ -120,7 +116,7 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Schema(d) => Ok(schema::create(d)),
         ObjectDef::Sequence(d) => Ok(sequence::create(d)),
         ObjectDef::Extension(d) => Ok(extension::create(d)),
-        ObjectDef::Index(_) => Err(unsupported(ObjectKind::Index)),
+        ObjectDef::Index(d) => Ok(index::create(d, ctx)),
     }
 }
 
@@ -143,7 +139,8 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         (ObjectDef::Schema(o), ObjectDef::Schema(n)) => Ok(schema::alter(o, n)),
         (ObjectDef::Sequence(o), ObjectDef::Sequence(n)) => Ok(sequence::alter(o, n)),
         (ObjectDef::Extension(o), ObjectDef::Extension(n)) => extension::alter(o, n),
-        _ => Err(unsupported(new.kind())),
+        (ObjectDef::Index(o), ObjectDef::Index(n)) => index::alter(o, n, ctx),
+        _ => Err(mismatch(old, new)),
     }
 }
 
@@ -153,7 +150,7 @@ pub fn drop(def: &ObjectDef, cascade: bool, ctx: &BuildCtx) -> Result<Plan, Vec<
         ObjectDef::Schema(d) => Ok(schema::drop(d, cascade)),
         ObjectDef::Sequence(d) => Ok(sequence::drop(d, cascade)),
         ObjectDef::Extension(d) => Ok(extension::drop(d, cascade)),
-        ObjectDef::Index(_) => Err(unsupported(ObjectKind::Index)),
+        ObjectDef::Index(d) => index::drop(d, cascade),
     }
 }
 
@@ -208,33 +205,6 @@ mod tests {
     #[test]
     fn default_ctx_is_not_concurrent() {
         assert!(!BuildCtx::default().concurrently);
-    }
-
-    #[test]
-    fn index_is_not_supported_yet() {
-        let d = ObjectDef::Index(IndexDef {
-            schema: "public".into(),
-            table: "t".into(),
-            name: "i".into(),
-            method: "btree".into(),
-            unique: false,
-            columns: vec![],
-            include: vec![],
-            where_clause: None,
-            tablespace: None,
-            fillfactor: None,
-            comment: None,
-            constraint: None,
-        });
-        for r in [
-            validate(&d, &ctx()),
-            create(&d, &ctx()).unwrap_err(),
-            drop(&d, false, &ctx()).unwrap_err(),
-        ] {
-            assert_eq!(r.len(), 1);
-            assert!(r[0].message.contains("henüz desteklenmiyor"));
-        }
-        assert!(alter(&d, &d, &ctx()).is_err());
     }
 
     #[test]

@@ -1,0 +1,6 @@
+---
+source: crates/pgt-ddl/src/build/index.rs
+expression: render(&p)
+---
+[DataLoss] DROP INDEX public.t_a_idx CASCADE  -- İndekse bağlı nesneler da silinir
+WARN: İndekse bağlı nesneler da silinir

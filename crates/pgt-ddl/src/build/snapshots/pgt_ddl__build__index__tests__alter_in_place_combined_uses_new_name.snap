@@ -1,0 +1,9 @@
+---
+source: crates/pgt-ddl/src/build/index.rs
+expression: render(&p)
+---
+[Safe] ALTER INDEX public.t_a_idx RENAME TO n2
+[Safe] ALTER INDEX public.n2 SET TABLESPACE ts  -- İndeks yeniden yazılır, kilit alır
+[Safe] ALTER INDEX public.n2 SET (fillfactor = 75)  -- Etkisi için REINDEX gerekir
+[Safe] COMMENT ON INDEX public.n2 IS 'b'
+WARN: Etkisi için REINDEX gerekir

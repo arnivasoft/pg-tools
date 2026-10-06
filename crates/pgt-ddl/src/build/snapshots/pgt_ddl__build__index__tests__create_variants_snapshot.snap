@@ -1,0 +1,19 @@
+---
+source: crates/pgt-ddl/src/build/index.rs
+expression: out
+---
+[Safe] CREATE INDEX t_a_idx ON public.t USING btree (a)
+
+[Safe] CREATE INDEX t_a_idx ON public.t USING hash (a)
+
+[Safe] CREATE INDEX t_a_idx ON public.t USING gin ((to_tsvector('simple', body)))
+
+[Safe] CREATE INDEX t_a_idx ON public.t USING brin (a) WITH (fillfactor = 10)
+
+[Safe] CREATE INDEX "ix;1" ON "My Schema"."order" USING gist ("user" NULLS FIRST) INCLUDE ("Ünï") TABLESPACE "Space X"
+[Safe] COMMENT ON INDEX "My Schema"."ix;1" IS E'a\\b'
+
+[Safe] CREATE INDEX t_a_idx ON public.t USING spgist (a) WITH (fillfactor = 100)
+
+[Safe non-tx] CREATE INDEX CONCURRENTLY t_a_idx ON public.t USING btree (a)  -- Transaction dışında çalışır; hata olursa geçersiz (INVALID) indeks kalabilir
+WARN: CONCURRENTLY bölümlenmiş (partitioned) tablolarda desteklenmez; tablo bölümlenmişse ifade hata verir

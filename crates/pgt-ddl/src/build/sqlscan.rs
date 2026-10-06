@@ -28,12 +28,21 @@ pub struct ScanResult {
     /// Kapanmamış tek tırnaklı dize, çift tırnaklı tanımlayıcı, dolar tırnak ya da blok yorum var.
     /// (Satır sonuna kadar süren `--` yorumu kapanmamış sayılmaz.)
     pub unterminated: bool,
+    /// Tırnak/yorum bölgeleri dışındaki parantez derinliğinin ulaştığı en küçük değer (`)` fazlalığı → negatif).
+    pub min_paren_depth: i32,
+    /// Tarama sonundaki parantez derinliği (kapanmamış `(` → pozitif).
+    pub final_paren_depth: i32,
 }
 
 impl ScanResult {
     /// Dış `;` yok ve kapanmamış bölge yok.
     pub fn is_clean(&self) -> bool {
         self.outer_semicolons == 0 && !self.unterminated
+    }
+
+    /// Parantezler dengeli ve hiçbir noktada fazladan `)` yok: ifade `( … )` sarmalından dışarı taşamaz.
+    pub fn parens_balanced(&self) -> bool {
+        self.min_paren_depth >= 0 && self.final_paren_depth == 0
     }
 }
 
@@ -47,8 +56,19 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
     let mut i = 0;
     let mut count = 0;
     let mut unterminated = false;
+    let mut depth: i32 = 0;
+    let mut min_depth: i32 = 0;
     while i < n {
         match b[i] {
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                min_depth = min_depth.min(depth);
+                i += 1;
+            }
             b';' => {
                 count += 1;
                 i += 1;
@@ -136,6 +156,8 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
     ScanResult {
         outer_semicolons: count,
         unterminated,
+        min_paren_depth: min_depth,
+        final_paren_depth: depth,
     }
 }
 
@@ -232,6 +254,29 @@ mod tests {
     #[test]
     fn mixed_and_unicode() {
         assert_eq!(c("SELECT 'ş;ğ', \"ü;\" ; -- ö;\n"), 1);
+    }
+
+    fn depths(s: &str) -> (i32, i32) {
+        let r = scan_semicolons(s);
+        (r.min_paren_depth, r.final_paren_depth)
+    }
+
+    #[test]
+    fn paren_depth_ignores_quoted_and_commented_regions() {
+        assert_eq!(depths(""), (0, 0));
+        assert_eq!(depths("(a)"), (0, 0));
+        assert_eq!(depths("f(g(x), y)"), (0, 0));
+        assert_eq!(depths("a)"), (-1, -1));
+        assert_eq!(depths("1) , (2"), (-1, 0));
+        assert_eq!(depths("(a"), (0, 1));
+        assert_eq!(depths(")("), (-1, 0));
+        assert_eq!(depths(r#"'(' || ")" || $$)$$ || /* ) */ 'x'"#), (0, 0));
+        assert_eq!(depths("a -- )\n"), (0, 0));
+        assert_eq!(depths(r"E'\')' )"), (-1, -1));
+        assert!(scan_semicolons("(a)").parens_balanced());
+        assert!(!scan_semicolons("a)").parens_balanced());
+        assert!(!scan_semicolons("1) , (2").parens_balanced());
+        assert!(!scan_semicolons("(a").parens_balanced());
     }
 
     #[test]

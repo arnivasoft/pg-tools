@@ -1,0 +1,8 @@
+---
+source: crates/pgt-ddl/src/build/index.rs
+expression: render(&p)
+---
+[Destructive] DROP INDEX public.t_a_idx
+[Safe] CREATE UNIQUE INDEX t_a_idx ON public.t USING btree (a) WITH (fillfactor = 50)
+[Safe] COMMENT ON INDEX public.t_a_idx IS 'c'
+WARN: İndeks yeniden oluşturulur; oluşturma süresince sorgular yavaşlayabilir
