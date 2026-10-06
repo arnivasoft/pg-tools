@@ -80,6 +80,12 @@ export const LIST_MIN_MS = 5000;
 const LOST_CODES = new Set(["not_found", "not_connected", "connection_lost"]);
 const GONE_CODES = new Set(["unknown_server"]);
 
+/**
+ * `lost` şeridindeki neden: `not_found` (kapanmış `DashId`) ham arka uç metni ("Nesne artık mevcut değil: Dashboard oturumu
+ * <uuid>") yerine null → şerit `td.lostNote` gösterir; bağlantı hatalarının metni korunur.
+ */
+const lostError = (p: ErrorPayload): string | null => (p.code === "not_found" ? null : p.message);
+
 const emptyRates = (): RateSeries => toRates([], 1);
 
 /**
@@ -180,7 +186,7 @@ export function createDashController(deps: DashControllerDeps) {
   const fail = (e: Entry, section: ErrorKey, err: unknown) => {
     const p = toPayload(err);
     if (GONE_CODES.has(p.code)) return markDown(e, "gone", p.message);
-    if (LOST_CODES.has(p.code)) return markDown(e, "lost", p.message);
+    if (LOST_CODES.has(p.code)) return markDown(e, "lost", lostError(p));
     update(e, (m) => ({ ...m, sectionError: { ...m.sectionError, [section]: errorText(p) } }));
   };
   const clearError = (m: DashModel, section: ErrorKey): Partial<Record<ErrorKey, string>> => {
@@ -283,7 +289,8 @@ export function createDashController(deps: DashControllerDeps) {
     } catch (err) {
       if (!alive(tabId, e, gen)) return;
       const p = toPayload(err);
-      patch(e, { status: GONE_CODES.has(p.code) ? "gone" : "lost", error: p.message });
+      const gone = GONE_CODES.has(p.code);
+      patch(e, { status: gone ? "gone" : "lost", error: gone ? p.message : lostError(p) });
       syncPoller(e);
     }
   };

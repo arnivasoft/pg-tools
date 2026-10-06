@@ -297,7 +297,7 @@ describe("dash-controller kayıp / kapatma", () => {
     s.api.dashSample.mockRejectedValueOnce(err("not_found"));
     await vi.advanceTimersByTimeAsync(2000);
     expect(s.ctl.model(id)?.status).toBe("lost");
-    expect(s.ctl.model(id)?.error).toBe("m:not_found");
+    expect(s.ctl.model(id)?.error).toBeNull(); // ham "Nesne artık mevcut değil…" değil: şerit td.lostNote gösterir
     expect(s.api.dashClose).toHaveBeenCalledWith("D1");
     expect(s.notify).not.toHaveBeenCalled(); // ham hata toast'ı değil, durum
     const n = s.api.dashSample.mock.calls.length;
@@ -324,6 +324,18 @@ describe("dash-controller kayıp / kapatma", () => {
     s.api.dashOverview.mockRejectedValueOnce(err("connection_lost"));
     await vi.advanceTimersByTimeAsync(2000);
     expect(s.ctl.model(id)?.status).toBe("lost");
+    expect(s.ctl.model(id)?.error).toBe("m:connection_lost"); // bağlantı hatasının metni korunur
+  });
+
+  it("dash_open not_found → lost, hata metni null; not_connected metni korunur", async () => {
+    const s = setup();
+    s.api.dashOpen.mockRejectedValueOnce(err("not_found"));
+    const a = await s.ctl.open({ serverId: "S1", serverName: "srv", databaseOid: null });
+    expect(s.ctl.model(a)?.status).toBe("lost");
+    expect(s.ctl.model(a)?.error).toBeNull();
+    s.api.dashOpen.mockRejectedValueOnce(err("not_connected"));
+    const b = await s.ctl.open({ serverId: "S1", serverName: "srv", databaseOid: null });
+    expect(s.ctl.model(b)?.error).toBe("m:not_connected");
   });
 
   it("serverSessionsClosed(gone=true) → status gone; reopen yok", async () => {
