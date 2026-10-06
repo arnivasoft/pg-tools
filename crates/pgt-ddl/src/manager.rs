@@ -366,6 +366,8 @@ impl DdlManager {
             ObjectDef::Extension(d) => (ObjectKind::Extension, FIND_EXTENSION_SQL, None, d.name.clone()),
             ObjectDef::Sequence(d) => (ObjectKind::Sequence, FIND_SEQUENCE_SQL, Some(d.schema.clone()), d.name.clone()),
             ObjectDef::Index(d) => (ObjectKind::Index, FIND_INDEX_SQL, Some(d.schema.clone()), d.name.clone()),
+            // Tablo üreticisi henüz yok (build yer tutucu hata verir); Task 6 tablo aramasını ekler.
+            ObjectDef::Table(_) => return None,
         };
         let row = self
             .mgr
@@ -424,6 +426,8 @@ impl DdlManager {
                     comment: None,
                 })
             }
+            // Task 6: şema bağlamlı varsayılan tablo tanımı.
+            ObjectKind::Table => return invalid("Table türü henüz desteklenmiyor."),
             ObjectKind::Index => {
                 let Some(table_oid) = ctx.table_oid else {
                     return invalid("İndeks yalnızca bir tablo altında oluşturulabilir.");

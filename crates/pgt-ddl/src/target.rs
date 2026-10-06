@@ -79,6 +79,7 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
             ObjectKind::Sequence => Coll::Sequences,
             ObjectKind::Extension => Coll::Extensions,
             ObjectKind::Index => Coll::Indexes,
+            ObjectKind::Table => Coll::Tables,
         };
         t.refresh_node_id = Some(id.parent().child(Seg::Coll(coll)).to_string());
     }

@@ -10,7 +10,8 @@
 //! - `CONCURRENTLY` yalnızca `create()` ve `BuildCtx.concurrently` ile gelir. Alter kaynaklı DROP+CREATE ve açık `drop()` her
 //!   zaman düz (transactional) DROP/CREATE kullanır; kesintisiz yeniden kurma ileri bir plana ertelendi.
 
-use super::{BuildCtx, check_ident, check_schema_ident, check_text, err, scan_semicolons, stmt};
+use super::freesql::{check_free_sql, composed_is_clean, wrap};
+use super::{BuildCtx, check_ident, check_schema_ident, check_text, err, stmt};
 use crate::model::{FieldError, IndexColumn, IndexDef, IndexKey};
 use crate::plan::{Plan, Risk, Statement};
 use crate::quote::{qualified, quote_ident, quote_literal};
@@ -23,50 +24,11 @@ const PARTITION_WARNING: &str = "CONCURRENTLY bölümlenmiş (partitioned) tablo
 const TABLESPACE_NOTE: &str = "İndeks yeniden yazılır, kilit alır";
 const FILLFACTOR_NOTE: &str = "Etkisi için REINDEX gerekir";
 
-/// Serbest SQL alanı: NUL yok, boş değil, dış `;`/kapanmamış bölge yok, parantezler dengeli.
-fn check_free_sql(path: &str, sql: &str, errs: &mut Vec<FieldError>) {
-    if sql.contains('\0') {
-        errs.push(err(path, "SQL NUL karakteri içeremez."));
-        return;
-    }
-    if sql.trim().is_empty() {
-        errs.push(err(path, "SQL boş olamaz."));
-        return;
-    }
-    let r = scan_semicolons(sql);
-    if r.unterminated {
-        errs.push(err(
-            path,
-            "SQL'de kapanmamış tırnak, dolar tırnak ya da yorum var.",
-        ));
-    } else if r.ends_in_line_comment {
-        errs.push(err(
-            path,
-            "SQL satır yorumu (--) ile bitemez; yorumdan sonra yeni satır ekleyin ya da yorumu kaldırın.",
-        ));
-    } else if r.digit_adjacent_quote {
-        errs.push(err(
-            path,
-            "SQL'de rakamın hemen ardından ' ya da $ gelemez; araya boşluk koyun.",
-        ));
-    } else if r.outer_semicolons > 0 {
-        errs.push(err(
-            path,
-            "SQL tek bir ifade olmalı; tırnak/yorum dışında ';' kullanılamaz.",
-        ));
-    } else if !r.parens_balanced() {
-        errs.push(err(
-            path,
-            "SQL'de parantezler dengeli olmalı (fazladan ')' ya da kapanmamış '(' var).",
-        ));
-    }
-}
-
 fn key_sql(c: &IndexColumn) -> String {
     let mut s = match &c.key {
         IndexKey::Column { name } => quote_ident(name),
         // Kapanış parantezi yeni satırda: alan `--` ile bitse bile `)` yorumda kalmaz.
-        IndexKey::Expression { sql } => format!("({sql}\n)"),
+        IndexKey::Expression { sql } => wrap(sql),
     };
     if let Some(cl) = &c.collation {
         s.push_str(&format!(" COLLATE {}", quote_ident(cl)));
@@ -108,7 +70,7 @@ fn create_sql(d: &IndexDef, concurrently: bool) -> String {
         sql.push_str(&format!(" TABLESPACE {}", quote_ident(ts)));
     }
     if let Some(w) = &d.where_clause {
-        sql.push_str(&format!(" WHERE ({w}\n)"));
+        sql.push_str(&format!(" WHERE {}", wrap(w)));
     }
     sql
 }
@@ -218,14 +180,11 @@ pub fn validate(d: &IndexDef, ctx: &BuildCtx) -> Vec<FieldError> {
         check_text("comment", c, &mut e);
     }
     // Nihai ifade: alan sınırlarında bölge/parantez kaymasını yakalar (ifade sonunda `;` yoktur).
-    if e.is_empty() {
-        let r = scan_semicolons(&create_sql(d, ctx.concurrently));
-        if !r.is_clean() || !r.parens_balanced() {
-            e.push(err(
-                "columns",
-                "Serbest SQL alanları birleşince geçersiz ifade oluşuyor (ör. satır yorumuyla biten ifade).",
-            ));
-        }
+    if e.is_empty() && !composed_is_clean(&create_sql(d, ctx.concurrently)) {
+        e.push(err(
+            "columns",
+            "Serbest SQL alanları birleşince geçersiz ifade oluşuyor (ör. satır yorumuyla biten ifade).",
+        ));
     }
     e
 }
@@ -379,7 +338,7 @@ mod tests {
     use super::*;
     use crate::build::{
         alter as balter, assert_single_statements, create as bcreate, drop as bdrop, render,
-        validate as bvalidate,
+        scan_semicolons, validate as bvalidate,
     };
     use crate::model::ObjectDef;
 

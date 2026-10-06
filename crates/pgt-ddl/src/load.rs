@@ -68,6 +68,8 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: u32, obj:
         ObjectKind::Sequence => load_sequence(mgr, server, database_oid, obj.oid).await,
         ObjectKind::Extension => load_extension(mgr, server, database_oid, obj.oid).await,
         ObjectKind::Index => load_index(mgr, server, database_oid, obj.oid).await,
+        // Tablo yükleyicisi Task 5'te gelir.
+        ObjectKind::Table => Err(Error::Invalid("Table türü henüz desteklenmiyor.".into())),
     }
 }
 

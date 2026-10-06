@@ -8,10 +8,12 @@
 //! (alan sınırlarında kapanma/açılma kaymasını yakalamak için). Tarayıcı `standard_conforming_strings = on` varsayar.
 
 pub mod extension;
+pub mod freesql;
 pub mod index;
 pub mod schema;
 pub mod sequence;
 mod sqlscan;
+pub mod type_syntax;
 
 pub use sqlscan::{ScanResult, scan_semicolons};
 
@@ -94,6 +96,11 @@ pub(crate) fn stmt(sql: String, risk: Risk, note: Option<&str>) -> Statement {
     }
 }
 
+/// Task 2–4 tablo üreticilerine kadar yer tutucu hata.
+fn table_unsupported() -> Vec<FieldError> {
+    vec![err("kind", "Table türü henüz desteklenmiyor.")]
+}
+
 fn mismatch(old: &ObjectDef, new: &ObjectDef) -> Vec<FieldError> {
     vec![err(
         "kind",
@@ -108,6 +115,7 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Sequence(d) => sequence::validate(d),
         ObjectDef::Extension(d) => extension::validate(d),
         ObjectDef::Index(d) => index::validate(d, ctx),
+        ObjectDef::Table(_) => table_unsupported(),
     }
 }
 
@@ -128,6 +136,10 @@ pub(crate) fn validate_identity(def: &ObjectDef) -> Vec<FieldError> {
             check_ident("table", &d.table, &mut e);
             check_ident("name", &d.name, &mut e);
         }
+        ObjectDef::Table(d) => {
+            check_schema_ident("schema", &d.schema, &mut e);
+            check_ident("name", &d.name, &mut e);
+        }
     }
     e
 }
@@ -144,6 +156,7 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Sequence(d) => Ok(sequence::create(d)),
         ObjectDef::Extension(d) => Ok(extension::create(d)),
         ObjectDef::Index(d) => Ok(index::create(d, ctx)),
+        ObjectDef::Table(_) => Err(table_unsupported()),
     }
 }
 
@@ -167,6 +180,7 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         (ObjectDef::Sequence(o), ObjectDef::Sequence(n)) => Ok(sequence::alter(o, n)),
         (ObjectDef::Extension(o), ObjectDef::Extension(n)) => extension::alter(o, n),
         (ObjectDef::Index(o), ObjectDef::Index(n)) => index::alter(o, n),
+        (ObjectDef::Table(_), ObjectDef::Table(_)) => Err(table_unsupported()),
         _ => Err(mismatch(old, new)),
     }
 }
@@ -181,6 +195,7 @@ pub fn drop(def: &ObjectDef, cascade: bool, _ctx: &BuildCtx) -> Result<Plan, Vec
         ObjectDef::Sequence(d) => Ok(sequence::drop(d, cascade)),
         ObjectDef::Extension(d) => Ok(extension::drop(d, cascade)),
         ObjectDef::Index(d) => index::drop(d, cascade),
+        ObjectDef::Table(_) => Err(table_unsupported()),
     }
 }
 
@@ -253,6 +268,46 @@ mod tests {
         let errs = alter(&s, &e, &ctx()).unwrap_err();
         assert_eq!(errs[0].path, "kind");
         assert!(errs[0].message.contains("uyuşmazlığı"));
+    }
+
+    fn table() -> ObjectDef {
+        ObjectDef::Table(TableDef {
+            schema: "public".into(),
+            name: "t".into(),
+            owner: None,
+            tablespace: None,
+            persistence: Persistence::Permanent,
+            columns: vec![],
+            constraints: vec![],
+            partition_by: None,
+            fillfactor: None,
+            comment: None,
+            partition_text: None,
+            is_partition: false,
+            inherits: false,
+            unsupported: vec![],
+        })
+    }
+
+    #[test]
+    fn table_is_wired_with_placeholder_error() {
+        let t = table();
+        let is_placeholder = |e: &[FieldError]| e.len() == 1 && e[0].path == "kind" && e[0].message.contains("henüz desteklenmiyor");
+        assert!(is_placeholder(&validate(&t, &ctx())));
+        assert!(is_placeholder(&create(&t, &ctx()).unwrap_err()));
+        assert!(is_placeholder(&alter(&t, &t, &ctx()).unwrap_err()));
+        assert!(is_placeholder(&drop(&t, false, &ctx()).unwrap_err()));
+        // Kimlik doğrulaması tablo için de çalışır (eski taraf/drop).
+        assert!(validate_identity(&t).is_empty());
+        let ObjectDef::Table(mut bad) = t.clone() else { unreachable!() };
+        bad.schema = "pg_catalog".into();
+        bad.name = "x\n".into();
+        let paths: Vec<String> = validate_identity(&ObjectDef::Table(bad.clone())).into_iter().map(|e| e.path).collect();
+        assert_eq!(paths, ["schema", "name"]);
+        assert_eq!(drop(&ObjectDef::Table(bad), false, &ctx()).unwrap_err()[0].path, "schema");
+        // Tür uyuşmazlığı yer tutucudan önce yakalanır.
+        let s = ObjectDef::Schema(SchemaDef { name: "a".into(), owner: None, comment: None });
+        assert_eq!(alter(&s, &t, &ctx()).unwrap_err()[0].message, mismatch(&s, &t)[0].message);
     }
 
     fn errs_for(v: &str) -> usize {
