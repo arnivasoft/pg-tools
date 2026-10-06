@@ -120,9 +120,13 @@ fn main() {
                 let state = app.state::<state::AppState>();
                 let query = state.query.clone();
                 state.dash.close_all();
-                state.ddl.cancel_all();
+                // Uçuştaki DDL iptalleri arka planda gönderilir; süreç bitmeden ulaşmaları için kısa bekleme.
+                let ddl_cancels = state.ddl.cancel_all();
                 // Zaman aşımı geleceği çalışma zamanı İÇİNDE kurulmalı: dışarıda `tokio::time::timeout` "no reactor running" ile panikler.
                 tauri::async_runtime::block_on(async move {
+                    if ddl_cancels > 0 {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
                     let _ = tokio::time::timeout(Duration::from_secs(7), query.close_all()).await;
                 });
             }

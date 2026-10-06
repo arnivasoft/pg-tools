@@ -18,7 +18,7 @@ pub struct DdlCreate {
     pub context: CreateContext,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct DdlTarget {
@@ -27,15 +27,18 @@ pub struct DdlTarget {
     pub database_oid: Option<u32>,
     pub object: Option<ObjectRef>,
     pub create: Option<DdlCreate>,
+    /// Uygulama sonrası arayüzün yenileyeceği ağaç düğümü: `create` için koleksiyonun kendisi, `object` için üst koleksiyon.
+    pub refresh_node_id: Option<String>,
 }
 
 /// Düğüm kimliğini çözer; bozuk kimlik ya da sunucuya ait olmayan (kök/grup) düğüm → `Error::Invalid`.
 pub fn target_of(node_id: &str) -> Result<DdlTarget> {
-    let NodeId::Node { server, path } = NodeId::parse(node_id)? else {
+    let id = NodeId::parse(node_id)?;
+    let NodeId::Node { server, ref path } = id else {
         return Err(Error::Invalid(format!("düğüm bir sunucuya ait değil: {node_id}")));
     };
     let database_oid = path.iter().find_map(|s| if let Seg::Db(o) = s { Some(*o) } else { None });
-    let mut t = DdlTarget { server_id: server, database_oid, object: None, create: None };
+    let mut t = DdlTarget { server_id: server, database_oid, object: None, create: None, refresh_node_id: None };
     let obj = |kind, oid| Some(ObjectRef { kind, oid });
     let create = |kind, schema_oid, table_oid| Some(DdlCreate { kind, context: CreateContext { schema_oid, table_oid } });
     let prev = path.len().checked_sub(2).map(|i| path[i]);
@@ -66,6 +69,19 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
         t.object = None;
         t.create = None;
     }
+    // Yenilenecek düğüm: oluşturmada koleksiyonun kendisi; düzenle/silde nesnenin üst koleksiyonu (çocuk kimlikleri
+    // koleksiyon parçasını atlar: `parent.child(seg(oid))`, koleksiyon kimliği `parent.child(Coll)`).
+    if t.create.is_some() {
+        t.refresh_node_id = Some(id.to_string());
+    } else if let Some(o) = t.object {
+        let coll = match o.kind {
+            ObjectKind::Schema => Coll::Schemas,
+            ObjectKind::Sequence => Coll::Sequences,
+            ObjectKind::Extension => Coll::Extensions,
+            ObjectKind::Index => Coll::Indexes,
+        };
+        t.refresh_node_id = Some(id.parent().child(Seg::Coll(coll)).to_string());
+    }
     Ok(t)
 }
 
@@ -91,13 +107,31 @@ mod tests {
         let u = Uuid::parse_str(U).unwrap();
         let x = t("db:5/sch:2200");
         assert_eq!((x.server_id, x.database_oid, x.object, x.create), (u, Some(5), obj(ObjectKind::Schema, 2200), None));
-        assert_eq!(t("db:5/sch:2200/sequences/seq:35").object, obj(ObjectKind::Sequence, 35));
         assert_eq!(t("db:5/sch:2200/seq:35").object, obj(ObjectKind::Sequence, 35));
-        assert_eq!(t("db:5/extensions/ext:9").object, obj(ObjectKind::Extension, 9));
         assert_eq!(t("db:5/ext:9").object, obj(ObjectKind::Extension, 9));
-        let i = t("db:5/sch:2200/tbl:24576/indexes/idx:41");
+        let i = t("db:5/sch:2200/tbl:24576/idx:41");
         assert_eq!((i.object, i.create, i.database_oid), (obj(ObjectKind::Index, 41), None, Some(5)));
-        assert_eq!(t("db:5/sch:2200/tbl:24576/idx:41").object, obj(ObjectKind::Index, 41));
+    }
+
+    #[test]
+    fn refresh_node_is_the_collection() {
+        // Düzenle/sil: üst koleksiyon; oluştur: koleksiyonun kendisi; diğerleri: yok.
+        let r = |p: &str| t(p).refresh_node_id;
+        let s = |p: &str| Some(format!("srv:{U}/{p}"));
+        assert_eq!(r("db:5/sch:2200"), s("db:5/schemas"));
+        assert_eq!(r("db:5/sch:2200/seq:35"), s("db:5/sch:2200/sequences"));
+        assert_eq!(r("db:5/ext:9"), s("db:5/extensions"));
+        assert_eq!(r("db:5/sch:2200/tbl:24576/idx:41"), s("db:5/sch:2200/tbl:24576/indexes"));
+        assert_eq!(r("db:5/schemas"), s("db:5/schemas"));
+        assert_eq!(r("db:5/sch:2200/sequences"), s("db:5/sch:2200/sequences"));
+        assert_eq!(r("db:5/extensions"), s("db:5/extensions"));
+        assert_eq!(r("db:5/sch:2200/tbl:24576/indexes"), s("db:5/sch:2200/tbl:24576/indexes"));
+        for p in ["", "db:5", "role:10", "db:5/sch:2200/tbl:24576", "db:5/sch:2200/tables"] {
+            assert_eq!(r(p), None, "{p}");
+        }
+        // Üretilen kimlik gerçekten ayrıştırılıp aynen geri yazılabilir.
+        let id = r("db:5/sch:2200/seq:35").unwrap();
+        assert_eq!(NodeId::parse(&id).unwrap().to_string(), id);
     }
 
     #[test]
@@ -137,7 +171,7 @@ mod tests {
             "db:5/sch:2200/indexes",
         ] {
             let x = t(p);
-            assert_eq!((x.object, x.create), (None, None), "{p}");
+            assert_eq!((x.object, x.create, x.refresh_node_id), (None, None, None), "{p}");
         }
         assert_eq!(t("").database_oid, None);
     }
@@ -153,6 +187,7 @@ mod tests {
     fn serializes_camel_case() {
         let v = serde_json::to_value(t("db:5/sch:2200/tbl:24576/indexes")).unwrap();
         assert_eq!(v["databaseOid"], 5);
+        assert_eq!(v["refreshNodeId"], format!("srv:{U}/db:5/sch:2200/tbl:24576/indexes"));
         assert_eq!(v["create"]["kind"], "index");
         assert_eq!(v["create"]["context"]["tableOid"], 24576);
         assert!(v["object"].is_null());

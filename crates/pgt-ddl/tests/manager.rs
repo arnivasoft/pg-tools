@@ -1,10 +1,9 @@
-//! `DdlManager` testleri: kapılar (sıra dahil), blok çalıştırma, lock_timeout, iptal ve günlük gizliliği.
+//! `DdlManager` testleri: kapılar (sıra dahil), blok çalıştırma, lock_timeout, iptal. Günlük gizliliği süreç genelinde abone gerektirdiği için ayrı ikilide (`logging.rs`).
 //! Docker'lı testler `PGT_TEST_URLS` yoksa atlanır; her test kendi veritabanını (`pgt_ddl_rt_<sürüm>_m_<etiket>`) kurar.
 
 mod common;
 
-use std::io::Write;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use common::{Env, cleanup, guarded, servers, setup};
@@ -510,49 +509,141 @@ async fn dropped_body(ts: TestServer) {
     assert!(r.is_err(), "{r:?}");
 }
 
-// ---- günlük ----
+// ---- iptal: Tokio bağlamsız iş parçacığı, gelecek düşmesi, kayıttan önce gelen iptal ----
 
-#[derive(Clone, Default)]
-struct Buf(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Buf {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Süreç genelinde (global) abone: iş parçacığı yerel abone, paralel testlerin callsite önbelleğiyle yarışıp
-/// olayları kaçırabiliyor. Diğer testlerin olayları da tampona düşer; denetimler yalnızca bu testin işaretlerine bakar.
-#[tokio::test]
-async fn password_free_logging() {
-    let buf = Buf::default();
-    let w = buf.clone();
-    let subscriber = tracing_subscriber::fmt().with_writer(move || w.clone()).with_max_level(tracing::Level::TRACE).finish();
-    tracing::subscriber::set_global_default(subscriber).expect("bu test ikilisinde başka global abone yok");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_all_works_from_a_plain_thread() {
     for ts in servers() {
-        guarded(logging_body(ts.clone()), cleanup(&ts, "m_log")).await;
-        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-        assert!(out.contains("DDL uygulandı") && out.contains("DDL uygulanamadı"), "günlük yakalanmadı: {out}");
-        assert!(out.contains("42P06"), "sonuç kodu günlükte olmalı: {out}");
-        for secret in ["m_log_gizli_ad", "gizli yorum", "CREATE", "SCHEMA", "COMMENT", "already exists"] {
-            assert!(!out.contains(secret), "günlükte {secret:?} var: {out}");
-        }
-        if let Some(p) = ts.password.as_deref().filter(|p| !p.is_empty()) {
-            assert!(!out.contains(p), "günlükte parola var");
-        }
+        guarded(cancel_all_body(ts.clone()), cleanup(&ts, "m_cancelall")).await;
     }
 }
 
-async fn logging_body(ts: TestServer) {
-    let env = setup(&ts, "m_log").await;
+async fn cancel_all_body(ts: TestServer) {
+    let env = setup(&ts, "m_cancelall").await;
     let f = fx(&env, &ts, false, None);
-    let def = ObjectDef::Schema(SchemaDef { name: "m_log_gizli_ad".into(), owner: None, comment: Some("gizli yorum".into()) });
-    applied(f.apply(&create(def.clone())).await);
-    // Aynı ad: 42P06 → Failed (hata iletisi adı içerir ama günlüğe yalnızca kod gider).
-    let (_, _, sqlstate, _) = failed(f.apply(&create(def)).await);
-    assert_eq!(sqlstate.as_deref(), Some("42P06"));
+    env.sql("CREATE TABLE public.ca (id int)").await;
+    let locker = lock_table(&ts, &env, "ca").await;
+    let req = create(index("ca", "ca_idx"));
+    let o = ApplyOptions { lock_timeout_ms: 0, ..opts(&f.preview(&req).await.hash) };
+    let (dm, server, db) = (f.dm.clone(), f.server, f.db);
+    let task = tokio::spawn(async move { dm.apply(server, db, &req, o).await });
+    wait_for_waiting(&env.admin, 1).await;
+    // Tauri ana iş parçacığı gibi: ortam Tokio bağlamı olmayan düz iş parçacığı.
+    let dm = f.dm.clone();
+    std::thread::spawn(move || {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        dm.cancel_all();
+    })
+    .join()
+    .unwrap();
+    let (idx, committed, sqlstate, _) = failed(tokio::time::timeout(Duration::from_secs(10), task).await.expect("iptal ulaşmadı").unwrap());
+    assert_eq!((idx, committed, sqlstate.as_deref()), (0, 0, Some("57014")));
+    locker.batch_execute("COMMIT").await.unwrap();
+    assert!(!exists(&env, "public.ca_idx").await);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_the_apply_future_cancels_the_server_statement() {
+    for ts in servers() {
+        guarded(drop_future_body(ts.clone()), cleanup(&ts, "m_dropfut")).await;
+    }
+}
+
+async fn drop_future_body(ts: TestServer) {
+    let env = setup(&ts, "m_dropfut").await;
+    let f = fx(&env, &ts, false, None);
+    env.sql("CREATE TABLE public.df (id int)").await;
+    let locker = lock_table(&ts, &env, "df").await;
+    let req = create(index("df", "df_idx"));
+    let o = ApplyOptions { lock_timeout_ms: 0, ..opts(&f.preview(&req).await.hash) };
+    let (dm, server, db) = (f.dm.clone(), f.server, f.db);
+    let task = tokio::spawn(async move { dm.apply(server, db, &req, o).await });
+    wait_for_waiting(&env.admin, 1).await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    // Kilit hâlâ tutuluyor: yalnızca iptal (bağlantı kapanışı değil) bekleyen ifadeyi bitirir.
+    wait_for_waiting(&env.admin, 0).await;
+    locker.batch_execute("COMMIT").await.unwrap();
+    assert!(!exists(&env, "public.df_idx").await);
+}
+
+#[tokio::test]
+async fn cancel_before_apply_registers_still_cancels() {
+    for ts in servers() {
+        guarded(early_cancel_body(ts.clone()), cleanup(&ts, "m_earlycn")).await;
+    }
+}
+
+async fn early_cancel_body(ts: TestServer) {
+    let env = setup(&ts, "m_earlycn").await;
+    let f = fx(&env, &ts, false, None);
+    let id = Uuid::new_v4();
+    f.dm.cancel(id).await.unwrap(); // henüz kayıtlı değil: mezar taşı
+    let r = f.apply_with(&create(schema("m_early")), |o| o.apply_id = id).await;
+    let (idx, committed, sqlstate, _) = failed(r);
+    assert_eq!((idx, committed, sqlstate.as_deref()), (0, 0, Some("57014")));
+    assert!(!exists(&env, "m_early").await);
+    // Mezar taşı tüketildi: aynı kimlik yeniden kullanılırsa normal uygulanır.
+    applied(f.apply_with(&create(schema("m_early")), |o| o.apply_id = id).await);
+    assert!(exists(&env, "m_early").await);
+}
+
+// ---- Applied.created ----
+
+#[tokio::test]
+async fn applied_reports_the_created_object() {
+    for ts in servers() {
+        guarded(created_body(ts.clone()), cleanup(&ts, "m_created")).await;
+    }
+}
+
+async fn created_body(ts: TestServer) {
+    let env = setup(&ts, "m_created").await;
+    let f = fx(&env, &ts, false, None);
+    let created = |r: Result<ApplyOutcome>| match r {
+        Ok(ApplyOutcome::Applied { created, .. }) => created,
+        other => panic!("uygulanmalıydı: {other:?}"),
+    };
+
+    let c = created(f.apply(&create(schema("m_cr_s"))).await);
+    assert_eq!(c, Some(ObjectRef { kind: ObjectKind::Schema, oid: env.schema_oid("m_cr_s").await }));
+
+    let seq = ObjectDef::Sequence(SequenceDef {
+        schema: "m_cr_s".into(),
+        name: "m_cr_seq".into(),
+        owner: None,
+        data_type: SeqType::Bigint,
+        increment: 1,
+        min_value: None,
+        max_value: None,
+        start: 1,
+        cache: 1,
+        cycle: false,
+        owned_by: None,
+        comment: None,
+    });
+    let c = created(f.apply(&create(seq)).await);
+    assert_eq!(c, Some(ObjectRef { kind: ObjectKind::Sequence, oid: env.class_oid("m_cr_s", "m_cr_seq").await }));
+
+    env.sql("CREATE TABLE public.cr_t (id int)").await;
+    let c = created(f.apply(&create(index("cr_t", "cr_idx"))).await);
+    assert_eq!(c, Some(ObjectRef { kind: ObjectKind::Index, oid: env.class_oid("public", "cr_idx").await }));
+
+    // Eklenti: contrib kurulu değilse atlanır.
+    let ext: Option<String> = env
+        .admin
+        .query_opt("SELECT name::text FROM pg_available_extensions WHERE name IN ('citext', 'pgcrypto') ORDER BY name LIMIT 1", &[])
+        .await
+        .unwrap()
+        .map(|r| r.get(0));
+    if let Some(name) = ext {
+        let def = ObjectDef::Extension(ExtensionDef { name: name.clone(), schema: None, version: None, cascade: false });
+        let c = created(f.apply(&create(def)).await);
+        let oid: u32 = env.admin.query_one("SELECT oid FROM pg_extension WHERE extname = $1", &[&name]).await.unwrap().get(0);
+        assert_eq!(c, Some(ObjectRef { kind: ObjectKind::Extension, oid }));
+    }
+
+    // Drop: created yok.
+    let r = f.apply_with(&PlanRequest::Drop { def: schema("m_cr_s"), cascade: true }, |o| o.confirmed = true).await;
+    assert_eq!(created(r), None);
 }

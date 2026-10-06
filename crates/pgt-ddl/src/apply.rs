@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex as StdMutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use pgt_core::connection::{CancelHandle, ConnectionManager, DedicatedConn, SessionProfile, Target};
 use pgt_core::{Error, ErrorPayload, Result};
@@ -23,6 +24,8 @@ pub(crate) const CANCELED_SQLSTATE: &str = "57014";
 pub(crate) const LOCK_TIMEOUT_SQLSTATE: &str = "55P03";
 /// Geçersiz parametre değeri; sequence sınır/RESTART çakışmaları bu kodla gelir.
 const INVALID_PARAMETER_SQLSTATE: &str = "22023";
+/// COMMIT yanıtı alınamadığında blok kalıcılaşmış olabilir.
+const OUTCOME_UNKNOWN_HINT: &str = "Sonuç belirsiz; nesneyi yenileyip kontrol edin.";
 const CANCELLED_MESSAGE: &str = "Uygulama iptal edildi.";
 const LOCK_TIMEOUT_MESSAGE: &str = "Nesne kilidi beklenirken zaman aşımı (lock_timeout).";
 const LOCK_TIMEOUT_HINT: &str = "Nesneyi kullanan oturumları kontrol edin ya da kilit zaman aşımını artırın.";
@@ -53,39 +56,67 @@ struct Slot {
     cancelled: bool,
 }
 
+/// Kayıttan önce gelen iptal isteğinin ömrü ve tutulacak en çok sayı.
+const TOMBSTONE_TTL: Duration = Duration::from_secs(30);
+const TOMBSTONE_CAP: usize = 1024;
+
+#[derive(Default)]
+struct Inner {
+    slots: HashMap<Uuid, Slot>,
+    /// Bilinmeyen kimliğe gelen iptaller: `apply` kayıt olurken yuva zaten iptal edilmiş doğar.
+    tombstones: HashMap<Uuid, Instant>,
+}
+
 /// `apply_id` → iptal yuvası.
 #[derive(Default)]
 pub(crate) struct CancelMap {
-    slots: StdMutex<HashMap<Uuid, Slot>>,
+    inner: StdMutex<Inner>,
 }
 
 impl CancelMap {
-    fn lock(&self) -> MutexGuard<'_, HashMap<Uuid, Slot>> {
-        self.slots.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Yuva açar; aynı kimlikle süren uygulama varsa reddedilir (birinin düşmesi diğerinin yuvasını silmesin).
+    /// Kayıttan önce iptal edilmiş kimlik (mezar taşı) iptal bayrağıyla doğar.
     pub(crate) fn register(&self, id: Uuid) -> Result<Registration<'_>> {
-        let mut slots = self.lock();
-        if slots.contains_key(&id) {
+        let mut inner = self.lock();
+        if inner.slots.contains_key(&id) {
             return Err(Error::Invalid(APPLY_ID_IN_USE.into()));
         }
-        slots.insert(id, Slot::default());
+        let cancelled = inner.tombstones.remove(&id).is_some_and(|t| t.elapsed() < TOMBSTONE_TTL);
+        inner.slots.insert(id, Slot { handle: None, cancelled });
         Ok(Registration { map: self, id })
     }
 
-    /// İptal bayrağını kurar; bağlantı açıldıysa tutamacı döndürür. Bilinmeyen kimlik → `None`.
+    /// İptal bayrağını kurar; bağlantı açıldıysa tutamacı döndürür. Bilinmeyen kimlik → `None` (ve kısa ömürlü
+    /// mezar taşı: iptal, `apply` kaydından önce gelmiş olabilir).
     pub(crate) fn request(&self, id: Uuid) -> Option<Option<CancelHandle>> {
-        let mut slots = self.lock();
-        let slot = slots.get_mut(&id)?;
-        slot.cancelled = true;
-        Some(slot.handle.clone())
+        let mut inner = self.lock();
+        if let Some(slot) = inner.slots.get_mut(&id) {
+            slot.cancelled = true;
+            return Some(slot.handle.clone());
+        }
+        inner.tombstones.retain(|_, t| t.elapsed() < TOMBSTONE_TTL);
+        if inner.tombstones.len() < TOMBSTONE_CAP {
+            inner.tombstones.insert(id, Instant::now());
+        }
+        None
+    }
+
+    /// Yuva hâlâ duruyor ve iptal bayrağı kalkmışsa tutamaç (iptal isteği ifade başlamadan önce ulaşıp yutulmuş
+    /// olabilir; yeniden gönderilir).
+    pub(crate) fn pending_cancel(&self, id: Uuid) -> Option<CancelHandle> {
+        let inner = self.lock();
+        inner.slots.get(&id).filter(|s| s.cancelled).and_then(|s| s.handle.clone())
     }
 
     /// Tüm yuvalara iptal bayrağı kurar; açık bağlantıların tutamaçlarını döndürür.
     pub(crate) fn request_all(&self) -> Vec<CancelHandle> {
-        let mut slots = self.lock();
-        slots
+        let mut inner = self.lock();
+        inner
+            .slots
             .values_mut()
             .filter_map(|s| {
                 s.cancelled = true;
@@ -96,7 +127,12 @@ impl CancelMap {
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.lock().len()
+        self.lock().slots.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tombstones(&self) -> usize {
+        self.lock().tombstones.len()
     }
 }
 
@@ -108,19 +144,19 @@ pub(crate) struct Registration<'a> {
 
 impl Registration<'_> {
     pub(crate) fn set_handle(&self, handle: CancelHandle) {
-        if let Some(slot) = self.map.lock().get_mut(&self.id) {
+        if let Some(slot) = self.map.lock().slots.get_mut(&self.id) {
             slot.handle = Some(handle);
         }
     }
 
     pub(crate) fn cancelled(&self) -> bool {
-        self.map.lock().get(&self.id).is_some_and(|s| s.cancelled)
+        self.map.lock().slots.get(&self.id).is_some_and(|s| s.cancelled)
     }
 }
 
 impl Drop for Registration<'_> {
     fn drop(&mut self) {
-        self.map.lock().remove(&self.id);
+        self.map.lock().slots.remove(&self.id);
     }
 }
 
@@ -128,7 +164,8 @@ impl Drop for Registration<'_> {
 #[derive(Debug)]
 pub(crate) enum RunResult {
     Done,
-    Failed { failed_index: u32, committed: u32, error: Error },
+    /// `outcome_unknown`: COMMIT yanıtı alınamadı (G/Ç hatası); blok kalıcılaşmış olabilir.
+    Failed { failed_index: u32, committed: u32, error: Error, outcome_unknown: bool },
 }
 
 pub(crate) fn cancelled_error() -> Error {
@@ -163,10 +200,10 @@ pub(crate) async fn run_statements(client: &Client, statements: &[Statement], re
     while i < statements.len() {
         if !statements[i].transactional {
             if reg.cancelled() {
-                return RunResult::Failed { failed_index: idx(i), committed, error: cancelled_error() };
+                return RunResult::Failed { failed_index: idx(i), committed, error: cancelled_error(), outcome_unknown: false };
             }
             if let Err(e) = client.batch_execute(&statements[i].sql).await {
-                return RunResult::Failed { failed_index: idx(i), committed, error: statement_error(e, reg) };
+                return RunResult::Failed { failed_index: idx(i), committed, error: statement_error(e, reg), outcome_unknown: false };
             }
             committed += 1;
             i += 1;
@@ -174,27 +211,28 @@ pub(crate) async fn run_statements(client: &Client, statements: &[Statement], re
         }
         let end = statements[i..].iter().position(|s| !s.transactional).map_or(statements.len(), |p| i + p);
         if reg.cancelled() {
-            return RunResult::Failed { failed_index: idx(i), committed, error: cancelled_error() };
+            return RunResult::Failed { failed_index: idx(i), committed, error: cancelled_error(), outcome_unknown: false };
         }
         if let Err(e) = client.batch_execute("BEGIN").await {
-            return RunResult::Failed { failed_index: idx(i), committed, error: statement_error(e, reg) };
+            return RunResult::Failed { failed_index: idx(i), committed, error: statement_error(e, reg), outcome_unknown: false };
         }
         for (k, s) in statements.iter().enumerate().take(end).skip(i) {
             if reg.cancelled() {
                 rollback(client).await;
-                return RunResult::Failed { failed_index: idx(k), committed, error: cancelled_error() };
+                return RunResult::Failed { failed_index: idx(k), committed, error: cancelled_error(), outcome_unknown: false };
             }
             if let Err(e) = client.batch_execute(&s.sql).await {
                 let error = statement_error(e, reg);
                 rollback(client).await;
-                return RunResult::Failed { failed_index: idx(k), committed, error };
+                return RunResult::Failed { failed_index: idx(k), committed, error, outcome_unknown: false };
             }
         }
-        // COMMIT hatası (ör. ertelenmiş kısıt): blok geri alınmıştır; hata bloğun son ifadesine yazılır.
+        // COMMIT hatası: SQLSTATE varsa (ör. ertelenmiş kısıt) sunucu bloğu geri almıştır, ayrı ROLLBACK gerekmez
+        // (transaction zaten sonlanmış); SQLSTATE yoksa (G/Ç, kopan bağlantı) sonuç belirsizdir. Hata bloğun son ifadesine yazılır.
         if let Err(e) = client.batch_execute("COMMIT").await {
+            let outcome_unknown = e.code().is_none();
             let error = statement_error(e, reg);
-            rollback(client).await;
-            return RunResult::Failed { failed_index: idx(end - 1), committed, error };
+            return RunResult::Failed { failed_index: idx(end - 1), committed, error, outcome_unknown };
         }
         committed += idx(end - i);
         i = end;
@@ -241,6 +279,13 @@ pub(crate) fn failure_payload(e: &Error) -> ErrorPayload {
     ErrorPayload::from(e)
 }
 
+/// Belirsiz sonuçlu (COMMIT yanıtsız) hatanın yükü: ipucu, bloğun kalıcılaşmış olabileceğini söyler.
+pub(crate) fn unknown_outcome_payload(e: &Error) -> ErrorPayload {
+    let mut p = failure_payload(e);
+    p.hint = Some(OUTCOME_UNKNOWN_HINT.into());
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +315,45 @@ mod tests {
         }));
         assert!(r.is_err());
         assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn cancel_before_register_leaves_a_tombstone_that_cancels_on_registration() {
+        let map = CancelMap::default();
+        let id = Uuid::new_v4();
+        assert!(map.request(id).is_none());
+        assert_eq!(map.tombstones(), 1);
+        let reg = map.register(id).unwrap();
+        assert!(reg.cancelled(), "kayıttan önce gelen iptal yuvayı iptal edilmiş doğurmalı");
+        assert_eq!(map.tombstones(), 0);
+        drop(reg);
+        // Mezar taşı tek kullanımlık: sonraki kayıt temiz.
+        assert!(!map.register(id).unwrap().cancelled());
+        // Bitmiş kimliğe iptal de bir mezar taşı bırakır ama bellek sınırlıdır.
+        for _ in 0..(TOMBSTONE_CAP + 10) {
+            map.request(Uuid::new_v4());
+        }
+        assert!(map.tombstones() <= TOMBSTONE_CAP);
+    }
+
+    #[test]
+    fn pending_cancel_needs_flag_and_handle() {
+        let map = CancelMap::default();
+        let id = Uuid::new_v4();
+        let _reg = map.register(id).unwrap();
+        assert!(map.pending_cancel(id).is_none());
+        map.request(id);
+        assert!(map.pending_cancel(id).is_none(), "tutamaç yokken gönderilecek bir şey yok");
+        assert!(map.pending_cancel(Uuid::new_v4()).is_none());
+    }
+
+    #[test]
+    fn unknown_outcome_payload_overrides_the_hint() {
+        let io = Error::Query { sqlstate: None, message: "bağlantı koptu".into(), detail: None, hint: None };
+        let p = unknown_outcome_payload(&io);
+        assert_eq!(p.hint.as_deref(), Some(OUTCOME_UNKNOWN_HINT));
+        assert!(OUTCOME_UNKNOWN_HINT.contains("belirsiz"));
+        assert_eq!(p.code, "query");
     }
 
     #[test]

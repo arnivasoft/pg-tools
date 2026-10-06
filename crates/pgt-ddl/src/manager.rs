@@ -6,8 +6,8 @@
 //!
 //! Günlük yalnızca işlem/nesne türü, ifade sayısı, süre ve sonuç kodunu içerir; SQL, ad ve değer asla.
 
-use std::sync::{Arc, PoisonError, RwLock};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::time::{Duration, Instant};
 
 use pgt_core::connection::{ConnectionManager, MAX_STATEMENT_TIMEOUT_MS, Target};
 use pgt_core::registry::Registry;
@@ -80,6 +80,8 @@ pub enum ApplyOutcome {
         statements: u32,
         #[ts(type = "number")]
         elapsed_ms: u64,
+        /// Create (ve kimliği değişen alter/yeniden kurma) sonrası yeni nesne; en iyi çaba, bulunamazsa `None`.
+        created: Option<ObjectRef>,
     },
     /// `failed_index`: başarısız ifadenin 0 tabanlı sırası; `committed`: kalıcılaşmış (transaction dışı ya da önceki blok)
     /// ifade sayısı; `sqlstate`: PG hata kodu (ör. `57014` iptal, `55P03` kilit zaman aşımı; bağlantı hatasında yok).
@@ -97,6 +99,46 @@ pub struct CreateContext {
     pub table_oid: Option<u32>,
 }
 
+/// İptal isteğinin yutulmasına karşı yeniden gönderme: sayı ve aralık.
+const CANCEL_RESENDS: u32 = 3;
+const CANCEL_RESEND_AFTER: Duration = Duration::from_millis(200);
+
+const FIND_SCHEMA_SQL: &str = "SELECT oid FROM pg_namespace WHERE nspname = $1";
+const FIND_EXTENSION_SQL: &str = "SELECT oid FROM pg_extension WHERE extname = $1";
+const FIND_SEQUENCE_SQL: &str = "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'S'";
+const FIND_INDEX_SQL: &str = "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('i', 'I')";
+
+/// Çağıran gelecek düşerse sunucudaki ifadeyi iptal eder (`armed` yalnızca çalıştırıcı bitince kapanır).
+struct CancelOnDrop {
+    handle: pgt_core::connection::CancelHandle,
+    rt: tokio::runtime::Handle,
+    armed: bool,
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            let h = self.handle.clone();
+            self.rt.spawn(async move {
+                let _ = h.cancel().await;
+            });
+        }
+    }
+}
+
+/// Alter sonrası nesnenin kimliği (şema/ad) değiştiyse ya da indeks yeniden kuruluyorsa (oid değişir) yeniden aranır.
+fn identity_changed(old: &ObjectDef, new: &ObjectDef) -> bool {
+    match (old, new) {
+        (ObjectDef::Schema(a), ObjectDef::Schema(b)) => a.name != b.name,
+        (ObjectDef::Extension(a), ObjectDef::Extension(b)) => a.name != b.name,
+        (ObjectDef::Sequence(a), ObjectDef::Sequence(b)) => (&a.schema, &a.name) != (&b.schema, &b.name),
+        (ObjectDef::Index(_), ObjectDef::Index(_)) => true,
+        _ => false,
+    }
+}
+
 const SCHEMA_NAME_SQL: &str = "SELECT nspname::text AS name FROM pg_namespace WHERE oid = $1";
 const TABLE_NAME_SQL: &str = "SELECT n.nspname::text AS schema, c.relname::text AS name \
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1 AND c.relkind IN ('r', 'm', 'p')";
@@ -105,6 +147,8 @@ pub struct DdlManager {
     mgr: Arc<ConnectionManager>,
     registry: Arc<RwLock<Registry>>,
     cancels: CancelMap,
+    /// Son `apply`'ın çalışma zamanı: `cancel_all` Tokio bağlamı olmayan iş parçacığından (Tauri ana iş parçacığı) çağrılabilir.
+    rt: Mutex<Option<tokio::runtime::Handle>>,
 }
 
 /// Çalıştırmanın günlük/iptal bilgileri.
@@ -113,6 +157,8 @@ struct Job {
     kind: ObjectKind,
     lock_timeout_ms: u32,
     apply_id: Uuid,
+    /// Uygulama sonrası kimliği aranacak nesne (Create / kimliği değişen alter).
+    created: Option<ObjectDef>,
 }
 
 /// Kayıttan okunan koruma bayrakları.
@@ -123,7 +169,7 @@ struct Guard {
 
 impl DdlManager {
     pub fn new(mgr: Arc<ConnectionManager>, registry: Arc<RwLock<Registry>>) -> Self {
-        DdlManager { mgr, registry, cancels: CancelMap::default() }
+        DdlManager { mgr, registry, cancels: CancelMap::default(), rt: Mutex::new(None) }
     }
 
     fn guard(&self, server: Uuid) -> Result<Guard> {
@@ -170,17 +216,33 @@ impl DdlManager {
         }
         // (7)
         check_lock_timeout(opts.lock_timeout_ms)?;
-        let job = Job { op: req.op(), kind: req.kind(), lock_timeout_ms: opts.lock_timeout_ms, apply_id: opts.apply_id };
+        let created = match req {
+            PlanRequest::Create { def, .. } => Some(def.clone()),
+            PlanRequest::Alter { old, new } if identity_changed(old, new) => Some(new.clone()),
+            _ => None,
+        };
+        let job = Job { op: req.op(), kind: req.kind(), lock_timeout_ms: opts.lock_timeout_ms, apply_id: opts.apply_id, created };
         self.execute(server, database_oid, &view.statements, job).await
     }
 
     /// Bağlantı açar, ifadeleri blok blok çalıştırır, sonucu günlüğe (yalnızca tür/sayı/süre/sonuç) yazar.
     async fn execute(&self, server: Uuid, database_oid: u32, statements: &[Statement], job: Job) -> Result<ApplyOutcome> {
-        let Job { op, kind, lock_timeout_ms, apply_id } = job;
+        let Job { op, kind, lock_timeout_ms, apply_id, created } = job;
+        let rt = tokio::runtime::Handle::current();
+        *self.rt.lock().unwrap_or_else(PoisonError::into_inner) = Some(rt.clone());
         let started = Instant::now();
         // Yuva bağlantıdan önce açılır: bağlantı kurulurken gelen iptal de dikkate alınır.
         let reg = self.cancels.register(apply_id)?;
         let count = u32::try_from(statements.len()).unwrap_or(u32::MAX);
+        // Kayıttan önce gelen iptal (mezar taşı): bağlantı açmadan, hiçbir ifade çalışmadan iptal sonucu.
+        if reg.cancelled() {
+            return Ok(ApplyOutcome::Failed {
+                failed_index: 0,
+                committed: 0,
+                sqlstate: Some(apply::CANCELED_SQLSTATE.into()),
+                error: apply::failure_payload(&apply::cancelled_error()),
+            });
+        }
         let conn = match apply::open_apply_conn(&self.mgr, server, database_oid, lock_timeout_ms).await {
             Ok(c) => c,
             Err(e) => {
@@ -189,15 +251,22 @@ impl DdlManager {
             }
         };
         reg.set_handle(conn.cancel.clone());
+        // Çağıran gelecek çalışırken düşerse (ör. pencere kapanışı) sunucudaki ifade iptal edilir.
+        let mut guard = CancelOnDrop { handle: conn.cancel.clone(), rt, armed: true };
         let result = apply::run_statements(&conn.client, statements, &reg).await;
+        guard.armed = false;
         drop(reg);
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         Ok(match result {
             RunResult::Done => {
                 tracing::info!(op, ?kind, statements = count, elapsed_ms, outcome = "applied", "DDL uygulandı");
-                ApplyOutcome::Applied { statements: count, elapsed_ms }
+                let created = match &created {
+                    Some(def) => self.find_created(server, database_oid, def).await,
+                    None => None,
+                };
+                ApplyOutcome::Applied { statements: count, elapsed_ms, created }
             }
-            RunResult::Failed { failed_index, committed, error } => {
+            RunResult::Failed { failed_index, committed, error, outcome_unknown } => {
                 let sqlstate = apply::sqlstate(&error).map(str::to_string);
                 tracing::info!(
                     op,
@@ -207,7 +276,8 @@ impl DdlManager {
                     outcome = sqlstate.as_deref().unwrap_or("error"),
                     "DDL uygulanamadı"
                 );
-                ApplyOutcome::Failed { failed_index, committed, sqlstate, error: apply::failure_payload(&error) }
+                let error = if outcome_unknown { apply::unknown_outcome_payload(&error) } else { apply::failure_payload(&error) };
+                ApplyOutcome::Failed { failed_index, committed, sqlstate, error }
             }
         })
     }
@@ -222,22 +292,42 @@ impl DdlManager {
         statements: &[Statement],
         lock_timeout_ms: u32,
     ) -> Result<ApplyOutcome> {
-        let job = Job { op: "test", kind: ObjectKind::Schema, lock_timeout_ms, apply_id: Uuid::new_v4() };
+        let job = Job { op: "test", kind: ObjectKind::Schema, lock_timeout_ms, apply_id: Uuid::new_v4(), created: None };
         self.execute(server, database_oid, statements, job).await
     }
 
-    /// Süren uygulamayı iptal eder; bilinmeyen/bitmiş kimlik → `Ok` (idempotent).
+    /// Süren uygulamayı iptal eder; bilinmeyen/bitmiş kimlik → `Ok` (idempotent). Kimlik henüz kayıtlı değilse
+    /// kısa ömürlü mezar taşı bırakılır (`apply` kaydında iptalle doğar). İstek ifade başlamadan önce ulaşıp
+    /// yutulmuş olabilir: yuva hâlâ duruyorsa kısa aralıklarla (en çok 3 kez) yeniden gönderilir.
     pub async fn cancel(&self, apply_id: Uuid) -> Result<()> {
-        match self.cancels.request(apply_id) {
-            Some(Some(handle)) => handle.cancel().await,
-            _ => Ok(()),
+        let Some(Some(handle)) = self.cancels.request(apply_id) else { return Ok(()) };
+        let first = handle.cancel().await;
+        for _ in 0..CANCEL_RESENDS {
+            tokio::time::sleep(CANCEL_RESEND_AFTER).await;
+            match self.cancels.pending_cancel(apply_id) {
+                Some(h) => {
+                    let _ = h.cancel().await;
+                }
+                None => break,
+            }
         }
+        first
     }
 
-    /// Tüm süren uygulamaları iptal eder (uygulama kapanışı); istekler arka planda gönderilir.
-    pub fn cancel_all(&self) {
+    /// Tüm süren uygulamaları iptal eder (uygulama kapanışı/yeniden yükleme); istekler arka planda gönderilir.
+    /// Ortam Tokio bağlamı olmayan iş parçacığından (Tauri ana iş parçacığı) da çalışır: bağlam yoksa son
+    /// `apply`'ın çalışma zamanı kullanılır (uçuşta uygulama varsa zaten vardır).
+    /// Gönderilmek üzere sıraya alınan iptal sayısını döndürür.
+    pub fn cancel_all(&self) -> usize {
         let handles = self.cancels.request_all();
-        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        if handles.is_empty() {
+            return 0;
+        }
+        let rt = tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| self.rt.lock().unwrap_or_else(PoisonError::into_inner).clone());
+        let Some(rt) = rt else { return 0 };
+        let n = handles.len();
         for h in handles {
             rt.spawn(async move {
                 if h.cancel().await.is_err() {
@@ -245,6 +335,32 @@ impl DdlManager {
                 }
             });
         }
+        n
+    }
+
+    /// Yeni nesnenin oid'i (kimlik tür + şema + addan, havuzdaki katalog bağlantısıyla). En iyi çaba: hata → `None`.
+    async fn find_created(&self, server: Uuid, database_oid: u32, def: &ObjectDef) -> Option<ObjectRef> {
+        let (kind, sql, schema, name) = match def {
+            ObjectDef::Schema(d) => (ObjectKind::Schema, FIND_SCHEMA_SQL, None, d.name.clone()),
+            ObjectDef::Extension(d) => (ObjectKind::Extension, FIND_EXTENSION_SQL, None, d.name.clone()),
+            ObjectDef::Sequence(d) => (ObjectKind::Sequence, FIND_SEQUENCE_SQL, Some(d.schema.clone()), d.name.clone()),
+            ObjectDef::Index(d) => (ObjectKind::Index, FIND_INDEX_SQL, Some(d.schema.clone()), d.name.clone()),
+        };
+        let row = self
+            .mgr
+            .run(server, Target::Database(database_oid), move |c| {
+                let (schema, name) = (schema.clone(), name.clone());
+                async move {
+                    match schema {
+                        Some(s) => c.client.query_opt(sql, &[&s, &name]).await,
+                        None => c.client.query_opt(sql, &[&name]).await,
+                    }
+                }
+            })
+            .await
+            .ok()
+            .flatten()?;
+        Some(ObjectRef { kind, oid: row.get::<_, u32>(0) })
     }
 
     pub async fn load(&self, server: Uuid, database_oid: u32, obj: ObjectRef) -> Result<ObjectDef> {
@@ -372,8 +488,8 @@ mod tests {
         assert_eq!(v["lockTimeoutMs"], 5000);
         assert_eq!(v["confirmedProduction"], false);
         assert_eq!(v["applyId"], Uuid::nil().to_string());
-        let a = serde_json::to_value(ApplyOutcome::Applied { statements: 2, elapsed_ms: 7 }).unwrap();
-        assert_eq!(a, json!({"outcome": "applied", "statements": 2, "elapsedMs": 7}));
+        let a = serde_json::to_value(ApplyOutcome::Applied { statements: 2, elapsed_ms: 7, created: None }).unwrap();
+        assert_eq!(a, json!({"outcome": "applied", "statements": 2, "elapsedMs": 7, "created": null}));
         let f = ApplyOutcome::Failed {
             failed_index: 1,
             committed: 0,

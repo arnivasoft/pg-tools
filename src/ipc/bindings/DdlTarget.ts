@@ -2,4 +2,8 @@
 import type { DdlCreate } from "./DdlCreate";
 import type { ObjectRef } from "./ObjectRef";
 
-export type DdlTarget = { serverId: string, databaseOid: number | null, object: ObjectRef | null, create: DdlCreate | null, };
+export type DdlTarget = { serverId: string, databaseOid: number | null, object: ObjectRef | null, create: DdlCreate | null, 
+/**
+ * Uygulama sonrası arayüzün yenileyeceği ağaç düğümü: `create` için koleksiyonun kendisi, `object` için üst koleksiyon.
+ */
+refreshNodeId: string | null, };

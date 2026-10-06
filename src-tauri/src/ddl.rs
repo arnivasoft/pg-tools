@@ -121,7 +121,8 @@ mod tests {
             fx.registry.write().unwrap().upsert(fx.ts.config.clone()).unwrap();
 
             let out = Box::pin(ddl.apply(sid, db, &req, opts(&view.hash))).await.map_err(|e| ddl_payload(&e)).unwrap();
-            assert!(matches!(out, ApplyOutcome::Applied { .. }), "{out:?}");
+            let ApplyOutcome::Applied { created, .. } = out else { panic!("{out:?}") };
+            assert_eq!(created.map(|c| c.kind), Some(ObjectKind::Schema));
 
             let oid: u32 = admin.query_one("SELECT oid FROM pg_namespace WHERE nspname = $1", &[&SCHEMA]).await.unwrap().get(0);
             let loaded = Box::pin(ddl.load(sid, db, ObjectRef { kind: ObjectKind::Schema, oid })).await.map_err(|e| ddl_payload(&e)).unwrap();
@@ -135,6 +136,15 @@ mod tests {
             let idle = DdlManager::new(Arc::new(ConnectionManager::new()), fx.registry.clone());
             let err = Box::pin(idle.apply(sid, db, &req, opts(&view.hash))).await.map_err(|e| ddl_payload(&e)).unwrap_err();
             assert_eq!(err.code, "not_connected");
+
+            // Yürütme hatası `Ok(Failed)`, kapı reddi `Err(kod)`: aynı şemayı yeniden oluşturmak sunucuda 42P06 ile
+            // düşer; yanlış hash ise bağlantı açılmadan `plan_changed` olur.
+            let hash = Box::pin(ddl.preview(sid, db, &req)).await.map_err(|e| ddl_payload(&e)).unwrap().hash;
+            let out = Box::pin(ddl.apply(sid, db, &req, opts(&hash))).await.map_err(|e| ddl_payload(&e)).unwrap();
+            let ApplyOutcome::Failed { sqlstate, committed, .. } = out else { panic!("{out:?}") };
+            assert_eq!((sqlstate.as_deref(), committed), (Some("42P06"), 0));
+            let err = Box::pin(ddl.apply(sid, db, &req, opts("yanlis"))).await.map_err(|e| ddl_payload(&e)).unwrap_err();
+            assert_eq!(err.code, "plan_changed");
         };
         body.await;
         admin.batch_execute(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")).await.unwrap();
