@@ -12,6 +12,8 @@
   - geçici %LOCALAPPDATA%\pg-tools\logs altında "panicked" / "stack overflow" geçiyorsa hata.
   Çıkış kodu 0 = başarılı, 1 = başarısız.
 .PARAMETER Exe      Sınanacak exe (varsayılan: target\release\pg-tools.exe)
+                    Ön yüzü gömülü exe gerekir: `bun run tauri build --no-bundle` ile derleyin. Düz
+                    `cargo build --release` exe'si devUrl'ye (localhost:1420) yönelir; betik bunu reddeder.
 .PARAMETER Seconds  Pencere oluştuktan sonra sürecin ayakta kalması gereken süre (varsayılan 6)
 #>
 param(
@@ -38,6 +40,13 @@ function Get-Tree([int]$rootPid, [datetime]$since) {
 }
 
 if (-not (Test-Path $Exe)) { Write-Output "BAŞARISIZ: exe bulunamadı: $Exe"; exit 1 }
+# Gömülü ön yüz denetimi: tauri build exe'si varlık anahtarlarını ("assets/index-…") düz metin taşır; düz cargo
+# build (custom-protocol yok) ve debug exe'si taşımaz ve devUrl'ye yönelir (arayüz komutları hiç çağrılmaz).
+$exeText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($Exe))
+if ($exeText.IndexOf("assets/index-", [StringComparison]::Ordinal) -lt 0) {
+    Write-Output "BAŞARISIZ: exe ön yüzü gömmüyor (cargo build?). 'bun run tauri build --no-bundle' ile derleyin: $Exe"; exit 1
+}
+Remove-Variable exeText
 
 $root = Join-Path $env:TEMP ("pgt-smoke-" + [guid]::NewGuid().ToString("N"))
 $appdata = Join-Path $root "Roaming"

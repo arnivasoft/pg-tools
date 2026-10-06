@@ -244,9 +244,51 @@ bütçe **< 50 ms** (2026-10-05 ölçümü 0,93 ms; `docs/performance.md`). `bun
 ile birlikte çalışır; ölçülen değeri görmek için
 `npx vitest run src/features/explorer/tree-model.test.ts -t "10,000" --silent=false`.
 
+## Query Tool ön yüzü (Plan 6)
+
+Ön yüz mantığı DOM'dan ayrı, saf modellerde tutulur ve `bun run test` (vitest) ile sınanır; CodeMirror/DOM'a bağlı
+kısım (`QueryTab.tsx`, `ResultGrid.tsx`, `editor.ts`) ince tutulur ve elle/CDP ile doğrulanır
+(`docs/smoke-test.md` "Query Tool"). `src/features/query/*.test.ts`:
+
+| Dosya | Kapsam |
+|---|---|
+| `offsets.test.ts` | UTF-16 (CodeMirror) ↔ Unicode scalar (arka uç) ofset dönüşümü; emoji/vekil çiftleri, sınır dışı kırpma |
+| `confirm-model.test.ts` | Onay kararı (`decide`): WHERE'siz UPDATE/DELETE, DROP/TRUNCATE, üretim + yazma/`DO`/`CALL`, kilit; onay diyaloğu metni |
+| `run-model.test.ts` | Çalıştırma durum makinesi (`runReduce`): açılış, çalışma, iptal, onay reddi/kilit/boş betik (`runAborted`), `scriptDone` ile bitiş, eski `runId` olayları |
+| `result-model.test.ts` | Olay → sonuç (`applyEvent`): ifade başına şerit, satır parçaları, NOTICE, hata konumu, `scriptDone` bitirir, eski `runId` yok sayılır |
+| `grid-model.test.ts` | Hücre gösterimi (NULL/boş ayrımı, satır sonu, 1000 karakterde kırpma), sütun genişlikleri, seçim/kopyalama biçimi |
+| `export.test.ts` | CSV dışa aktarma hedef seçimi (`exportTarget`: tek satır döndüren ifade), dosya adı sadeleştirme, ifade seçimi (`preferredIndex`) |
+| `history-model.test.ts` | Geçmiş girdileri (`historyEntriesFor`): hassas ifadeyi dışarıda bırakma, başarısız/iptal işareti, emoji sonrası ofsetler, arama |
+| `errors.test.ts` | `isQueryErrorCode` tür koruyucusu ve `hintFor` ipuçları (25001, `tx_failed`, `session_reset`, `locked`) |
+| `completion.test.ts` | Tamamlama bağlamı (`contextAt`), `replaceRange`/`matchItems` (açık tırnak, otomatik kapanış tırnağı) |
+| `tabs-store.test.ts` | Sekme deposu: Nesne sekmesi, başlık `<sunucu>/<db> #n`, kimlik çakışması, kapatma/seçim, sıra |
+| `workspace-model.test.ts` | Çalışma alanı: `openContext`/`initialSql`, ortam istemi, `saveClosesSessions` (arka uçla aynı kural), `closePlan`/`bulkPolicy`, `routeError`, taslak dönüşümü, `swapEditorState`, zamanlayıcı biçimi |
+| `query-controller.test.ts` | Denetleyici (sahte api + sahte zamanlayıcılar): kapanan sekmenin taslağı geri gelmez, sunucusu silinen sekme taslak yazmaz |
+
+Ayrıca `src/features/explorer/actions.test.ts` (menüdeki `openQueryTool` ve kısayol etiketi) ve
+`tree-model.test.ts` (sunucu listesi yeniden yüklenince bağlı sunucunun alt ağacı korunur) Plan 6'da genişletildi.
+
+### GUI'nin CDP ile sürülmesi
+
+Elle duman testi ve ölçümler otomatikleştirilmiş bir tarayıcı yerine WebView2'nin uzak hata ayıklama portuyla
+(Chrome DevTools Protocol) yapıldı; ek bağımlılık gerekmez (Node ≥ 22'nin yerleşik `WebSocket`'i yeter):
+
+1. Atılabilir PG: `docker run -d --name pgt-qt-ui … -p 127.0.0.1:55499:5432 postgres:18` (iş bitince `docker rm -f`).
+2. Gerçek yapılandırmaya dokunmamak için `APPDATA` ve `LOCALAPPDATA` geçici dizinlere yönlendirilir; uygulama
+   `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="<tauri.conf.json ayarları> --remote-debugging-port=9224"` ile başlatılır
+   (bu değişken `additionalBrowserArgs`'ın yerine geçer: ayarları da yazın, yoksa bellek ölçümü bozulur).
+3. `http://127.0.0.1:9224/json` → sayfa hedefinin `webSocketDebuggerUrl`'sine bağlanılır; `Runtime.evaluate`
+   (`awaitPromise`, `returnByValue`) ile DOM okunur / `window.__TAURI_INTERNALS__.invoke(...)` ile komut çağrılır,
+   `Input.dispatchMouseEvent` / `Input.dispatchKeyEvent` / `Input.insertText` ile gerçek girdi gönderilir (Enter
+   tuşu yerine odaktaki düğme tıklanmalı: sentetik `keyDown` Enter bir formu göndermez), `Page.captureScreenshot` ile görüntü alınır.
+4. Sunucu kaydı `invoke("save_server", …)` ile eklenir, işin sonunda `delete_server` ile silinir (`servers.json` boş doğrulanır).
+   Parolalar betiğin dışına yazılmaz/yazdırılmaz. Yerel Windows kaydet diyaloğu CDP'nin dışındadır: UIAutomation + SendKeys.
+
+Bu yöntemle Task 8'de akışlar (onay, transaction, iptal, CSV, geçmiş, 50.000 satır DOM sayımı, taslaklar, pencere
+kapanışı) ve Task 9'da yayın exe'sinde sorgu sekmesi açılış süresi ile bellek (`docs/performance.md`) doğrulandı.
+
 ## Yayın exe duman testi
-    bun run build
-    cargo build --release -p pg-tools               # ya da bun run tauri build
+    bun run tauri build --no-bundle                 # dist + ön yüzü gömülü targeteleasepg-tools.exe (NSIS yok)
     ./scripts/smoke-release.ps1                     # varsayılan: target\release\pg-tools.exe, 6 sn
     ./scripts/smoke-release.ps1 -Exe C:\yol\pg-tools.exe -Seconds 10
 
@@ -255,6 +297,20 @@ dokunmaz, sunucuya bağlanmaz, parola kullanmaz), ana pencerenin 10 sn içinde o
 `-Seconds` boyunca izler, sonra uygulama + WebView2 süreç ağacını kapatır ve geçici
 `%LOCALAPPDATA%\pg-tools\logs` altında `panicked` / `stack overflow` arar. Çıkış kodu 0 = başarılı; ≠ 0 =
 exe yok, pencere oluşmadı, süre dolmadan çıktı (çıkış kodu yazdırılır) ya da logda panik var.
+Betik önce exe'nin ön yüzü gömüp gömmediğini denetler (exe'de düz metin `assets/index-` varlık anahtarı); yoksa
+"BAŞARISIZ: exe ön yüzü gömmüyor (cargo build?)" ile çıkar. Düz `cargo build --release -p pg-tools`, `tauri`
+CLI'nin açtığı `custom-protocol` özelliği olmadan derlendiği için `devUrl`'ye (`http://localhost:1420`) yönelir: pencere
+bir bağlantı hatası sayfası gösterir ve arayüzün açılışta çağırdığı komutlar (`list_servers`, `list_children`,
+`startup_notice`, `qt_drafts_load`, `settings_get` …) hiç çalışmaz — yayın yığın taşması gibi gerilemeler kaçar.
+(Doğrulama 2026-10-06: `cargo build` exe'si 14.146.560 bayt, `assets/index-` yok; `bun run tauri build --no-bundle`
+exe'si 14.369.792 bayt, CDP hedef URL'si `http://tauri.localhost/`, `assets/index-` var; debug exe'de de yok.)
+`scripts/measure.ps1` aynı denetimi yapar.
+
+> **Geçmiş çalıştırmalar için not:** bu denetimden önce belgelenen `cargo build --release` + `smoke-release.ps1`
+> çalıştırmaları (Plan 3, Plan 5 sonu ve Plan 6 Task 8 doğrulama/düzeltme turları) ön yüzü gömülü olmayan exe ile
+> yapılmış olabilir; bunlar yalnızca açılışta çökme olmadığını gösterir, arayüz komutlarının yayın derlemesinde
+> çalıştığını göstermez. Plan 2 (`bun tauri build --no-bundle`) ve Plan 6 Task 9/son düzeltme dalgası `tauri build` exe'siyle yapıldı.
+
 Yalnızca debug derlemede görünmeyen hataları yakalamak içindir: Plan 2'de release exe açılıştan ~1 sn sonra
 ana iş parçacığında yığın taşmasıyla (`STATUS_STACK_OVERFLOW`) çöküyordu; varsayılan 6 sn bu tür bir
 gerilemeyi yakalayacak kadar uzundur. Her yayından önce çalıştırın.

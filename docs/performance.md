@@ -135,6 +135,10 @@ tembel yüklenen diyaloglar) sonrasında aynı makinede, Plan 2'de seçilen ayar
     powershell -NoProfile -File scripts/smoke-release.ps1     # BAŞARILI, çıkış kodu 0 (pencere 192 ms, 6 sn ayakta)
     powershell -NoProfile -File scripts/measure.ps1 -Runs 5
 
+> **Not (sonradan eklendi):** bu bölümün exe'si düz `cargo build --release` ile derlendi; ön yüzü gömmeyen (devUrl'ye
+> yönelen) bir exe olabilir (bkz. Plan 6 bölümündeki not ve `docs/testing.md` "Yayın exe duman testi"). Rakamlar
+> değiştirilmedi; arayüzsüz WebView ile ölçülmüş olabilirler.
+
 | Çalıştırma | Pencere (ms) | Toplam özel WS (MiB) | Toplam WS (MiB) | Rust özel WS (MiB) | Süreç |
 |---|---|---|---|---|---|
 | 1 | 121 | 73,7 | 348,2 | 7,2 | 7 |
@@ -175,6 +179,10 @@ yok (Plan 6), bu yüzden boşta bellek değişmemelidir. Aynı makinede, seçile
     powershell -NoProfile -File scripts/smoke-release.ps1     # BAŞARILI, çıkış kodu 0 (pencere 158 ms, 6 sn ayakta)
     powershell -NoProfile -File scripts/measure.ps1 -Runs 5
 
+> **Not (sonradan eklendi):** bu bölümün exe'si düz `cargo build --release` ile derlendi; ön yüzü gömmeyen (devUrl'ye
+> yönelen) bir exe olabilir (bkz. Plan 6 bölümündeki not ve `docs/testing.md` "Yayın exe duman testi"). Rakamlar
+> değiştirilmedi; arayüzsüz WebView ile ölçülmüş olabilirler.
+
 | Çalıştırma | Pencere (ms) | Toplam özel WS (MiB) | Toplam WS (MiB) | Rust özel WS (MiB) | Süreç |
 |---|---|---|---|---|---|
 | 1 | 34 | 72,8 | 347,0 | 7,2 | 7 |
@@ -190,6 +198,7 @@ Plan 3 sonuna göre (73,4 / 7,2 MiB) fark yok.
 ### Exe boyutu (öncesi/sonrası)
 
 `cargo build --release -p pg-tools`, aynı `dist` ile, temiz hedef dizini:
+(Exe boyutu karşılaştırması için geçerli; bu exe ön yüzü gömmez — gömülü exe ~0,2 MiB daha büyüktür.)
 
 | Commit | `pg-tools.exe` |
 |---|---|
@@ -218,3 +227,115 @@ Süreler tek çalıştırmadır, assert edilmez; CSV hızı debug derlemede ve y
 daha yüksek olması beklenir).
 
 Sınır: akış sayaçları yalnızca **satır** sayısını sınırlar; hücre başına bayt sınırı yoktur (1 GB'lık tek bir `bytea`/`text` hücresi bütün olarak bellekte tutulur ve gönderilir). Geniş satırlarda tepe bellek `satır x genişlik` ile büyür; ölçümlerdeki 1M satır dar (tek `int`) satırlardır.
+
+## Plan 6 sonu: Query Tool arayüzü (2026-10-06)
+
+Plan 6 arayüzü ekler (sekmeli sağ panel, CodeMirror editörü, sanal ızgara, geçmiş, taslaklar). Editör, ızgara ve
+CodeMirror tembel yüklenen parçalardadır (`QueryTab`, `codemirror-setup`); ana pakete yalnızca sekme çubuğu,
+denetleyici ve saf modeller girer. Boşta bellek bu yüzden Plan 5'ten anlamlı farklı olmamalıdır. Aynı makinede,
+seçilen ayarlarla (B + R1), karar kuralı uygulanmadı (hiçbir hedef aşılmadı).
+
+> **Önemli (ölçüm yöntemi düzeltmesi):** düz `cargo build --release -p pg-tools` çıktısı `custom-protocol` özelliği
+> olmadan derlendiği için ön yüzü gömmez, `devUrl`'ye (`http://localhost:1420`) yönelir; dev sunucusu yokken pencerede
+> bağlantı hatası sayfası görünür. Bu çalıştırmada bu doğrudan görüldü (CDP hedef URL'si `http://localhost:1420/`;
+> gömülü exe'de `http://tauri.localhost/`). Gerçek uygulamanın ölçümü için `bun run tauri build` (ya da
+> `bun tauri build --no-bundle`) çıktısı kullanılmalıdır. Aşağıda **ikisi de** verilir; Plan 3/Plan 5 bölümlerinde
+> `cargo build --release` exe'si ölçülmüşse (73 MiB satırları) o değerler arayüzsüz WebView ile ölçülmüştür. Geçmiş
+> rakamlar yeniden etiketlenmedi. 73 → 76 MiB kayması **ortamdandır** (büyük olasılıkla WebView2 çalışma zamanı
+> güncellemesi): bugün aynı türden (arayüzsüz) `cargo build` exe'si de 75,9 MiB ölçüyor, Plan 5'te aynı tür 73,1 MiB'dı.
+
+    bun run build
+    cargo build --release -p pg-tools                        # exe: ön yüz gömülü DEĞİL (devUrl)
+    powershell -NoProfile -File scripts/smoke-release.ps1    # BAŞARILI, çıkış kodu 0 (pencere 140 ms)
+    powershell -NoProfile -File scripts/measure.ps1 -Runs 5  # cargo exe: medyan pencere 30 ms, toplam özel WS 75,9 MiB, Rust 7,1 MiB
+    bun run tauri build                                      # gerçek exe + NSIS
+    powershell -NoProfile -File scripts/smoke-release.ps1    # BAŞARILI, çıkış kodu 0 (pencere 236 ms)
+    powershell -NoProfile -File scripts/measure.ps1 -Runs 5
+
+### Boşta (gerçek exe, `bun run tauri build` çıktısı)
+
+| Çalıştırma | Pencere (ms) | Toplam özel WS (MiB) | Toplam WS (MiB) | Rust özel WS (MiB) | Süreç |
+|---|---|---|---|---|---|
+| 1 | 143 | 76,1 | 357,1 | 7,3 | 7 |
+| 2 | 43 | 76,2 | 356,9 | 7,4 | 7 |
+| 3 | 45 | 75,9 | 357,1 | 7,4 | 7 |
+| 4 | 45 | 76,1 | 357,4 | 7,4 | 7 |
+| 5 | 45 | 76,2 | 357,4 | 7,5 | 7 |
+| **Medyan** | **45** | **76,1** | 357,1 | **7,4** | 7 |
+
+< 150 MB hedefi karşılandı. Query Tool boşta bellek eklemedi: aynı tür karşılaştırma (arayüzsüz `cargo build` exe'si)
+bugün 75,9 / 7,1 MiB, Plan 5'te 73,1 / 7,2 MiB — +2,8 MiB'lık fark Plan 6 kodu yüklenmeden de görüldüğü için ortamdandır;
+gerçek (gömülü) exe 76,1 MiB, Plan 2'nin `tauri build` sonucu 76,1 MiB ile aynı. Plan 2 (satır 10) doğru yöntemi
+(`bun tauri build --no-bundle`) kullanmıştı; Plan 3 ve Plan 5 `cargo build`'e geçmişti.
+
+### Query Tool senaryosu (elle, CDP ile)
+
+`measure.ps1`'e `-Scenario query` eklenmedi: senaryo bir PostgreSQL ve oturum açmış bir pencere gerektirir (betik
+bugün sunucusuz çalışır); basit olmadığı için elle, betikle ölçüldü:
+
+1. `docker run -d --name pgt-qt-ui9 -e POSTGRES_PASSWORD=<rastgele> -e POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256 -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 -p 127.0.0.1:55499:5432 postgres:18` (iş bitince `docker rm -f`).
+2. Yalıtılmış `APPDATA`/`LOCALAPPDATA` (geçici dizin; gerçek `servers.json`/taslaklara dokunulmaz) ve
+   `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="<tauri.conf.json'daki ayarlar> --remote-debugging-port=9224"` ile
+   `target\release\pg-tools.exe` (tauri build) başlatıldı. **Dikkat:** bu ortam değişkeni `tauri.conf.json`'daki
+   `additionalBrowserArgs`'ın yerine geçer; yalnız `--remote-debugging-port` verilirse GPU kapatma/çizici sınırı
+   kaybolur ve bellek yükselir. Tam ayar kümesi verilince boşta 76,3 MiB (yukarıdakiyle aynı) ölçüldü.
+3. Node (yerleşik `WebSocket`, bağımlılık yok) ile CDP (`http://127.0.0.1:9224/json`): sunucu `window.__TAURI_INTERNALS__.invoke("save_server", …)`
+   ile kaydedildi (etiket "Test"), sayfa yenilendi, ağaçta çift tıklama + parola istemi + "Bağlan" (arayüz üzerinden),
+   8 sn beklendi; "Yeni sorgu" düğmesine `mousedown` ile `.cm-content`'in DOM'a girişi arasındaki fark `performance.now`
+   (sayfa içi `mousedown` yakalama dinleyicisi + `MutationObserver`) ile ölçüldü; ardından editöre
+   `select g as id, md5(g::text) as txt, now() as ts, g * 1.5 as val from generate_series(1,10000) g;` yazılıp
+   Ctrl+Enter ile çalıştırıldı.
+4. Her aşamadan sonra `measure.ps1`'in süreç ağacı yöntemiyle (uygulama + tüm alt süreçler, `WorkingSetPrivate` toplamı; MiB) bellek okundu.
+5. Sunucu `delete_server` ile silindi (`servers.json` boş doğrulandı), uygulama kapatıldı, geçici dizin ve kapsayıcı silindi.
+
+3 bağımsız çalıştırma (her biri sıfır profil + yeni uygulama süreci):
+
+| Çalıştırma | A: bağlı, sorgu sekmesi yok (MiB) | İlk sorgu sekmesi açılış (ms) | B: sekme açık, boş (MiB) | İlk satırlar görünür (ms)¹ | C: 10.000 satır, ~10 sn sonra (MiB) | D: sonuna kaydırıldıktan sonra (MiB) |
+|---|---|---|---|---|---|---|
+| 1 | 85,5 | 45,2 | 91,6 | 115 | 107,1 | 101,8 |
+| 2 | 85,1 | 46,5 | 90,7 | 107 | 109,1 | 102,3 |
+| 3 | 85,8 | 38,2 | 90,5 | 114 | 106,3 | 101,3 |
+| (ön deneme) | 80,9 | 46,6 | 85,6 | 116 | 96,7 | 97,1 |
+
+¹ Ctrl+Enter'den ilk `gridcell`'in görünmesine kadar, 100 ms yoklamayla (≈ ±100 ms); ilk çalıştırma oturumu açmayı
+(`qt_open`) içerir. Spec §1.3 hedefi: basit sorguda (LAN, < 1.000 satır) ilk satır < 150 ms. Bu ölçüm 10.000 satır,
+`qt_open` dahil ve ±100 ms yoklama çözünürlüğüyle yapıldığından hedefi **ne doğrular ne çürütür**; açık iş olarak
+`docs/smoke-test.md`'de listelenir.
+
+- **İlk sorgu sekmesi açılış süresi: 38–47 ms** (hedef < 500 ms). Süre lazy `QueryTab` + `codemirror-setup` parçalarının
+  yüklenmesini, `qt_target_of`/`listServers` çağrılarını ve editörün kurulmasını içerir; ilk açılıştır (parçalar önbellekte değil).
+  (`window` parçası sorgu sekmesinde değil, uygulama açılışında `QueryTabs.onMount` içinde yüklenir.)
+- **10.000 satırlı sekmeyle toplam özel WS: en çok 109,1 MiB** (hedef < 250 MB); sonuna kaydırınca 101–102 MiB.
+  Sunucuya bağlanıp ağaç açmak ~+9 MiB (85 vs 76); boş sekme ~+5 MiB; 10.000 satır ~+16–18 MiB.
+- Izgara DOM'u: 10.000 satır yüklüyken ve sonuna kaydırınca `gridcell` sayısı 92–96, toplam DOM düğümü 369 (sanal liste).
+
+### Paket boyutları
+
+`bun run build` (vite), `dist/assets`:
+
+| Parça | main (`ba40d78`, Plan 5 ön yüzü) | Plan 6 sonu |
+|---|---|---|
+| `index` (ana) | 191,70 kB (gz 61,61) | **228,09 kB (gz 73,83)** — +36,4 kB (gz +12,2) |
+| `DdlView` (lazy) | 295,23 kB (gz 97,35) | 0,38 kB |
+| `codemirror-setup` (lazy, DdlView + QueryTab ortak) | — (DdlView içindeydi) | 351,57 kB (gz 115,94) |
+| `QueryTab` (lazy) | — | 78,37 kB (gz 26,30) |
+| `window` (lazy, Tauri pencere API'si) | — | 14,34 kB (gz 3,49) |
+| `ServerDialog` (lazy) | 5,77 kB | 8,22 kB |
+| `ImportDialog` (lazy) | 5,45 kB | 5,47 kB |
+| `web` (lazy) | 27,02 kB | 27,02 kB |
+| CSS | 17,90 kB | 22,35 kB |
+
+Ana paket Plan 6'da 36,4 kB büyüdü (sekme denetleyicisi, sekme çubuğu + diyaloglar, saf modeller, metinler);
+CodeMirror, ızgara ve editör kodu **ana pakete girmez** (`QueryTab`/`codemirror-setup` ayrı ve tembel). Yalnızca
+Query Tool ya da DDL sekmesi açılınca yüklenirler. Main (Plan 5) ölçümü: `ba40d78`'in geçici worktree'sinde `bun run build`
+(Plan 3 sayısı 184 KiB `index` ≈ 188 kB ile uyumlu).
+
+Exe / kurulum paketi:
+
+| | Boyut |
+|---|---|
+| `target\release\pg-tools.exe` (`cargo build --release`, ön yüz gömülü değil) | 13,49 MiB (14.146.560 bayt) |
+| `target\release\pg-tools.exe` (`bun run tauri build`, ön yüz gömülü) | 13,70 MiB (14.369.792 bayt) |
+| NSIS kurulum paketi `pg-tools_0.1.0_x64-setup.exe` | **3,56 MiB** (3.737.668 bayt; hedef < 15 MB) |
+
+Plan 3'e göre (3,24 MiB) NSIS +0,32 MiB; exe Plan 5'in 13,34 MiB'ine göre +0,15 MiB (cargo exe karşılaştırması).

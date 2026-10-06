@@ -1,4 +1,4 @@
-use pgt_catalog::node::{NodeId, TreeNode};
+use pgt_catalog::node::{NodeId, QueryTarget, TreeNode};
 use pgt_catalog::props::PropertySection;
 use std::sync::RwLock;
 
@@ -22,32 +22,46 @@ pub fn list_servers(state: State<'_, AppState>) -> CmdResult<Vec<ServerConfig>> 
 
 #[tauri::command]
 pub async fn save_server(state: State<'_, AppState>, config: ServerConfig, password: Option<String>) -> CmdResult<ServerConfig> {
-    let (saved, prev) = Box::pin(save_registered(&state.registry, &state.manager, &state.query, config)).await?;
-    let forget = should_forget_stored(prev.as_ref(), &saved, password.as_deref());
-    match (password, saved.save_password) {
-        (Some(p), true) => state.credentials.remember(saved.id, &p, true)?,
-        (_, false) => state.credentials.forget(saved.id)?,
-        (None, true) if forget => state.credentials.forget(saved.id)?,
-        (None, true) => {}
-    }
+    let typed = password.is_some();
+    let (saved, prev) = Box::pin(save_registered(&state.registry, &state.manager, &state.query, config, typed)).await?;
+    apply_saved_password(&state.credentials, prev.as_ref(), &saved, password)?;
     Ok(saved)
 }
 
-/// Kaydı yazar, katalog bağlantısını keser; yazma başarısızsa hiçbir şeye dokunmaz. Hedef, kilit ya da üretim
-/// etiketi değiştiyse sorgu oturumları eski ayarlarla açılmıştır: kapatılır (Plan 6 yeniden bağlanmayı sunar).
+/// Kayıttan sonra parola: yazılan parola tercihe göre saklanır. "Parolayı kaydet" kapalıyken parola yazılmadıysa
+/// ve hedef aynıysa yalnızca kalıcı kayıt silinir; oturum parolası kalır (etiket/ad/renk kaydı yeniden sormasın).
+fn apply_saved_password(creds: &Credentials, prev: Option<&ServerConfig>, saved: &ServerConfig, password: Option<String>) -> Result<(), Error> {
+    let forget = should_forget_stored(prev, saved, password.as_deref());
+    match (password, saved.save_password) {
+        (Some(p), true) => creds.remember(saved.id, &p, true),
+        // Kaydetme kapalı ama parola yazıldı: yalnızca oturumda tutulur (kalıcı kayıt silinir); hemen yeniden sorulmaz.
+        (Some(p), false) => creds.remember(saved.id, &p, false),
+        (None, false) if !forget => creds.forget_stored(saved.id),
+        (None, false) => creds.forget(saved.id),
+        (None, true) if forget => creds.forget(saved.id),
+        (None, true) => Ok(()),
+    }
+}
+
+/// Kaydı yazar; yazma başarısızsa hiçbir şeye dokunmaz. Katalog bağlantısı hedef/SSL değişince ya da parola
+/// yazıldıysa kesilir. Hedef, kilit, üretim etiketi değiştiyse ya da parola yazıldıysa sorgu oturumları eski
+/// ayarlarla/parolayla açılmıştır: kapatılır (Plan 6 yeniden bağlanmayı sunar).
 async fn save_registered(
     registry: &RwLock<Registry>,
     manager: &ConnectionManager,
     query: &QueryManager,
     config: ServerConfig,
+    password_typed: bool,
 ) -> Result<(ServerConfig, Option<ServerConfig>), Error> {
     let (saved, prev) = {
         let mut registry = registry.write().unwrap();
         let prev = registry.get(config.id).cloned();
         (registry.upsert(config)?, prev)
     };
-    manager.disconnect(saved.id);
-    if should_close_query_sessions(prev.as_ref(), &saved) {
+    if should_disconnect_catalog(prev.as_ref(), &saved, password_typed) {
+        manager.disconnect(saved.id);
+    }
+    if password_typed || should_close_query_sessions(prev.as_ref(), &saved) {
         query.close_sessions_of(saved.id).await;
     }
     Ok((saved, prev))
@@ -75,6 +89,13 @@ async fn delete_and_close(
 /// A stored password may only be used for the same host/port/user/maintenance db.
 fn same_target(a: &ServerConfig, b: &ServerConfig) -> bool {
     a.host == b.host && a.port == b.port && a.username == b.username && a.maintenance_db == b.maintenance_db
+}
+
+/// Katalog bağlantısı yalnızca bağlantı parametreleri (hedef, SSL) değişince kesilir: önbellekteki yapılandırma
+/// yalnızca bağlanmak için kullanılır; kilit/üretim koruması kayıttan okunur ve sorgu oturumları ayrıca kapanır.
+/// Yeni yazılmış parola da bağlantıyı yeniler: yönetici parolayı havuz/özel bağlantılar için önbellekte tutar.
+fn should_disconnect_catalog(prev: Option<&ServerConfig>, new: &ServerConfig, password_typed: bool) -> bool {
+    password_typed || prev.is_none_or(|p| !same_target(p, new) || p.ssl != new.ssl)
 }
 
 /// Kayıtlı sunucunun sorgu oturumlarının kapatılması gerekir mi: bağlantı hedefi (host/port/kullanıcı/bakım
@@ -225,6 +246,18 @@ pub async fn quote_identifiers(state: State<'_, AppState>, server_id: Uuid, name
     Ok(Box::pin(state.catalog.quote_identifiers(server_id, names)).await?)
 }
 
+/// "Query Tool'da aç": düğümün sunucusu ve veritabanı OID'i (arayüz düğüm kimliğini ayrıştırmaz).
+fn target_of(node_id: &str) -> Result<QueryTarget, Error> {
+    NodeId::parse(node_id)?
+        .query_target()
+        .ok_or_else(|| Error::Invalid(format!("düğüm bir sunucuya ait değil: {node_id}")))
+}
+
+#[tauri::command]
+pub fn qt_target_of(node_id: String) -> CmdResult<QueryTarget> {
+    Ok(target_of(&node_id)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +359,17 @@ mod tests {
         delete_registered(&registry, &manager, &c, config.id).unwrap();
         assert!(registry.read().unwrap().get(config.id).is_none());
         assert_eq!(c.password(config.id).unwrap(), None);
+    }
+
+    #[test]
+    fn target_of_returns_server_and_database_oid() {
+        let u = Uuid::new_v4();
+        let t = target_of(&format!("srv:{u}/db:16384/sch:2200/tables/tbl:24576")).unwrap();
+        assert_eq!((t.server_id, t.database_oid), (u, Some(16384)));
+        assert_eq!(target_of(&format!("srv:{u}")).unwrap().database_oid, None);
+        assert!(matches!(target_of("grp:A"), Err(Error::Invalid(_))));
+        assert!(matches!(target_of(""), Err(Error::Invalid(_))));
+        assert!(target_of("srv:nope").is_err());
     }
 
     #[test]
@@ -448,6 +492,73 @@ mod tests {
     }
 
     #[test]
+    fn catalog_disconnects_only_for_target_or_ssl_changes() {
+        let id = Uuid::new_v4();
+        let prev = cfg(id);
+        assert!(should_disconnect_catalog(None, &prev, false));
+        let meta: [fn(&mut ServerConfig); 5] = [
+            |x| x.label = Some("Üretim".into()),
+            |x| x.name = "yeni".into(),
+            |x| x.color = Some("red".into()),
+            |x| x.group = Some("g".into()),
+            |x| x.read_only_lock = true,
+        ];
+        for f in meta {
+            let mut new = prev.clone();
+            f(&mut new);
+            assert!(!should_disconnect_catalog(Some(&prev), &new, false));
+            assert!(should_disconnect_catalog(Some(&prev), &new, true), "yazılmış parola her zaman yeniler");
+        }
+        let target: [fn(&mut ServerConfig); 5] = [
+            |x| x.host = "other".into(),
+            |x| x.port = 1,
+            |x| x.username = "u2".into(),
+            |x| x.maintenance_db = "d2".into(),
+            |x| x.ssl.mode = pgt_core::config::SslMode::Require,
+        ];
+        for f in target {
+            let mut new = prev.clone();
+            f(&mut new);
+            assert!(should_disconnect_catalog(Some(&prev), &new, false));
+        }
+    }
+
+    #[test]
+    fn label_only_save_keeps_the_session_password() {
+        use pgt_core::credentials::{SecretStore, password_key};
+        let store = Arc::new(MemorySecretStore::default());
+        let c = Credentials::new(store.clone());
+        let id = Uuid::new_v4();
+        let mut prev = cfg(id);
+        prev.save_password = false;
+        c.remember(id, "oturum", false).unwrap();
+        store.set(&password_key(id), "eski-kalici").unwrap();
+        let mut labelled = prev.clone();
+        labelled.label = Some("Test".into());
+        apply_saved_password(&c, Some(&prev), &labelled, None).unwrap();
+        assert_eq!(store.get(&password_key(id)).unwrap(), None, "kalıcı kayıt yine silinir");
+        assert_eq!(c.password(id).unwrap().as_deref(), Some("oturum"), "oturum parolası kalır");
+
+        // Hedef değişince oturum parolası da unutulur (eski hedefin parolası yeni hedefe gitmesin).
+        let mut moved = labelled.clone();
+        moved.host = "baska".into();
+        apply_saved_password(&c, Some(&labelled), &moved, None).unwrap();
+        assert_eq!(c.password(id).unwrap(), None);
+
+        // save_password açıkken: yazılan parola saklanır; yazılmadıysa ve hedef aynıysa dokunulmaz.
+        let mut keep = prev.clone();
+        keep.save_password = true;
+        apply_saved_password(&c, Some(&prev), &keep, Some("yeni".into())).unwrap();
+        assert_eq!(store.get(&password_key(id)).unwrap().as_deref(), Some("yeni"));
+        apply_saved_password(&c, Some(&keep), &keep, None).unwrap();
+        assert_eq!(c.password(id).unwrap().as_deref(), Some("yeni"));
+        // save_password kapalı + yazılmış parola: oturumda tutulur, kalıcı depoya yazılmaz (eskisi silinir).
+        apply_saved_password(&c, Some(&keep), &prev, Some("x".into())).unwrap();
+        assert_eq!(c.password(id).unwrap().as_deref(), Some("x"));
+        assert_eq!(store.get(&password_key(id)).unwrap(), None);
+    }
+
+    #[test]
     fn close_sessions_decision() {
         let id = Uuid::new_v4();
         let prev = cfg(id);
@@ -544,7 +655,7 @@ mod tests {
         assert_alive(&fx, id, pid).await;
         let mut changed = fx.ts.config.clone();
         changed.read_only_lock = true;
-        assert!(save_registered(&fx.registry, &fx.manager, &fx.qm, changed).await.is_err());
+        assert!(save_registered(&fx.registry, &fx.manager, &fx.qm, changed, false).await.is_err());
         assert_alive(&fx, id, pid).await;
         // Bilinmeyen sunucu silme de hiçbir oturumu kapatmaz.
         assert!(delete_and_close(&fx.registry, &fx.manager, &creds(), &fx.qm, Uuid::new_v4()).await.is_err());
@@ -570,8 +681,10 @@ mod tests {
         meta.name = "yeni ad".into();
         meta.group = Some("grup".into());
         meta.color = Some("blue".into());
-        save_registered(&fx.registry, &fx.manager, &fx.qm, meta).await.unwrap();
+        meta.label = Some("Test".into());
+        save_registered(&fx.registry, &fx.manager, &fx.qm, meta, false).await.unwrap();
         assert_alive(&fx, id, pid).await;
+        assert!(fx.manager.is_connected(fx.ts.config.id), "etiket/ad/renk kaydı katalog bağlantısını kesmez");
         fx.qm.close(id, pgt_query::session::ClosePolicy::Rollback).await.unwrap();
 
         // Her bir değişim (kilit, üretim etiketi, hedef) oturumu kapatır ve transaction'ı geri alır.
@@ -585,13 +698,25 @@ mod tests {
             // Önceki turun değişimini sıfırla (oturumlar kapalıyken); bu da bir değişim olabilir, hâlâ oturum yok.
             let mut base = fx.ts.config.clone();
             base.name = "yeni ad".into();
-            save_registered(&fx.registry, &fx.manager, &fx.qm, base.clone()).await.unwrap();
+            save_registered(&fx.registry, &fx.manager, &fx.qm, base.clone(), false).await.unwrap();
             fx.manager.connect(base.clone(), fx.ts.password.clone()).await.unwrap();
             let (id, pid) = session_with_open_tx(&fx, table).await;
             let mut new = base;
             change(&mut new);
-            save_registered(&fx.registry, &fx.manager, &fx.qm, new).await.unwrap();
+            save_registered(&fx.registry, &fx.manager, &fx.qm, new, false).await.unwrap();
             assert_closed_and_rolled_back(&fx, id, pid, table).await;
+            // Kilit/üretim değişimi katalog bağlantısını korur; hedef (port) değişimi keser.
+            assert_eq!(fx.manager.is_connected(fx.ts.config.id), table != "pgt_qt8_save_port", "{table}");
         }
+
+        // Yeni yazılmış parola (ör. parola değişimi): hedef aynı olsa da katalog bağlantısı kesilir, oturumlar kapanır.
+        let mut base = fx.ts.config.clone();
+        base.name = "yeni ad".into();
+        save_registered(&fx.registry, &fx.manager, &fx.qm, base.clone(), false).await.unwrap();
+        fx.manager.connect(base.clone(), fx.ts.password.clone()).await.unwrap();
+        let (id, pid) = session_with_open_tx(&fx, "pgt_qt8_save_pw").await;
+        save_registered(&fx.registry, &fx.manager, &fx.qm, base, true).await.unwrap();
+        assert!(!fx.manager.is_connected(fx.ts.config.id), "yazılmış parola katalog bağlantısını yeniler");
+        assert_closed_and_rolled_back(&fx, id, pid, "pgt_qt8_save_pw").await;
     }
 }

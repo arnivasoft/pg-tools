@@ -5,9 +5,9 @@ import {
   ROOT, ancestorOfKind, collapse, invalidate, emptyTree, expand, flatten, keyIntent, patchNode, rowLabel, select, serverOf, setChildren, setError, startLoading,
 } from "./tree-model";
 
-const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false };
+const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false, locked: false };
 function node(id: string, extra: Partial<TreeNode> = {}): TreeNode {
-  return { id, kind: "table", label: id, detail: null, hasChildren: true, serverId: null, flags, ...extra };
+  return { id, kind: "table", label: id, detail: null, hasChildren: true, serverId: null, flags, color: null, tag: null, ...extra };
 }
 
 function sample() {
@@ -45,6 +45,17 @@ describe("tree-model", () => {
     expect(s.expanded.has("a1")).toBe(true);
     expect(s.children.get("a1")).toEqual(["a1x"]);
     expect(s.selected).toBe("a");
+  });
+
+  it("server list reload keeps a still-connected server expanded with its children (label-only save)", () => {
+    const up = { ...flags, connected: true };
+    let s = setChildren(emptyTree(), ROOT, [node("srv", { kind: "server", serverId: "S", flags: up, tag: null })]);
+    s = expand(s, "srv");
+    s = setChildren(s, "srv", [node("dbs", { kind: "databaseCollection" })]);
+    s = setChildren(s, ROOT, [node("srv", { kind: "server", serverId: "S", flags: up, tag: "Test" })]);
+    expect(s.nodes.get("srv")?.tag).toBe("Test");
+    expect(s.expanded.has("srv")).toBe(true);
+    expect(flatten(s).map((r) => r.id)).toEqual(["srv", "dbs"]);
   });
 
   it("drops subtree when a server becomes disconnected", () => {

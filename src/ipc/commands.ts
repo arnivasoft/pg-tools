@@ -3,9 +3,13 @@ import type { ClosePolicy } from "./bindings/ClosePolicy";
 import type { CompletionItem } from "./bindings/CompletionItem";
 import type { CompletionRequest } from "./bindings/CompletionRequest";
 import type { CsvOptions } from "./bindings/CsvOptions";
+import type { AppSettings } from "./bindings/AppSettings";
+import type { DraftTab } from "./bindings/DraftTab";
 import type { ExportSummary } from "./bindings/ExportSummary";
+import type { HistoryEntry } from "./bindings/HistoryEntry";
 import type { ImportItem } from "./bindings/ImportItem";
 import type { PropertySection } from "./bindings/PropertySection";
+import type { QueryTarget } from "./bindings/QueryTarget";
 import type { QueryEvent } from "./bindings/QueryEvent";
 import type { Scope } from "./bindings/Scope";
 import type { ServerConfig } from "./bindings/ServerConfig";
@@ -50,6 +54,8 @@ export const commands = {
 
   // Sorgu Aracı. Hata `code`ları: confirmation_required | locked | busy | tx_failed | open_transaction | session_reset
   // (bkz. bindings/QueryErrorCode), gerisi genel kodlar. Olaylar Channel ile akar; komut tamamlanınca söz çözülür.
+  // "Query Tool'da aç": düğümün sunucusu ve veritabanı OID'i (düğüm kimliği arayüzde ayrıştırılmaz).
+  qtTargetOf: (nodeId: string) => call<QueryTarget>("qt_target_of", { nodeId }),
   qtOpen: (serverId: string, databaseOid: number | null, options: SessionOptions) =>
     call<string>("qt_open", { serverId, databaseOid, options }),
   qtAnalyze: (session: string, sql: string, scope: Scope) => call<StmtPlan[]>("qt_analyze", { session, sql, scope }),
@@ -65,6 +71,18 @@ export const commands = {
   qtComplete: (session: string, request: CompletionRequest) => call<CompletionItem[]>("qt_complete", { session, request }),
   qtExportCsv: (session: string, sql: string, path: string, options: CsvOptions, onProgress: (rows: number) => void) =>
     call<ExportSummary>("qt_export_csv", { session, sql, path, options, onProgress: channel(onProgress) }),
+
+  // Kalıcılık: geçmiş (≤500; bir çalıştırmanın girdileri tek çağrıda, tek dosya yazımıyla; arka uç hassas SQL'i
+  // ve kapalı geçmişi yazmaz, eklenen sayısını döner), taslaklar, ayarlar.
+  qtHistoryPushMany: (entries: HistoryEntry[]) => call<number>("qt_history_push_many", { entries }),
+  qtHistoryList: (query: string | null, limit: number) => call<HistoryEntry[]>("qt_history_list", { query, limit }),
+  qtHistoryClear: () => call<null>("qt_history_clear"),
+  qtDraftsSave: (tab: DraftTab, sql: string) => call<null>("qt_drafts_save", { tab, sql }),
+  qtDraftsRemove: (id: string) => call<null>("qt_drafts_remove", { id }),
+  qtDraftsLoad: () => call<[DraftTab, string][]>("qt_drafts_load"),
+  qtDraftsClear: () => call<null>("qt_drafts_clear"),
+  settingsGet: () => call<AppSettings>("settings_get"),
+  settingsSetHistory: (enabled: boolean) => call<AppSettings>("settings_set_history", { enabled }),
 };
 
 export type Api = typeof commands;

@@ -208,6 +208,29 @@ impl NodeId {
     }
 }
 
+/// "Query Tool'da aç" hedefi: düğümün sunucusu ve (varsa) yolundaki veritabanı OID'i. Arayüz düğüm kimliğini
+/// ayrıştırmaz; `qt_target_of` bunu döndürür. `database_oid: None` = bakım veritabanı (ör. sunucu düğümü).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct QueryTarget {
+    pub server_id: Uuid,
+    pub database_oid: Option<u32>,
+}
+
+impl NodeId {
+    /// Sunucu altındaki düğümler için hedef; kök ve grup düğümlerinde `None`.
+    pub fn query_target(&self) -> Option<QueryTarget> {
+        match self {
+            NodeId::Node { server, path } => Some(QueryTarget {
+                server_id: *server,
+                database_oid: path.iter().find_map(|s| if let Seg::Db(oid) = s { Some(*oid) } else { None }),
+            }),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -288,6 +311,8 @@ pub struct NodeFlags {
     pub primary_key: bool,
     pub not_null: bool,
     pub from_extension: bool,
+    /// Yalnızca sunucu düğümlerinde: salt okunur kilit açık.
+    pub locked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -301,6 +326,9 @@ pub struct TreeNode {
     pub has_children: bool,
     pub server_id: Option<Uuid>,
     pub flags: NodeFlags,
+    /// Yalnızca sunucu düğümlerinde: renk adı (`pgt_core::config::COLORS`) ve ortam etiketi.
+    pub color: Option<String>,
+    pub tag: Option<String>,
 }
 
 impl TreeNode {
@@ -313,6 +341,8 @@ impl TreeNode {
             has_children: true,
             server_id: None,
             flags: NodeFlags::default(),
+            color: None,
+            tag: None,
         }
     }
     pub fn with_detail(mut self, detail: Option<String>) -> Self {
@@ -327,6 +357,11 @@ impl TreeNode {
         self.flags = flags;
         self
     }
+    pub fn with_marks(mut self, color: Option<String>, tag: Option<String>) -> Self {
+        self.color = color;
+        self.tag = tag;
+        self
+    }
     pub fn with_server(mut self, server: Uuid) -> Self {
         self.server_id = Some(server);
         self
@@ -338,6 +373,22 @@ mod tests {
     use super::*;
 
     const U: &str = "3f2a6d1e-8a4b-4c2e-9f00-0123456789ab";
+
+    #[test]
+    fn query_target_finds_server_and_database() {
+        let u = Uuid::parse_str(U).unwrap();
+        let t = |id: &str| NodeId::parse(id).unwrap().query_target();
+        assert_eq!(t(&format!("srv:{U}")), Some(QueryTarget { server_id: u, database_oid: None }));
+        assert_eq!(t(&format!("srv:{U}/dbs")), Some(QueryTarget { server_id: u, database_oid: None }));
+        assert_eq!(t(&format!("srv:{U}/db:16384")), Some(QueryTarget { server_id: u, database_oid: Some(16384) }));
+        assert_eq!(
+            t(&format!("srv:{U}/db:16384/sch:2200/tables/tbl:24576")),
+            Some(QueryTarget { server_id: u, database_oid: Some(16384) })
+        );
+        assert_eq!(t(&format!("srv:{U}/roles/role:10")), Some(QueryTarget { server_id: u, database_oid: None }));
+        assert_eq!(t(""), None);
+        assert_eq!(t("grp:Üretim"), None);
+    }
 
     #[test]
     fn round_trips_all_shapes() {

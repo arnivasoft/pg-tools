@@ -4,6 +4,7 @@ mod commands;
 mod logging;
 mod query;
 mod state;
+mod store_cmds;
 
 use std::time::Duration;
 
@@ -58,6 +59,7 @@ fn main() {
             commands::delete_server,
             commands::set_show_system,
             commands::quote_identifiers,
+            commands::qt_target_of,
             commands::preview_pgadmin_import,
             commands::apply_pgadmin_import,
             query::qt_open,
@@ -71,6 +73,15 @@ fn main() {
             query::qt_close,
             query::qt_complete,
             query::qt_export_csv,
+            store_cmds::qt_history_push_many,
+            store_cmds::qt_history_list,
+            store_cmds::qt_history_clear,
+            store_cmds::qt_drafts_save,
+            store_cmds::qt_drafts_remove,
+            store_cmds::qt_drafts_load,
+            store_cmds::qt_drafts_clear,
+            store_cmds::settings_get,
+            store_cmds::settings_set_history,
         ])
         .build(tauri::generate_context!())
         .expect("pg-tools başlatılamadı")
@@ -78,7 +89,10 @@ fn main() {
             // Kapanışta açık sorgu oturumları kapatılır: açık transaction'lar ROLLBACK edilir (en iyi çaba, sınırlı bekleme).
             if let tauri::RunEvent::Exit = event {
                 let query = app.state::<state::AppState>().query.clone();
-                let _ = tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(7), query.close_all()));
+                // Zaman aşımı geleceği çalışma zamanı İÇİNDE kurulmalı: dışarıda `tokio::time::timeout` "no reactor running" ile panikler.
+                tauri::async_runtime::block_on(async move {
+                    let _ = tokio::time::timeout(Duration::from_secs(7), query.close_all()).await;
+                });
             }
         });
 }

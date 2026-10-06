@@ -6,12 +6,12 @@ import { IpcError } from "../../ipc/errors";
 import { actionsFor, executeAction, qualifiedParts, type ActionDeps } from "./actions";
 import { ROOT, emptyTree, type TreeState } from "./tree-model";
 
-const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false };
+const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false, locked: false };
 
 function sampleTree(): TreeState {
   const s = emptyTree();
   const add = (id: string, parent: string, kind: NodeKind, label: string, extra: Partial<TreeNode> = {}) => {
-    s.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, ...extra });
+    s.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, color: null, tag: null, ...extra });
     s.parent.set(id, parent);
     s.children.set(parent, [...(s.children.get(parent) ?? []), id]);
   };
@@ -76,10 +76,10 @@ describe("qualifiedParts / actionsFor", () => {
     expect(qualifiedParts(s, "trg-1")).toBeNull();
   });
   it("menu per node kind", () => {
-    expect(actionsFor(s, node(s, "srv-down"))).toEqual(["connect", "editServer", "deleteServer", "copyName"]);
-    expect(actionsFor(s, node(s, "srv-up"))).toEqual(["refresh", "disconnect", "editServer", "deleteServer", "copyName"]);
+    expect(actionsFor(s, node(s, "srv-down"))).toEqual(["openQueryTool", "connect", "editServer", "deleteServer", "copyName"]);
+    expect(actionsFor(s, node(s, "srv-up"))).toEqual(["openQueryTool", "refresh", "disconnect", "editServer", "deleteServer", "copyName"]);
     expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["refresh", "copyName"]);
-    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["refresh", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "col-id"))).toEqual(["copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "con-1"))).toEqual(["copyName", "copyDdl"]);
   });
@@ -142,6 +142,28 @@ describe("executeAction", () => {
     await executeAction(asDeps(d), "copyDdl", "tbl-orders");
     expect(d.controller.nodeGone).toHaveBeenCalledWith("tbl-orders", expect.objectContaining({ code: "not_found" }));
     expect(d.notify).toHaveBeenCalledWith("yok", "error");
+  });
+
+  it("openQueryTool hands the node to the query tool", async () => {
+    const d = { ...deps(sampleTree()), openQueryTool: vi.fn() };
+    await executeAction(asDeps(d), "openQueryTool", "tbl-orders");
+    expect(d.openQueryTool).toHaveBeenCalledWith("tbl-orders");
+  });
+
+  it("disconnect/delete ask about open transactions first and report closed sessions", async () => {
+    const d = { ...deps(sampleTree()), beforeServerChange: vi.fn(async () => false), afterServerChange: vi.fn() };
+    await executeAction(asDeps(d), "disconnect", "srv-up");
+    await executeAction(asDeps(d), "deleteServer", "srv-up");
+    expect(d.beforeServerChange).toHaveBeenCalledWith("u1", "up");
+    expect(d.controller.disconnect).not.toHaveBeenCalled();
+    expect(d.api.deleteServer).not.toHaveBeenCalled();
+    expect(d.afterServerChange).not.toHaveBeenCalled();
+    d.beforeServerChange.mockResolvedValue(true);
+    d.api.deleteServer.mockResolvedValue(null);
+    await executeAction(asDeps(d), "disconnect", "srv-up");
+    expect(d.afterServerChange).toHaveBeenLastCalledWith("u1", false);
+    await executeAction(asDeps(d), "deleteServer", "srv-up");
+    expect(d.afterServerChange).toHaveBeenLastCalledWith("u1", true);
   });
 
   it("connect expands only after a successful connection", async () => {

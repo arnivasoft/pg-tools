@@ -5,10 +5,11 @@ import type { Api } from "../../ipc/commands";
 import { toPayload } from "../../ipc/errors";
 import type { ExplorerController } from "./controller";
 import { ROOT, ancestorOfKind, isCollection, serverOf, type TreeState } from "./tree-model";
+import { canOpenQueryTool } from "../query/open-kinds";
 
 export type ActionId =
   | "refresh" | "connect" | "disconnect" | "editServer" | "deleteServer"
-  | "copyName" | "copyQualifiedName" | "copyDdl";
+  | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool";
 
 export interface ActionDeps {
   state: () => TreeState;
@@ -18,6 +19,12 @@ export interface ActionDeps {
   notify(text: string, kind: ToastKind): void;
   editServer(serverId: string): void;
   confirmDelete(name: string): Promise<boolean>;
+  /** "Query Tool'da aç" (sunucu/veritabanı/şema/tablo/görünüm). */
+  openQueryTool?(id: string): void;
+  /** Sunucunun sorgu oturumlarını kapatacak işlemden (silme, bağlantı kesme) önce: açık transaction'lar için sorar. */
+  beforeServerChange?(serverId: string, name: string): Promise<boolean>;
+  /** İşlemden sonra: o sunucunun sorgu sekmeleri oturumsuz kalır (`gone`: kayıt silindi). */
+  afterServerChange?(serverId: string, gone: boolean): void;
 }
 
 const SCHEMA_QUALIFIED = ["table", "view", "materializedView", "sequence", "type", "domain", "index"];
@@ -60,14 +67,15 @@ export function qualifiedParts(s: TreeState, id: string): { parts: string[]; suf
 }
 
 export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
+  const q: ActionId[] = canOpenQueryTool(node.kind) ? ["openQueryTool"] : [];
   if (node.kind === "serverGroup") return ["refresh", "copyName"];
   if (node.kind === "server") {
     return node.flags.connected
-      ? ["refresh", "disconnect", "editServer", "deleteServer", "copyName"]
-      : ["connect", "editServer", "deleteServer", "copyName"];
+      ? [...q, "refresh", "disconnect", "editServer", "deleteServer", "copyName"]
+      : [...q, "connect", "editServer", "deleteServer", "copyName"];
   }
   if (isCollection(node.kind)) return ["refresh", "copyName"];
-  const out: ActionId[] = [];
+  const out: ActionId[] = [...q];
   if (node.hasChildren) out.push("refresh");
   out.push("copyName");
   if (qualifiedParts(s, node.id) !== null) out.push("copyQualifiedName");
@@ -77,6 +85,7 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
 
 /** Menüde ayırıcı yerleşimi için eylem grubu. */
 export function groupOf(a: ActionId): number {
+  if (a === "openQueryTool") return -1;
   if (a === "refresh" || a === "connect" || a === "disconnect") return 0;
   if (a === "editServer" || a === "deleteServer") return 1;
   return 2;
@@ -97,8 +106,13 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
       case "connect":
         if (await deps.controller.ensureConnected(id)) await deps.controller.expand(id);
         return;
+      case "openQueryTool":
+        deps.openQueryTool?.(id);
+        return;
       case "disconnect":
+        if (node.serverId && deps.beforeServerChange && !(await deps.beforeServerChange(node.serverId, node.label))) return;
         deps.controller.disconnect(id);
+        if (node.serverId) deps.afterServerChange?.(node.serverId, false);
         deps.notify(t.menu.disconnected, "info");
         return;
       case "editServer":
@@ -107,6 +121,7 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
       case "deleteServer": {
         if (!node.serverId) return;
         if (!(await deps.confirmDelete(node.label))) return;
+        if (deps.beforeServerChange && !(await deps.beforeServerChange(node.serverId, node.label))) return;
         // Diyalog açıkken düğüm kaybolmuş olabilir: yeniden oku.
         const still = deps.state().nodes.get(id);
         if (!still?.serverId) {
@@ -114,6 +129,7 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
           return;
         }
         await deps.api.deleteServer(still.serverId);
+        deps.afterServerChange?.(still.serverId, true);
         await deps.controller.serverRemoved();
         deps.notify(t.menu.deleted(node.label), "success");
         return;

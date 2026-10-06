@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 2: Query Tool Çekirdeği Tasarımı
 
 - **Tarih:** 2026-10-06
-- **Durum:** Arka uç uygulandı (Plan 5); arayüz Plan 6
+- **Durum:** Uygulandı (Plan 5–6)
 - **Kapsam:** Çoklu sekmeli SQL editörü, sorgu çalıştırma (yazma dahil, korumalarla), sanal ızgarada sonuçlar, iptal, geçmiş, CSV dışa aktarma
 - **Önceki alt proje:** Object Explorer (`2026-10-05-object-explorer-design.md`) — Plan 1–4 ile tamamlandı ve `main`'de.
 - **Sonraki alt proje:** Gelişmiş editör zekâsı (alias çözümleme, join önerisi, formatter, LSP benzeri hata çizimi) — ayrı spec.
@@ -131,7 +131,7 @@ CodeMirror 6 (Object Explorer'ın DDL görünümüyle aynı tembel yükleme kal�
 
 ### 5.3 Izgara
 
-TanStack Virtual ile satır **ve** sütun sanallaştırma (geniş sonuçlarda yatay akıcılık); sabit satır yüksekliği 24 px; sütun başlığında ad + tür; tür bazlı hizalama (sayısal sağa); `NULL` soluk italik `[NULL]`; uzun metin kesilir, hücre seçilince altta tam değer paneli (JSON güzel yazdırma, çok satırlı metin); sütun genişliği sürükleme/otomatik sığdırma (ilk 200 satıra göre); satır numarası sütunu; seçim (hücre/satır/sütun) ve `Ctrl+C` (seçimi TSV kopyalar). Yüklenen satır sayısı ve "Daha fazla yükle (10.000)" düğmesi; sınıra gelince açık uyarı. **CSV'ye aktar:** Tauri dialog ile dosya yolu seçilir; **yüklenmiş satırlar değil, sorgu yeniden çalıştırılarak** akıtılır (arka uç imleçle parça parça yazar, bellek şişmez; ilerleme ve iptal) — tam sonuç dışa aktarma ayrı bir bağlantıda değil, aynı oturumda ikinci imleçle yapılır, açık transaction'ı bozmaz.
+TanStack Virtual ile satır **ve** sütun sanallaştırma (geniş sonuçlarda yatay akıcılık); sabit satır yüksekliği 24 px; sütun başlığında ad + tür; tür bazlı hizalama (sayısal sağa); `NULL` soluk italik `[NULL]`; uzun metin kesilir, hücre seçilince altta tam değer paneli (JSON güzel yazdırma, çok satırlı metin); sütun genişliği sürükleme/otomatik sığdırma (ilk 200 satıra göre); satır numarası sütunu; seçim (hücre/satır/sütun) ve `Ctrl+C` (seçimi TSV kopyalar). Yüklenen satır sayısı ve "Daha fazla yükle (1.000)" düğmesi (parça 1.000 satır; ilk çalıştırma 10.000 satıra kadar getirir); sınıra gelince açık uyarı. **CSV'ye aktar:** Tauri dialog ile dosya yolu seçilir; **yüklenmiş satırlar değil, sorgu yeniden çalıştırılarak** akıtılır (arka uç imleçle parça parça yazar, bellek şişmez; ilerleme ve iptal) — tam sonuç dışa aktarma ayrı bir bağlantıda değil, aynı oturumda ikinci imleçle yapılır, açık transaction'ı bozmaz.
 
 ### 5.4 Sonuç şeridi ve Mesajlar
 
@@ -139,7 +139,7 @@ Komut dizisi çalışınca ifade başına bir satır: `#`, sınıf, durum (✓/�
 
 ### 5.5 Geçmiş
 
-Çalıştırılan her ifade: metin (en çok 10 KB, fazlası kesilir), sunucu/veritabanı adı, zaman, süre, durum. `%APPDATA%\pg-tools\query-history.json`, **en çok 500 kayıt** (en eski silinir), atomik yazım; **Ayarlar'dan kapatılabilir** ("sorgu geçmişini kaydet") çünkü SQL metni hassas veri taşıyabilir (parola içeren `ALTER ROLE … PASSWORD` benzeri ifadeler için sınıflandırıcı `Role/Password` ifadelerini geçmişe **yazmaz**). Geçmiş panelinde arama, tıklayınca editöre ekleme.
+Çalıştırılan her ifade: metin (en çok 10 KB, fazlası kesilir), sunucu/veritabanı adı, zaman, süre, durum. `%APPDATA%\pg-tools\history.json`, **en çok 500 kayıt** (en eski silinir), atomik yazım; **Ayarlar'dan kapatılabilir** ("sorgu geçmişini kaydet") çünkü SQL metni hassas veri taşıyabilir (parola içeren `ALTER ROLE … PASSWORD` benzeri ifadeler için sınıflandırıcı `Role/Password` ifadelerini geçmişe **yazmaz**). Geçmiş panelinde arama, tıklayınca editöre ekleme.
 
 ### 5.6 Sekme kalıcılığı
 

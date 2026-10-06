@@ -3,6 +3,62 @@
 Plan 5 arka ucundan (`pgt-query`, `src-tauri/src/query.rs`) arayüze (Plan 6) kalan sözleşmeler ve bilinen
 sınırlar. Ayrıntılar için ilgili kod yorumlarına bakın.
 
+## Plan 6 durumu (madde madde)
+
+Aşağıda bu belgenin her maddesi için Plan 6 (Query Tool arayüzü) sonunda durum yazılıdır. **✔ Plan 6'da karşılandı**,
+**✘ Karşılanmadı** (nedeniyle birlikte), **— Arka uç sınırı** (arayüzün yapacağı bir şey yok; bilinen sınır olarak kalır).
+Doğrulama notları: **[test]** birim testi, **[T8]** Task 8 elle/CDP duman testi, **[T9]** Task 9 yayın exe çalıştırması.
+
+### Olay akışı
+- ✔ `qt_run` `ScriptDone` ile biter, `invoke` çözülmesi bitiş sayılmaz (`result-model.ts`/`run-model.ts`) **[test]**.
+- ✔ Olay sırası ifade başına işlenir; `Failed.notices` Mesajlar'a eklenir (`result-model.ts` `applyEvent`) **[test]**.
+- ✔ İfadeler arası iptal (`failed` + `scriptDone`) sıradan hata gibi işlenir; çalıştırma biter **[T8]** (iptal).
+- — Atılan NOTICE sayısı olaylarda yok; arayüz "daha fazla NOTICE atıldı" demez (arka uç sınırı).
+- ✔ `more()` yalnızca son `runId`'nin ızgarasından ve `canLoadMoreRows` iken istenir; yeni çalıştırma/`qt_more` sürerken ve dışa aktarırken tetikler engelli **[test] [T8]**.
+- ✔ `truncated` "Satır sınırına ulaşıldı; daha fazla satır var olabilir" olarak gösterilir (kesin değil, olabilir) **[T8]**.
+
+### Konumlar
+- ✔ `charOffset`/`charLen`/`Failed.position` Unicode scalar → CodeMirror UTF-16 (`offsets.ts`); hata işareti ve onay diyaloğu metni bununla çizilir **[test]**; hata işareti elle (emojisiz) **[T8]**.
+- ✔ Girdiler (`Scope.selection`, `Scope.atCursor.offset`) UTF-16 → scalar dönüştürülerek gönderilir **[test]**. Emojili betikte uçtan uca seçim çalıştırma **elle denenmedi** (smoke-test.md'de açık madde).
+
+### Hata kodları
+- ✔ `session_reset` dahil tüm kodlar için `isQueryErrorCode` tür koruyucusu (`errors.ts`) **[test]**.
+- ✔ `qt_open` hataları: `invalid` ve `unknown_server` → sekme hata durumu / "sunucu yok" (`routeError`); `qt_complete`'in boş listesi sessiz kalır; `not_found` → oturum kayıp, "Yeniden bağlan" **[test]**, "sunucu yok" **[T8]**.
+- ✔ `session_reset`: Mesajlar'da açıklama + "Tekrar çalıştır" düğmesi, `hintFor` **[test]**. **Gerçek PG yeniden başlatmasıyla elle denenmedi** (smoke-test.md'de açık madde).
+
+### Onay akışı
+- ✔ Onay diyaloğu `qt_analyze` ile aynı metin ve kapsamla `confirmed=true` yeniden çağırır; üretim bandı (`production = isProductionLabel`); odak "Vazgeç"te **[test] [T8]**.
+- ✔ `DO`/`CALL` üretimde onay ister (`confirm-model`) **[test]**; elle yalnızca yazma onayı **[T8]**.
+- ✔ Kilitli sunucuda `locked`: ifade başına neden Mesajlar'da (neden yoksa yedek metin), sekme idle'a döner **[test]**; kilitli sunucuda elle deneme **yapılmadı**. Kilidin güvenlik sınırı olmadığı uyarısı (`docs/testing.md`) geçerli — — arka uç sınırı.
+- ✔ Kilit/üretim etiketi değişince oturumlar kapanır; açık transaction varsa değişiklikten önce toplu diyalog, sonra sekmeler "Yeniden bağlan" **[T8]**.
+
+### Transaction durumu
+- ✔ `Failed`'da yalnızca Rollback etkin ("Transaction hatalı — yalnızca Rollback") **[T8]**.
+- ✔ 25001 → "autocommit moduna geçin" ipucu **[T8]**.
+- — Durum sondayla düzeltilir, her ifadeden sonra değil; geç kalan iptal sonraki iç komutu vurabilir (arka uç sınırı).
+- ✔ İptal her basışta yeniden gönderilir ve düğme `cancelling`'de de etkin kalır (tekrar basılabilir) — `canCancel` **[test]**; "tekrar basma" **elle ayrıca denenmedi** (iptal ilk basışta ~100 ms'de sonuçlandı **[T8]**).
+- — Autocommit ızgara imleci açıkken transaction açık kalır (5 dk boşta kapanır): arka uç sınırı; arayüz ek bir şey yapmaz.
+
+### Oturum yaşam döngüsü
+- ✔ Sayfa yenilemede tüm oturumlar kapanır; geri yüklenen taslaklar oturumsuz (`noSession`) açılır, ilk çalıştırmada bağlanır **[T8]**. Çoklu pencere yok (filtre gerekmez) — ✘ ikinci pencere/pencere başına filtre **karşılanmadı** (kapsam dışı).
+- ✔ Meşgul sekmeyi kapatma: bilgi bildirimi, sekme kapanır, PG'de yetim sorgu yok (215 ms'de kapandı) **[T8]**. En kötü ~10 sn / N × ~10 sn sınırı arka uçta kalır — ✘ kapanış sırasında ilerleme göstergesi **eklenmedi**.
+- ✔ Çıkışta `close_all`: pencere kapanışı → açık/hatalı transaction'lar için tek diyalog → kapat **[T8]**. Bu sırada Plan 5'ten kalan `RunEvent::Exit` içindeki `there is no reactor running` paniği düzeltildi (`block_on`).
+- ✔ Durumlu oturum: `session_reset` yolu hint'le karşılanır (bkz. Hata kodları); boşta 30 dk uyutma arayüzde görünmez.
+- ✔ Kilitsiz oturumun `default_transaction_read_only=off` / `statement_timeout` ezme davranışı arayüzde zaman aşımı seçicisiyle (30 sn / 5 dk / Sınırsız) açığa çıkarıldı; ✘ rol/veritabanı düzeyindeki DBA politikasına uyma (ör. salt okunur rolü ezmeme) için ayar **eklenmedi** (politika kararı Plan 7+).
+
+### Onay / dışa aktarma / diğer
+- ✔ Tamamlama yazılırken çalıştırmadan önce `closeCompletion` çağrılır; anlık `busy` toast + sekme idle **[T8]** (kod incelemesi; yarış elle zorlanmadı).
+- — `CompletionKind::Function` hiç üretilmez (arka uç).
+- ✔ `qt_set_options` sonrası ızgara "daha fazla" düğmesi kapanır (`optionsChanged`) **[test]**.
+- ✔ CSV: ayrı imleç; yalnızca tek SELECT/VALUES/TABLE/WITH — dışa aktar düğmesi sekme boşta ve başka işlem yokken etkindir; uygunluk tıklamadan sonra denetlenir (`qtAnalyze` → `exportTarget`; uygun değilse bilgi toast'u `disabledHint`) **[test]**.
+- ✔ CSV üzerine yazma: Windows kaydet diyaloğunun "zaten var" onayı (+ ad sadeleştirme) **[T8]**. ✘ Hedef Excel'de açıkken hata **ancak sonda** görünür — önceden yazılabilirlik denemesi **eklenmedi** (arka uç sınırı korunuyor).
+- ✘ Kullanıcı iptali ile `statement_timeout`'u ayıran ayrı hata kodu **eklenmedi**; ayrım ileti metninden (arka uç değişmedi).
+- ✘ `smoke-release.ps1` hâlâ `qt_*` çağırmaz (yalnızca açılış). Uçtan uca doğrulama `docs/smoke-test.md` "Query Tool" listesi ve Task 8/9 CDP çalıştırmalarıyla yapıldı; **betikleştirilmiş, tekrarlanabilir bir uçtan uca testi eklenmedi** (CDP betikleri depoda değil).
+- — NOTICE'lar ifade başına 100 adet / 2.000 karakter (arka uç sınırı).
+- ✘ **Hücre başına bayt sınırı arka uçta yok ve eklenmedi.** Arayüz hücre *gösterimini* 1000 karaktere kırpar ve ayrı hücre panelinde tam değeri gösterir (`grid-model.ts` `displayCell`) **[test]**; ancak 1 GB'lık tek hücre hâlâ bütünüyle bellekte tutulur ve `Rows` olayıyla taşınır. İzleme işi olarak kalır.
+
+---
+
 ## Olay akışı
 - Arayüz bir `qt_run`'ı **`ScriptDone` olayıyla** bitirmelidir; `Channel` iletileri `invoke` çözüldükten sonra da
   gelebilir. `invoke`'un çözülmesi "bitti" demek değildir.
