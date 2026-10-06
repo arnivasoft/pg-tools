@@ -10,7 +10,7 @@ import type { SectionProps } from "./DashboardView";
 /** Bağlantı kullanımı bu oranın üstünde ise rozet gösterilir. */
 const HIGH_USAGE = 0.8;
 
-function Card(props: { label: string; title?: string; children: JSX.Element; badge?: JSX.Element }) {
+function Card(props: { label: string; title?: string; children: JSX.Element; badge?: JSX.Element; note?: JSX.Element }) {
   return (
     <div class="min-w-0 rounded border border-border bg-panel px-3 py-2" title={props.title}>
       <div class="text-[11px] text-muted">{props.label}</div>
@@ -18,6 +18,7 @@ function Card(props: { label: string; title?: string; children: JSX.Element; bad
         <span class="min-w-0 truncate">{props.children}</span>
         {props.badge}
       </div>
+      {props.note}
     </div>
   );
 }
@@ -95,7 +96,15 @@ export default function OverviewView(props: SectionProps) {
         <Card label={td.overview.oldestXact}>
           {o() ? (o()!.oldestXactSecs == null ? td.overview.none : formatDuration(o()!.oldestXactSecs)) : "—"}
         </Card>
-        <Card label={td.overview.sessions} title={last() && last()!.sessionsOther > 0 ? td.overview.otherTitle(last()!.sessionsOther) : undefined}>
+        <Card
+          label={td.overview.sessions}
+          title={last() && last()!.sessionsOther > 0 ? td.overview.otherTitle(last()!.sessionsOther) : undefined}
+          note={
+            <Show when={last() && last()!.sessionsOther > 0}>
+              <div class="mt-0.5 text-[11px] text-muted">{td.partial}</div>
+            </Show>
+          }
+        >
           {total() ?? "—"}
           <Show when={last() && last()!.sessionsOther > 0}>
             <span class="ml-1 text-[12px] font-normal text-muted">

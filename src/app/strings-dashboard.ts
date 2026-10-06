@@ -194,7 +194,6 @@ export const td = {
       idleInTx: "Açık transaction geri alınacak.",
       terminate: "Oturum kapanır; bağlı istemci hata alır.",
     },
-    noPermission: "Bu oturumu durdurma yetkiniz yok (yalnızca kendi oturumlarınız ya da pg_signal_backend üyeliği).",
     sent: (kind: "cancel" | "terminate") =>
       kind === "cancel" ? "İptal isteği gönderildi." : "Sonlandırma isteği gönderildi.",
     notFound: "Oturum artık yok.",
