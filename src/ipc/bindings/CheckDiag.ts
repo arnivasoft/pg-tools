@@ -11,6 +11,10 @@ stmtIndex: number,
  */
 charOffset: number, 
 /**
+ * İfade metninin Unicode scalar uzunluğu (konumsuz hatada bütün ifade işaretlenir).
+ */
+charLen: number, 
+/**
  * İfade metninde 1 tabanlı Unicode scalar konum (betikteki yeri `char_offset + position - 1`); ifade sonunu
  * aşan konum ("end of input") son karaktere kırpılır.
  */

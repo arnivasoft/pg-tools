@@ -50,6 +50,8 @@ pub struct CheckDiag {
     pub stmt_index: u32,
     /// İfadenin betikteki Unicode scalar ofseti.
     pub char_offset: u32,
+    /// İfade metninin Unicode scalar uzunluğu (konumsuz hatada bütün ifade işaretlenir).
+    pub char_len: u32,
     /// İfade metninde 1 tabanlı Unicode scalar konum (betikteki yeri `char_offset + position - 1`); ifade sonunu
     /// aşan konum ("end of input") son karaktere kırpılır.
     pub position: Option<u32>,
@@ -131,6 +133,7 @@ pub(crate) fn diag(stmt: &CheckStmt, parsed: Parsed) -> Option<CheckDiag> {
     Some(CheckDiag {
         stmt_index: stmt.index,
         char_offset: stmt.char_offset,
+        char_len: stmt.char_len,
         position: position.map(|p| p.min(stmt.char_len.max(1))),
         message,
         sqlstate: Some(code),
@@ -206,7 +209,7 @@ mod tests {
         let plain = CheckStmt { index: 2, char_offset: 10, char_len: 5, range: 0..1, after_ddl: false };
         let after = CheckStmt { after_ddl: true, ..plain.clone() };
         let d = diag(&plain, q("42P01", 3)).unwrap();
-        assert_eq!((d.severity, d.position, d.stmt_index, d.char_offset), (CheckSeverity::Error, Some(3), 2, 10));
+        assert_eq!((d.severity, d.position, d.stmt_index, d.char_offset, d.char_len), (CheckSeverity::Error, Some(3), 2, 10, 5));
         for code in NAME_ERRORS {
             assert_eq!(diag(&after, q(code, 3)).unwrap().severity, CheckSeverity::Info, "{code}");
         }
@@ -226,6 +229,7 @@ mod tests {
         let d = CheckDiag {
             stmt_index: 1,
             char_offset: 4,
+            char_len: 3,
             position: Some(2),
             message: "m".into(),
             sqlstate: Some("42601".into()),
@@ -233,7 +237,7 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&d).unwrap(),
-            serde_json::json!({"stmtIndex": 1, "charOffset": 4, "position": 2, "message": "m", "sqlstate": "42601", "severity": "info"})
+            serde_json::json!({"stmtIndex": 1, "charOffset": 4, "charLen": 3, "position": 2, "message": "m", "sqlstate": "42601", "severity": "info"})
         );
         let t: CheckTarget = serde_json::from_str(r#"{"cursor":1,"visibleStart":0,"visibleEnd":9}"#).unwrap();
         assert_eq!(t, CheckTarget { cursor: 1, visible_start: 0, visible_end: 9 });

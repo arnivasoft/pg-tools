@@ -3,6 +3,7 @@
 //! çalıştırır; dosya G/Ç'si (5 MB'a varan geçmiş, sınırsız taslak metni) pencereyi dondurmasın.
 
 use pgt_core::ErrorPayload;
+use pgt_core::format_options::FormatOptions;
 use pgt_core::store::{AppSettings, DraftTab, HistoryEntry};
 use tauri::State;
 use uuid::Uuid;
@@ -66,10 +67,21 @@ pub fn settings_get(state: State<'_, AppState>) -> CmdResult<AppSettings> {
 #[tauri::command(async)]
 pub fn settings_set_history(state: State<'_, AppState>, enabled: bool) -> CmdResult<AppSettings> {
     let mut settings = state.store.settings.lock().unwrap();
-    let next = AppSettings { history_enabled: enabled };
+    let next = AppSettings { history_enabled: enabled, ..*settings };
     next.save(&state.store.settings_path)?;
     *settings = next;
     state.store.history.lock().unwrap().set_enabled(enabled);
+    Ok(next)
+}
+
+/// Editör ayarları: yazarken denetim ve biçimlendirici seçenekleri (geçersiz seçenek `invalid`, dosyaya yazılmaz).
+#[tauri::command(async)]
+pub fn settings_set_editor(state: State<'_, AppState>, check_enabled: bool, format: FormatOptions) -> CmdResult<AppSettings> {
+    format.validate()?;
+    let mut settings = state.store.settings.lock().unwrap();
+    let next = AppSettings { check_enabled, format, ..*settings };
+    next.save(&state.store.settings_path)?;
+    *settings = next;
     Ok(next)
 }
 

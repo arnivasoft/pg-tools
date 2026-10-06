@@ -88,6 +88,8 @@ export const commands = {
   qtDraftsClear: () => call<null>("qt_drafts_clear"),
   settingsGet: () => call<AppSettings>("settings_get"),
   settingsSetHistory: (enabled: boolean) => call<AppSettings>("settings_set_history", { enabled }),
+  settingsSetEditor: (checkEnabled: boolean, format: FormatOptions) =>
+    call<AppSettings>("settings_set_editor", { checkEnabled, format }),
 };
 
 export type Api = typeof commands;

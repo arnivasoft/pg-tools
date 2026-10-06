@@ -38,8 +38,8 @@
 //! `format(çıktı) == çıktı` doğrulanır. Herhangi biri bozulursa `Err(Invalid(FORMAT_FAILED))`; bozuk sonuç dönmez.
 
 use pgt_core::{Error, Result};
-use serde::{Deserialize, Serialize};
-use ts_rs::TS;
+/// Seçenek tipleri `pgt-core`'dadır (ayarlarda saklanır); burada yeniden dışa açılır.
+pub use pgt_core::format_options::{CommaStyle, FormatOptions, KeywordCase};
 
 use crate::lex::{Kind, Token, lex};
 use crate::split::split;
@@ -53,55 +53,6 @@ pub const FORMAT_TOO_LARGE: &str = "biçimlendirilecek metin 5 MB'tan büyük";
 
 /// Bu derinliği (parantez ya da iç içe `CASE`) aşan ifadeler yalnız boşluk sadeleştirmesi alır (yığın güvenliği).
 const MAX_DEPTH: u32 = 100;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub enum KeywordCase {
-    #[default]
-    Upper,
-    Lower,
-    Preserve,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub enum CommaStyle {
-    #[default]
-    Trailing,
-    Leading,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase", default)]
-#[ts(export)]
-pub struct FormatOptions {
-    pub keyword_case: KeywordCase,
-    /// Girinti boşluğu: 2 ya da 4.
-    pub indent: u8,
-    pub comma: CommaStyle,
-    /// Satır uzunluğu: 80–200.
-    pub max_line: u16,
-}
-
-impl Default for FormatOptions {
-    fn default() -> Self {
-        FormatOptions { keyword_case: KeywordCase::Upper, indent: 2, comma: CommaStyle::Trailing, max_line: 120 }
-    }
-}
-
-impl FormatOptions {
-    pub fn validate(&self) -> Result<()> {
-        if !matches!(self.indent, 2 | 4) {
-            return Err(Error::Invalid("girinti 2 ya da 4 olmalı".into()));
-        }
-        if !(80..=200).contains(&self.max_line) {
-            return Err(Error::Invalid("satır uzunluğu 80–200 olmalı".into()));
-        }
-        Ok(())
-    }
-}
 
 /// `sql`'i biçimlendirir. Seçenekler geçersizse ya da güvenlik sözleşmesi (belirteç eşitliği + eşkuvvetlilik)
 /// sağlanamazsa `Err(Invalid)`.

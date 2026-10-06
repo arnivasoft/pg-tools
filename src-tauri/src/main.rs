@@ -84,6 +84,7 @@ fn main() {
             store_cmds::qt_drafts_clear,
             store_cmds::settings_get,
             store_cmds::settings_set_history,
+            store_cmds::settings_set_editor,
         ])
         .build(tauri::generate_context!())
         .expect("pg-tools başlatılamadı")
