@@ -1,4 +1,4 @@
-# pg-tools — Duman Testi (Plan 1–6)
+# pg-tools — Duman Testi (Plan 1–9)
 
 Her sürümden önce elle uygulanır. Ortam: Windows 10/11 veya Server 2019/2022, PostgreSQL 10–18 sunucusu.
 
@@ -208,6 +208,82 @@ WebView2 CDP, PG 18.6), **[T7]** = Task 6 / Plan 7 sonu doğrulaması ve son dü
 ### Kapanan iş
 - [x] Tamamlama gecikmesi (Plan 7 son düzeltme dalgası): `.` sonrası debounce kaldırıldı, CodeMirror `activateOnTypingDelay` 50 ms;
   tuştan öneriye ~270 ms → 54–70 ms (sıcak/soğuk); spec §1.2 sıcak hedefi (< 150 ms) karşılanır (`docs/performance.md`).
+
+## Dashboard (Plan 8–9)
+
+Ön koşul: Query Tool bölümündeki gibi atılabilir bir PostgreSQL ve geçici `%APPDATA%`/`%LOCALAPPDATA%`. Aşağıdaki maddelerin
+hepsi **[—]** = elle çalıştırılmadı (ajanlar GUI'yi denemez; birim testleri yalnızca modelleri/denetleyiciyi kapsar). Sürüm öncesi
+kullanıcı işaretlemeli. Dashboard bağlantıları sunucuda `application_name = 'pg-tools dash'` ile görünür; doğrulamalarda şu sorgu kullanılır:
+`select pid, state, query_start, state_change from pg_stat_activity where application_name = 'pg-tools dash';`
+
+### Açılış, sekme ve görünüm
+- [ ] Ağaçta sunucu düğümü sağ tık → "Dashboard'u aç": yeni sekme `Dashboard · <sunucu>` açılır; veritabanı düğümünden açılınca `Dashboard · <sunucu>/<db>`. Aynı sunucu/veritabanı için ikinci kez açmak mevcut sekmeye geçer (çoğaltmaz). **[—]**
+- [ ] Sekme rengi sunucu rengini, etiketi (Üretim/Test/Geliştirme) ve kilit simgesini sorgu sekmeleriyle aynı biçimde gösterir; sunucu rengi/etiketi bağlam şeridinde okunur. **[—]**
+- [ ] İlk açılışta (tembel parça yüklenirken) sekme gövdesi "Yükleniyor…" gösterir; titreme/boş kare, yerleşim sıçraması yok; ikinci açılışta anında açılır. **[—]**
+- [ ] Bölüm sekmeleri (Genel / Oturumlar / Kilitler / Yapılandırma / Sorgu istatistikleri): ok tuşlarıyla gezilir; seçili bölüm vurgulu. `pg_stat_statements` yokken "Sorgu istatistikleri" sekmesi soluk (muted) görünür ama hem açık hem koyu temada okunur (kontrast yeterli) ve tıklanabilir. **[—]**
+- [ ] Açık ve koyu temada tüm bölümler okunur; kalın yan çizgi vurgusu yok, rozetler kullanılır. **[—]**
+- [ ] Dashboard açıkken temayı değiştir (araç çubuğundaki Tema düğmesi): grafik renkleri (seri çizgileri, ızgara, eksen yazıları) bir sonraki çizimde yeni temaya göre okunur; sayfa yenilemeye gerek kalmaz, yeni renkler eski temanın izini taşımaz. **[—]**
+
+### Genel (grafikler)
+- [ ] 5 grafik (Oturumlar, İşlem/sn, Satır girişi/sn, Satır çıkışı/sn, Blok G/Ç/sn) 2 sn'de bir sağa doğru akar; ilk örnek yalnızca taban çizgisidir (oranlı grafiklerde ilk birkaç saniye "Veri bekleniyor"). **[—]**
+- [ ] Duraklat → grafikler ve sayılar durur, durum "Duraklatıldı"; sunucuda dashboard bağlantısının `query_start` değeri ilerlemez. Sürdür → hemen bir yenileme, durum "Canlı". **[—]**
+- [ ] Aralık seçici 1/2/5/10/30 sn: değişince tek zamanlayıcı kalır (`query_start` farkları yeni aralığa yakın; çift sıklık yok). **[—]**
+- [ ] Grafik üzerinde fare: ipucu (tooltip) imleçle birlikte gezer, grafiğin sağ/alt kenarında taşmaz (kenara yaslanıp içeride kalır), serilerin değerleri ve zaman doğru; fare çıkınca kaybolur. **[—]**
+- [ ] `pg_stat_reset()` (veya sunucu yeniden bağlanması) sonrası oran grafiklerinde negatif değer çıkmaz; çizgide boşluk olur. Bilgisayarı uyutup uyandırınca (aralığın 5 katından uzun ara) çizgide boşluk olur. **[—]** (mantık `chart-model.test.ts`)
+- [ ] Özet kartları: sürüm, çalışma süresi, bağlantı sayısı `n / max_connections`, yüksek kullanımda "Yüksek kullanım" rozeti, en eski açık transaction yaşı ("Yok" yoksa); oturum dağılımı (Etkin / Boşta / Boşta (tx) / Diğer). **[—]**
+- [ ] 300 örnekten fazlası belleği büyütmez (uzun süre açık bırakınca sekme belleği sabit kalır). **[—]**
+
+### Arka plan ve istek durdurma
+- [ ] Dashboard sekmesi arka plandayken (başka sekme/Query Tool seçili) sunucuda dashboard bağlantısının `query_start` değeri ilerlemez, `state` değişmez; sekmeye dönünce hemen bir yenileme olur ve akış sürer. **[—]**
+- [ ] Pencere simge durumuna küçültülünce ya da gizlenince (`document.visibilityState = hidden`) aynı şekilde sıfır istek; geri getirince hemen bir yenileme. **[—]**
+- [ ] Dashboard sekmesini kapatınca `application_name = 'pg-tools dash'` bağlantısı kısa sürede sunucudan düşer (satır sayısı 0). **[—]**
+- [ ] F5 (ve araç çubuğundaki "Yenile (F5)") dashboard açıkken yalnızca verileri yeniler, sayfayı yeniden yüklemez (sekmeler, seçim, süzgeçler yerinde kalır). **[—]**
+
+### Oturumlar
+- [ ] Yerleşim: tablo gövdesi kalan yüksekliği doldurur (`h-full`), sayfa kaydırma çubuğu çıkmaz; tablo kendi içinde kaydırılır; üstteki süzgeç satırı sabit kalır. Ayrıntı paneli (Sorgu) açılınca tablo en çok kendi yüzde sınırına (`max-h`) kadar küçülür, panel taşmaz, ikisi de okunur; pencereyi küçültünce/büyütünce bozulmaz. **[—]**
+- [ ] Süzgeçler: arama kutusu (pid, sorgu, kullanıcı, uygulama), "Yalnızca etkin", durum seçimi, "Boşta-tx ≥" eşiği, veritabanı seçici birleşik çalışır; sayaç "x / y oturum"; hiçbiri uymazsa "Süzgece uyan oturum yok." **[—]**
+- [ ] Yukarı/Aşağı satır seçer, Enter ayrıntıyı açar; satır seçili kalır ve 5 sn'lik yenilemede seçim kaybolmaz; "Kopyala" sorgu metnini panoya alır ("Sorgu panoya kopyalandı."). **[—]**
+- [ ] Başka bir uygulama (ör. `psql`) kendi sorgusunu uzun süre çalıştırırken (`select pg_sleep(60)`) satır görünür, "Sorgu süresi" ilerler; bitince durum değişir. **[—]**
+- [ ] Yetkisiz rol (`pg_read_all_stats` üyesi olmayan, süper kullanıcı olmayan) ile bağlanınca başkalarının satırlarında sorgu sütunu soluk italik "yetki yok" gösterir; ayrıntıda "Yetki yok: başka bir rolün sorgusu görüntülenemez"; Genel'de "Bazı oturumlar görünmüyor (yetki)." notu çıkar. **[—]**
+- [ ] 5000'den fazla oturumda "İlk 5000 oturum gösteriliyor; liste kesildi." **[—]** (büyük kurulum gerektirir)
+
+### İptal ve sonlandırma
+- [ ] Kendi dashboard bağlantısının satırında (`isSelf`) İptal/Sonlandır düğmeleri kapalıdır; ipucu "Bu dashboard'un kendi bağlantısı; durdurulamaz." **[—]**
+- [ ] Çalışan başka oturumda `select pg_sleep(300)` iken "İptal" → diyalog o anki canlı satırı gösterir (pid, kullanıcı, uygulama, durum, sorgu), odak **Vazgeç**'te başlar; Enter yıkıcı eylemi onaylamaz; Delete tuşu satırda iptal isteği diyaloğunu açar. Onaylayınca "İptal isteği gönderildi." ve diğer oturum `canceling statement` hatası alır; oturum bağlı kalır. **[—]**
+- [ ] "Sonlandır" → "Oturum kapanır; bağlı istemci hata alır." uyarısı; onaylayınca oturum `pg_stat_activity`'den kaybolur, istemci bağlantı hatası alır. **[—]**
+- [ ] Açık transaction'lı (`idle in transaction`) oturum için ek uyarı "Açık transaction geri alınacak." **[—]**
+- [ ] pg-tools'un kendi sorgu sekmesi (`application = pg-tools query`) satırı için "Bu, pg-tools'un kendi sorgu sekmesi." uyarısı; sonlandırınca o sorgu sekmesi "Oturum kapandı" gösterir. **[—]**
+- [ ] Diyalog açıkken hedef oturum kapanırsa onayda "Oturum artık yok." çıkar ve işlem yapılmaz; pid başka kullanıcı/uygulamaya geçtiyse "Bu pid artık başka bir oturuma ait; işlem yapılmadı." **[—]** (zor tetiklenir; `signal-model.test.ts`)
+- [ ] Çift tıklama çift sinyal göndermez (onay düğmesi tıklamadan sonra kapanır/kilitlenir; sunucu günlüğünde tek sinyal). **[—]**
+- [ ] Yetkisiz rolle başka bir rolün oturumunu iptal etmeyi dene: hata iletisi PostgreSQL'in kendi ayrıntısını (yetki hatası, kod `42501`) gösteren Türkçe "Bu oturumu durdurma yetkiniz yok…" metnidir; ham İngilizce hata değil, ama sunucu ayrıntısı metnin yanında okunur. **[—]**
+- [ ] Diyalog kapanınca (Vazgeç / Esc / onay) odak diyaloğu açan satıra/düğmeye döner; klavyeyle gezme kesintisiz sürer. **[—]**
+
+### Kilitler
+- [ ] Yerleşim: Engelleme ağacı üstte, Kilitler tablosu altta; ikisi de kendi yüksekliğini yüzde sınırlarıyla paylaşır (biri diğerini dışarı itmez), uzun listede her biri kendi içinde kaydırılır. **[—]**
+- [ ] İki oturumla zincir: oturum A `begin; lock table t;` açık bırakır, B `select * from t;` (bekler), C de aynısını. Ağaçta kök "Engelleyen" = A, altında B ve C ("2 bekleyen" gibi), bekleme süreleri ("… bekliyor") ilerler; A `commit` edince ağaç "Engellenen oturum yok" olur. **[—]**
+- [ ] Zincir A → B → C (B de bir şeyi tutup C'yi bloke eder) iç içe doğru gösterilir; döngü varsa "döngü" rozeti çıkar ve arayüz donmaz. **[—]** (`lock-tree.test.ts`; gerçek döngü deadlock detector'ı yüzünden zor)
+- [ ] Hazır transaction ile engelleme (`max_prepared_transactions > 0` ve yeniden başlatma gerekir): `begin; lock table t; prepare transaction 'x';` sonra başka oturum `select * from t;`. Ağaçta engelleyen "Hazır transaction" (eylemsiz; "Hazırlanmış (prepared) transaction kilit tutuyor; buradan durdurulamaz.") görünür; `rollback prepared 'x'` ile temizlenir. **[—]**
+- [ ] Kilit tablosunda bekleyen satırlarda "Verildi: Hayır" ve "Kilit bekleniyor" ipucu; tablo klavyeyle gezilir. **[—]**
+- [ ] Ağaç ve tablo satırlarında bekleyen/engelleyen oturum listede yoksa "Oturum listede yok" yazar. **[—]**
+
+### Yapılandırma ve hazır transaction'lar
+- [ ] Yapılandırma: arama (ad, kategori, açıklama) çalışır; "Yalnızca değiştirilmiş" varsayılan dışı ayarları (kaynak ≠ default) gösterir; "Yeniden başlatma bekliyor" yalnızca `pending_restart` ayarlarını gösterir (ör. `max_connections`'ı `ALTER SYSTEM` + `pg_reload_conf()` ile değiştirip sonra süzgeci aç; satırda "yeniden başlatma bekliyor" rozeti). **[—]**
+- [ ] Ayarlar otomatik yenilenmez; "Yenile" düğmesi yeniden yükler. **[—]**
+- [ ] Uzun değerler (`search_path`, `shared_preload_libraries`, uzun dizinler) hücrede kesilir (üç nokta), satır yüksekliği büyümez, tam değer ipucu/ayrıntıda okunur; sütun taşması yatay kaydırma çubuğu yaratmaz. **[—]**
+- [ ] Hazır transaction'lar tablosu (Yapılandırma altında): `max_prepared_transactions` 0 ise "Hazır transaction yok"; bir tane `prepare transaction` ile oluşturulunca gid, transaction, sahip, veritabanı, yaş görünür; 1 saatten eskiyse "uzun süredir açık" rozeti; "yalnızca bilgi" notu, sonlandırma düğmesi yok. **[—]**
+
+### Sorgu istatistikleri (`pg_stat_statements`)
+- [ ] `shared_preload_libraries = 'pg_stat_statements'` + `create extension pg_stat_statements` yapılmış veritabanında liste gelir: sıralama (Toplam süre / Ortalama / Çağrı) değişince sıra değişir; ayrıntıda tam sorgu, "Kopyala" çalışır; isabet oranı (Hit/Read) mantıklı. **[—]**
+- [ ] Eklenti yokken (ya da yalnızca yüklenmemişken): bölümde "pg_stat_statements kullanılamıyor" durumu, hata iletisi/çökme yok; diğer bölümler çalışmaya devam eder; `pg_stat_statements_reset()` sonrası "Henüz kayıtlı sorgu istatistiği yok." **[—]**
+- [ ] `shared_preload_libraries`'de olup `create extension` yapılmamış durumda da aynı "kullanılamıyor" durumu (eklenti yok ile ayırt edilmeyebilir, kabul). **[—]**
+
+### Bağlantı yaşam döngüsü
+- [ ] Dashboard açıkken ağaçta sunucuyu "Bağlantıyı kes": dashboard "Bağlantı kesildi" durumuna geçer ("Dashboard oturumu kapandı; yenileme durdu."), istekler durur (sunucuda `pg-tools dash` bağlantısı yok), **Yeniden aç** yeniden bağlanır ve "Canlı" olur; grafik geçmişi temizlenmiş başlar. **[—]**
+- [ ] Sunucu tarafında bağlantıyı düşür (`select pg_terminate_backend(pid)` ile `pg-tools dash` bağlantısını): "Bağlantı kesildi" + **Yeniden aç** çıkar, ham `not_found` hatası görünmez. **[—]**
+- [ ] Dashboard açıkken sunucuyu sil: "Sunucu silindi" ("Bu sunucunun kaydı silindi; dashboard yeniden açılamaz."), **Yeniden aç** yok/etkisiz, sekme kapatılabilir; sunucuda dashboard bağlantısı kalmaz. **[—]**
+- [ ] Dashboard açıkken sunucuyu düzenleyip salt okunur kilidini ya da üretim etiketini değiştir (kaydet): dashboard "Bağlantı kesildi" durumuna geçer, **Yeniden aç** çalışır; her yeniden açmadan sonra `select count(*) from pg_stat_activity where application_name = 'pg-tools dash'` dashboard sekmesi sayısı kadar (sekme başına 1) kalır; fazladan/yetim bağlantı birikmez. **[—]**
+- [ ] Aynı sunucuda iki dashboard sekmesi (sunucu + veritabanı) açıkken biri kapanınca diğeri etkilenmez. **[—]**
+- [ ] Uygulama açıkken F5/Ctrl+R sayfayı yeniden yüklemez (Plan 6 ile aynı davranış); kapatma penceresi dashboard bağlantılarını temizler (uygulamayı kapattıktan sonra sunucuda `pg-tools dash` bağlantısı kalmaz). **[—]**
 
 ## Ölçümler
 
