@@ -263,6 +263,8 @@ kısım (`QueryTab.tsx`, `ResultGrid.tsx`, `editor.ts`) ince tutulur ve elle/CDP
 | `completion.test.ts` | Tamamlama bağlamı (`contextAt`), `replaceRange`/`matchItems` (açık tırnak, otomatik kapanış tırnağı) |
 | `tabs-store.test.ts` | Sekme deposu: Nesne sekmesi, başlık `<sunucu>/<db> #n`, kimlik çakışması, kapatma/seçim, sıra |
 | `workspace-model.test.ts` | Çalışma alanı: `openContext`/`initialSql`, ortam istemi, `saveClosesSessions` (arka uçla aynı kural), `closePlan`/`bulkPolicy`, `routeError`, taslak dönüşümü, `swapEditorState`, zamanlayıcı biçimi |
+| `check-model.test.ts` | Yazarken denetim (Plan 7): kapı (açık+boşta, Failed/meşgul/oturumsuz değil), 600 ms debounce, sürüm sayacıyla eski sonucun yok sayılması, sırasız sonuçlar, aynı hedefte yeniden istek yok, emojili UTF-16 eşleme, düzenlemede işaret temizleme |
+| `format-edit.test.ts` | Biçimlendir komutu (Plan 7): aralık (seçim/tümü), seçim boşluklarının korunması, imleç eşleme, tek geri alma adımı (`EditorState` + `history`) |
 | `query-controller.test.ts` | Denetleyici (sahte api + sahte zamanlayıcılar): kapanan sekmenin taslağı geri gelmez, sunucusu silinen sekme taslak yazmaz |
 
 Ayrıca `src/features/explorer/actions.test.ts` (menüdeki `openQueryTool` ve kısayol etiketi) ve
