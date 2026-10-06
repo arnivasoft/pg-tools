@@ -5,10 +5,10 @@ import { td } from "../../app/strings-dashboard";
 import type { ToastKind } from "../../app/toast-model";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { Api } from "../../ipc/commands";
-import { toPayload } from "../../ipc/errors";
+import { errorText, toPayload } from "../../ipc/errors";
 import type { TreeState } from "../explorer/tree-model";
 import type { TabsStore } from "../query/tabs-store";
-import { createDashController, errorText, type DashController, type DashControllerDeps } from "./dash-controller";
+import { createDashController, type DashController, type DashControllerDeps } from "./dash-controller";
 
 export interface DashOpenDeps {
   dash: DashController;

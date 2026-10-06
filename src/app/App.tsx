@@ -8,6 +8,7 @@ import { copyText } from "./clipboard";
 import { Inspector } from "../features/inspector/Inspector";
 import { ROOT } from "../features/explorer/tree-model";
 import type { Dashboard } from "../features/dashboard/dash-open";
+import type { Designer } from "../features/designer/designer-open";
 import { createPasswordPrompt } from "../features/servers/PasswordPrompt";
 import { groupsOf } from "../features/servers/server-form";
 import { createQueryController } from "../features/query/query-controller";
@@ -31,6 +32,16 @@ const ImportDialog = lazy(() => import("../features/servers/ImportDialog").then(
 
 const SHOW_SYSTEM_KEY = "pgt.showSystem";
 
+/** Tembel parçayı bir kez kurar (iki hızlı tıklamada tek kurulum); yükleme hatasında sonraki deneme yeniden yükler. */
+function once<T>(load: () => Promise<T>) {
+  let p: Promise<T> | null = null;
+  return () =>
+    (p ??= load().catch((err) => {
+      p = null;
+      throw err;
+    }));
+}
+
 export default function App() {
   const prompt = createPasswordPrompt();
   const explorer = createExplorer({ api: commands, requestPassword: prompt.ask });
@@ -39,28 +50,26 @@ export default function App() {
     const node = [...explorer.state().nodes.values()].find((n) => n.kind === "server" && n.serverId === serverId);
     return node ? explorer.controller.ensureConnected(node.id) : false;
   };
+  // Tembel parçaların ortak bağımlılıkları (sorgu denetleyicisi aşağıda kurulur; yalnızca ilk açılışta okunur).
+  const lazyDeps = () => ({
+    api: commands,
+    tree: explorer.state,
+    tabs: query.tabs,
+    refreshServers: query.refreshServers,
+    connect: connectServer,
+    notify: toast.show,
+  });
   // Dashboard tembel parçadadır: ilk "Dashboard'u aç"ta yüklenir (ana paket büyümez).
   const [dash, setDash] = createSignal<Dashboard | null>(null);
-  let dashLoad: Promise<Dashboard> | null = null;
-  const loadDash = () =>
-    (dashLoad ??= import("../features/dashboard/dash-open").then(
-      (m) => {
-        const d = m.createDashboard({
-          api: commands,
-          tree: explorer.state,
-          tabs: query.tabs,
-          refreshServers: query.refreshServers,
-          connect: connectServer,
-          notify: toast.show,
-        });
-        setDash(d);
-        return d;
-      },
-      (err) => {
-        dashLoad = null; // sonraki denemede yeniden yüklensin
-        throw err;
-      },
-    ));
+  const loadDash = once(() => import("../features/dashboard/dash-open").then((m) => setDash(m.createDashboard(lazyDeps()))));
+  // Nesne diyaloğu (designer) da tembel: ilk "Oluştur/Düzenle/Yeniden adlandır/Sil"de yüklenir.
+  const [designer, setDesigner] = createSignal<Designer | null>(null);
+  const loadDesigner = once(() =>
+    import("../features/designer/designer-open").then((m) =>
+      setDesigner(m.createDesigner({ ...lazyDeps(), query, explorer: explorer.controller })),
+    ),
+  );
+  const loadFailed = (err: unknown) => toast.show(toPayload(err).message, "error");
   const query = createQueryController({
     api: commands,
     notify: toast.show,
@@ -68,7 +77,10 @@ export default function App() {
     connect: connectServer,
     serversChanged: () => void explorer.controller.reloadServers().catch(() => {}),
     // Arka uç sunucunun dashboard oturumlarını da kapatır (sil/kes/kayıt değişimi): sekmeler "bağlantı kesildi".
-    sessionsClosed: (serverId, gone) => dash()?.ctl.serverSessionsClosed(serverId, gone),
+    // Designer sekmeleri de "bağlantı kesildi" olur ve istek atmaz.
+    sessionsClosed: (serverId, gone) => {
+      for (const x of [dash(), designer()]) x?.ctl.serverSessionsClosed(serverId, gone);
+    },
   });
   const [themePref, setThemePref] = createSignal(loadThemePreference());
   const [dialogOpen, setDialogOpen] = createSignal(false);
@@ -103,11 +115,8 @@ export default function App() {
     editServer: (serverId) => void openDialog(serverId),
     confirmDelete: deleteConfirm.ask,
     openQueryTool: (id) => void query.openFromNode(id),
-    openDashboard: (id) =>
-      void loadDash().then(
-        (d) => d.openFromNode(id),
-        (err) => toast.show(toPayload(err).message, "error"),
-      ),
+    openDashboard: (id) => void loadDash().then((d) => d.openFromNode(id), loadFailed),
+    openDesigner: (id, mode) => void loadDesigner().then((d) => d.open(id, mode), loadFailed),
     beforeServerChange: query.confirmServerChange,
     afterServerChange: (serverId, gone) => {
       query.serverSessionsClosed(serverId, gone);
@@ -239,6 +248,8 @@ export default function App() {
             inspector={<Inspector explorer={explorer} />}
             dash={() => dash()?.ctl ?? null}
             onReopenDash={(id) => void dash()?.reopen(id)}
+            designer={() => designer()?.ctl ?? null}
+            onOpenScript={(input) => designer()?.openScript(input)}
           />
         }
       />

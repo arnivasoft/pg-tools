@@ -7,10 +7,18 @@ import type { ExplorerController } from "./controller";
 import { ROOT, ancestorOfKind, isCollection, serverOf, type TreeState } from "./tree-model";
 import { canOpenQueryTool } from "../query/open-kinds";
 import { canOpenDashboard } from "../dashboard/open-kinds";
+import { canCreateIn, canEditObject } from "../designer/ddl-kinds";
 
 export type ActionId =
   | "refresh" | "connect" | "disconnect" | "editServer" | "deleteServer"
-  | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool" | "openDashboard";
+  | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool" | "openDashboard"
+  | "createObject" | "editObject" | "renameObject" | "dropObject";
+
+/**
+ * Nesne diyaloğu (designer) eylemleri: adı `Object` ile biten dört eylem (ana paket bütçesi için liste yerine sonek);
+ * kip, adın `Object` öncesidir (`createObject` → `create`). Yeni bir eylem adı bu soneki kullanmamalıdır.
+ */
+export type DesignerOpenMode = "create" | "edit" | "rename" | "drop";
 
 export interface ActionDeps {
   state: () => TreeState;
@@ -24,6 +32,10 @@ export interface ActionDeps {
   openQueryTool?(id: string): void;
   /** "Dashboard'u aç" (bağlı sunucu / veritabanı). */
   openDashboard?(id: string): void;
+  /** Nesne diyaloğunu aç (Schema/Sequence/Extension/Index; `drop` sekme açmaz, silme diyaloğu). */
+  openDesigner?(id: string, mode: DesignerOpenMode): void;
+  /** Düğümün sunucusu salt okunur kilitli mi (designer eylemleri kapalı)? Verilmezse ağaçtaki sunucu düğümünün kilidi. */
+  serverLocked?(nodeId: string): boolean;
   /** Sunucunun sorgu oturumlarını kapatacak işlemden (silme, bağlantı kesme) önce: açık transaction'lar için sorar. */
   beforeServerChange?(serverId: string, name: string): Promise<boolean>;
   /** İşlemden sonra: o sunucunun sorgu sekmeleri oturumsuz kalır (`gone`: kayıt silindi). */
@@ -78,8 +90,9 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
       ? [...q, "refresh", "disconnect", "editServer", "deleteServer", "copyName"]
       : [...q, "connect", "editServer", "deleteServer", "copyName"];
   }
-  if (isCollection(node.kind)) return ["refresh", "copyName"];
+  if (isCollection(node.kind)) return canCreateIn(node.kind) ? ["createObject", "refresh", "copyName"] : ["refresh", "copyName"];
   const out: ActionId[] = [...q];
+  if (canEditObject(node.kind)) out.push("editObject", "renameObject", "dropObject");
   if (node.hasChildren) out.push("refresh");
   out.push("copyName");
   if (qualifiedParts(s, node.id) !== null) out.push("copyQualifiedName");
@@ -90,9 +103,16 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
 /** Menüde ayırıcı yerleşimi için eylem grubu. */
 export function groupOf(a: ActionId): number {
   if (a === "openQueryTool" || a === "openDashboard") return -1;
+  if (a.endsWith("Object")) return 3;
   if (a === "refresh" || a === "connect" || a === "disconnect") return 0;
   if (a === "editServer" || a === "deleteServer") return 1;
   return 2;
+}
+
+/** Eylem görünür ama kapalıysa gerekçesi (menüde `title`); designer eylemleri kilitli sunucuda kapalıdır. */
+export function disabledReason(a: ActionId, deps: Pick<ActionDeps, "serverLocked" | "state">, nodeId: string): string | null {
+  const locked = a.endsWith("Object") && (deps.serverLocked?.(nodeId) ?? serverOf(deps.state(), nodeId)?.flags.locked);
+  return locked ? t.query.hint.locked : null;
 }
 
 export async function executeAction(deps: ActionDeps, action: ActionId, id: string): Promise<void> {
@@ -115,6 +135,13 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
         return;
       case "openDashboard":
         deps.openDashboard?.(id);
+        return;
+      case "createObject":
+      case "editObject":
+      case "renameObject":
+      case "dropObject":
+        // Savunma: menü kilitli sunucuda bu öğeleri gerekçesiyle zaten kapatır (açıcı da kaydı yeniden denetler).
+        if (!disabledReason(action, deps, id)) deps.openDesigner?.(id, action.slice(0, -6) as DesignerOpenMode);
         return;
       case "disconnect":
         if (node.serverId && deps.beforeServerChange && !(await deps.beforeServerChange(node.serverId, node.label))) return;

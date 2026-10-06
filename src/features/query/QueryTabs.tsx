@@ -1,15 +1,16 @@
-// Sağ panel: sabit "Nesne" sekmesi (Inspector) + sorgu sekmeleri + dashboard sekmeleri. Ana pakette kalır; çalışma
-// alanı (CodeMirror, ızgara) ilk sorgu sekmesi etkinleşene kadar, dashboard gövdesi ilk dashboard açılana kadar inmeyen
-// tembel parçalardır.
+// Sağ panel: sabit "Nesne" sekmesi (Inspector) + sorgu + dashboard + designer sekmeleri. Ana pakette kalır; çalışma
+// alanı (CodeMirror, ızgara) ilk sorgu sekmesi etkinleşene kadar, dashboard/designer gövdeleri ilk sekmeleri açılana kadar
+// inmeyen tembel parçalardır.
 import { Lock, X } from "lucide-solid";
 import { For, Show, Suspense, createSignal, lazy, onCleanup, onMount, type JSX } from "solid-js";
 import { t } from "../../app/strings";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import type { DashController } from "../dashboard/dash-controller";
+import type { DesignerController } from "../designer/designer-controller";
 import { isProductionLabel } from "../servers/server-form";
 import type { QueryController } from "./query-controller";
-import { OBJECT_TAB_ID, isDashTabId, isQueryTabId } from "./tabs-store";
+import { OBJECT_TAB_ID, isDashTabId, isDesignerTabId, isQueryTabId } from "./tabs-store";
 import { ENV_CHOICES, canCommitAny, envLabel, envLockDefault, serverLineColor, type EnvChoice } from "./workspace-model";
 
 const QueryTab = lazy(() => import("./QueryTab"));
@@ -17,6 +18,10 @@ const QueryTab = lazy(() => import("./QueryTab"));
 const dashTabs = () => import("../dashboard/DashTabs");
 const DashTabHeads = lazy(() => dashTabs().then((m) => ({ default: m.DashTabHeads })));
 const DashPanels = lazy(() => dashTabs().then((m) => ({ default: m.DashPanels })));
+// Designer sekme başlıkları ve panelleri (kapatma onayı dahil): designer denetleyicisi yüklendiğinde inen tembel parça.
+const designerTabs = () => import("../designer/DesignerTabs");
+const DesignerTabHeads = lazy(() => designerTabs().then((m) => ({ default: m.DesignerTabHeads })));
+const DesignerPanels = lazy(() => designerTabs().then((m) => ({ default: m.DesignerPanels })));
 
 export function QueryTabs(props: {
   ctl: QueryController;
@@ -25,23 +30,46 @@ export function QueryTabs(props: {
   dash?: () => DashController | null;
   /** Kayıp dashboard'u yeniden aç (önce sunucuyu bağlar). */
   onReopenDash?: (tabId: string) => void;
+  /** Tembel designer denetleyicisi (ilk "Oluştur/Düzenle"de yüklenir; o zamana kadar `null`). */
+  designer?: () => DesignerController | null;
+  /** Designer betiğini yeni sorgu sekmesinde aç (çalıştırmaz). */
+  onOpenScript?: (input: { serverId: string; databaseOid: number; text: string }) => void;
 }) {
   const ctl = props.ctl;
   const active = () => ctl.tabs.state.activeId;
   const isObject = () => active() === OBJECT_TAB_ID;
   const isQuery = () => isQueryTabId(ctl.tabs.state, active());
   const isDash = (id: string) => isDashTabId(ctl.tabs.state, id);
+  const isDesigner = (id: string) => isDesignerTabId(ctl.tabs.state, id);
 
   /** Dashboard sekmesi onaysız kapanır: önce oturum (`dash_close`), sonra sekme. */
   const closeDash = (id: string) => {
     props.dash?.()?.close(id);
     ctl.tabs.close(id);
   };
-  const requestClose = (id: string) => (isDash(id) ? closeDash(id) : void ctl.requestClose(id));
+  /** Designer sekmesi: önce denetleyici girdisi (önizleme/uçuştaki uygulama iptal), sonra sekme. */
+  const closeDesigner = (id: string) => {
+    props.designer?.()?.close(id);
+    ctl.tabs.close(id);
+  };
+  // Kirli designer sekmesi kapatılmadan önce onay ister (odak Vazgeç'te); temiz sekme doğrudan kapanır.
+  const [designerClosing, setDesignerClosing] = createSignal<string | null>(null);
+  const answerDesignerClose = (discard: boolean) => {
+    const id = designerClosing();
+    setDesignerClosing(null);
+    if (discard && id !== null && isDesigner(id)) closeDesigner(id);
+  };
+  const requestClose = (id: string) => {
+    if (isDash(id)) closeDash(id);
+    else if (isDesigner(id)) {
+      if (props.designer?.()?.isDirty(id)) setDesignerClosing(id);
+      else closeDesigner(id);
+    } else void ctl.requestClose(id);
+  };
 
   // WebView yeniden yüklemesi (F5, Ctrl+R, Ctrl+Shift+R) oturumları kaybettirir: her zaman engellenir.
-  // Sorgu sekmesi etkinken (ağaç dışında) F5 tüm betiği çalıştırır, dashboard etkinken onu yeniler; ağaçta F5 düğümü
-  // yeniler.
+  // Sorgu sekmesi etkinken (ağaç dışında) F5 tüm betiği çalıştırır, dashboard etkinken onu yeniler, designer etkinken
+  // önizlemeyi hemen yeniler (sorgu çalışmaz); ağaçta F5 düğümü yeniler.
   const onKeyCapture = (e: KeyboardEvent) => {
     const k = e.key;
     const reload = k === "F5" || ((e.ctrlKey || e.metaKey) && !e.altKey && k.toLowerCase() === "r");
@@ -55,7 +83,8 @@ export function QueryTabs(props: {
     if (!here || document.querySelector('[role="dialog"]')) return;
     e.stopPropagation();
     if (isDash(a)) props.dash?.()?.refreshNow(a);
-    else ctl.runActive("all");
+    else if (isDesigner(a)) props.designer?.()?.previewNow(a);
+    else if (isQuery()) ctl.runActive("all");
   };
 
   onMount(() => {
@@ -203,6 +232,13 @@ export function QueryTabs(props: {
             </Suspense>
           )}
         </Show>
+        <Show when={props.designer?.()}>
+          {(designer) => (
+            <Suspense>
+              <DesignerTabHeads designer={designer()} tabs={ctl.tabs.state.designers} Head={TabHead} />
+            </Suspense>
+          )}
+        </Show>
       </div>
       {/* Gizli panel `invisible` ile saklanır (display:none kaydırma konumunu sıfırlar). */}
       <div class="relative min-h-0 flex-1">
@@ -220,6 +256,21 @@ export function QueryTabs(props: {
           {(dash) => (
             <Suspense>
               <DashPanels dash={dash()} tabs={ctl.tabs.state.dashboards} activeId={active()} onReopen={(id) => props.onReopenDash?.(id)} />
+            </Suspense>
+          )}
+        </Show>
+        <Show when={props.designer?.()}>
+          {(designer) => (
+            <Suspense>
+              <DesignerPanels
+                designer={designer()}
+                tabs={ctl.tabs.state.designers}
+                activeId={active()}
+                onOpenScript={(input) => props.onOpenScript?.(input)}
+                onClose={requestClose}
+                closing={designerClosing()}
+                onCloseAnswer={answerDesignerClose}
+              />
             </Suspense>
           )}
         </Show>

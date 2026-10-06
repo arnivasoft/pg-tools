@@ -283,7 +283,83 @@ kullanıcı işaretlemeli. Dashboard bağlantıları sunucuda `application_name 
 - [ ] Dashboard açıkken sunucuyu sil: "Sunucu silindi" ("Bu sunucunun kaydı silindi; dashboard yeniden açılamaz."), **Yeniden aç** yok/etkisiz, sekme kapatılabilir; sunucuda dashboard bağlantısı kalmaz. **[—]**
 - [ ] Dashboard açıkken sunucuyu düzenleyip salt okunur kilidini ya da üretim etiketini değiştir (kaydet): dashboard "Bağlantı kesildi" durumuna geçer, **Yeniden aç** çalışır; her yeniden açmadan sonra `select count(*) from pg_stat_activity where application_name = 'pg-tools dash'` dashboard sekmesi sayısı kadar (sekme başına 1) kalır; fazladan/yetim bağlantı birikmez. **[—]**
 - [ ] Aynı sunucuda iki dashboard sekmesi (sunucu + veritabanı) açıkken biri kapanınca diğeri etkilenmez. **[—]**
+- [ ] İki dashboard sekmesini art arda aç (ör. iki farklı sunucu ya da sunucu + veritabanı) → ikinci sekme de yüklenir ve "Canlı" olur ("Yükleniyor…"da kalmaz). **[—]**
 - [ ] Uygulama açıkken F5/Ctrl+R sayfayı yeniden yüklemez (Plan 6 ile aynı davranış); kapatma penceresi dashboard bağlantılarını temizler (uygulamayı kapattıktan sonra sunucuda `pg-tools dash` bağlantısı kalmaz). **[—]**
+
+## Nesne diyalogları (Plan 11)
+
+Ön koşul: bağlı bir sunucu ve veritabanı; designer sekmesi Explorer menüsünden açılır (Task 4). Aşağıdaki kutucuklar GUI üzerinden elle uygulanmadı; sürüm öncesi işaretlenmelidir.
+
+### Sekme kabuğu
+- [ ] Designer sekmesi sorgu ve dashboard sekmelerinden sonra çizilir (kalem-cetvel simgesi); sunucu renk çizgisi, üretim rozeti ve kilit simgesi sorgu sekmesindekiyle aynıdır. **[—]**
+- [ ] Formda değişiklik yapılınca sekmede nokta görünür (ekran okuyucu "kaydedilmemiş değişiklikler" okur); bağlantı kesilince/sunucu silinince başlık soluklaşır ("gone"da üstü çizili). **[—]**
+- [ ] Kirli designer sekmesini kapat (×, orta tık, Delete): "Kaydedilmemiş değişiklikler atılsın mı?" diyaloğu, odak **Vazgeç**'te, Enter sekmeyi kapatmaz; "Değişiklikleri at ve kapat" kapatır. Temiz sekme onaysız kapanır. **[—]**
+- [ ] Designer etkinken F5 sayfayı yeniden yüklemez, sorgu çalıştırmaz, önizlemeyi hemen yeniler; Ctrl+R/Ctrl+Shift+R sayfayı yeniden yüklemez. Ctrl+F davranışı değişmez. **[—]**
+- [ ] Designer etkinken sorgu paneli ve "Nesne" paneli görünmez/tıklanamaz; designer'dan sorgu sekmesine geçince editör/ızgara kaydırma konumu korunur, designer'a dönünce form ve önizleme olduğu gibi durur. **[—]**
+- [ ] **Bilinçli karar:** pencere kapatılırken kirli designer sekmeleri için uyarı **gösterilmez** (açık transaction toplu onayına eklenmez); kaydedilmemiş taslaklar kaybolur, uçuştaki uygulama arka uçta iptal edilir. Kapatma sonrası sunucuda `pg-tools` DDL oturumu kalmadığını doğrula. **[—]**
+
+### Önizleme ve uygulama çubuğu
+- [ ] Önizleme salt okunur; metin yalnızca arka ucun ifadeleri (`;` ile, aralarında boş satır). İfade listesinde sıra, risk rozeti (Güvenli / Yıkıcı / Veri kaybı olabilir), "transaction dışı" rozeti ve not görünür; uyarılar şeridi okunur. **[—]**
+- [ ] Boş durumlar: hatalı form → "Formu tamamlayın"; değişiklik yok → "Değişiklik yok"; ilk önizleme beklerken → "Önizleme hazırlanıyor…"; yazarken eski önizleme soluk kalır ("Yenileniyor…"), titreme yok. **[—]**
+- [ ] **Kopyala** betiği panoya koyar ("SQL panoya kopyalandı."); pano hatasında hata bildirimi. **[—]**
+- [ ] Yıkıcı planda "Etkisini anladım" işaretlenmeden **Uygula** kapalı; Uygula kırmızıdır. Üretim etiketli sunucuda veri kaybı planında ayrıca "Onaylamak için sunucu adını yazın: <ad>" alanı (büyük/küçük harf duyarlı); ad alanında Enter gönderim yapmaz. **[—]**
+- [ ] Uygulama sürerken Uygula "Uygulanıyor…" ve kapalı, **İptal** görünür ve uçuştaki uygulamayı iptal eder; çift tık ikinci istek üretmez. **[—]**
+- [ ] Kilitli sunucuda Uygula ve lock_timeout kapalı (`title`: "Sunucu salt okunur kilitli"), önizleme ve Kopyala serbest. **[—]**
+- [ ] Başarısız uygulamada ilgili ifade satırları önizlemede kırmızı zeminle vurgulanır, listede "başarısız" rozeti; `committed > 0` ise "N ifade kalıcı oldu" uyarısı ve "Yeniden yükle" şeridi; `55P03` → "Kilit beklerken zaman aşımı". **[—]**
+- [ ] lock_timeout seçici (1 sn / 5 sn / 30 sn / sınırsız) uygulamada kullanılır (başka oturumda `lock table … in access exclusive mode` tutarken 1 sn ile zaman aşımı). **[—]**
+- [ ] **Yeniden yükle**: kirli formda "Kaydedilmemiş değişiklikler atılsın mı?" onayı (odak Vazgeç); temizken doğrudan yükler. İlk yükleme hatasında "Yeniden dene". **[—]**
+
+### Gezgin menüsü ve açma (Task 4)
+- [ ] Schemas / Sequences / Extensions / Indexes koleksiyonunda sağ tık → **Oluştur…**; schema / sequence / extension / index düğümünde **Düzenle…**, **Yeniden adlandır…**, **Sil…** (Query Tool eyleminden sonra, ayırıcıyla ayrı grup). Tablo, kolon, görünüm, fonksiyon, rol, veritabanı, sunucu düğümlerinde bu eylemler yok. **[—]**
+- [ ] Salt okunur kilitli sunucuda bu dört eylem görünür ama soluk ve seçilemez; üzerine gelince `title` "Bu sunucu salt okunur kilitli."; kilit kaldırılıp ağaç yenilenince etkinleşir. **[—]**
+- [ ] İlk "Oluştur/Düzenle" designer parçasını yükler (ağ sekmesinde `designer-open-*.js`); iki hızlı tıklama tek sekme / tek kurulum üretir. Bağlı olmayan sunucuda önce parola istenir; iptalde sekme açılmaz. **[—]**
+- [ ] İki farklı nesnenin **Düzenle…** sekmelerini art arda aç → ikinci sekme de yüklenir ("Yükleniyor…"da kalmaz); formda değişiklik yapınca başlığında kirli noktası görünür, silinince/bağlantı kesilince başlık stili güncellenir. **[—]**
+- [ ] Aynı nesnede ikinci **Düzenle…** mevcut sekmeyi etkinleştirir; **Yeniden adlandır…** (yeni ya da mevcut sekmede) ad alanına odaklanır. Sekme üst çubuğunda "<sunucu>/<veritabanı>". **[—]**
+- [ ] **Sil…** sekme açmaz; silme diyaloğunu açar (bkz. "Silme diyaloğu"). Hiç designer sekmesi açık değilken de diyalog görünür (ilk kullanımda `DropDialog-*.js` iner). **[—]**
+- [ ] Uygulama sonrası Explorer'da doğru koleksiyon yenilenir (yeni sequence görünür). Designer'dan "Query Tool'da aç" betiği yeni sorgu sekmesine **çalıştırmadan** koyar (başlık "<sunucu>/<veritabanı> #n"; etiketsiz sunucuda ortam sorusu; kilitli sunucuda da açılır, çalıştırma kilit kapısına takılır). **[—]**
+- [ ] Sunucu bağlantısı kesilince/silinince açık designer sekmeleri "Bağlantı kesildi"/"Sunucu kaydı silindi" olur; sunucu adı/etiketi/kilidi düzenlenince açık designer sekmesi yeni adı/kilidi gösterir. **[—]**
+
+### Formlar: Schema
+- [ ] Schemas → **Oluştur…**: ad, sahip (OWNER; boş → bağlanan rol), yorum → önizleme `CREATE SCHEMA …` (+ `COMMENT ON SCHEMA`) → Uygula → Schemas yenilenir, sekme yeni şemanın Düzenle sekmesine dönüşür. **[—]**
+- [ ] Var olan şemada yeniden adlandır / yorum değiştir / sahip değiştir → her biri ayrı `ALTER SCHEMA …`/`COMMENT ON` ifadesi; yorumu boşaltmak → `COMMENT … IS NULL`. **[—]**
+
+### Formlar: Sequence
+- [ ] Oluştur: veri türü, INCREMENT, MINVALUE/MAXVALUE (boş = varsayılan), START, CACHE, CYCLE → önizleme doğru; büyük sayılar (`9223372036854775807`) bozulmadan gider; harf/boşluk girilince "sayıları düzeltin" yerel engeli → istek gitmez. **[—]**
+- [ ] Yön değişimi (INCREMENT pozitiften negatife) → START/MIN/MAX birlikte güncellenir, `start` hatası çıkmaz; uyarı şeridi okunur. **[—]**
+- [ ] OWNED BY: tablo → kolon seçimi (tablo dizinin şemasında olmalı; dizinin şeması değişince OWNED BY şeması da izler); kaldırma → `OWNED BY NONE`. Tür değişimi (`bigint` → `integer`) sınır dışı değerde arka uç hatası alanın yanında görünür. **[—]**
+
+### Formlar: Extension
+- [ ] Oluştur: kullanılabilir eklenti listesi, sürüm (boş = varsayılan), şema → `CREATE EXTENSION …`; sürüm listesi yüklenirken "yükleniyor" gösterir, kurulamayan adda arka uç hatası alanın yanında. **[—]**
+- [ ] Düzenle: sürüm güncelle (`ALTER EXTENSION … UPDATE TO`), şemayı taşı (`SET SCHEMA`); taşınamayan eklentide arka uç hatası okunur. Sil → silme diyaloğu. **[—]**
+
+### Formlar: Index
+- [ ] Oluştur: yöntem btree / hash / gin (yöntem değişince tanım korunur), kolon ve ifade anahtarları ("ifade SQL olarak çalıştırılır" notu), INCLUDE (desteklenmeyen sürümde öğretici hata), WHERE (kısmi indeks), UNIQUE, fillfactor, tablespace (`pg_default` seçilir; temizlenemez), CONCURRENTLY → önizlemede "transaction dışı" rozeti. **[—]**
+- [ ] Kolon satırı klavyeyle taşınır (yukarı/aşağı düğmeleri Tab ile erişilir; odak taşınan satırda kalır); satır silme/ekleme sonrası `columns[i].key` hataları doğru satırda görünür. **[—]**
+- [ ] Düzenle: yeniden adlandır, fillfactor, tablespace → `ALTER INDEX`; yapısal değişiklik (kolon/yöntem/WHERE) → "drop + create" uyarısı ve tablo kilidi notu, risk ≥ Yıkıcı. **[—]**
+- [ ] Yapısal değişiklik uygulandıktan sonra (DROP+CREATE → yeni oid) sekme yeni indeks üzerinde `ready` kalır ("Nesne yok" olmaz); form yeni tanımı gösterir. **[—]**
+- [ ] Kısıt-bağlı indeks (PRIMARY KEY/UNIQUE kısıtı) → banner + form salt okunur; geçersiz (`indisvalid = false`) indeks → banner. **[—]**
+- [ ] Uzun CREATE INDEX (büyük tablo, `statement_timeout` olmadan) sırasında **İptal** → uygulama iptal edilir, sekme kullanılabilir kalır; CONCURRENTLY yarım kalırsa geçersiz indeks banner'ı. **[—]**
+
+### Canlı önizleme ve yaşam döngüsü
+- [ ] Yazarken önizleme ~150 ms gecikmeyle yenilenir (her tuşta istek yağmuru yok); eksik formda "Formu tamamlayın", değişmemiş formda "Değişiklik yok", yüklenirken "Yükleniyor". **[—]**
+- [ ] `plan_changed`: sekme açıkken nesneyi başka oturumda değiştir (`ALTER SCHEMA … RENAME`), sonra Uygula → "Nesne değişti; yeniden yükleyin." şeridi + Yeniden yükle; kirli taslakta yeniden yükleme önce onay ister. **[—]**
+- [ ] Hata ortası kısmi uygulama (çok ifadeli planda ikinci ifade başarısız) → "N ifade kalıcı oldu" uyarısı, yeniden yükleme şeridi; aynı plan yeniden gönderilmez. **[—]**
+- [ ] Sunucu bağlantısını kes → açık designer sekmeleri "Bağlantı kesildi" salt okunur, istek gitmez; sunucuyu bağlayıp Yeniden yükle → sekme yeniden hazır. **[—]**
+- [ ] Açık ve koyu temada formlar, rozetler, hata şeritleri, silme diyaloğu okunur (renkler yalnızca tema değişkenlerinden; kalın yan vurgu kenarlığı yok). **[—]**
+- [ ] Klavye ile tam kullanım: Tab sırası form → önizleme → uygulama çubuğu; tüm denetimler odaklanabilir, odak halkası görünür. **[—]**
+- [ ] Ekran okuyucu: her alan etiketli; alan hataları `aria-describedby` ile okunur; uygulama hatası `role="alert"` ile duyurulur; durum rozeti okunur. **[—]**
+- [ ] Uzun ifade/yorum alanları (birkaç yüz karakterlik WHERE, çok satırlı yorum) yerleşimi bozmaz; önizleme satırları kaydırılır, yatay sayfa kaydırması yok. **[—]**
+
+### Silme diyaloğu
+- [ ] Nesne düğümünde **Sil…** → diyalog "Sil: <tür> <ad>": önce "Tanım yükleniyor…", sonra çalıştırılacak `DROP …` ifadesi risk rozetiyle (`<pre>`, salt okunur), varsa uyarılar. Sekme açılmaz. **[—]**
+- [ ] Odak **Vazgeç**'te başlar; Enter diyaloğu kapatır, silmez. **Sil** kırmızıdır (`--danger-fg` metin) ve "Etkisini anladım" işaretlenmeden kapalıdır (`title` gerekçeyi söyler). **[—]**
+- [ ] "Bağımlı nesnelerle birlikte sil (CASCADE)" işaretlenince önizleme hemen yenilenir (`… CASCADE`, risk "Veri kaybı olabilir"), onay kutusu sıfırlanır; hızlı aç/kapa son seçime göre önizleme gösterir. **[—]**
+- [ ] Üretim etiketli sunucuda CASCADE işaretliyken kutuya ek olarak sunucu adının tam yazılması gerekir (büyük/küçük harf duyarlı); ad alanında Enter silmez. **[—]**
+- [ ] Bağımlı nesnesi olan şemayı (içinde tablo) CASCADE olmadan sil → diyalog açık kalır, şerit "Bağımlı nesneler var; CASCADE ile silin ya da bağımlıları kaldırın." ve altında PG'nin bağımlı nesne listesi (`detail`); CASCADE işaretleyip onaylayınca silinir. **[—]**
+- [ ] Bağımlısı olmayan nesneyi sil → "<ad> silindi." bildirimi, diyalog kapanır, Gezgin'de üst koleksiyon yenilenir ve düğüm kaybolur; aynı nesnenin açık Düzenle sekmesi "Nesne silindi" (gone) olur. **[—]**
+- [ ] Diyalog açıkken nesneyi başka oturumda sil/değiştir, sonra Sil → "Nesne değişti ya da artık yok; Gezgini yenileyin."; Sil kapalı kalır, yalnızca Kapat. **[—]**
+- [ ] Silme sürerken (başka oturum tabloyu kilitliyken) Sil "Siliniyor…" ve kapalı, Vazgeç yerine **İptal**; Esc diyaloğu kapatmaz; lock_timeout (5 sn) dolunca "Kilit beklerken zaman aşımı" şeridi. **[—]**
+- [ ] Kilitli sunucuda Sil… menüde soluk; (kilit diyalog açıkken konursa) Sil kapalı ve "Sunucu salt okunur kilitli." notu. Diyalog açıkken sunucu bağlantısı kesilirse diyalog kapanır. **[—]**
 
 ## Ölçümler
 

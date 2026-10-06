@@ -1,12 +1,12 @@
 import { ContextMenu } from "@kobalte/core/context-menu";
 import { For, Show, createSignal } from "solid-js";
 import { t } from "../../app/strings";
-import { actionsFor, executeAction, groupOf, type ActionDeps, type ActionId } from "./actions";
+import { actionsFor, disabledReason, executeAction, groupOf, type ActionDeps, type ActionId } from "./actions";
 import type { Explorer } from "./explorer-store";
 import { TreeView } from "./TreeView";
 
 const itemClass =
-  "flex h-7 cursor-default items-center px-3 text-[13px] outline-none data-[highlighted]:bg-hover";
+  "flex h-7 cursor-default items-center px-3 text-[13px] outline-none data-[highlighted]:bg-hover data-[disabled]:opacity-50";
 
 /** Satırın ham kimliğini `data-node-id`'den okur (TreeRow `encodeURIComponent` ile yazar). */
 export function rowIdFromTarget(target: EventTarget | null): string | null {
@@ -68,13 +68,18 @@ export function ExplorerMenu(props: { explorer: Explorer; deps: ActionDeps; tree
           }}
         >
           <For each={items()}>
-            {(action, i) => (
+            {(action, i) => {
+              // Kapalı öğe görünür kalır (gerekçe `title`); Kobalte seçtirmez.
+              const off = () => disabledReason(action, props.deps, target() ?? "");
+              return (
               <>
                 <Show when={i() > 0 && groupOf(items()[i() - 1]) !== groupOf(action)}>
                   <ContextMenu.Separator class="my-1 border-t border-border" />
                 </Show>
                 <ContextMenu.Item
                   class={itemClass}
+                  disabled={!!off()}
+                  title={off() ?? undefined}
                   onSelect={() => {
                     const id = target();
                     if (id !== null) void executeAction(props.deps, action, id);
@@ -86,7 +91,8 @@ export function ExplorerMenu(props: { explorer: Explorer; deps: ActionDeps; tree
                   </Show>
                 </ContextMenu.Item>
               </>
-            )}
+              );
+            }}
           </For>
         </ContextMenu.Content>
         </Show>

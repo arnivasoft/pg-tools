@@ -3,7 +3,7 @@ import { t } from "../../app/strings";
 import type { NodeKind } from "../../ipc/bindings/NodeKind";
 import type { TreeNode } from "../../ipc/bindings/TreeNode";
 import { IpcError } from "../../ipc/errors";
-import { actionsFor, executeAction, groupOf, qualifiedParts, type ActionDeps } from "./actions";
+import { actionsFor, disabledReason, executeAction, groupOf, qualifiedParts, type ActionDeps, type ActionId } from "./actions";
 import { ROOT, emptyTree, type TreeState } from "./tree-model";
 
 const flags = { connected: false, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false, locked: false };
@@ -200,5 +200,98 @@ describe("deleteServer stale target", () => {
     await executeAction(asDeps(d), "deleteServer", "srv-up");
     expect(d.api.deleteServer).not.toHaveBeenCalled();
     expect(d.notify).toHaveBeenCalledWith(t.menu.gone, "error");
+  });
+});
+
+describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
+  /** Designer türlerini de içeren ağaç (sampleTree'ye dokunmadan). */
+  function ddlTree(): TreeState {
+    const s = sampleTree();
+    const add = (id: string, parent: string, kind: NodeKind, label: string, extra: Partial<TreeNode> = {}) => {
+      s.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, color: null, tag: null, ...extra });
+      s.parent.set(id, parent);
+      s.children.set(parent, [...(s.children.get(parent) ?? []), id]);
+    };
+    add("coll-sch", "db-app", "schemaCollection", "Schemas", { hasChildren: true });
+    add("coll-seq", "sch-app", "sequenceCollection", "Sequences", { hasChildren: true });
+    add("seq-1", "coll-seq", "sequence", "orders_id_seq");
+    add("coll-ext", "db-app", "extensionCollection", "Extensions", { hasChildren: true });
+    add("ext-1", "coll-ext", "extension", "pgcrypto");
+    add("coll-views", "sch-app", "viewCollection", "Views", { hasChildren: true });
+    add("view-1", "coll-views", "view", "v_orders");
+    add("coll-roles", "srv-up", "roleCollection", "Roles", { hasChildren: true });
+    add("role-1", "coll-roles", "role", "app_user");
+    add("coll-dbs", "srv-up", "databaseCollection", "Databases", { hasChildren: true });
+    return s;
+  }
+  const s = ddlTree();
+  const DES: ActionId[] = ["createObject", "editObject", "renameObject", "dropObject"];
+
+  it("koleksiyonlarda createObject (Query Tool grubunun hemen ardından)", () => {
+    for (const id of ["coll-sch", "coll-seq", "coll-ext", "coll-idx"]) {
+      expect(actionsFor(s, node(s, id))).toEqual(["createObject", "refresh", "copyName"]);
+    }
+  });
+  it("nesnelerde editObject/renameObject/dropObject, Query Tool eylemlerinden sonra", () => {
+    expect(actionsFor(s, node(s, "sch-app"))).toEqual([
+      "openQueryTool", "editObject", "renameObject", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl",
+    ]);
+    expect(actionsFor(s, node(s, "idx-1"))).toEqual(["editObject", "renameObject", "dropObject", "copyName", "copyQualifiedName", "copyDdl"]);
+    for (const id of ["seq-1", "ext-1"]) {
+      const a = actionsFor(s, node(s, id));
+      expect(a.filter((x) => DES.includes(x))).toEqual(["editObject", "renameObject", "dropObject"]);
+    }
+  });
+  it("diğer düğümlerde designer eylemi yok", () => {
+    for (const id of [
+      "srv-up", "srv-down", "db-app", "tbl-orders", "col-id", "con-1", "trg-1", "fn-fmt-int", "view-1", "role-1",
+      "coll-tables", "coll-cols", "coll-views", "coll-roles", "coll-dbs", "coll-fn", "coll-con",
+    ]) {
+      expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual([]);
+    }
+  });
+  it("groupOf: designer eylemleri kendi grubunda (Query Tool ve yenile gruplarından ayrı)", () => {
+    for (const a of DES) {
+      expect(groupOf(a)).toBe(groupOf("createObject"));
+      expect(groupOf(a)).not.toBe(groupOf("openQueryTool"));
+      expect(groupOf(a)).not.toBe(groupOf("refresh"));
+      expect(groupOf(a)).not.toBe(groupOf("copyName"));
+    }
+  });
+  it("disabledReason: kilitli sunucuda designer eylemleri gerekçeli kapalı, diğerleri ve kilitsiz sunucu serbest", () => {
+    const locked = { serverLocked: vi.fn(() => true) } as unknown as ActionDeps;
+    const open = { serverLocked: vi.fn(() => false) } as unknown as ActionDeps;
+    // Bağımlılık verilmezse ağaçtaki sunucu düğümünün kilidi (flags.locked) esas alınır.
+    const none = { state: () => s } as unknown as ActionDeps;
+    const lockedTree = ddlTree();
+    const srv = lockedTree.nodes.get("srv-up")!;
+    lockedTree.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
+    const viaTree = { state: () => lockedTree } as unknown as ActionDeps;
+    for (const a of DES) expect(disabledReason(a, viaTree, "seq-1")).toBe(t.query.hint.locked);
+    expect(disabledReason("copyName", viaTree, "seq-1")).toBeNull();
+    for (const a of DES) {
+      expect(disabledReason(a, locked, "sch-app")).toBe(t.query.hint.locked);
+      expect(disabledReason(a, open, "sch-app")).toBeNull();
+      expect(disabledReason(a, none, "sch-app")).toBeNull();
+    }
+    expect(locked.serverLocked).toHaveBeenCalledWith("sch-app");
+    for (const a of ["refresh", "copyName", "copyDdl", "openQueryTool", "disconnect"] as ActionId[]) {
+      expect(disabledReason(a, locked, "sch-app")).toBeNull();
+    }
+  });
+  it("executeAction designer eylemlerini doğru kiple iletir", async () => {
+    const d = { ...deps(s), openDesigner: vi.fn(), serverLocked: vi.fn(() => false) };
+    await executeAction(d as unknown as ActionDeps, "createObject", "coll-seq");
+    await executeAction(d as unknown as ActionDeps, "editObject", "seq-1");
+    await executeAction(d as unknown as ActionDeps, "renameObject", "seq-1");
+    await executeAction(d as unknown as ActionDeps, "dropObject", "seq-1");
+    expect(d.openDesigner.mock.calls).toEqual([
+      ["coll-seq", "create"], ["seq-1", "edit"], ["seq-1", "rename"], ["seq-1", "drop"],
+    ]);
+  });
+  it("kilitli sunucuda executeAction openDesigner'ı çağırmaz (savunma)", async () => {
+    const d = { ...deps(s), openDesigner: vi.fn(), serverLocked: vi.fn(() => true) };
+    for (const a of DES) await executeAction(d as unknown as ActionDeps, a, a === "createObject" ? "coll-seq" : "seq-1");
+    expect(d.openDesigner).not.toHaveBeenCalled();
   });
 });

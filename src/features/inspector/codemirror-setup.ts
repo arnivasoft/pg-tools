@@ -25,7 +25,8 @@ export function sqlLookExtensions(): Extension[] {
   return [sql({ dialect: PostgreSQL }), syntaxHighlighting(sharedHighlight), sharedTheme];
 }
 
-export function createReadOnlyEditor(parent: HTMLElement, doc: string): EditorView {
+/** `extra`: çağıranın ek uzantıları (ör. designer önizlemesinde başarısız ifade vurgusu). */
+export function createReadOnlyEditor(parent: HTMLElement, doc: string, extra: Extension[] = []): EditorView {
   return new EditorView({
     parent,
     state: EditorState.create({
@@ -35,6 +36,7 @@ export function createReadOnlyEditor(parent: HTMLElement, doc: string): EditorVi
         EditorState.readOnly.of(true),
         EditorView.editable.of(false),
         sqlLookExtensions(),
+        extra,
       ],
     }),
   });

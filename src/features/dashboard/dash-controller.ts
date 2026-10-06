@@ -16,7 +16,7 @@ import type { Statements } from "../../ipc/bindings/Statements";
 import type { StatementsOrder } from "../../ipc/bindings/StatementsOrder";
 import type { Api } from "../../ipc/commands";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
-import { toPayload } from "../../ipc/errors";
+import { errorText, toPayload } from "../../ipc/errors";
 import { SampleRing, toRates, type RateSeries } from "./dash-model";
 import { DEFAULT_INTERVAL_MS, MIN_INTERVAL_MS, createPoller, defaultPollerDeps, type Poller, type PollerDeps } from "./poller";
 import { revalidate, signalWarnings, type SignalWarning } from "./signal-model";
@@ -88,15 +88,6 @@ const lostError = (p: ErrorPayload): string | null => (p.code === "not_found" ? 
 
 const emptyRates = (): RateSeries => toRates([], 1);
 
-/**
- * Kullanıcıya gösterilecek hata metni. SQL hatalarında (`code === "query"`) arka uç dostça `message`'ı verir, PostgreSQL'in
- * kendi metni `detail`'dadır (ör. 42501 için "permission denied …"): ikisi (ve varsa ipucu) birlikte gösterilir.
- */
-export function errorText(p: ErrorPayload): string {
-  if (p.code !== "query") return p.message;
-  return [p.message, p.detail, p.hint].filter(Boolean).join(" — ");
-}
-
 /** Geçersiz aralık (0, negatif) → en az `MIN_INTERVAL_MS`; sonlu değilse (NaN) varsayılan. */
 export function clampInterval(ms: number): number {
   return Number.isFinite(ms) ? Math.max(MIN_INTERVAL_MS, ms) : DEFAULT_INTERVAL_MS;
@@ -141,9 +132,12 @@ export function createDashController(deps: DashControllerDeps) {
   const { api, notify } = deps;
   const pd: PollerDeps = { ...defaultPollerDeps(), ...deps.poller };
   const entries = new Map<string, Entry>();
+  // Kayıt sinyali: `entries` düz Map'tir (tepkisiz). Sekme modelden ÖNCE çizilir (dash-open `openDashboard` →
+  // `open`; store eşzamanlı akar); okuyucular bu sinyale bağlanır, girdi eklenince/silinince yeniden çalışır.
+  const [registry, bump] = createSignal<void>(undefined, { equals: false });
   const signalGate = gate<SignalRequest, boolean>(false);
 
-  const model = (tabId: string): DashModel | undefined => entries.get(tabId)?.model();
+  const model = (tabId: string): DashModel | undefined => (registry(), entries.get(tabId)?.model());
   const update = (e: Entry, f: (m: DashModel) => DashModel) => e.set((m) => f(m));
   const patch = (e: Entry, p: Partial<DashModel>) => update(e, (m) => ({ ...m, ...p }));
   /** Yanıt hâlâ geçerli mi: sekme açık ve aynı kuşak. */
@@ -328,6 +322,7 @@ export function createDashController(deps: DashControllerDeps) {
     const poller = createPoller(pd, () => tick(tabId, e));
     e = { model: m, set, poller, tabActive: false, gen: 0, listAt: {}, loading: new Set() };
     entries.set(tabId, e);
+    bump();
     await connect(tabId, e);
     return tabId;
   };
@@ -337,6 +332,7 @@ export function createDashController(deps: DashControllerDeps) {
     const e = entries.get(tabId);
     if (!e) return;
     entries.delete(tabId);
+    bump();
     e.gen++;
     e.poller.dispose();
     // Bu sekmenin açık onay diyaloğu vazgeçilmiş sayılır.
@@ -504,7 +500,7 @@ export function createDashController(deps: DashControllerDeps) {
 
   return {
     model,
-    ids: () => [...entries.keys()],
+    ids: () => (registry(), [...entries.keys()]),
     open,
     close,
     reopen,
