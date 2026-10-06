@@ -6,7 +6,7 @@
 
 use pgt_core::ErrorPayload;
 use pgt_dash::{
-    ActivityRow, DashInfo, LockReport, Overview, PreparedXact, Sample, Setting, SignalKind, SignalOutcome, Statements, StatementsOrder,
+    ActivityReport, DashInfo, LockReport, Overview, PreparedXact, Sample, Setting, SignalKind, SignalOutcome, Statements, StatementsOrder,
 };
 use tauri::State;
 use uuid::Uuid;
@@ -37,7 +37,7 @@ pub async fn dash_overview(state: State<'_, AppState>, id: Uuid) -> CmdResult<Ov
 }
 
 #[tauri::command]
-pub async fn dash_activity(state: State<'_, AppState>, id: Uuid) -> CmdResult<Vec<ActivityRow>> {
+pub async fn dash_activity(state: State<'_, AppState>, id: Uuid) -> CmdResult<ActivityReport> {
     Box::pin(state.dash.activity(id)).await.map_err(ErrorPayload::from)
 }
 

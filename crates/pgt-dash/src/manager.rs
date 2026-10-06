@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::queries;
 use crate::types::{
-    ActivityRow, DashId, DashInfo, LockReport, Overview, PreparedXact, Sample, Setting, SignalKind, SignalOutcome,
+    ActivityReport, DashId, DashInfo, LockReport, Overview, PreparedXact, Sample, Setting, SignalKind, SignalOutcome,
     Statements, StatementsOrder,
 };
 
@@ -80,6 +80,11 @@ impl DashManager {
         let session =
             DashSession { server, target, db_name, conn: tokio::sync::Mutex::new(Some(live)), self_pid: AtomicI32::new(pid) };
         self.sessions.lock().unwrap().insert(id, Arc::new(session));
+        // `disconnect_and_close` ile yarış: bağlantı kesilmişse (kapatma haritayı bizden önce taradı) kendimizi geri al.
+        if !self.manager.is_connected(server) {
+            self.close(id);
+            return Err(Error::NotConnected);
+        }
         Ok(info)
     }
 
@@ -107,7 +112,7 @@ impl DashManager {
         self.with_conn(&s, Retry::Once, |c, _, _, db| Box::pin(queries::overview(c, db))).await
     }
 
-    pub async fn activity(&self, id: DashId) -> Result<Vec<ActivityRow>> {
+    pub async fn activity(&self, id: DashId) -> Result<ActivityReport> {
         let s = self.session(id)?;
         self.with_conn(&s, Retry::Once, |c, v, _, db| Box::pin(queries::activity(c, v, db))).await
     }

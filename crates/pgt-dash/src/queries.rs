@@ -5,7 +5,7 @@ use pgt_core::{Error, Result};
 use tokio_postgres::Client;
 
 use crate::types::{
-    ActivityRow, BlockSession, LockReport, LockRow, Overview, PreparedXact, Sample, Setting, StatementRow, Statements,
+    ActivityReport, ActivityRow, BlockSession, LockReport, LockRow, Overview, PreparedXact, Sample, Setting, StatementRow, Statements,
     StatementsOrder,
 };
 
@@ -21,8 +21,8 @@ const STATEMENTS_EXT: &str = include_str!("sql/statements_ext.sql");
 const STATEMENTS_PG10: &str = include_str!("sql/statements.sql");
 const STATEMENTS_PG13: &str = include_str!("sql/statements.pg13.sql");
 
-/// Oturum listesinde gösterilecek en çok satır. SQL bir fazla (`LIMIT 5001`) satır getirir; dönen
-/// liste bu sınırı aşıyorsa liste kırpılmıştır ve üst katman fazlalığı atıp "kırpıldı" bilgisini verir.
+/// Oturum listesinde gösterilecek en çok satır. SQL bir fazla (`LIMIT 5001`) satır getirir; `activity`
+/// fazlayı atar ve aşım `ActivityReport::truncated` ile bildirilir.
 pub const ACTIVITY_LIMIT: usize = 5000;
 /// Kilit listesinde tutulan en çok satır (SQL `LIMIT 1001`); aşım `LockReport::truncated` ile bildirilir.
 pub const LOCKS_LIMIT: usize = 1000;
@@ -72,12 +72,14 @@ pub async fn overview(c: &Client, db: Option<&str>) -> Result<Overview> {
     })
 }
 
-/// Oturum listesi (en çok `ACTIVITY_LIMIT + 1` satır; `len() > ACTIVITY_LIMIT` ise kırpılmıştır, fazlayı üst katman atar).
-pub async fn activity(c: &Client, version_num: u32, db: Option<&str>) -> Result<Vec<ActivityRow>> {
+/// Oturum listesi: en çok `ACTIVITY_LIMIT` satır; SQL bir fazla getirdiyse `truncated` true olur.
+pub async fn activity(c: &Client, version_num: u32, db: Option<&str>) -> Result<ActivityReport> {
     let sql = pick(version_num, &[(10, ACTIVITY_PG10), (13, ACTIVITY_PG13)]);
     let rows = c.query(sql, &[&db]).await.map_err(Error::from_query)?;
-    Ok(rows
+    let truncated = rows.len() > ACTIVITY_LIMIT;
+    let rows = rows
         .iter()
+        .take(ACTIVITY_LIMIT)
         .map(|r| ActivityRow {
             pid: r.get("pid"),
             leader_pid: r.get("leader_pid"),
@@ -96,7 +98,8 @@ pub async fn activity(c: &Client, version_num: u32, db: Option<&str>) -> Result<
             query: r.get::<_, Option<String>>("query").filter(|q| q != NO_PRIVILEGE),
             is_self: r.get("is_self"),
         })
-        .collect())
+        .collect();
+    Ok(ActivityReport { rows, truncated })
 }
 
 /// Engelleme ilişkisindeki oturumlar ve kilitler; `db` verilirse yalnızca o veritabanının oturumları.
@@ -165,10 +168,10 @@ pub async fn prepared(c: &Client) -> Result<Vec<PreparedXact>> {
         .collect())
 }
 
-/// Sıralama ifadesi: yalnızca üç sabit dizeden biri (kullanıcı metni asla girmez). PG 13'te sütunlar
-/// `*_exec_time` olarak yeniden adlandırıldı. Eşitlikte kararlı sıra için `queryid` eklenir.
-fn order_clause(order: StatementsOrder, pg13: bool) -> &'static str {
-    match (order, pg13) {
+/// Sıralama ifadesi: yalnızca üç sabit dizeden biri (kullanıcı metni asla girmez). Eklenti 1.8'de
+/// sütunlar `*_exec_time` olarak yeniden adlandırıldı. Eşitlikte kararlı sıra için `queryid` eklenir.
+fn order_clause(order: StatementsOrder, exec_cols: bool) -> &'static str {
+    match (order, exec_cols) {
         (StatementsOrder::TotalTime, true) => "total_exec_time DESC, queryid",
         (StatementsOrder::MeanTime, true) => "mean_exec_time DESC, queryid",
         (StatementsOrder::TotalTime, false) => "total_time DESC, queryid",
@@ -177,21 +180,39 @@ fn order_clause(order: StatementsOrder, pg13: bool) -> &'static str {
     }
 }
 
+/// Eklenti sürümünden ("1.10" gibi) `(ana, ara)` çıkarır; sayısal karşılaştırma için (dize sırası "1.10" < "1.8" verir).
+fn parse_ext_version(v: &str) -> Option<(u32, u32)> {
+    let mut it = v.trim().split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Sütun adları kurulu EKLENTİ sürümüne bağlıdır (pg_upgrade ile gelen kümelerde sunucu PG 13+ iken
+/// eklenti ≤ 1.7 kalabilir). Ayrıştırılamazsa sunucu ana sürümüne düşülür.
+fn uses_exec_cols(ext_version: &str, version_num: u32) -> bool {
+    parse_ext_version(ext_version).map_or(version_num / 10_000 >= 13, |v| v >= (1, 8))
+}
+
 /// `pg_stat_statements` en çok 50 satır. Eklenti kurulu değilse ya da yüklenmemişse `Unavailable`.
 /// Sorgu metni günlüğe/hata mesajına asla girmez.
 pub async fn statements(c: &Client, version_num: u32, db: Option<&str>, order: StatementsOrder) -> Result<Statements> {
     let installed = c.query_opt(STATEMENTS_EXT, &[]).await.map_err(Error::from_query)?;
-    if installed.is_none() {
+    let Some(installed) = installed else {
         return Ok(Statements::Unavailable { reason: "pg_stat_statements eklentisi bu veritabanında kurulu değil.".into() });
-    }
-    let pg13 = version_num / 10_000 >= 13;
-    let base = pick(version_num, &[(10, STATEMENTS_PG10), (13, STATEMENTS_PG13)]);
-    let sql = format!("{base}\nORDER BY {} LIMIT {STATEMENTS_LIMIT}", order_clause(order, pg13));
+    };
+    let exec_cols = uses_exec_cols(&installed.get::<_, String>("extversion"), version_num);
+    let base = if exec_cols { STATEMENTS_PG13 } else { STATEMENTS_PG10 };
+    let sql = format!("{base}\nORDER BY {} LIMIT {STATEMENTS_LIMIT}", order_clause(order, exec_cols));
     let rows = match c.query(sql.as_str(), &[&db]).await.map_err(Error::from_query) {
         Ok(rows) => rows,
-        // 55000: kitaplık shared_preload_libraries'te değil; 42P01: görünüm yok.
-        Err(Error::Query { sqlstate: Some(code), .. }) if code == "55000" || code == "42P01" => {
+        // 55000: kitaplık shared_preload_libraries'te değil.
+        Err(Error::Query { sqlstate: Some(code), .. }) if code == "55000" => {
             return Ok(Statements::Unavailable { reason: "pg_stat_statements yüklenmemiş (shared_preload_libraries).".into() });
+        }
+        // 42P01: eklentinin görünümü arama yolunda değil (başka şemada kurulu).
+        Err(Error::Query { sqlstate: Some(code), .. }) if code == "42P01" => {
+            return Ok(Statements::Unavailable { reason: "pg_stat_statements eklentisinin şeması arama yolunda değil.".into() });
         }
         Err(e) => return Err(e),
     };
@@ -213,7 +234,10 @@ pub async fn statements(c: &Client, version_num: u32, db: Option<&str>, order: S
 
 #[cfg(test)]
 mod tests {
-    use super::{order_clause, pick};
+    use super::{
+        order_clause, parse_ext_version, pick, uses_exec_cols, ACTIVITY_LIMIT, ACTIVITY_PG10, ACTIVITY_PG13, LOCKS,
+        LOCKS_LIMIT,
+    };
     use crate::types::StatementsOrder::*;
 
     #[test]
@@ -231,5 +255,35 @@ mod tests {
         assert_eq!(pick(130000, &v), "b");
         assert_eq!(pick(180000, &v), "b");
         assert_eq!(pick(90600, &v), "a");
+    }
+
+    #[test]
+    fn ext_version_parses_numerically() {
+        assert_eq!(parse_ext_version("1.7"), Some((1, 7)));
+        assert_eq!(parse_ext_version("1.10"), Some((1, 10)));
+        assert_eq!(parse_ext_version("2.0"), Some((2, 0)));
+        assert_eq!(parse_ext_version(""), None);
+        assert_eq!(parse_ext_version("abc"), None);
+        assert_eq!(parse_ext_version("1"), None);
+    }
+
+    #[test]
+    fn exec_cols_follow_extension_version() {
+        assert!(!uses_exec_cols("1.7", 160000), "eski eklenti PG 16'da bile total_time kullanır");
+        assert!(uses_exec_cols("1.8", 130000));
+        assert!(uses_exec_cols("1.10", 160000));
+        assert!(uses_exec_cols("1.11", 180000));
+        assert!(uses_exec_cols("2.0", 180000));
+        // Ayrıştırılamazsa sunucu ana sürümüne düşülür.
+        assert!(uses_exec_cols("garip", 130000));
+        assert!(!uses_exec_cols("", 120000));
+    }
+
+    #[test]
+    fn limits_match_sql() {
+        for sql in [ACTIVITY_PG10, ACTIVITY_PG13] {
+            assert!(sql.contains(&format!("LIMIT {}", ACTIVITY_LIMIT + 1)));
+        }
+        assert!(LOCKS.contains(&format!("LIMIT {}", LOCKS_LIMIT + 1)));
     }
 }

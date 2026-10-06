@@ -39,12 +39,14 @@ async fn activity_marks_self_and_filters_by_database() {
         let v = c.info.version_num;
         eprintln!("activity varyantı: PG {} ({})", v / 10_000, if v / 10_000 >= 13 { "pg13+" } else { "pg10-12" });
         let rows = queries::activity(&c.client, v, None).await.unwrap();
+        assert!(!rows.truncated);
+        let rows = rows.rows;
         let me: Vec<_> = rows.iter().filter(|r| r.is_self).collect();
         assert_eq!(me.len(), 1);
         assert_eq!(me[0].application, "pg-tools dash");
         assert_eq!(me[0].state.as_deref(), Some("active"));
         let none = queries::activity(&c.client, v, Some("yok_boyle_bir_db")).await.unwrap();
-        assert!(none.is_empty());
+        assert!(none.rows.is_empty());
     }
 }
 
@@ -83,7 +85,7 @@ async fn activity_hides_other_users_queries_without_privilege() {
         low.config.username = role.to_string();
         low.password = Some(pw);
         let c = dash_conn(&low).await;
-        let rows = queries::activity(&c.client, c.info.version_num, None).await.unwrap();
+        let rows = queries::activity(&c.client, c.info.version_num, None).await.unwrap().rows;
         let other = rows.iter().find(|r| r.pid == sleeper_pid).expect("uyuyan oturum listede olmalı");
         assert_eq!(other.application, "pg-tools-test");
         assert_eq!(other.query, None);

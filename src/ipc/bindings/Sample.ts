@@ -11,4 +11,9 @@ at: number, xactCommit: number, xactRollback: number, tupReturned: number, tupFe
 /**
  * `idle in transaction` + `idle in transaction (aborted)`.
  */
-sessionsIdleInTx: number, sessionsOther: number, };
+sessionsIdleInTx: number, 
+/**
+ * Diğerleri; yetkisiz rollerde başkalarının durumu NULL olan oturumlar da buraya sayılır
+ * (PG 10'da yetkisiz sayımlar ayrıca kısmidir).
+ */
+sessionsOther: number, };

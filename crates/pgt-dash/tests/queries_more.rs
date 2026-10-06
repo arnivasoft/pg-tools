@@ -94,6 +94,7 @@ async fn settings_and_prepared_xacts() {
             assert!(all.len() > 200 && all.iter().any(|x| x.name == "max_connections"));
             let n: i64 = admin.query_one("SELECT current_setting('max_prepared_transactions')::int8", &[]).await.unwrap().get(0);
             if n > 0 {
+                let _ = admin.batch_execute("ROLLBACK PREPARED 'pgt_dash_test'").await;
                 admin.batch_execute("BEGIN; PREPARE TRANSACTION 'pgt_dash_test'").await.unwrap();
                 let list = queries::prepared(&c.client).await.unwrap();
                 let x = list.iter().find(|p| p.gid == "pgt_dash_test").expect("hazır tx listede olmalı");

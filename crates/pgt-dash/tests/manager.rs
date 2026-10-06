@@ -42,7 +42,7 @@ async fn open_query_close_roundtrip() {
         let info = dm.open(id, None).await.unwrap();
         assert!(info.self_pid > 0 && info.database.is_none());
         assert!(dm.sample(info.id).await.is_ok());
-        assert!(dm.activity(info.id).await.unwrap().iter().any(|r| r.is_self));
+        assert!(dm.activity(info.id).await.unwrap().rows.iter().any(|r| r.is_self));
         dm.close(info.id);
         assert!(matches!(dm.sample(info.id).await, Err(Error::NotFound(_))), "kapalı kimlik: NotFound");
         // close_server / close_all de oturumları düşürür.
@@ -77,7 +77,7 @@ async fn database_scope_filters_activity() {
             let dm = DashManager::new(cm);
             let info = dm.open(id, Some(oid)).await.unwrap();
             assert_eq!(info.database.as_deref(), Some(db.as_str()));
-            let rows = dm.activity(info.id).await.unwrap();
+            let rows = dm.activity(info.id).await.unwrap().rows;
             assert!(rows.iter().any(|r| r.is_self));
             assert!(rows.iter().all(|r| r.database.as_deref() == Some(db.as_str())), "yalnızca bu veritabanının oturumları");
             dm.close(info.id);
@@ -203,7 +203,7 @@ async fn reconnects_after_the_dash_connection_is_killed() {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         assert!(ok, "3 sn içinde yeniden bağlanıp sorgu çalışmalıydı");
-        let rows = dm.activity(info.id).await.unwrap();
+        let rows = dm.activity(info.id).await.unwrap().rows;
         let me = rows.iter().find(|r| r.is_self).expect("kendi oturumu");
         assert_ne!(me.pid, info.self_pid, "yeni bağlantı, yeni pid");
         dm.close(info.id);

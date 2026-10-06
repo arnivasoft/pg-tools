@@ -36,6 +36,8 @@ pub struct Sample {
     /// `idle in transaction` + `idle in transaction (aborted)`.
     #[ts(type = "number")]
     pub sessions_idle_in_tx: i64,
+    /// Diğerleri; yetkisiz rollerde başkalarının durumu NULL olan oturumlar da buraya sayılır
+    /// (PG 10'da yetkisiz sayımlar ayrıca kısmidir).
     #[ts(type = "number")]
     pub sessions_other: i64,
 }
@@ -89,6 +91,15 @@ pub struct ActivityRow {
     pub is_self: bool,
 }
 
+/// Oturum listesi; `truncated` true ise `rows` ilk `ACTIVITY_LIMIT` satıra kırpılmıştır.
+#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ActivityReport {
+    pub rows: Vec<ActivityRow>,
+    pub truncated: bool,
+}
+
 /// Engelleme ilişkisine giren oturum (bekleyen ∪ engelleyen).
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -100,14 +111,15 @@ pub struct BlockSession {
     pub state: Option<String>,
     /// En çok 1024 karakter; yetkisiz kullanıcıda başkasının sorgusu `None`.
     pub query: Option<String>,
-    /// `pg_blocking_pids`: bu oturumu bekleten pid'ler.
+    /// `pg_blocking_pids`: bu oturumu bekleten pid'ler. Kilidi hazırlanmış (prepared) bir transaction
+    /// tutuyorsa 0 içerebilir; böyle bir oturum yoktur (sinyal `NotFound` döner), arayüz "hazır transaction" göstermelidir.
     pub blocked_by: Vec<i32>,
     /// `state_change`'ten bu yana geçen süre (bekleyen oturum için bekleme süresi).
     #[ts(type = "number | null")]
     pub wait_secs: Option<f64>,
 }
 
-/// `pg_locks` satırı.
+/// `pg_locks` satırı. Hazırlanmış transaction'ların kilitleri (pid NULL) dahil değildir.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

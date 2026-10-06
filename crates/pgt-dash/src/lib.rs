@@ -6,7 +6,6 @@ pub mod types;
 
 pub use manager::DashManager;
 pub use types::{
-    DashId, DashInfo, SignalKind, SignalOutcome,
-    ActivityRow, BlockSession, LockReport, LockRow, Overview, PreparedXact, Sample, Setting, StatementRow, Statements,
+    ActivityReport, ActivityRow, DashId, DashInfo, SignalKind, SignalOutcome, BlockSession, LockReport, LockRow, Overview, PreparedXact, Sample, Setting, StatementRow, Statements,
     StatementsOrder,
 };

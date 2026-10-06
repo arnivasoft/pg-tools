@@ -9,7 +9,8 @@ export type BlockSession = { pid: number, user: string | null, application: stri
  */
 query: string | null, 
 /**
- * `pg_blocking_pids`: bu oturumu bekleten pid'ler.
+ * `pg_blocking_pids`: bu oturumu bekleten pid'ler. Kilidi hazırlanmış (prepared) bir transaction
+ * tutuyorsa 0 içerebilir; böyle bir oturum yoktur (sinyal `NotFound` döner), arayüz "hazır transaction" göstermelidir.
  */
 blockedBy: Array<number>, 
 /**
