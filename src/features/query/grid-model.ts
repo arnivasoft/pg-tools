@@ -10,14 +10,27 @@ const CELL_PADDING = 24;
 
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
 
-/** Sütun genişliği: başlık ve örnek satırların en geniş görüntüsü (+ dolgu), 60..480 px. */
-export function initialWidths(columns: Column[], sampleRows: (string | null)[][], measure: (s: string) => number): number[] {
+/**
+ * Metin genişliği ölçücüsü; her metin türü kendi yazı tipiyle ölçülür (başlık adı yarı kalın sans, tür etiketi küçük
+ * sans, hücre eş aralıklı). Ölçüm yazı tipi gerçek görünümle aynı olmalı, yoksa başlık kısa kalır.
+ */
+export interface TextMeasure {
+  header(s: string): number;
+  type(s: string): number;
+  cell(s: string): number;
+}
+
+/**
+ * Sütun genişliği: başlık adı, tür etiketi (başlığın ikinci satırı) ve örnek satırların en geniş görüntüsü (+ dolgu),
+ * 60..480 px. İçerik kısa olsa da başlık kırpılmaz.
+ */
+export function initialWidths(columns: Column[], sampleRows: (string | null)[][], measure: TextMeasure): number[] {
   return columns.map((col, c) => {
-    let w = measure(col.name);
+    let w = Math.max(measure.header(col.name), measure.type(col.typeDisplay));
     const n = Math.min(sampleRows.length, SAMPLE_ROWS);
     for (let r = 0; r < n; r++) {
       const v = sampleRows[r][c];
-      w = Math.max(w, measure(v === null ? "[NULL]" : displayCell(v).text));
+      w = Math.max(w, measure.cell(v === null ? "[NULL]" : displayCell(v).text));
     }
     return clamp(Math.ceil(w) + CELL_PADDING, MIN_COL_WIDTH, MAX_COL_WIDTH);
   });
