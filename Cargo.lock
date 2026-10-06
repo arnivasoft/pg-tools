@@ -2568,6 +2568,7 @@ dependencies = [
  "pgt-catalog",
  "pgt-core",
  "pgt-dash",
+ "pgt-ddl",
  "pgt-query",
  "serde",
  "tauri",
@@ -2577,6 +2578,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-appender",
+ "tracing-log",
  "tracing-subscriber",
  "uuid",
 ]
@@ -2629,6 +2631,24 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tracing",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
+name = "pgt-ddl"
+version = "0.1.0"
+dependencies = [
+ "insta",
+ "pgt-catalog",
+ "pgt-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "tracing-subscriber",
  "ts-rs",
  "uuid",
 ]
@@ -4564,7 +4584,6 @@ dependencies = [
  "thread_local",
  "tracing",
  "tracing-core",
- "tracing-log",
 ]
 
 [[package]]

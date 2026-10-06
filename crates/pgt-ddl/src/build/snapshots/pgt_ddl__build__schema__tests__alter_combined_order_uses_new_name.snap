@@ -1,0 +1,7 @@
+---
+source: crates/pgt-ddl/src/build/schema.rs
+expression: render(&p)
+---
+[Safe] ALTER SCHEMA "old" RENAME TO "new name"
+[Safe] ALTER SCHEMA "new name" OWNER TO y
+[Safe] COMMENT ON SCHEMA "new name" IS NULL

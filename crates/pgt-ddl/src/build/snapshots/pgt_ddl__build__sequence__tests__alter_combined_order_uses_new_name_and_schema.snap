@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/build/sequence.rs
+expression: render(&p)
+---
+[Safe] ALTER SEQUENCE public.s CACHE 5
+[Safe] ALTER SEQUENCE public.s OWNED BY NONE
+[Safe] ALTER SEQUENCE public.s RENAME TO s2
+[Safe] ALTER SEQUENCE public.s2 SET SCHEMA other
+[Safe] ALTER SEQUENCE other.s2 OWNER TO b
+[Safe] COMMENT ON SEQUENCE other.s2 IS NULL

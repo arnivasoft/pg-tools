@@ -1,0 +1,6 @@
+---
+source: crates/pgt-ddl/src/build/schema.rs
+expression: render(&p)
+---
+[DataLoss] DROP SCHEMA "select" CASCADE  -- Şemadaki tüm nesneler silinir
+WARN: Şemadaki tüm nesneler silinir

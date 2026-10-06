@@ -12,15 +12,19 @@ pgt-core.workspace = true
 pgt-catalog.workspace = true
 pgt-query.workspace = true
 pgt-dash.workspace = true
+pgt-ddl.workspace = true
 tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2.8"
 tokio.workspace = true
 uuid.workspace = true
 serde.workspace = true
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `tracing-log` kapalı: tokio-postgres'in `log` kayıtları (SQL metni içerir) günlük dosyasına köprülenmez.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "smallvec", "ansi", "fmt", "env-filter"] }
 tracing-appender = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+# Yalnızca günlük süzgeci testi: `log` -> `tracing` köprüsü açıkken de SQL sızmadığını doğrular.
+tracing-log = "0.2"
 pgt-core = { workspace = true, features = ["testing"] }

@@ -1,0 +1,8 @@
+---
+source: crates/pgt-ddl/src/build/sequence.rs
+expression: render(&p)
+---
+[Safe] CREATE SEQUENCE public.s AS bigint INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START WITH 1 CACHE 1 NO CYCLE OWNED BY NONE
+[Safe] ALTER SEQUENCE public.s OWNER TO b
+[Safe] ALTER SEQUENCE public.s OWNED BY public.t.c
+WARN: OWNED BY hedefi olan tablonun sahibi, dizinin sahibiyle aynı olmalı

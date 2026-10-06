@@ -39,6 +39,8 @@ pub const MAX_STATEMENT_TIMEOUT_MS: u32 = 2_147_483_647;
 const QUERY_APPLICATION_NAME: &str = "pg-tools query";
 /// Dashboard oturumunun `application_name`'i: `pg_stat_activity`'de kendi sorgularımız ayırt edilsin.
 const DASHBOARD_APPLICATION_NAME: &str = "pg-tools dash";
+/// DDL uygulama oturumunun `application_name`'i: `pg_stat_activity`'de şema değişiklikleri ayırt edilsin.
+const DDL_APPLICATION_NAME: &str = "pg-tools ddl";
 
 /// Oturum ayarları profili.
 /// - `Catalog`: havuzdaki salt okunur katalog oturumu (`SESSION_OPTIONS`/`SESSION_SETS`, 30 sn, `search_path=pg_catalog`).
@@ -49,11 +51,15 @@ const DASHBOARD_APPLICATION_NAME: &str = "pg-tools dash";
 ///   `BEGIN READ WRITE` ile değiştirebilir. Gerçek salt okunurluk rol yetkileriyle sağlanır.
 /// - `Dashboard`: dashboard'un ayrı (havuzsuz) salt okunur oturumu; `statement_timeout` 10 sn, `lock_timeout` 2 sn.
 ///   `search_path` verilmez. İzleme sorguları yalnızca okur ve kilit beklemez.
+/// - `Ddl`: nesne diyaloglarının DDL uygulama oturumu (ayrı, havuzsuz, **yazılabilir**): `statement_timeout = 0`
+///   (uzun `CREATE INDEX` vb. kesilmesin), `lock_timeout` çağrıdan (ms; `0` = sınırsız, en fazla
+///   `MAX_STATEMENT_TIMEOUT_MS`). `search_path` verilmez: tanımlayıcılar şema ile nitelenerek üretilir.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionProfile {
     Catalog,
     Query { read_only: bool, statement_timeout_ms: u32 },
     Dashboard,
+    Ddl { lock_timeout_ms: u32 },
 }
 
 impl SessionProfile {
@@ -62,6 +68,7 @@ impl SessionProfile {
             SessionProfile::Catalog => "pg-tools",
             SessionProfile::Query { .. } => QUERY_APPLICATION_NAME,
             SessionProfile::Dashboard => DASHBOARD_APPLICATION_NAME,
+            SessionProfile::Ddl { .. } => DDL_APPLICATION_NAME,
         }
     }
 }
@@ -81,6 +88,9 @@ fn profile_session_options(profile: SessionProfile) -> Cow<'static, str> {
         SessionProfile::Dashboard => {
             Cow::Borrowed("-c default_transaction_read_only=on -c statement_timeout=10000 -c lock_timeout=2000")
         }
+        SessionProfile::Ddl { lock_timeout_ms } => Cow::Owned(format!(
+            "-c default_transaction_read_only=off -c statement_timeout=0 -c lock_timeout={lock_timeout_ms} -c standard_conforming_strings=on"
+        )),
     }
 }
 
@@ -96,6 +106,13 @@ fn profile_session_sets(profile: SessionProfile) -> Vec<Cow<'static, str>> {
             Cow::Borrowed("SET default_transaction_read_only = on"),
             Cow::Borrowed("SET statement_timeout = 10000"),
             Cow::Borrowed("SET lock_timeout = 2000"),
+        ],
+        SessionProfile::Ddl { lock_timeout_ms } => vec![
+            Cow::Borrowed("SET default_transaction_read_only = off"),
+            Cow::Borrowed("SET statement_timeout = 0"),
+            Cow::Owned(format!("SET lock_timeout = {lock_timeout_ms}")),
+            // Üreticiler/tarayıcı `\` kaçışını yalnızca E'…' için varsayar; oturum bunu sabitler.
+            Cow::Borrowed("SET standard_conforming_strings = on"),
         ],
     }
 }
@@ -401,6 +418,9 @@ fn validate_profile(profile: SessionProfile) -> Result<()> {
         SessionProfile::Query { statement_timeout_ms, .. } if statement_timeout_ms > MAX_STATEMENT_TIMEOUT_MS => {
             Err(Error::Invalid("statement_timeout en fazla 2147483647 ms olabilir.".into()))
         }
+        SessionProfile::Ddl { lock_timeout_ms } if lock_timeout_ms > MAX_STATEMENT_TIMEOUT_MS => {
+            Err(Error::Invalid("lock_timeout en fazla 2147483647 ms olabilir.".into()))
+        }
         _ => Ok(()),
     }
 }
@@ -552,7 +572,7 @@ fn session_settings_ok(read_only: &str, statement_timeout: &str, search_path: &s
 /// Profilin gerektirdiği oturum ayarları gerçekten etkin mi? (`options`'ı sessizce yok sayan havuzlayıcılar,
 /// ör. pgbouncer `ignore_startup_parameters = options`, bağlantıyı başarıyla kurar ama ayarları uygulamaz.)
 /// `Catalog`: salt okunur, 30 sn ve `search_path = pg_catalog`; `Query`: yalnızca salt okunurluk ve süre sınırı;
-/// `Dashboard`: salt okunur ve 10 sn.
+/// `Dashboard`: salt okunur ve 10 sn; `Ddl`: yazılabilir ve süre sınırsız (`statement_timeout = 0`).
 fn settings_ok_for(profile: SessionProfile, read_only: &str, statement_timeout: &str, search_path: &str) -> bool {
     match profile {
         SessionProfile::Catalog => {
@@ -564,6 +584,8 @@ fn settings_ok_for(profile: SessionProfile, read_only: &str, statement_timeout: 
         }
         // `lock_timeout` doğrulanmaz: `options` yok sayılırsa `statement_timeout` denetimi bağlantıyı zaten reddeder.
         SessionProfile::Dashboard => read_only.trim() == "on" && timeout_ms(statement_timeout) == Some(10_000),
+        // `lock_timeout` doğrulanmaz (Dashboard ile aynı gerekçe): `statement_timeout = 0` denetimi yeterli sinyaldir.
+        SessionProfile::Ddl { .. } => read_only.trim() == "off" && timeout_ms(statement_timeout) == Some(0),
     }
 }
 
@@ -1023,6 +1045,38 @@ mod tests {
         assert!(validate_profile(max).is_ok());
         assert!(validate_profile(SessionProfile::Catalog).is_ok());
         assert_eq!(profile_session_options(max), "-c default_transaction_read_only=off -c statement_timeout=2147483647");
+    }
+
+    #[test]
+    fn ddl_profile_options_and_sets_agree() {
+        let p = SessionProfile::Ddl { lock_timeout_ms: 5000 };
+        let opts = profile_session_options(p);
+        assert!(opts.contains("default_transaction_read_only=off"));
+        assert!(opts.contains("statement_timeout=0"));
+        assert!(opts.contains("lock_timeout=5000"));
+        assert!(opts.contains("standard_conforming_strings=on"));
+        assert!(!opts.contains("search_path"));
+        let sets: Vec<String> = profile_session_sets(p).iter().map(|s| s.to_string()).collect();
+        assert!(sets.contains(&"SET default_transaction_read_only = off".to_string()));
+        assert!(sets.contains(&"SET statement_timeout = 0".to_string()));
+        assert!(sets.contains(&"SET lock_timeout = 5000".to_string()));
+        assert!(sets.contains(&"SET standard_conforming_strings = on".to_string()));
+    }
+
+    #[test]
+    fn ddl_profile_application_name_and_validation() {
+        assert_eq!(SessionProfile::Ddl { lock_timeout_ms: 0 }.application_name(), "pg-tools ddl");
+        assert!(validate_profile(SessionProfile::Ddl { lock_timeout_ms: 0 }).is_ok());
+        assert!(validate_profile(SessionProfile::Ddl { lock_timeout_ms: MAX_STATEMENT_TIMEOUT_MS }).is_ok());
+        assert!(validate_profile(SessionProfile::Ddl { lock_timeout_ms: MAX_STATEMENT_TIMEOUT_MS + 1 }).is_err());
+    }
+
+    #[test]
+    fn ddl_profile_settings_check() {
+        let p = SessionProfile::Ddl { lock_timeout_ms: 5000 };
+        assert!(settings_ok_for(p, "off", "0", "public"));
+        assert!(!settings_ok_for(p, "on", "0", "public"));
+        assert!(!settings_ok_for(p, "off", "30s", "public"));
     }
 
     #[test]

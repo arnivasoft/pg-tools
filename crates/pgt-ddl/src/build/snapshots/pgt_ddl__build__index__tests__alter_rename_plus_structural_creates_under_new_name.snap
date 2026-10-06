@@ -1,0 +1,7 @@
+---
+source: crates/pgt-ddl/src/build/index.rs
+expression: render(&p)
+---
+[Destructive] DROP INDEX public.t_a_idx
+[Safe] CREATE INDEX yeni ON public.t USING hash (a)
+WARN: İndeks yeniden oluşturulur: önce silinir, sonra kurulur. DROP INDEX ACCESS EXCLUSIVE kilidi alır ve işlem bitene kadar tablo okuma ve yazmaya kapalı kalır; büyük tablolarda kesinti uzar

@@ -1,0 +1,24 @@
+[package]
+name = "pgt-ddl"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pgt-core.workspace = true
+pgt-catalog.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+serde.workspace = true
+uuid.workspace = true
+ts-rs.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+pgt-core = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }
+serde_json.workspace = true
+insta.workspace = true
+tempfile.workspace = true
+# Günlük yakalama testi (SQL/ad sızmaz).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }

@@ -7,6 +7,7 @@ use pgt_core::credentials::{Credentials, MemorySecretStore, SecretStore};
 use pgt_core::registry::Registry;
 use pgt_core::store::{AppSettings, Drafts, History};
 use pgt_dash::DashManager;
+use pgt_ddl::DdlManager;
 use pgt_query::session::QueryManager;
 
 /// Sorgu geçmişi, taslaklar ve ayarlar (config dizini altında).
@@ -25,6 +26,7 @@ pub struct AppState {
     pub catalog: Catalog,
     pub query: Arc<QueryManager>,
     pub dash: Arc<DashManager>,
+    pub ddl: Arc<DdlManager>,
     pub startup_notice: Option<String>,
 }
 
@@ -87,6 +89,7 @@ impl AppState {
             catalog: Catalog::new(manager.clone(), registry.clone()),
             query: Arc::new(QueryManager::new(manager.clone(), registry.clone())),
             dash: Arc::new(DashManager::new(manager.clone())),
+            ddl: Arc::new(DdlManager::new(manager.clone(), registry.clone())),
             credentials: Credentials::new(store),
             registry,
             manager,
@@ -137,6 +140,13 @@ mod tests {
         let state = AppState::with_store(dir.path(), Arc::new(MemorySecretStore::default()));
         state.dash.close_all(); // boşken panik etmez
         state.dash.close_server(uuid::Uuid::new_v4());
+    }
+
+    #[test]
+    fn fresh_state_has_an_idle_ddl_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::with_store(dir.path(), Arc::new(MemorySecretStore::default()));
+        state.ddl.cancel_all(); // uçuşta uygulama yokken panik etmez
     }
 
     #[test]

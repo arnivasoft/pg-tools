@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/build/schema.rs
+expression: out
+---
+[Safe] CREATE SCHEMA sales
+
+[Safe] CREATE SCHEMA sales AUTHORIZATION bob
+
+[Safe] CREATE SCHEMA "App Data" AUTHORIZATION "Bob"
+[Safe] COMMENT ON SCHEMA "App Data" IS E'it''s a \\ test'

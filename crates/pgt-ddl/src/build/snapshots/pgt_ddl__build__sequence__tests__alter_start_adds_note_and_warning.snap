@@ -1,0 +1,6 @@
+---
+source: crates/pgt-ddl/src/build/sequence.rs
+expression: render(&p)
+---
+[Safe] ALTER SEQUENCE public.s START WITH 100  -- Başlangıç değeri yalnızca bir sonraki RESTART için kaydedilir; mevcut sayaç değişmez
+WARN: Başlangıç değeri yalnızca bir sonraki RESTART için kaydedilir; mevcut sayaç değişmez
