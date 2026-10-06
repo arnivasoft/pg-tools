@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- CSS yüklenmeden önceki tuval rengi sistem temasını izler. Satır içi <style> kullanılmadı: Tauri ona nonce
+         ekler ve CSP'deki style-src 'unsafe-inline' geçersizleşir. Pencere zaten ilk çizime kadar gizli (window.rs). -->
+    <meta name="color-scheme" content="light dark" />
     <title>pg-tools</title>
   </head>
   <body>

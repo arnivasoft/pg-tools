@@ -56,6 +56,16 @@
   color-scheme: dark;
 }
 
+/* data-theme henüz yokken (ön yüz betiği çalışmadan önce ya da hiç çalışmazsa) zemin sistem temasını izler;
+   pencere normalde tema uygulanıp ilk çizim kurulana kadar gizlidir (bkz. src-tauri/src/window.rs). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #16181d;
+    --fg: #e6e8eb;
+    color-scheme: dark;
+  }
+}
+
 @theme inline {
   --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", Consolas, monospace;

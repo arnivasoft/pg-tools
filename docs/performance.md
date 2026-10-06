@@ -14,7 +14,9 @@ tahmini birimi belirsiz kaynaklardan geldiği için MB olarak bırakıldı. Spec
 
 - ayrı bir geçici `APPDATA` dizini kullanır (gerçek `%APPDATA%\pg-tools` yapılandırmasına dokunmaz; sunucu
   listesi boş, hiçbir sunucuya bağlanılmaz),
-- `MainWindowHandle` oluşana kadar geçen süreyi **pencere süresi** olarak ölçer (içerik çizimini kapsamaz),
+- ana pencerenin (`Tauri Window` sınıfı) **görünür** olmasına kadar geçen süreyi **pencere süresi** olarak ölçer.
+  Beyaz kare düzeltmesinden (aşağıda) beri pencere gizli oluşturulur ve ön yüz tema + ilk çizimden sonra gösterir;
+  bu süre artık ön yüz paketinin çalışmasını kapsar. Önceki ölçümler `MainWindowHandle`'ı bekliyordu (aşağıya bakın),
 - 8 sn boşta bekler, sonra uygulama sürecini ve tüm alt süreçlerini (WebView2 tarayıcı, GPU, yardımcı ve
   çizici süreçleri) bulur ve `Win32_PerfFormattedData_PerfProc_Process` sayaçlarından okur:
   - **toplam özel çalışma kümesi** (`WorkingSetPrivate` toplamı — Görev Yöneticisi "Bellek" sütununun toplamı),
@@ -463,3 +465,53 @@ Son düzeltme dalgasından sonra (aynı makine): `index` 229,15 kB (gz 74,26), `
 
 NSIS paketi bu çalıştırmada üretilmedi (`--no-bundle`); exe farkı kadar büyümesi beklenir (sıkıştırılmış < 0,5 MiB),
 15 MB hedefinin çok altında.
+
+## Açılışta beyaz kare düzeltmesi (2026-10-06)
+
+Belirti: uygulama açılırken pencere bir an beyaz görünüyordu (koyu temada belirgin). Neden: pencere görünür
+oluşturuluyordu ve WebView2, ön yüz paketi çalışıp `data-theme` uygulanana kadar varsayılan beyaz arka planı
+çiziyordu (~300 ms).
+
+Çözüm (`src-tauri/src/window.rs`):
+
+- `tauri.conf.json` → ana pencere `"visible": false`.
+- `setup`: pencere + WebView arka planı sistem temasına göre `--bg` rengine ayarlanır (açık `#fbfbfc`, koyu
+  `#16181d`; birim test `styles.css` ile eşleşmeyi denetler).
+- Ön yüz (`main.tsx`) temayı uygulayıp `render` ettikten hemen sonra `app_ready(dark)` komutunu çağırır: arka plan
+  çözülmüş temaya (saklanan tercih sistemden farklı olabilir) ayarlanır ve pencere gösterilir. Özel komut,
+  `core:window:allow-show` yetkisi ve pencere API'sinin ana pakete alınması gerekmesin diye seçildi (ana paket
+  +0,12 kB).
+- Yedek: ön yüz 3 sn içinde çağırmazsa Rust pencereyi yine gösterir ve logda `fallback-show` uyarısı yazar;
+  `smoke-release.ps1` bu uyarıyı başarısızlık sayar.
+- `styles.css`: `data-theme` yokken (betik çalışmadan) zemin `prefers-color-scheme`'i izler; `index.html`'e
+  `<meta name="color-scheme" content="light dark">` eklendi. Satır içi `<style>` kullanılmadı: Tauri satır içi
+  stillere nonce ekler, bu da CSP'deki `style-src 'unsafe-inline'`i geçersiz kılar.
+
+Doğrulama (gerçek exe, `PrintWindow` ile ~25 ms aralıklı kare yakalama, açılıştan 2,5 sn): koyu temada ilk görünür
+kare tam arayüzlü ve koyu, açık (>240) piksel oranı tüm karelerde %0; sistem koyu + saklanan tercih açık iken
+ilk kare açık temalı; betikler kapalıyken (`--blink-settings=scriptEnabled=false`) pencere 3,35 sn'de yedekle
+koyu zeminle göründü.
+
+### Ölçüm yöntemi değişikliği
+
+`Process.MainWindowHandle` tao'nun `Tao Thread Event Target` yardımcı penceresini (16x16, `WS_VISIBLE`) döndürür;
+bu pencere süreç başlar başlamaz oluşur. Yani Plan 1–7'deki 27–43 ms "pencere" değerleri ana pencerenin değil bu
+yardımcı pencerenin oluşma süresiydi (ana pencere o zamanlar ~70 ms'de görünür oluşuyor, içerik ~300 ms sonra
+çiziliyordu). `measure.ps1` ve `smoke-release.ps1` artık `EnumWindows` ile `Tauri Window` sınıfındaki pencerenin
+görünür olmasını bekler.
+
+    bun run tauri build --no-bundle
+    powershell -NoProfile -File scripts/smoke-release.ps1    # BAŞARILI, çıkış kodu 0 (pencere 394 ms'de göründü)
+    powershell -NoProfile -File scripts/measure.ps1 -Runs 5
+
+| Çalıştırma | Pencere görünür (ms) | Toplam özel WS (MiB) | Toplam WS (MiB) | Rust özel WS (MiB) | Süreç |
+|---|---|---|---|---|---|
+| 1 | 393 | 77,1 | 358,5 | 7,3 | 7 |
+| 2 | 349 | 77,4 | 358,9 | 7,6 | 7 |
+| 3 | 349 | 78,0 | 359,5 | 7,4 | 7 |
+| 4 | 346 | 78,0 | 359,5 | 7,5 | 7 |
+| 5 | 352 | 77,3 | 358,8 | 7,4 | 7 |
+| **Medyan** | **349** | **77,4** | 358,9 | **7,4** | 7 |
+
+Pencere süresi yeni anlamıyla (temalı ilk çizimle görünür) 349 ms; 1 sn hedefinin altında. Bellek Plan 7 ile aynı
+(77,5 → 77,4 MiB). Paket: `index` 229,15 → 229,27 kB (gz 74,26 → 74,31), CSS 22,51 → 22,66 kB; exe 14.934.016 bayt.
