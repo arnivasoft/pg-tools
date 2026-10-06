@@ -274,6 +274,16 @@ describe("applyOptionsFor", () => {
       applyId: "id-2", lockTimeoutMs: 0, expectedHash: "z", confirmed: false, confirmedProduction: false,
     });
   });
+
+  it("canSubmit değilse null (gönderilemez): blocked, kutusuz onay, yanlış ad, boş beklenen ad", () => {
+    const v = view({ risk: "data_loss" });
+    const off: ConfirmState = { checked: false, typedName: "" };
+    expect(applyOptionsFor("a", 5000, v, { kind: "blocked", reason: "stale" }, { checked: true, typedName: "P" })).toBeNull();
+    expect(applyOptionsFor("a", 5000, v, { kind: "needsConfirm" }, off)).toBeNull();
+    expect(applyOptionsFor("a", 5000, v, { kind: "needsProductionName", expected: "P" }, { checked: true, typedName: "p" })).toBeNull();
+    expect(applyOptionsFor("a", 5000, v, { kind: "needsProductionName", expected: "" }, { checked: true, typedName: "" })).toBeNull();
+    expect(applyOptionsFor("a", 5000, v, { kind: "needsConfirm" }, { checked: true, typedName: "" })).toMatchObject({ confirmed: true });
+  });
 });
 
 describe("scriptWithRanges", () => {

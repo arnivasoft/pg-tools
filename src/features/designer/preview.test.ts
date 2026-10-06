@@ -159,4 +159,50 @@ describe("createPreviewer", () => {
     p.schedule(async () => "2"); t.advance(150); await flush();
     expect(onResult.mock.calls).toEqual([["1"], ["2"]]);
   });
+
+  it("onResult/onError fırlatırsa yutulur (işlenmemiş ret yok), sonraki schedule çalışır", async () => {
+    const unhandled = vi.fn();
+    const proc = (globalThis as unknown as { process: { on(ev: string, f: unknown): void; off(ev: string, f: unknown): void } }).process;
+    proc.on("unhandledRejection", unhandled);
+    try {
+      const p = createPreviewer<string>(
+        t.deps,
+        (r) => { onResult(r); throw new Error("onResult patladı"); },
+        (e) => { onError(e); throw new Error("onError patladı"); },
+      );
+      p.schedule(async () => "a"); t.advance(150); await flush();
+      p.schedule(async () => { throw new Error("x"); }); t.advance(150); await flush();
+      p.schedule(async () => "b"); t.advance(150); await flush();
+      await flush();
+      expect(onResult.mock.calls).toEqual([["a"], ["b"]]);
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      proc.off("unhandledRejection", unhandled);
+    }
+  });
+
+  it("runNow: bekleyen zamanlayıcıyı iptal eder, hemen çalıştırır; en son kazanır kuralı aynı", async () => {
+    const p = createPreviewer<string>(t.deps, onResult, onError);
+    const later = vi.fn(async () => "zamanlı");
+    p.schedule(later);
+    const d = deferred<string>();
+    p.runNow(() => d.promise);
+    expect(t.count()).toBe(0);
+    t.advance(1000);
+    expect(later).not.toHaveBeenCalled();
+    d.resolve("hemen"); await flush();
+    expect(onResult).toHaveBeenCalledExactlyOnceWith("hemen");
+    const d2 = deferred<string>();
+    p.runNow(() => d2.promise);
+    p.schedule(async () => "yeni"); // d2'yi geçersiz kılar
+    d2.resolve("eski"); await flush();
+    t.advance(150); await flush();
+    expect(onResult).toHaveBeenLastCalledWith("yeni");
+    expect(onResult).toHaveBeenCalledTimes(2);
+    p.dispose();
+    const run = vi.fn(async () => "z");
+    p.runNow(run);
+    expect(run).not.toHaveBeenCalled();
+  });
 });

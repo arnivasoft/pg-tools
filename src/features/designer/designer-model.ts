@@ -134,7 +134,9 @@ export function confirmFlags(g: ApplyGate, c: ConfirmState): { confirmed: boolea
   return { confirmed: false, confirmedProduction: false };
 }
 
-export function applyOptionsFor(applyId: string, lockTimeoutMs: number, view: PlanView, gate: ApplyGate, c: ConfirmState): ApplyOptions {
+/** Gönderim seçenekleri; `!canSubmit(gate, c)` ise null (çağıran hiçbir şey göndermez — kapı UI'ya güvenmez). */
+export function applyOptionsFor(applyId: string, lockTimeoutMs: number, view: PlanView, gate: ApplyGate, c: ConfirmState): ApplyOptions | null {
+  if (!canSubmit(gate, c)) return null;
   return { applyId, lockTimeoutMs, expectedHash: view.hash, ...confirmFlags(gate, c) };
 }
 

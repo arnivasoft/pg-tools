@@ -9,9 +9,11 @@ export interface PreviewDeps {
 export interface Previewer<R> {
   /** Her çağrı öncekini geçersiz kılar; 150 ms sonra `run`; yalnızca EN SON çağrının yanıtı `onResult`a gider. */
   schedule(run: () => Promise<R>): void;
+  /** `schedule` gibi ama beklemeden (bekleyen zamanlayıcı iptal edilir); en son kazanır kuralı aynıdır. */
+  runNow(run: () => Promise<R>): void;
   /** Bekleyen zamanlayıcıyı ve uçuştaki yanıtı geçersiz kılar. */
   cancel(): void;
-  /** `cancel` + sonraki `schedule` çağrıları etkisiz. */
+  /** `cancel` + sonraki `schedule`/`runNow` çağrıları etkisiz. */
   dispose(): void;
 }
 
@@ -34,6 +36,18 @@ export function createPreviewer<R>(
     token++;
     clear();
   };
+  /** Geri çağrının fırlattığı hata yutulur: söz zincirinde işlenmemiş ret bırakılmaz. */
+  const safe = (f: () => void) => {
+    try { f(); } catch { /* geri çağrı hatası önizleyiciyi bozmaz */ }
+  };
+  const start = (run: () => Promise<R>, mine: number) => {
+    let p: Promise<R>;
+    try { p = run(); } catch (e) { p = Promise.reject(e); }
+    p.then(
+      (r) => { if (!disposed && mine === token) safe(() => onResult(r)); },
+      (e) => { if (!disposed && mine === token) safe(() => onError(e)); },
+    );
+  };
 
   return {
     schedule(run) {
@@ -42,13 +56,13 @@ export function createPreviewer<R>(
       const mine = token;
       timer = deps.setTimer(() => {
         timer = null;
-        let p: Promise<R>;
-        try { p = run(); } catch (e) { p = Promise.reject(e); }
-        p.then(
-          (r) => { if (!disposed && mine === token) onResult(r); },
-          (e) => { if (!disposed && mine === token) onError(e); },
-        );
+        start(run, mine);
       }, delayMs);
+    },
+    runNow(run) {
+      if (disposed) return;
+      cancel();
+      start(run, token);
     },
     cancel,
     dispose() {

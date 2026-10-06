@@ -16,7 +16,7 @@ import type { Statements } from "../../ipc/bindings/Statements";
 import type { StatementsOrder } from "../../ipc/bindings/StatementsOrder";
 import type { Api } from "../../ipc/commands";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
-import { toPayload } from "../../ipc/errors";
+import { errorText, toPayload } from "../../ipc/errors";
 import { SampleRing, toRates, type RateSeries } from "./dash-model";
 import { DEFAULT_INTERVAL_MS, MIN_INTERVAL_MS, createPoller, defaultPollerDeps, type Poller, type PollerDeps } from "./poller";
 import { revalidate, signalWarnings, type SignalWarning } from "./signal-model";
@@ -87,15 +87,6 @@ const GONE_CODES = new Set(["unknown_server"]);
 const lostError = (p: ErrorPayload): string | null => (p.code === "not_found" ? null : p.message);
 
 const emptyRates = (): RateSeries => toRates([], 1);
-
-/**
- * Kullanıcıya gösterilecek hata metni. SQL hatalarında (`code === "query"`) arka uç dostça `message`'ı verir, PostgreSQL'in
- * kendi metni `detail`'dadır (ör. 42501 için "permission denied …"): ikisi (ve varsa ipucu) birlikte gösterilir.
- */
-export function errorText(p: ErrorPayload): string {
-  if (p.code !== "query") return p.message;
-  return [p.message, p.detail, p.hint].filter(Boolean).join(" — ");
-}
 
 /** Geçersiz aralık (0, negatif) → en az `MIN_INTERVAL_MS`; sonlu değilse (NaN) varsayılan. */
 export function clampInterval(ms: number): number {
