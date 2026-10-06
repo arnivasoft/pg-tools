@@ -62,7 +62,7 @@ pub fn resolve<'a>(items: &'a [ScopeItem], qualifier: &str) -> Option<&'a ScopeI
 /// Alias olamayacak anahtar sözcükler (küçük harfle): PostgreSQL'in ayrılmış ve `type_func_name` sözcükleri
 /// (AS'siz tablo alias'ı olamazlar) ile ilişki adından sonra bağlamsal olarak gelen birkaç ayrılmamış sözcük
 /// (`set`, `values`, `overriding`, `ordinality`, `repeatable`, `conflict`).
-fn is_kw(lower: &str) -> bool {
+pub(crate) fn is_kw(lower: &str) -> bool {
     matches!(
         lower,
         // ayrılmış

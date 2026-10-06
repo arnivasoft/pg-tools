@@ -275,3 +275,211 @@ async fn complete_keeps_the_grid_cursor_and_search_path_changes_invalidate() {
         assert!(labels(&items).contains(&"orders"), "{items:?}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Kapsamlı (alias'lı) tamamlama
+// ---------------------------------------------------------------------------------------------------------------
+
+/// `|` imleçtir; ofset Unicode scalar olarak hesaplanır.
+fn scoped(s: &str, prefix: &str) -> CompletionRequest {
+    let at = s.find('|').expect("imleç");
+    let sql = format!("{}{}", &s[..at], &s[at + 1..]);
+    CompletionRequest::Scoped { offset: s[..at].chars().count() as u32, sql, prefix: prefix.into() }
+}
+
+fn first_cell(events: &[QueryEvent]) -> String {
+    events
+        .iter()
+        .find_map(|e| match e {
+            QueryEvent::Rows { rows, .. } => rows.first().and_then(|r| r.first().cloned().flatten()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("satır yok: {events:?}"))
+}
+
+const SCOPED_FIXTURE: &str = r#"
+    drop schema if exists qc_a cascade;
+    drop schema if exists qc_b cascade;
+    create schema qc_a;
+    create schema qc_b;
+    create table qc_a.t(a_col int);
+    create table qc_b.t(b_col text);
+    create table qc_app.ins(id serial primary key, v int);
+    create table qc_app.locked(k int);
+"#;
+
+#[tokio::test]
+async fn scoped_resolves_aliases_quoted_names_and_search_path() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup(FIXTURE).await;
+        fx.setup(SCOPED_FIXTURE).await;
+        let id = fx.open(TxMode::Autocommit).await;
+        fx.run(id, "set search_path = nowhere").await;
+
+        let cols = fx.complete(id, scoped("select o.| from qc_app.orders o", "o")).await;
+        let got: Vec<(&str, &str, Option<&str>)> =
+            cols.iter().map(|c| (c.label.as_str(), c.quoted.as_str(), c.detail.as_deref())).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("id", "id", Some("integer")),
+                ("Total Price", "\"Total Price\"", Some("numeric(10,2)")),
+                ("note", "note", Some("text")),
+            ]
+        );
+        let cols = fx.complete(id, scoped("select oi.| from qc_app.\"Order Items\" oi where true", "oi")).await;
+        assert_eq!(labels(&cols), ["order_id", "qty"]);
+        let cols = fx.complete(id, scoped("select \"OI\".| from qc_app.\"Order Items\" \"OI\"", "\"OI\"")).await;
+        assert_eq!(labels(&cols), ["order_id", "qty"]);
+        // Emoji imleçten önce (scalar ofset) ve ifade sınırı.
+        let cols = fx.complete(id, scoped("select 1; select '\u{1F600}', o.| from qc_app.orders o; select 2", "o")).await;
+        assert_eq!(labels(&cols), ["id", "Total Price", "note"]);
+        // Alias kolon listesi ilk N kolonu yeniden adlandırır.
+        let cols = fx.complete(id, scoped("select x.| from qc_app.orders x(k)", "x")).await;
+        assert_eq!(labels(&cols), ["k", "Total Price", "note"]);
+        // Fonksiyon kaynağı: alias tek kolon.
+        let cols = fx.complete(id, scoped("select g.| from generate_series(1, 3) g", "g")).await;
+        assert_eq!(labels(&cols), ["g"]);
+        // Select listesi: alias.kolon.
+        let cols = fx.complete(id, scoped("select | from qc_app.orders o, qc_app.\"Order Items\"", "")).await;
+        let got: Vec<(&str, &str)> = cols.iter().map(|c| (c.label.as_str(), c.quoted.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("o.id", "o.id"),
+                ("o.Total Price", "o.\"Total Price\""),
+                ("o.note", "o.note"),
+                ("Order Items.order_id", "\"Order Items\".order_id"),
+                ("Order Items.qty", "\"Order Items\".qty"),
+            ]
+        );
+
+        // Arama yolu: şemasız ad oturumun yoluyla çözülür; yol değişince (SET önbelleği boşaltır) diğer tablo.
+        assert!(fx.complete(id, scoped("select x.| from t x", "x")).await.is_empty());
+        fx.run(id, "set search_path = qc_b, qc_a").await;
+        assert_eq!(labels(&fx.complete(id, scoped("select x.| from t x", "x")).await), ["b_col"]);
+        fx.run(id, "set search_path = qc_a, qc_b").await;
+        assert_eq!(labels(&fx.complete(id, scoped("select x.| from t x", "x")).await), ["a_col"]);
+        assert_eq!(first_cell(&fx.run(id, "show search_path").await), "qc_a, qc_b", "arama yoluna dokunulmaz");
+
+        // Kapsamda eşleşme yok: Plan 5 `Columns` (önek ilişki adıdır).
+        fx.run(id, "set search_path = qc_app").await;
+        let cols = fx.complete(id, scoped("select orders.| from elsewhere e", "orders")).await;
+        assert_eq!(labels(&cols), ["id", "Total Price", "note"]);
+    }
+}
+
+#[tokio::test]
+async fn scoped_cte_and_subquery_columns_come_from_parse_without_executing() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup(FIXTURE).await;
+        fx.setup(SCOPED_FIXTURE).await;
+        let id = fx.open(TxMode::Autocommit).await;
+        fx.run(id, "set lock_timeout = '3s'").await;
+
+        let sql = "with x as (insert into qc_app.ins(v) values (1) returning id, v) select x.| from x";
+        let cols = fx.complete(id, scoped(sql, "x")).await;
+        let got: Vec<(&str, Option<&str>)> = cols.iter().map(|c| (c.label.as_str(), c.detail.as_deref())).collect();
+        assert_eq!(got, [("id", Some("int4")), ("v", Some("int4"))]);
+        let admin = admin_client(&fx.ts, &fx.ts.config.maintenance_db).await;
+        let n: i64 = admin.query_one("select count(*) from qc_app.ins", &[]).await.unwrap().get(0);
+        assert_eq!(n, 0, "CTE gövdesi çalıştırılmamalı");
+        let called: bool = admin.query_one("select is_called from qc_app.ins_id_seq", &[]).await.unwrap().get(0);
+        assert!(!called, "dizi ilerlememeli");
+
+        let cols = fx
+            .complete(id, scoped("with a as (select 1 as p), b as (select p, 2 as q from a) select b.| from b", "b"))
+            .await;
+        assert_eq!(labels(&cols), ["p", "q"]);
+        let cols = fx.complete(id, scoped("select s.| from (select id as k, note from qc_app.orders) s", "s")).await;
+        assert_eq!(labels(&cols), ["k", "note"]);
+        let cols = fx.complete(id, scoped("with c(m) as (select 1, 2) select z.| from c z", "z")).await;
+        assert_eq!(labels(&cols), ["m"], "açık kolon listesi Parse gerektirmez");
+        // Bozuk gövde: boş, oturum etkilenmez.
+        assert!(fx.complete(id, scoped("select s.| from (select nope from qc_app.orders) s", "s")).await.is_empty());
+        // Kullanıcının lock_timeout'u geri yüklendi.
+        assert_eq!(first_cell(&fx.run(id, "show lock_timeout").await), "3s");
+
+        // Başka bağlantı tabloyu kilitliyor: Parse kilit beklemez (200 ms), boş döner.
+        let mut locker = admin_client(&fx.ts, &fx.ts.config.maintenance_db).await;
+        let tx = locker.transaction().await.unwrap();
+        tx.batch_execute("lock table qc_app.locked in access exclusive mode").await.unwrap();
+        let started = Instant::now();
+        let locked = "with c as (select * from qc_app.locked) select c.| from c";
+        assert!(fx.complete(id, scoped(locked, "c")).await.is_empty());
+        assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
+        tx.rollback().await.unwrap();
+        // Kilit zaman aşımı önbelleğe alınmaz: kilit kalkınca kolonlar gelir.
+        assert_eq!(labels(&fx.complete(id, scoped(locked, "c")).await), ["k"]);
+        assert_eq!(first_cell(&fx.run(id, "show lock_timeout").await), "3s");
+    }
+}
+
+#[tokio::test]
+async fn scoped_parse_inside_a_transaction_leaves_it_and_its_locks_untouched() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup(FIXTURE).await;
+        fx.setup(SCOPED_FIXTURE).await;
+        let id = fx.open(TxMode::Manual).await;
+        let pid: i32 = first_cell(&fx.run(id, "select pg_backend_pid()").await).parse().unwrap();
+        assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::InTransaction);
+        fx.run(id, "set local lock_timeout = '4s'").await;
+        let admin = admin_client(&fx.ts, &fx.ts.config.maintenance_db).await;
+        let q = "select count(*) from pg_locks where pid = $1 and relation = 'qc_app.orders'::regclass";
+        assert_eq!(admin.query_one(q, &[&pid]).await.unwrap().get::<_, i64>(0), 0);
+
+        let sql = "with c as (select id, note from qc_app.orders) select c.| from c";
+        assert_eq!(labels(&fx.complete(id, scoped(sql, "c")).await), ["id", "note"]);
+        assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::InTransaction);
+        assert_eq!(
+            admin.query_one(q, &[&pid]).await.unwrap().get::<_, i64>(0),
+            0,
+            "Parse'ın aldığı kilit savepoint'le bırakılmalı"
+        );
+        // Hatalı Parse da transaction'ı bozmaz.
+        assert!(fx.complete(id, scoped("select s.| from (select nope from qc_app.orders) s", "s")).await.is_empty());
+        assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::InTransaction);
+        let ev = fx.run(id, "select current_setting('lock_timeout')").await;
+        assert!(!ev.iter().any(|e| matches!(e, QueryEvent::Failed { .. })), "{ev:?}");
+        assert_eq!(first_cell(&ev), "4s", "SET LOCAL değeri korunur");
+        assert_eq!(admin.query_one(q, &[&pid]).await.unwrap().get::<_, i64>(0), 0);
+
+        // Failed iken boş.
+        fx.run(id, "select 1/0").await;
+        assert_eq!(fx.qm.tx_state(id).unwrap(), TxState::Failed);
+        let other = "with d as (select note from qc_app.orders) select d.| from d";
+        assert!(fx.complete(id, scoped(other, "d")).await.is_empty());
+        assert!(fx.complete(id, scoped("select o.| from qc_app.orders o", "o")).await.is_empty());
+        fx.qm.tx(id, pgt_query::session::TxAction::Rollback).await.unwrap();
+        assert_eq!(labels(&fx.complete(id, scoped(other, "d")).await), ["note"]);
+    }
+}
+
+#[tokio::test]
+async fn scoped_returns_nothing_while_busy() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup(FIXTURE).await;
+        let id = fx.open(TxMode::Autocommit).await;
+        let qm = fx.qm.clone();
+        let task = tokio::spawn(async move {
+            let mut sink = VecSink::default();
+            qm.run(id, "select pg_sleep(30)", Scope::All, 10, true, &mut sink).await
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let started = Instant::now();
+        let sql = "with c as (select id from qc_app.orders) select c.| from c";
+        assert!(fx.complete(id, scoped(sql, "c")).await.is_empty());
+        assert!(started.elapsed() < Duration::from_millis(100), "{:?}", started.elapsed());
+        fx.qm.cancel(id);
+        task.await.unwrap().unwrap();
+        assert_eq!(labels(&fx.complete(id, scoped(sql, "c")).await), ["id"]);
+    }
+}

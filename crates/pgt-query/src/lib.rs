@@ -7,6 +7,8 @@ pub mod events;
 pub mod exec;
 pub mod export;
 pub mod lex;
+mod parse_guard;
 pub mod scope;
+mod scoped;
 pub mod session;
 pub mod split;
