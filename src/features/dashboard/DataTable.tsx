@@ -122,10 +122,11 @@ export function DataTable<T>(props: {
                 style={{ width: `${col.width}px` }}
               >
                 <Show when={col.sortable} fallback={<span class="truncate px-2">{col.header}</span>}>
+                  {/* Klavyeyle de sıralanabilir (Tab + Enter/Boşluk); ızgaranın keydown'u hedef kendisi değilse dokunmaz. */}
                   <button
                     type="button"
-                    tabIndex={-1}
-                    class="flex h-full min-w-0 flex-1 items-center gap-1 px-2 hover:bg-hover"
+                    tabIndex={0}
+                    class="flex h-full min-w-0 flex-1 items-center gap-1 px-2 outline-none hover:bg-hover focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent"
                     classList={{ "justify-end": col.align === "right" }}
                     onClick={() => props.onSort?.(col.key)}
                   >
