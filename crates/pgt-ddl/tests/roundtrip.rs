@@ -61,6 +61,7 @@ fn idx(schema: &str, table: &str, name: &str, method: &str, columns: Vec<IndexCo
         fillfactor: None,
         comment: None,
         constraint: None,
+        valid: true,
     }
 }
 
@@ -613,6 +614,12 @@ async fn lookup_body(ts: TestServer) {
     if let Some(d) = uninstalled {
         assert!(d.contains("yüklü —"), "{d}");
     }
+
+    // Sürümler: plpgsql yüklü (bayrak), olmayan eklenti için boş liste.
+    let vers = ask(LookupRequest::ExtensionVersions { name: "plpgsql".into() }).await;
+    assert!(!vers.is_empty());
+    assert!(vers.iter().any(|v| v.detail.as_deref().is_some_and(|d| d.contains("yüklü"))), "{vers:?}");
+    assert!(ask(LookupRequest::ExtensionVersions { name: "yok_boyle_eklenti".into() }).await.is_empty());
 
     let methods: Vec<_> = ask(LookupRequest::IndexMethods).await.into_iter().map(|m| m.value).collect();
     assert_eq!(methods, ["btree", "hash", "gin", "gist", "brin", "spgist"]);

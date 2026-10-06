@@ -3,6 +3,64 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+/// i64 sözleşmesi: JS `number` 2^53'ün üstünde kesinlik kaybeder (sequence sınırları bigint aralığındadır). Bu yüzden
+/// SequenceDef'in sayısal alanları JSON'da ondalık DİZGE olarak gider; girişte dizge de tamsayı da kabul edilir.
+mod i64_str {
+    use serde::de::{self, Visitor};
+    use serde::{Deserializer, Serializer};
+    use std::fmt;
+
+    struct V;
+
+    impl Visitor<'_> for V {
+        type Value = i64;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("ondalık tamsayı dizgesi ya da tamsayı")
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<i64, E> {
+            Ok(v)
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<i64, E> {
+            i64::try_from(v).map_err(|_| E::custom("tamsayı i64 aralığının dışında"))
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<i64, E> {
+            v.parse::<i64>().map_err(|_| E::custom("geçersiz tamsayı dizgesi"))
+        }
+    }
+
+    pub fn serialize<S: Serializer>(v: &i64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&v.to_string())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+        d.deserialize_any(V)
+    }
+
+    /// `Option<i64>`: `null` -> `None`.
+    pub mod opt {
+        use serde::{Deserialize, Deserializer, Serializer};
+
+        struct Wrap(i64);
+
+        impl<'de> Deserialize<'de> for Wrap {
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                super::deserialize(d).map(Wrap)
+            }
+        }
+
+        pub fn serialize<S: Serializer>(v: &Option<i64>, s: S) -> Result<S::Ok, S::Error> {
+            match v {
+                Some(v) => s.serialize_str(&v.to_string()),
+                None => s.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+            Ok(Option::<Wrap>::deserialize(d)?.map(|w| w.0))
+        }
+    }
+}
+
 /// Desteklenen nesne türleri.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -50,15 +108,20 @@ pub struct SequenceDef {
     pub name: String,
     pub owner: Option<String>,
     pub data_type: SeqType,
-    #[ts(type = "number")]
+    #[serde(with = "i64_str")]
+    #[ts(type = "string")]
     pub increment: i64,
-    #[ts(type = "number | null")]
+    #[serde(default, with = "i64_str::opt")]
+    #[ts(type = "string | null")]
     pub min_value: Option<i64>,
-    #[ts(type = "number | null")]
+    #[serde(default, with = "i64_str::opt")]
+    #[ts(type = "string | null")]
     pub max_value: Option<i64>,
-    #[ts(type = "number")]
+    #[serde(with = "i64_str")]
+    #[ts(type = "string")]
     pub start: i64,
-    #[ts(type = "number")]
+    #[serde(with = "i64_str")]
+    #[ts(type = "string")]
     pub cache: i64,
     pub cycle: bool,
     pub owned_by: Option<ColumnRef>,
@@ -113,6 +176,14 @@ pub struct IndexDef {
     pub comment: Option<String>,
     /// Yalnızca yüklemede dolar: indeks bir kısıta (PK/UNIQUE/EXCLUDE) aitse kısıt adı. Üreticiler bu indeksi değiştirmez/silmez.
     pub constraint: Option<String>,
+    /// Yalnızca yüklemede dolar (`pg_index.indisvalid`): başarısız CONCURRENTLY inşası geçersiz indeks bırakır. Üreticiler
+    /// bunu okumaz/yazmaz; alter farkına girmez. Yeni tanımda varsayılan `true`.
+    #[serde(default = "default_true")]
+    pub valid: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Arayüz ile arka uç arasındaki nesne tanımı (`kind` etiketi nesne türüdür).
@@ -183,11 +254,35 @@ mod tests {
         let v = serde_json::to_value(ObjectDef::Sequence(seq())).unwrap();
         assert_eq!(v["kind"], "sequence");
         assert_eq!(v["dataType"], "bigint");
-        assert_eq!(v["maxValue"], 100);
+        assert_eq!(v["maxValue"], "100");
+        assert_eq!(v["increment"], "1");
         assert!(v["minValue"].is_null());
         assert_eq!(v["ownedBy"]["column"], "id");
         let back: ObjectDef = serde_json::from_value(v).unwrap();
         assert_eq!(back, ObjectDef::Sequence(seq()));
+    }
+
+    #[test]
+    fn sequence_numbers_are_strings_and_accept_integers() {
+        let mut s = seq();
+        s.min_value = Some(i64::MIN);
+        s.max_value = Some(i64::MAX);
+        s.start = 9_007_199_254_740_993; // 2^53 + 1: JS number'a sığmaz
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!((v["minValue"].clone(), v["maxValue"].clone(), v["start"].clone()), (json!("-9223372036854775808"), json!("9223372036854775807"), json!("9007199254740993")));
+        assert_eq!(serde_json::from_value::<SequenceDef>(v).unwrap(), s);
+        // Giriş: tamsayı ve dizge birlikte; eksik/`null` seçenekler `None`.
+        let mut v = serde_json::to_value(seq()).unwrap();
+        v["increment"] = json!(5);
+        v["start"] = json!("7");
+        v["minValue"] = json!(null);
+        v.as_object_mut().unwrap().remove("maxValue");
+        let d: SequenceDef = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!((d.increment, d.start, d.min_value, d.max_value), (5, 7, None, None));
+        for bad in [json!("abc"), json!(1.5), json!(true), json!("9223372036854775808"), json!(18446744073709551615u64)] {
+            v["increment"] = bad.clone();
+            assert!(serde_json::from_value::<SequenceDef>(v.clone()).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -225,6 +320,7 @@ mod tests {
             fillfactor: Some(70),
             comment: None,
             constraint: None,
+            valid: true,
         });
         let v = serde_json::to_value(&d).unwrap();
         assert_eq!(v["kind"], "index");

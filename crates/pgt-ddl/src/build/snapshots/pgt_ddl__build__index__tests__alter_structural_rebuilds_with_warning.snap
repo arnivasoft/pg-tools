@@ -5,4 +5,4 @@ expression: render(&p)
 [Destructive] DROP INDEX public.t_a_idx
 [Safe] CREATE UNIQUE INDEX t_a_idx ON public.t USING btree (a) WITH (fillfactor = 50)
 [Safe] COMMENT ON INDEX public.t_a_idx IS 'c'
-WARN: İndeks yeniden oluşturulur; oluşturma süresince sorgular yavaşlayabilir
+WARN: İndeks yeniden oluşturulur: önce silinir, sonra kurulur. DROP INDEX ACCESS EXCLUSIVE kilidi alır ve işlem      bitene kadar tablo okuma ve yazmaya kapalı kalır; büyük tablolarda kesinti uzar

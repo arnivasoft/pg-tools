@@ -6,4 +6,4 @@ export type ApplyOutcome = { "outcome": "applied", statements: number, elapsedMs
 /**
  * Create (ve kimliği değişen alter/yeniden kurma) sonrası yeni nesne; en iyi çaba, bulunamazsa `None`.
  */
-created: ObjectRef | null, } | { "outcome": "failed", failedIndex: number, committed: number, sqlstate: string | null, error: ErrorPayload, };
+created: ObjectRef | null, } | { "outcome": "failed", failedIndex: number, committed: number, sqlstate: string | null, position: number | null, error: ErrorPayload, };

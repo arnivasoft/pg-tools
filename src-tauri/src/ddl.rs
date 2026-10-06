@@ -145,6 +145,16 @@ mod tests {
             assert_eq!((sqlstate.as_deref(), committed), (Some("42P06"), 0));
             let err = Box::pin(ddl.apply(sid, db, &req, opts("yanlis"))).await.map_err(|e| ddl_payload(&e)).unwrap_err();
             assert_eq!(err.code, "plan_changed");
+
+            // Sunucu istemcinin tanımına güvenmez: tahrifli `def` ile silme `plan_changed` olur, şema yerinde kalır.
+            let ObjectDef::Schema(mut tampered) = loaded.clone() else { panic!() };
+            tampered.comment = Some("sahte".into());
+            let drop = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid }, def: ObjectDef::Schema(tampered), cascade: false };
+            let hash = Box::pin(ddl.preview(sid, db, &drop)).await.map_err(|e| ddl_payload(&e)).unwrap().hash;
+            let mut o = opts(&hash);
+            o.confirmed = true;
+            let err = Box::pin(ddl.apply(sid, db, &drop, o)).await.map_err(|e| ddl_payload(&e)).unwrap_err();
+            assert_eq!(err.code, "plan_changed");
         };
         body.await;
         admin.batch_execute(&format!("DROP SCHEMA IF EXISTS {SCHEMA} CASCADE")).await.unwrap();

@@ -5,4 +5,9 @@ export type IndexDef = { schema: string, table: string, name: string, method: st
 /**
  * Yalnızca yüklemede dolar: indeks bir kısıta (PK/UNIQUE/EXCLUDE) aitse kısıt adı. Üreticiler bu indeksi değiştirmez/silmez.
  */
-constraint: string | null, };
+constraint: string | null, 
+/**
+ * Yalnızca yüklemede dolar (`pg_index.indisvalid`): başarısız CONCURRENTLY inşası geçersiz indeks bırakır. Üreticiler
+ * bunu okumaz/yazmaz; alter farkına girmez. Yeni tanımda varsayılan `true`.
+ */
+valid: boolean, };

@@ -20,6 +20,8 @@ pub enum LookupRequest {
     Schemas,
     Tablespaces,
     AvailableExtensions,
+    /// Bir eklentinin kurulabilir sürümleri (`UPDATE TO` seçicisi): value = sürüm, detail = "yüklü" bayrağı + açıklama.
+    ExtensionVersions { name: String },
     IndexMethods,
     Tables { schema: Option<String> },
     TableColumns { schema: String, table: String },
@@ -37,6 +39,7 @@ static ROLES: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_roles.
 static SCHEMAS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_schemas.sql"))]);
 static TABLESPACES: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_tablespaces.sql"))]);
 static EXTENSIONS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_available_extensions.sql"))]);
+static EXTENSION_VERSIONS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_extension_versions.sql"))]);
 static METHODS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_index_methods.sql"))]);
 static TABLES: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_tables.sql"))]);
 static COLUMNS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_table_columns.sql"))]);
@@ -81,6 +84,7 @@ pub async fn lookup(mgr: &ConnectionManager, server: Uuid, database_oid: u32, re
                 }
             })
             .collect(),
+        LookupRequest::ExtensionVersions { name } => items(&fetch(mgr, server, db, &EXTENSION_VERSIONS, vec![Some(name)]).await?),
         LookupRequest::IndexMethods => {
             let present = items(&fetch(mgr, server, db, &METHODS, vec![]).await?);
             INDEX_METHODS
@@ -104,6 +108,8 @@ mod tests {
         assert_eq!(v, serde_json::json!({"kind": "tables", "schema": "app"}));
         let r: LookupRequest = serde_json::from_value(serde_json::json!({"kind": "available_extensions"})).unwrap();
         assert_eq!(r, LookupRequest::AvailableExtensions);
+        let r: LookupRequest = serde_json::from_value(serde_json::json!({"kind": "extension_versions", "name": "citext"})).unwrap();
+        assert_eq!(r, LookupRequest::ExtensionVersions { name: "citext".into() });
         let r: LookupRequest = serde_json::from_value(serde_json::json!({"kind": "table_columns", "schema": "a", "table": "t"})).unwrap();
         assert_eq!(r, LookupRequest::TableColumns { schema: "a".into(), table: "t".into() });
     }

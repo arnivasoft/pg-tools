@@ -246,6 +246,7 @@ async fn load_index(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) ->
         fillfactor,
         comment: h.get("comment"),
         constraint: h.get("constraint_name"),
+        valid: h.get("is_valid"),
     }))
 }
 

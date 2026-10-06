@@ -7,9 +7,8 @@
 //!   boş olamaz, `scan_semicolons` ile temiz olmalı (dış `;`/kapanmamış bölge yok), parantezleri dengeli olmalı
 //!   (fazla `)` sarmalı kırar) ve birleşmiş NİHAİ ifade de aynı taramadan geçmelidir (ör. `--` ile biten alan
 //!   kapanış parantezini yutar → nihai ifade dengesiz).
-//! - `CONCURRENTLY` yalnızca `BuildCtx.concurrently` ile gelir. Alter kaynaklı DROP+CREATE de eşlenir:
-//!   `DROP INDEX CONCURRENTLY` + `CREATE INDEX CONCURRENTLY` (ikisi de transaction dışı); açık `drop()` ise
-//!   CASCADE ile uyumsuz olduğundan her zaman düz `DROP INDEX` kullanır.
+//! - `CONCURRENTLY` yalnızca `create()` ve `BuildCtx.concurrently` ile gelir. Alter kaynaklı DROP+CREATE ve açık `drop()` her
+//!   zaman düz (transactional) DROP/CREATE kullanır; kesintisiz yeniden kurma ileri bir plana ertelendi.
 
 use super::{BuildCtx, check_ident, check_schema_ident, check_text, err, scan_semicolons, stmt};
 use crate::model::{FieldError, IndexColumn, IndexDef, IndexKey};
@@ -17,8 +16,7 @@ use crate::plan::{Plan, Risk, Statement};
 use crate::quote::{qualified, quote_ident, quote_literal};
 
 const METHODS: [&str; 6] = ["btree", "hash", "gist", "gin", "brin", "spgist"];
-const REBUILD_WARNING: &str =
-    "İndeks yeniden oluşturulur; oluşturma süresince sorgular yavaşlayabilir";
+const REBUILD_WARNING: &str = "İndeks yeniden oluşturulur: önce silinir, sonra kurulur. DROP INDEX ACCESS EXCLUSIVE kilidi alır ve işlem      bitene kadar tablo okuma ve yazmaya kapalı kalır; büyük tablolarda kesinti uzar";
 const CONCURRENT_NOTE: &str =
     "Transaction dışında çalışır; hata olursa geçersiz (INVALID) indeks kalabilir";
 const PARTITION_WARNING: &str = "CONCURRENTLY bölümlenmiş (partitioned) tablolarda desteklenmez; tablo bölümlenmişse ifade hata verir";
@@ -293,7 +291,7 @@ fn structural_change(o: &IndexDef, n: &IndexDef) -> bool {
 /// Yapısal değişiklik → DROP + CREATE (yeni ad doğrudan CREATE'te; rename ayrıca yazılmaz).
 /// Aksi halde yerinde: rename, tablespace, fillfactor, yorum. `constraint` alanı yalnızca yüklemede dolar ve
 /// farka katılmaz; kısıt-bağlı indekste yapısal/rename isteği hatadır (tablespace/fillfactor/yorum serbest).
-pub fn alter(old: &IndexDef, new: &IndexDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
+pub fn alter(old: &IndexDef, new: &IndexDef) -> Result<Plan, Vec<FieldError>> {
     let structural = structural_change(old, new);
     let renamed = old.name != new.name;
     if (structural || renamed)
@@ -303,26 +301,12 @@ pub fn alter(old: &IndexDef, new: &IndexDef, ctx: &BuildCtx) -> Result<Plan, Vec
     }
     let old_q = qualified(&old.schema, &old.name);
     if structural {
-        let drop_sql = if ctx.concurrently {
-            format!("DROP INDEX CONCURRENTLY {old_q}")
-        } else {
-            format!("DROP INDEX {old_q}")
-        };
-        let mut statements = vec![Statement {
-            sql: drop_sql,
-            risk: Risk::Destructive,
-            transactional: !ctx.concurrently,
-            note: ctx.concurrently.then(|| CONCURRENT_NOTE.to_string()),
-        }];
-        statements.extend(create_statements(new, ctx.concurrently));
-        let mut warnings = vec![REBUILD_WARNING.to_string()];
-        if ctx.concurrently {
-            warnings.push(PARTITION_WARNING.to_string());
-        }
-        return Ok(Plan {
-            statements,
-            warnings,
-        });
+        // Tek transaction'da DROP + CREATE (ya hep ya hiç). CONCURRENTLY yeniden kurma bilerek yok: DROP INDEX
+        // CONCURRENTLY sonrası CREATE hatası indeksi hiç bırakmaz; kesintisiz yeniden kurma (geçici ad CONCURRENTLY
+        // kur -> eskiyi sil -> yeniden adlandır) ileri bir plana ertelendi.
+        let mut statements = vec![stmt(format!("DROP INDEX {old_q}"), Risk::Destructive, None)];
+        statements.extend(create_statements(new, false));
+        return Ok(Plan { statements, warnings: vec![REBUILD_WARNING.to_string()] });
     }
 
     if old.tablespace.is_some() && new.tablespace.is_none() {
@@ -443,6 +427,7 @@ mod tests {
             fillfactor: None,
             comment: None,
             constraint: None,
+            valid: true,
         }
     }
     fn sqls(p: &Plan) -> Vec<&str> {
@@ -1071,7 +1056,10 @@ mod tests {
                 balter(&o(old.clone()), &o(d.clone()), &ctx()).is_err(),
                 "{d:?}"
             );
-            assert!(balter(&o(d.clone()), &o(old), &ctx()).is_err(), "{d:?}");
+            // Eski taraf yalnızca kimlikle doğrulanır: ifade/INCLUDE içeriği ne olursa olsun yeniden kurulabilir ve silinebilir.
+            let identity_ok = crate::build::validate_identity(&o(d.clone())).is_empty();
+            assert_eq!(balter(&o(d.clone()), &o(old), &ctx()).is_ok(), identity_ok, "{d:?}");
+            assert_eq!(bdrop(&o(d.clone()), false, &ctx()).is_ok(), identity_ok, "{d:?}");
         }
         // Kabul edilen biçimlerde nihai ifade (tam metin taraması) temiz ve dengeli kalır.
         let d = IndexDef {
@@ -1490,50 +1478,46 @@ mod tests {
     }
 
     #[test]
-    fn alter_structural_concurrent_mode() {
-        let p = balter(
-            &o(base()),
-            &o(IndexDef {
-                unique: true,
-                ..base()
-            }),
-            &cctx(),
-        )
-        .unwrap();
-        assert_eq!(
-            p.statements[0].sql,
-            "DROP INDEX CONCURRENTLY public.t_a_idx"
-        );
-        assert!(!p.statements[0].transactional && !p.statements[1].transactional);
-        assert_eq!(p.statements[0].risk, Risk::Destructive);
-        assert!(
-            p.statements[1]
-                .sql
-                .starts_with("CREATE UNIQUE INDEX CONCURRENTLY")
-        );
-        assert_eq!(p.warnings.len(), 2);
+    fn alter_rebuild_is_never_concurrent() {
+        // `concurrently` bağlamı alter'ı etkilemez: tek transaction'da DROP + CREATE, uyarı tek.
+        let new = IndexDef { unique: true, ..base() };
+        let p = balter(&o(base()), &o(new.clone()), &cctx()).unwrap();
+        assert_eq!(sqls(&p), ["DROP INDEX public.t_a_idx", "CREATE UNIQUE INDEX t_a_idx ON public.t USING btree (a)"]);
+        assert!(p.statements.iter().all(|s| s.transactional));
+        assert_eq!(p.warnings, [REBUILD_WARNING]);
+        assert_eq!(p, balter(&o(base()), &o(new), &ctx()).unwrap());
+        // Uyarı kilit gerçeğini söyler.
+        assert!(REBUILD_WARNING.contains("ACCESS EXCLUSIVE") && REBUILD_WARNING.contains("okuma ve yazmaya kapalı"));
         // Yerinde değişiklikler concurrently'den etkilenmez.
-        let p = balter(
-            &o(base()),
-            &o(IndexDef {
-                name: "z".into(),
-                ..base()
-            }),
-            &cctx(),
-        )
-        .unwrap();
+        let p = balter(&o(base()), &o(IndexDef { name: "z".into(), ..base() }), &cctx()).unwrap();
         assert!(p.statements.iter().all(|s| s.transactional) && p.warnings.is_empty());
-        insta::assert_snapshot!(render(
-            &balter(
-                &o(base()),
-                &o(IndexDef {
-                    unique: true,
-                    ..base()
-                }),
-                &cctx()
-            )
-            .unwrap()
-        ));
+    }
+
+    #[test]
+    fn drop_and_old_side_validate_identity_only() {
+        // Yüklenmiş özel erişim yöntemi + muhafazakâr tarayıcıya takılan ifade: silinebilir, yeniden adlandırılabilir.
+        let odd = IndexDef { method: "bloom".into(), columns: vec![expr("a -- x")], where_clause: Some("(".into()), ..base() };
+        assert!(!bvalidate(&o(odd.clone()), &ctx()).is_empty());
+        assert_eq!(sqls(&bdrop(&o(odd.clone()), false, &ctx()).unwrap()), ["DROP INDEX public.t_a_idx"]);
+        let renamed = IndexDef { name: "z".into(), ..odd.clone() };
+        let p = balter(&o(odd.clone()), &o(renamed), &ctx());
+        assert!(p.is_err(), "yeni taraf tam doğrulanır (bozuk ifade/yöntem)");
+        // Kimlik hâlâ doğrulanır: NUL / denetim karakteri / sistem şeması / boş ad.
+        for bad in [
+            IndexDef { name: "a ".into(), ..odd.clone() },
+            IndexDef { table: "a
+b".into(), ..odd.clone() },
+            IndexDef { schema: "pg_catalog".into(), ..odd.clone() },
+            IndexDef { name: String::new(), ..odd.clone() },
+        ] {
+            let e = bdrop(&o(bad.clone()), false, &ctx()).unwrap_err();
+            assert!(!e.is_empty());
+            let e = balter(&o(bad), &o(base()), &ctx()).unwrap_err();
+            assert!(e[0].path.starts_with("old."), "{e:?}");
+        }
+        // Kısıt koruması kimlik doğrulamasından bağımsız sürer.
+        let pk = IndexDef { constraint: Some("t_pkey".into()), ..odd };
+        assert_eq!(bdrop(&o(pk), false, &ctx()).unwrap_err()[0].path, "constraint");
     }
 
     #[test]

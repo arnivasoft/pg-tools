@@ -169,7 +169,8 @@ mod tests {
             assert_eq!(errs.len(), 1, "{d:?}");
             assert_eq!(errs[0].path, path);
             assert!(bcreate(&o(d.clone()), &ctx()).is_err());
-            assert!(bdrop(&o(d.clone()), false, &ctx()).is_err());
+            // Silme yalnızca kimliği (ad) doğrular.
+            assert_eq!(bdrop(&o(d.clone()), false, &ctx()).is_err(), path == "name");
             assert!(balter(&o(ext("a")), &o(d), &ctx()).is_err());
         }
     }

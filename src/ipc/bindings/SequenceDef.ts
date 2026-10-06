@@ -2,4 +2,4 @@
 import type { ColumnRef } from "./ColumnRef";
 import type { SeqType } from "./SeqType";
 
-export type SequenceDef = { schema: string, name: string, owner: string | null, dataType: SeqType, increment: number, minValue: number | null, maxValue: number | null, start: number, cache: number, cycle: boolean, ownedBy: ColumnRef | null, comment: string | null, };
+export type SequenceDef = { schema: string, name: string, owner: string | null, dataType: SeqType, increment: string, minValue: string | null, maxValue: string | null, start: string, cache: string, cycle: boolean, ownedBy: ColumnRef | null, comment: string | null, };

@@ -111,6 +111,27 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
     }
 }
 
+/// Yalnızca KİMLİK alanları (şema/tablo/ad): `drop` ve `alter`'ın eski tarafı yalnızca bunları SQL'e koyar. Yüklenmiş
+/// bir nesne (özel erişim yöntemi, eski ifade vb.) tam oluşturma doğrulamasına takılsa bile silinebilir/yeniden
+/// adlandırılabilir kalmalı; tam doğrulama yalnızca oluşturma ve alter'ın yeni tarafındadır.
+pub(crate) fn validate_identity(def: &ObjectDef) -> Vec<FieldError> {
+    let mut e = vec![];
+    match def {
+        ObjectDef::Schema(d) => check_schema_ident("name", &d.name, &mut e),
+        ObjectDef::Sequence(d) => {
+            check_schema_ident("schema", &d.schema, &mut e);
+            check_ident("name", &d.name, &mut e);
+        }
+        ObjectDef::Extension(d) => check_ident("name", &d.name, &mut e),
+        ObjectDef::Index(d) => {
+            check_schema_ident("schema", &d.schema, &mut e);
+            check_ident("table", &d.table, &mut e);
+            check_ident("name", &d.name, &mut e);
+        }
+    }
+    e
+}
+
 fn checked(def: &ObjectDef, ctx: &BuildCtx) -> Result<(), Vec<FieldError>> {
     let errs = validate(def, ctx);
     if errs.is_empty() { Ok(()) } else { Err(errs) }
@@ -127,14 +148,14 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
 }
 
 /// Aynı türde iki tanım arasındaki fark; ad değişimi `RENAME`. Fark yoksa boş plan.
-/// Hem yeni hem eski tanım doğrulanır.
+/// Yeni tanım tam doğrulanır; eski tanımın yalnızca kimlik alanları (bkz. `validate_identity`).
 pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     if old.kind() != new.kind() {
         return Err(mismatch(old, new));
     }
     checked(new, ctx)?;
-    // Eski tanımdaki ad/şema da SQL'e girer (RENAME/ALTER hedefi); o da doğrulanır.
-    let mut old_errs = validate(old, ctx);
+    // Eski tanımdaki ad/şema da SQL'e girer (RENAME/ALTER hedefi); yalnızca kimlik alanları doğrulanır.
+    let mut old_errs = validate_identity(old);
     if !old_errs.is_empty() {
         for e in &mut old_errs {
             e.path = format!("old.{}", e.path);
@@ -145,13 +166,16 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         (ObjectDef::Schema(o), ObjectDef::Schema(n)) => Ok(schema::alter(o, n)),
         (ObjectDef::Sequence(o), ObjectDef::Sequence(n)) => Ok(sequence::alter(o, n)),
         (ObjectDef::Extension(o), ObjectDef::Extension(n)) => extension::alter(o, n),
-        (ObjectDef::Index(o), ObjectDef::Index(n)) => index::alter(o, n, ctx),
+        (ObjectDef::Index(o), ObjectDef::Index(n)) => index::alter(o, n),
         _ => Err(mismatch(old, new)),
     }
 }
 
-pub fn drop(def: &ObjectDef, cascade: bool, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
-    checked(def, ctx)?;
+pub fn drop(def: &ObjectDef, cascade: bool, _ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
+    let errs = validate_identity(def);
+    if !errs.is_empty() {
+        return Err(errs);
+    }
     match def {
         ObjectDef::Schema(d) => Ok(schema::drop(d, cascade)),
         ObjectDef::Sequence(d) => Ok(sequence::drop(d, cascade)),

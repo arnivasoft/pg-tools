@@ -165,7 +165,7 @@ impl Drop for Registration<'_> {
 pub(crate) enum RunResult {
     Done,
     /// `outcome_unknown`: COMMIT yanıtı alınamadı (G/Ç hatası); blok kalıcılaşmış olabilir.
-    Failed { failed_index: u32, committed: u32, error: Error, outcome_unknown: bool },
+    Failed { failed_index: u32, committed: u32, error: Error, outcome_unknown: bool, position: Option<u32> },
 }
 
 pub(crate) fn cancelled_error() -> Error {
@@ -177,11 +177,21 @@ fn idx(i: usize) -> u32 {
 }
 
 /// Hata ifadenin çalışması sırasında geldiyse ve iptal istendiyse iptal hatasına çevirir.
-fn statement_error(e: tokio_postgres::Error, reg: &Registration<'_>) -> Error {
+fn statement_error(e: tokio_postgres::Error, reg: &Registration<'_>) -> (Error, Option<u32>) {
+    let position = error_position(&e);
     let e = Error::from_query(e);
     match &e {
-        Error::Query { sqlstate: Some(s), .. } if s == CANCELED_SQLSTATE && reg.cancelled() => cancelled_error(),
-        _ => e,
+        Error::Query { sqlstate: Some(s), .. } if s == CANCELED_SQLSTATE && reg.cancelled() => (cancelled_error(), None),
+        _ => (e, position),
+    }
+}
+
+/// PG hata konumu (1 tabanlı karakter sapması, çalıştırılan ifade metninde). Dönüştürmeden ÖNCE okunmalıdır
+/// (`Error::from_query` yalnızca ileti/ayrıntı/ipucu taşır). Dahili sorgudaki (PL/pgSQL vb.) konum ifadeye ait değildir.
+pub(crate) fn error_position(e: &tokio_postgres::Error) -> Option<u32> {
+    match e.as_db_error()?.position()? {
+        tokio_postgres::error::ErrorPosition::Original(n) => Some(*n),
+        tokio_postgres::error::ErrorPosition::Internal { .. } => None,
     }
 }
 
@@ -200,10 +210,11 @@ pub(crate) async fn run_statements(client: &Client, statements: &[Statement], re
     while i < statements.len() {
         if !statements[i].transactional {
             if reg.cancelled() {
-                return RunResult::Failed { failed_index: idx(i), committed, error: cancelled_error(), outcome_unknown: false };
+                return RunResult::Failed { failed_index: idx(i), committed, error: cancelled_error(), outcome_unknown: false, position: None };
             }
             if let Err(e) = client.batch_execute(&statements[i].sql).await {
-                return RunResult::Failed { failed_index: idx(i), committed, error: statement_error(e, reg), outcome_unknown: false };
+                let (error, position) = statement_error(e, reg);
+                return RunResult::Failed { failed_index: idx(i), committed, error, outcome_unknown: false, position };
             }
             committed += 1;
             i += 1;
@@ -211,28 +222,29 @@ pub(crate) async fn run_statements(client: &Client, statements: &[Statement], re
         }
         let end = statements[i..].iter().position(|s| !s.transactional).map_or(statements.len(), |p| i + p);
         if reg.cancelled() {
-            return RunResult::Failed { failed_index: idx(i), committed, error: cancelled_error(), outcome_unknown: false };
+            return RunResult::Failed { failed_index: idx(i), committed, error: cancelled_error(), outcome_unknown: false, position: None };
         }
         if let Err(e) = client.batch_execute("BEGIN").await {
-            return RunResult::Failed { failed_index: idx(i), committed, error: statement_error(e, reg), outcome_unknown: false };
+            let (error, position) = statement_error(e, reg);
+            return RunResult::Failed { failed_index: idx(i), committed, error, outcome_unknown: false, position };
         }
         for (k, s) in statements.iter().enumerate().take(end).skip(i) {
             if reg.cancelled() {
                 rollback(client).await;
-                return RunResult::Failed { failed_index: idx(k), committed, error: cancelled_error(), outcome_unknown: false };
+                return RunResult::Failed { failed_index: idx(k), committed, error: cancelled_error(), outcome_unknown: false, position: None };
             }
             if let Err(e) = client.batch_execute(&s.sql).await {
-                let error = statement_error(e, reg);
+                let (error, position) = statement_error(e, reg);
                 rollback(client).await;
-                return RunResult::Failed { failed_index: idx(k), committed, error, outcome_unknown: false };
+                return RunResult::Failed { failed_index: idx(k), committed, error, outcome_unknown: false, position };
             }
         }
         // COMMIT hatası: SQLSTATE varsa (ör. ertelenmiş kısıt) sunucu bloğu geri almıştır, ayrı ROLLBACK gerekmez
         // (transaction zaten sonlanmış); SQLSTATE yoksa (G/Ç, kopan bağlantı) sonuç belirsizdir. Hata bloğun son ifadesine yazılır.
         if let Err(e) = client.batch_execute("COMMIT").await {
             let outcome_unknown = e.code().is_none();
-            let error = statement_error(e, reg);
-            return RunResult::Failed { failed_index: idx(end - 1), committed, error, outcome_unknown };
+            let (error, position) = statement_error(e, reg);
+            return RunResult::Failed { failed_index: idx(end - 1), committed, error, outcome_unknown, position };
         }
         committed += idx(end - i);
         i = end;

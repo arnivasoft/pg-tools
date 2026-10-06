@@ -1,8 +1,11 @@
 //! DDL yöneticisi: önizleme, kapılı uygulama (kilit/geçerlilik/hash/onay), iptal, yükleme, varsayılanlar ve açılır listeler.
 //!
-//! Kapı sırası (`apply`, hiçbiri bağlantı açmaz): (1) kayıtsız sunucu, (2) `read_only_lock`, (3) plan üretimi
-//! (geçersiz tanım / boş plan), (4) hash uyuşmazlığı, (5) yıkıcı plan onayı, (6) üretim sunucusunda veri kaybı
-//! onayı, (7) `lock_timeout` sınırı. Plan istemciden alınmaz; her seferinde tanımdan yeniden üretilir.
+//! Kapı sırası (`apply`; yalnızca (4) havuzdaki katalog bağlantısında tek gidiş-dönüş yapar, hiçbiri uygulama
+//! bağlantısı açmaz): (1) kayıtsız sunucu, (2) `read_only_lock`, (3) plan üretimi (geçersiz tanım / boş plan),
+//! (4) nesne denetimi (yalnızca alter/drop: istemcinin `old`/`def`'i, `object`'in sunucudaki güncel tanımına eşit
+//! olmalı; fark → `plan_changed`; yükleme hataları — yok/sistem nesnesi/identity dizisi — olduğu gibi geçer),
+//! (5) hash uyuşmazlığı, (6) yıkıcı plan onayı, (7) üretim sunucusunda veri kaybı onayı, (8) `lock_timeout` sınırı.
+//! Plan istemciden alınmaz; her seferinde tanımdan yeniden üretilir. `preview` nesne denetimi yapmaz.
 //!
 //! Günlük yalnızca işlem/nesne türü, ifade sayısı, süre ve sonuç kodunu içerir; SQL, ad ve değer asla.
 
@@ -34,8 +37,11 @@ use crate::plan::{PlanView, Risk, Statement};
 #[ts(export)]
 pub enum PlanRequest {
     Create { def: ObjectDef, concurrently: bool },
-    Alter { old: ObjectDef, new: ObjectDef },
-    Drop { def: ObjectDef, cascade: bool },
+    /// `object`: değiştirilen nesne (`ddl_load`'a verilen kimlik). `apply` bu nesneyi yeniden yükler ve `old`'un
+    /// yüklenen tanıma eşit olduğunu doğrular (istemciye güvenilmez).
+    Alter { object: ObjectRef, old: ObjectDef, new: ObjectDef },
+    /// `object`: silinen nesne; `def` yüklenen tanıma eşit olmalıdır (bkz. `Alter`).
+    Drop { object: ObjectRef, def: ObjectDef, cascade: bool },
 }
 
 impl PlanRequest {
@@ -85,7 +91,9 @@ pub enum ApplyOutcome {
     },
     /// `failed_index`: başarısız ifadenin 0 tabanlı sırası; `committed`: kalıcılaşmış (transaction dışı ya da önceki blok)
     /// ifade sayısı; `sqlstate`: PG hata kodu (ör. `57014` iptal, `55P03` kilit zaman aşımı; bağlantı hatasında yok).
-    Failed { failed_index: u32, committed: u32, sqlstate: Option<String>, error: ErrorPayload },
+    ///
+    /// `position`: PG'nin hata konumu (1 tabanlı karakter sapması), başarısız ifadenin metnine göredir.
+    Failed { failed_index: u32, committed: u32, sqlstate: Option<String>, position: Option<u32>, error: ErrorPayload },
 }
 
 /// "Yeni …" diyaloğunun açıldığı koleksiyon düğümü bağlamı.
@@ -202,23 +210,33 @@ impl DdlManager {
         if view.empty {
             return Err(Error::Invalid(NO_CHANGES.into()));
         }
-        // (4)
+        // (4) nesne denetimi: istemcinin `old`/`def`'i sunucudaki güncel tanımla birebir aynı olmalı.
+        if let Some((object, expected)) = object_check(req) {
+            if object.kind != expected.kind() {
+                return Err(Error::Invalid(INVALID_DEF.into()));
+            }
+            let loaded = load::load(&self.mgr, server, database_oid, object).await?;
+            if loaded != *expected {
+                return Err(Error::Invalid(PLAN_CHANGED.into()));
+            }
+        }
+        // (5)
         if view.hash != opts.expected_hash {
             return Err(Error::Invalid(PLAN_CHANGED.into()));
         }
-        // (5)
+        // (6)
         if view.risk >= Risk::Destructive && !opts.confirmed {
             return Err(Error::Invalid(CONFIRMATION_REQUIRED.into()));
         }
-        // (6)
+        // (7)
         if view.risk == Risk::DataLoss && guard.production && !opts.confirmed_production {
             return Err(Error::Invalid(PRODUCTION_CONFIRMATION_REQUIRED.into()));
         }
-        // (7)
+        // (8)
         check_lock_timeout(opts.lock_timeout_ms)?;
         let created = match req {
             PlanRequest::Create { def, .. } => Some(def.clone()),
-            PlanRequest::Alter { old, new } if identity_changed(old, new) => Some(new.clone()),
+            PlanRequest::Alter { old, new, .. } if identity_changed(old, new) => Some(new.clone()),
             _ => None,
         };
         let job = Job { op: req.op(), kind: req.kind(), lock_timeout_ms: opts.lock_timeout_ms, apply_id: opts.apply_id, created };
@@ -240,6 +258,7 @@ impl DdlManager {
                 failed_index: 0,
                 committed: 0,
                 sqlstate: Some(apply::CANCELED_SQLSTATE.into()),
+                position: None,
                 error: apply::failure_payload(&apply::cancelled_error()),
             });
         }
@@ -256,6 +275,8 @@ impl DdlManager {
         let result = apply::run_statements(&conn.client, statements, &reg).await;
         guard.armed = false;
         drop(reg);
+        // Uygulama bağlantısı, havuzdaki katalog sorgusundan (`find_created`) önce kapanır.
+        drop(conn);
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         Ok(match result {
             RunResult::Done => {
@@ -266,7 +287,7 @@ impl DdlManager {
                 };
                 ApplyOutcome::Applied { statements: count, elapsed_ms, created }
             }
-            RunResult::Failed { failed_index, committed, error, outcome_unknown } => {
+            RunResult::Failed { failed_index, committed, error, outcome_unknown, position } => {
                 let sqlstate = apply::sqlstate(&error).map(str::to_string);
                 tracing::info!(
                     op,
@@ -277,7 +298,7 @@ impl DdlManager {
                     "DDL uygulanamadı"
                 );
                 let error = if outcome_unknown { apply::unknown_outcome_payload(&error) } else { apply::failure_payload(&error) };
-                ApplyOutcome::Failed { failed_index, committed, sqlstate, error }
+                ApplyOutcome::Failed { failed_index, committed, sqlstate, position, error }
             }
         })
     }
@@ -421,6 +442,7 @@ impl DdlManager {
                     fillfactor: None,
                     comment: None,
                     constraint: None,
+                    valid: true,
                 })
             }
         })
@@ -443,17 +465,26 @@ impl DdlManager {
     }
 }
 
+/// Sunucudaki güncel tanımla karşılaştırılacak (nesne, istemci tanımı); `Create` için yok.
+fn object_check(req: &PlanRequest) -> Option<(ObjectRef, &ObjectDef)> {
+    match req {
+        PlanRequest::Create { .. } => None,
+        PlanRequest::Alter { object, old, .. } => Some((*object, old)),
+        PlanRequest::Drop { object, def, .. } => Some((*object, def)),
+    }
+}
+
 /// İstekten saf plan üretimi (önizleme ve uygulama aynı yolu kullanır; hash yalnızca ifadelerden).
 pub(crate) fn plan_view(req: &PlanRequest, version_num: u32) -> PlanView {
     let ctx = |concurrently| BuildCtx { version_num, concurrently };
     PlanView::from_build(match req {
         PlanRequest::Create { def, concurrently } => build::create(def, &ctx(*concurrently)),
-        PlanRequest::Alter { old, new } => build::alter(old, new, &ctx(false)),
-        PlanRequest::Drop { def, cascade } => build::drop(def, *cascade, &ctx(false)),
+        PlanRequest::Alter { old, new, .. } => build::alter(old, new, &ctx(false)),
+        PlanRequest::Drop { def, cascade, .. } => build::drop(def, *cascade, &ctx(false)),
     })
 }
 
-/// (7) `lock_timeout` sınırı (`SessionProfile::Ddl` doğrulamasıyla aynı; bağlantıdan önce).
+/// (8) `lock_timeout` sınırı (`SessionProfile::Ddl` doğrulamasıyla aynı; bağlantıdan önce).
 fn check_lock_timeout(ms: u32) -> Result<()> {
     if ms > MAX_STATEMENT_TIMEOUT_MS {
         return Err(Error::Invalid(format!("lock_timeout en fazla {MAX_STATEMENT_TIMEOUT_MS} ms olabilir.")));
@@ -472,7 +503,7 @@ mod tests {
 
     #[test]
     fn request_and_outcome_json_shapes() {
-        let r = PlanRequest::Drop { def: schema("a"), cascade: true };
+        let r = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid: 1 }, def: schema("a"), cascade: true };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["op"], "drop");
         assert_eq!(v["def"]["kind"], "schema");
@@ -494,6 +525,7 @@ mod tests {
             failed_index: 1,
             committed: 0,
             sqlstate: Some("42P07".into()),
+            position: Some(12),
             error: ErrorPayload { code: "query".into(), message: "m".into(), detail: None, hint: None },
         };
         let f = serde_json::to_value(f).unwrap();
@@ -511,7 +543,7 @@ mod tests {
         let bad = plan_view(&PlanRequest::Create { def: schema(""), concurrently: false }, 160000);
         assert!(bad.empty && !bad.errors.is_empty());
         assert_eq!(bad.hash, crate::plan_hash(&[]));
-        let noop = plan_view(&PlanRequest::Alter { old: schema("a"), new: schema("a") }, 160000);
+        let noop = plan_view(&PlanRequest::Alter { object: ObjectRef { kind: ObjectKind::Schema, oid: 1 }, old: schema("a"), new: schema("a") }, 160000);
         assert!(noop.empty && noop.errors.is_empty());
     }
 

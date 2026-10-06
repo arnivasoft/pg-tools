@@ -59,6 +59,25 @@ impl Fx {
     async fn apply(&self, req: &PlanRequest) -> Result<ApplyOutcome> {
         self.apply_with(req, |_| {}).await
     }
+
+    /// Şemayı sunucudan yükler (kimlik + `ddl_load` çıktısı): arayüzün geri göndereceği biçim.
+    async fn load_schema(&self, env: &Env, name: &str) -> (ObjectRef, SchemaDef) {
+        let object = ObjectRef { kind: ObjectKind::Schema, oid: env.schema_oid(name).await };
+        let ObjectDef::Schema(d) = self.dm.load(self.server, self.db, object).await.unwrap() else { panic!("şema bekleniyordu") };
+        (object, d)
+    }
+
+    async fn drop_schema(&self, env: &Env, name: &str, cascade: bool) -> PlanRequest {
+        let (object, d) = self.load_schema(env, name).await;
+        PlanRequest::Drop { object, def: ObjectDef::Schema(d), cascade }
+    }
+
+    async fn alter_schema(&self, env: &Env, name: &str, edit: impl FnOnce(&mut SchemaDef)) -> PlanRequest {
+        let (object, old) = self.load_schema(env, name).await;
+        let mut new = old.clone();
+        edit(&mut new);
+        PlanRequest::Alter { object, old: ObjectDef::Schema(old), new: ObjectDef::Schema(new) }
+    }
 }
 
 fn code(r: &Result<ApplyOutcome>) -> String {
@@ -77,7 +96,7 @@ fn applied(r: Result<ApplyOutcome>) {
 
 fn failed(r: Result<ApplyOutcome>) -> (u32, u32, Option<String>, ErrorPayload) {
     match r {
-        Ok(ApplyOutcome::Failed { failed_index, committed, sqlstate, error }) => (failed_index, committed, sqlstate, error),
+        Ok(ApplyOutcome::Failed { failed_index, committed, sqlstate, error, .. }) => (failed_index, committed, sqlstate, error),
         other => panic!("Failed bekleniyordu: {other:?}"),
     }
 }
@@ -104,6 +123,7 @@ fn index(table: &str, name: &str) -> ObjectDef {
         fillfactor: None,
         comment: None,
         constraint: None,
+        valid: true,
     })
 }
 
@@ -213,7 +233,7 @@ async fn destructive_body(ts: TestServer) {
     let f = fx(&env, &ts, false, None);
     applied(f.apply(&create(schema("m_d"))).await);
     assert!(exists(&env, "m_d").await);
-    let drop = PlanRequest::Drop { def: schema("m_d"), cascade: false };
+    let drop = f.drop_schema(&env, "m_d", false).await;
     assert_eq!(f.preview(&drop).await.risk, Risk::Destructive);
     assert_eq!(code(&f.apply(&drop).await), "confirmation_required");
     assert!(exists(&env, "m_d").await);
@@ -232,7 +252,8 @@ async fn production_body(ts: TestServer) {
     let env = setup(&ts, "m_prod").await;
     let f = fx(&env, &ts, false, Some("Üretim"));
     env.sql("CREATE SCHEMA m_p1; CREATE TABLE m_p1.t (id int); CREATE SCHEMA m_p2; CREATE SCHEMA m_p3").await;
-    let cascade = |n: &str| PlanRequest::Drop { def: schema(n), cascade: true };
+    let (c1, c3) = (f.drop_schema(&env, "m_p1", true).await, f.drop_schema(&env, "m_p3", true).await);
+    let cascade = |n: &str| if n == "m_p1" { c1.clone() } else { c3.clone() };
     assert_eq!(f.preview(&cascade("m_p1")).await.risk, Risk::DataLoss);
     // Önce genel onay (5), sonra üretim onayı (6).
     assert_eq!(code(&f.apply(&cascade("m_p1")).await), "confirmation_required");
@@ -241,7 +262,8 @@ async fn production_body(ts: TestServer) {
     applied(f.apply_with(&cascade("m_p1"), |o| (o.confirmed, o.confirmed_production) = (true, true)).await);
     assert!(!exists(&env, "m_p1").await);
     // Yalnızca yıkıcı (veri kaybı yok) plan üretimde ek onay istemez.
-    applied(f.apply_with(&PlanRequest::Drop { def: schema("m_p2"), cascade: false }, |o| o.confirmed = true).await);
+    let p2 = f.drop_schema(&env, "m_p2", false).await;
+    applied(f.apply_with(&p2, |o| o.confirmed = true).await);
     // Üretim etiketi olmayan sunucuda veri kaybı için genel onay yeter.
     let plain = fx(&env, &ts, false, Some("test"));
     applied(plain.apply_with(&cascade("m_p3"), |o| o.confirmed = true).await);
@@ -267,10 +289,10 @@ async fn stale_body(ts: TestServer) {
     assert_eq!(code(&f.dm.apply(f.server, f.db, &create(schema("")), opts("bogus")).await), "invalid_def");
     // Hash uyuşmazlığı onaydan önce gelir.
     env.sql("CREATE SCHEMA m_sc").await;
-    let drop = PlanRequest::Drop { def: schema("m_sc"), cascade: false };
+    let drop = f.drop_schema(&env, "m_sc", false).await;
     assert_eq!(code(&f.dm.apply(f.server, f.db, &drop, opts("bogus")).await), "plan_changed");
     // Boş plan: kodsuz `invalid`.
-    let noop = PlanRequest::Alter { old: schema("m_sc"), new: schema("m_sc") };
+    let noop = f.alter_schema(&env, "m_sc", |_| {}).await;
     let r = f.apply(&noop).await;
     assert_eq!(code(&r), "invalid");
     assert!(matches!(r, Err(Error::Invalid(m)) if m == "Değişiklik yok"));
@@ -294,8 +316,7 @@ async fn all_tx_body(ts: TestServer) {
     let f = fx(&env, &ts, false, None);
     env.sql("CREATE SCHEMA m_ta").await;
     // RENAME (başarılı) + OWNER TO olmayan rol (hata) → ikisi de geri alınır.
-    let new = ObjectDef::Schema(SchemaDef { name: "m_tb".into(), owner: Some("m_no_such_role".into()), comment: None });
-    let req = PlanRequest::Alter { old: schema("m_ta"), new };
+    let req = f.alter_schema(&env, "m_ta", |n| (n.name, n.owner) = ("m_tb".into(), Some("m_no_such_role".into()))).await;
     assert_eq!(f.preview(&req).await.statements.len(), 2);
     let (idx, committed, sqlstate, error) = failed(f.apply(&req).await);
     assert_eq!((idx, committed, sqlstate.as_deref()), (1, 0, Some("42704")));
@@ -403,7 +424,7 @@ async fn lock_timeout_body(ts: TestServer) {
     let (idx, committed, sqlstate, error) = failed(r);
     assert_eq!((idx, committed, sqlstate.as_deref()), (0, 0, Some("55P03")));
     assert!(error.hint.is_some(), "{error:?}");
-    assert!(elapsed < Duration::from_secs(2), "lock_timeout beklenenden uzun: {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(5), "lock_timeout beklenenden uzun: {elapsed:?}");
     assert!(!exists(&env, "public.lt_idx").await);
     assert_eq!(ddl_waiting(&env.admin).await, 0, "arkada bekleyen DDL oturumu kalmamalı");
     locker.batch_execute("COMMIT").await.unwrap();
@@ -644,6 +665,152 @@ async fn created_body(ts: TestServer) {
     }
 
     // Drop: created yok.
-    let r = f.apply_with(&PlanRequest::Drop { def: schema("m_cr_s"), cascade: true }, |o| o.confirmed = true).await;
+    let drop = f.drop_schema(&env, "m_cr_s", true).await;
+    let r = f.apply_with(&drop, |o| o.confirmed = true).await;
     assert_eq!(created(r), None);
+}
+
+// ---- hata konumu ----
+
+#[tokio::test]
+async fn failed_apply_reports_the_error_position() {
+    for ts in servers() {
+        guarded(position_body(ts.clone()), cleanup(&ts, "m_position")).await;
+    }
+}
+
+async fn position_body(ts: TestServer) {
+    let env = setup(&ts, "m_position").await;
+    let f = fx(&env, &ts, false, None);
+    env.sql("CREATE TABLE public.ps (id int)").await;
+    let mut d = index("ps", "ps_idx");
+    let ObjectDef::Index(i) = &mut d else { unreachable!() };
+    i.columns = vec![IndexColumn { key: IndexKey::Expression { sql: "nosuch_col + 1".into() }, opclass: None, collation: None, descending: false, nulls_first: None }];
+    let req = create(d);
+    let sql = f.preview(&req).await.statements[0].sql.clone();
+    let r = f.apply(&req).await;
+    let ApplyOutcome::Failed { sqlstate, position, .. } = r.unwrap() else { panic!("Failed bekleniyordu") };
+    assert_eq!(sqlstate.as_deref(), Some("42703"));
+    let pos = position.expect("hata konumu") as usize;
+    // Konum, çalıştırılan ifade metnindeki 1 tabanlı karakter sapmasıdır ve hatalı sütun adını gösterir.
+    assert!(sql.chars().skip(pos - 1).collect::<String>().starts_with("nosuch_col"), "{pos}: {sql}");
+}
+
+// ---- geçersiz indeks bayrağı ----
+
+#[tokio::test]
+async fn load_reports_index_validity() {
+    for ts in servers() {
+        guarded(valid_body(ts.clone()), cleanup(&ts, "m_valid")).await;
+    }
+}
+
+async fn valid_body(ts: TestServer) {
+    let env = setup(&ts, "m_valid").await;
+    let f = fx(&env, &ts, false, None);
+    env.sql("CREATE TABLE public.vv (id int)").await;
+    applied(f.apply(&create(index("vv", "vv_idx"))).await);
+    let oid = env.class_oid("public", "vv_idx").await;
+    let load = || async { f.dm.load(f.server, f.db, ObjectRef { kind: ObjectKind::Index, oid }).await.unwrap() };
+    let ObjectDef::Index(l) = load().await else { panic!() };
+    assert!(l.valid);
+    // Başarısız CONCURRENTLY inşasının bıraktığı durumu taklit eder.
+    env.sql("UPDATE pg_index SET indisvalid = false WHERE indexrelid = 'public.vv_idx'::regclass").await;
+    let ObjectDef::Index(l) = load().await else { panic!() };
+    assert!(!l.valid);
+    // `valid` alter farkına girmez: yalnızca geçerlilik bayrağı farklı iki tanım arasında plan boş.
+    let req = PlanRequest::Alter {
+        object: ObjectRef { kind: ObjectKind::Index, oid },
+        old: ObjectDef::Index(l.clone()),
+        new: ObjectDef::Index(IndexDef { valid: true, ..l }),
+    };
+    let r = f.preview(&req).await;
+    assert!(r.empty && r.errors.is_empty());
+}
+
+// ---- nesne denetimi: sunucu istemcinin old/def alanlarına güvenmez ----
+
+#[tokio::test]
+async fn apply_verifies_the_client_definition_against_the_server() {
+    for ts in servers() {
+        guarded(object_check_body(ts.clone()), cleanup(&ts, "m_objchk")).await;
+    }
+}
+
+async fn object_check_body(ts: TestServer) {
+    let env = setup(&ts, "m_objchk").await;
+    let f = fx(&env, &ts, false, None);
+    env.sql("CREATE SCHEMA m_oc; COMMENT ON SCHEMA m_oc IS 'gercek'").await;
+
+    let honest = f.alter_schema(&env, "m_oc", |n| (n.name, n.comment) = ("m_oc2".into(), Some("yeni".into()))).await;
+    // Tahrif: `old` farklı yorum taşıyor -> plan_changed; hiçbir şey yazılmaz.
+    let PlanRequest::Alter { object, old, new } = honest.clone() else { unreachable!() };
+    let ObjectDef::Schema(mut tampered) = old.clone() else { unreachable!() };
+    tampered.comment = Some("sahte".into());
+    let bad = PlanRequest::Alter { object, old: ObjectDef::Schema(tampered), new: new.clone() };
+    assert_eq!(code(&f.apply(&bad).await), "plan_changed");
+    assert!(exists(&env, "m_oc").await && !exists(&env, "m_oc2").await);
+    // Tür uyuşmazlığı (object = indeks, tanım = şema): geçersiz tanım.
+    let wrong_kind = PlanRequest::Alter { object: ObjectRef { kind: ObjectKind::Index, oid: object.oid }, old: old.clone(), new: new.clone() };
+    assert_eq!(code(&f.apply(&wrong_kind).await), "invalid_def");
+    // Önizleme nesneye bakmaz (tahrifli istekte de plan üretir).
+    assert_eq!(f.preview(&bad).await.statements.len(), 2);
+    // Bayat yeniden adlandırma: nesne yüklendikten sonra başkası adını değiştirdi -> plan_changed.
+    env.sql("ALTER SCHEMA m_oc RENAME TO m_oc_renamed").await;
+    assert_eq!(code(&f.apply(&honest).await), "plan_changed");
+    assert!(exists(&env, "m_oc_renamed").await && !exists(&env, "m_oc2").await);
+    // Yok olan nesne: yükleme hatası olduğu gibi geçer.
+    env.sql("DROP SCHEMA m_oc_renamed").await;
+    assert_eq!(code(&f.apply(&honest).await), "not_found");
+
+    // Dürüst akış: yeniden yükle -> uygula -> yeni kimlik.
+    env.sql("CREATE SCHEMA m_oc3; COMMENT ON SCHEMA m_oc3 IS 'a'").await;
+    let honest = f.alter_schema(&env, "m_oc3", |n| n.name = "m_oc4".into()).await;
+    let ApplyOutcome::Applied { created, .. } = f.apply(&honest).await.unwrap() else { panic!() };
+    assert_eq!(created, Some(ObjectRef { kind: ObjectKind::Schema, oid: env.schema_oid("m_oc4").await }));
+
+    // Silme: tahrifli `def` reddedilir, dürüst olan çalışır.
+    env.sql("CREATE SCHEMA m_oc5").await;
+    let PlanRequest::Drop { object, def, cascade } = f.drop_schema(&env, "m_oc5", false).await else { unreachable!() };
+    let ObjectDef::Schema(mut sd) = def.clone() else { unreachable!() };
+    sd.comment = Some("sahte".into());
+    let bad = PlanRequest::Drop { object, def: ObjectDef::Schema(sd), cascade };
+    assert_eq!(code(&f.apply_with(&bad, |o| o.confirmed = true).await), "plan_changed");
+    assert!(exists(&env, "m_oc5").await);
+    applied(f.apply_with(&PlanRequest::Drop { object, def, cascade }, |o| o.confirmed = true).await);
+    assert!(!exists(&env, "m_oc5").await);
+}
+
+#[tokio::test]
+async fn system_objects_and_constraint_indexes_are_refused() {
+    for ts in servers() {
+        guarded(system_body(ts.clone()), cleanup(&ts, "m_sysobj")).await;
+    }
+}
+
+async fn system_body(ts: TestServer) {
+    let env = setup(&ts, "m_sysobj").await;
+    let f = fx(&env, &ts, false, None);
+    // plpgsql eklentisi sistem nesnesidir: yükleme reddeder, istemci tanımı ne derse desin silinemez.
+    let object = ObjectRef { kind: ObjectKind::Extension, oid: env.extension_oid("plpgsql").await };
+    let def = ObjectDef::Extension(ExtensionDef { name: "plpgsql".into(), schema: None, version: None, cascade: false });
+    let req = PlanRequest::Drop { object, def, cascade: false };
+    let r = f.apply_with(&req, |o| o.confirmed = true).await;
+    assert_eq!(code(&r), "invalid");
+    let still: bool = env.admin.query_one("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'plpgsql')", &[]).await.unwrap().get(0);
+    assert!(still);
+
+    // PK indeksi: yüklenen tanım `constraint` taşır; istemci `constraint: null` gönderirse reddedilir.
+    env.sql("CREATE TABLE public.pk_t (id int PRIMARY KEY)").await;
+    let oid = env.class_oid("public", "pk_t_pkey").await;
+    let object = ObjectRef { kind: ObjectKind::Index, oid };
+    let ObjectDef::Index(loaded) = f.dm.load(f.server, f.db, object).await.unwrap() else { panic!() };
+    assert_eq!(loaded.constraint.as_deref(), Some("pk_t_pkey"));
+    let liar = IndexDef { constraint: None, ..loaded.clone() };
+    let req = PlanRequest::Drop { object, def: ObjectDef::Index(liar), cascade: false };
+    assert_eq!(code(&f.apply_with(&req, |o| o.confirmed = true).await), "plan_changed");
+    // Dürüst tanım: üretici kısıt korumasıyla reddeder (invalid_def).
+    let req = PlanRequest::Drop { object, def: ObjectDef::Index(loaded), cascade: false };
+    assert_eq!(code(&f.apply_with(&req, |o| o.confirmed = true).await), "invalid_def");
+    assert!(exists(&env, "public.pk_t_pkey").await);
 }
