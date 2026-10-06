@@ -180,8 +180,8 @@ export function seqTypeBoundsNote(t: SeqType): string {
 export type SequenceNumberField = "increment" | "minValue" | "maxValue" | "start" | "cache";
 /**
  * Sayı alanlarının yalnızca BİÇİM uyarısı (`isSafeIntegerString`): zorunlu alan boşsa "gerekli", yazılmış ama tam sayı
- * değilse "biçim". Aralık/sıra kuralları arka ucun `FieldError`'larıdır. Biçimsiz sayı JSON'da çözülemez (önizleme alan
- * hatası yerine önizleme hatası döner) — bu uyarı nedeni alanın yanında gösterir.
+ * değilse "biçim". Aralık/sıra kuralları arka ucun `FieldError`'larıdır. Biçimsiz sayı arka uçta çözülemez; denetleyici
+ * (`localBlock`) bu durumda isteği hiç göndermez ve "Sayı alanlarını düzeltin" gösterir — bu uyarı alanı işaret eder.
  */
 export function sequenceFormatWarnings(d: SequenceDef): Partial<Record<SequenceNumberField, string>> {
   const out: Partial<Record<SequenceNumberField, string>> = {};
@@ -195,6 +195,15 @@ export function sequenceFormatWarnings(d: SequenceDef): Partial<Record<SequenceN
     if (v !== null && !isSafeIntegerString(v)) out[k] = tdes.sequence.format;
   }
   return out;
+}
+
+/**
+ * Sequence şeması değişimi: OWNED BY ayarlı ve eski şemayı izliyorsa (`ownedBy.schema === eski şema`) aynı düzenlemede
+ * yeni şemaya taşınır; farklı şemaya elle bağlanmışsa dokunulmaz (ipucu ve arka uç hatası gösterir).
+ */
+export function sequenceSchemaPatch(d: SequenceDef, schema: string): SequenceDef {
+  const follow = d.ownedBy !== null && d.ownedBy.schema === d.schema;
+  return { ...d, schema, ownedBy: follow && d.ownedBy ? { ...d.ownedBy, schema } : d.ownedBy };
 }
 
 /** OWNED BY tablosu sequence ile aynı şemada değilse ipucu (arka uç da `ownedBy.schema` hatası verir). */
@@ -224,16 +233,21 @@ export function fillfactorEnabled(method: string): boolean {
 }
 
 /**
- * Yöntem değişimi: btree dışı yöntemde devre dışı kalan DESC/NULLS seçimleri ve gin/brin'de fillfactor temizlenir
- * (aksi halde denetimi kapalı olduğu için kullanıcının düzeltemeyeceği bir arka uç hatası kalırdı).
+ * Yöntem değişimi YALNIZCA `method`'u değiştirir: anahtar tanımı (DESC/NULLS) ve fillfactor sessizce yeniden yazılmaz
+ * (aksi halde btree → hash → btree gidiş-dönüşü farklı bir indeksi yeniden kurardı). Yeni yöntemde geçersiz kalan
+ * değerlerin denetimi, kullanıcı temizleyebilsin diye değer varsayılan olana kadar açık kalır; arka uç alan hatası
+ * nedeni açıklar.
  */
 export function indexMethodPatch(d: IndexDef, method: string): IndexDef {
-  const out: IndexDef = { ...d, method };
-  if (!btreeOnlyFields(method) && d.columns.some((c) => c.descending || c.nullsFirst !== null)) {
-    out.columns = d.columns.map((c) => ({ ...c, descending: false, nullsFirst: null }));
-  }
-  if (!fillfactorEnabled(method)) out.fillfactor = null;
-  return out;
+  return { ...d, method };
+}
+
+/**
+ * Yönteme bağlı seçeneğin denetimi kapalı mı: yöntem desteklemiyorsa ve değer zaten varsayılandaysa. Değer
+ * varsayılandan farklıysa açık kalır (temizlenebilsin).
+ */
+export function restrictedControlDisabled(supported: boolean, atDefault: boolean): boolean {
+  return !supported && atDefault;
 }
 
 export type NullsSelect = "default" | "first" | "last";
@@ -276,10 +290,23 @@ export function normalizeTablespaceEdit(original: string | null, next: string): 
   return normalizeEmpty(next) ?? original;
 }
 
-/** Sayı girdisinden fillfactor: boş → null; tam sayı değilse null (aralık 10–100 arka uçta denetlenir). */
-export function fillfactorFromInput(s: string): number | null {
+/**
+ * fillfactor girdisi: boş → `null`; en çok 3 rakam → sayı (aralık 10–100 arka uçta denetlenir); tarayıcının
+ * çözümleyemediği girdi (`badInput`), kesirli/işaretli ya da 3 haneden uzun metin → `undefined` = olay yok sayılır
+ * (son geçerli değer korunur; yazılan metin silinmez, `null`/dev sayı gönderilmez).
+ */
+export function fillfactorFromInput(s: string, badInput = false): number | null | undefined {
+  if (badInput) return undefined;
   const t = s.trim();
-  return /^[0-9]+$/.test(t) ? Number(t) : null;
+  if (!/^[0-9]{0,3}$/.test(t)) return undefined;
+  return t === "" ? null : Number(t);
+}
+
+/** Tablespace seçenekleri: `pg_default` ayrı seçenektir, `pg_global` indeks için geçersizdir; mevcut değer listede yoksa başa. */
+export function tablespaceChoices(items: readonly LookupItem[], current: string | null): string[] {
+  const list = items.map((t) => t.value).filter((v) => v !== "pg_default" && v !== "pg_global");
+  if (current !== null && current !== "pg_default" && !list.includes(current)) list.unshift(current);
+  return list;
 }
 
 /**

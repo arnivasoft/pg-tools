@@ -9,7 +9,7 @@ import type { FieldIssues } from "./designer-model";
 import { CommentField, FieldRow, OwnerSelect, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
 import {
   asSequence, incrementEditPatch, incrementSign, normalizeEmpty, ownedByHint, seqTypeBoundsNote, sequenceDirectionChanged,
-  sequenceEditPatch, sequenceFormatWarnings, sequenceStartChanged, sequenceTypeChanged, type SequenceNumberField,
+  sequenceEditPatch, sequenceFormatWarnings, sequenceSchemaPatch, sequenceStartChanged, sequenceTypeChanged, type SequenceNumberField,
 } from "./forms-model";
 
 const SEQ_TYPES: SeqType[] = ["smallint", "integer", "bigint"];
@@ -129,7 +129,10 @@ export default function SequenceForm(props: FormProps) {
                     aria-invalid={a.invalid}
                     disabled={props.readOnly}
                     value={d().schema}
-                    onInput={(ev) => patch({ schema: ev.currentTarget.value })}
+                    onInput={(ev) => {
+                      const v = ev.currentTarget.value;
+                      props.designer.edit(props.tabId, (x) => (x.kind === "sequence" ? { ...sequenceSchemaPatch(x, v), kind: "sequence" } : x));
+                    }}
                   />
                   <datalist id={schemaList}>
                     <For each={schemas() ?? []}>{(i) => <option value={i.value} />}</For>

@@ -15,7 +15,7 @@ import { addColumn, addInclude, moveColumn, removeColumn, removeInclude, updateC
 import { CommentField, FieldRow, FreeSqlNote, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
 import {
   asIndex, btreeOnlyFields, columnKeyLabel, exactIssues, fillfactorEnabled, fillfactorFromInput, indexEditPatch,
-  indexMethodPatch, indexReadOnlyReason, newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect,
+  indexMethodPatch, indexReadOnlyReason, newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect, restrictedControlDisabled, tablespaceChoices,
   orphanRowIssues, selectToNullsFirst, structuralChange, switchKeyKind, updateInclude,
 } from "./forms-model";
 
@@ -84,6 +84,7 @@ export default function IndexForm(props: FormProps) {
     props.designer.edit(props.tabId, (d) => (d.kind === "index" ? { ...fn(d), kind: "index" } : d));
   const patch = (p: Partial<IndexDef>) => props.designer.edit(props.tabId, (d) => indexEditPatch(d, p));
   const columnList = createUniqueId();
+  const rowHint = createUniqueId();
   const whereNote = createUniqueId();
   let nameEl: HTMLInputElement | undefined;
   createFocusOnRequest(props, "name", () => nameEl);
@@ -119,11 +120,6 @@ export default function IndexForm(props: FormProps) {
     const list = (methods() ?? []).map((m) => m.value);
     const base = list.length > 0 ? list : FALLBACK_METHODS;
     return base.includes(current) ? base : [current, ...base];
-  };
-  const tablespaceOptions = (current: string | null) => {
-    const list = (tablespaces() ?? []).map((t) => t.value).filter((v) => v !== "pg_default");
-    if (current !== null && current !== "pg_default" && !list.includes(current)) list.unshift(current);
-    return list;
   };
 
   return (
@@ -340,22 +336,30 @@ export default function IndexForm(props: FormProps) {
                         </FieldRow>
                       </div>
                       <div class="grid grid-cols-1 items-end gap-2 sm:grid-cols-2">
-                        <label class="flex h-7 items-center gap-2 text-[13px]" title={btree() ? undefined : f.btreeOnly}>
-                          <input
-                            type="checkbox"
-                            disabled={ro() || !btree()}
-                            checked={c().descending}
-                            onChange={(ev) => editCol(i, { descending: ev.currentTarget.checked })}
-                          />
-                          {f.descending}
-                        </label>
+                        <div class="flex flex-col gap-1">
+                          <label class="flex h-7 items-center gap-2 text-[13px]">
+                            <input
+                              type="checkbox"
+                              aria-describedby={btree() ? undefined : `${rowHint}-${i}`}
+                              disabled={ro() || restrictedControlDisabled(btree(), !c().descending)}
+                              checked={c().descending}
+                              onChange={(ev) => editCol(i, { descending: ev.currentTarget.checked })}
+                            />
+                            {f.descending}
+                          </label>
+                          <Show when={!btree()}>
+                            <span id={`${rowHint}-${i}`} class="text-xs text-muted">
+                              {f.btreeOnly}
+                            </span>
+                          </Show>
+                        </div>
                         <FieldRow label={f.nullsOrder} path={`columns[${i}].nulls`} issues={props.issues} hint={btree() ? undefined : f.btreeOnly}>
                           {(a) => (
                             <select
                               id={a.id}
                               class={inputClass}
                               aria-describedby={a.describedBy}
-                              disabled={ro() || !btree()}
+                              disabled={ro() || restrictedControlDisabled(btree(), c().nullsFirst === null)}
                               value={nullsFirstToSelect(c().nullsFirst)}
                               onChange={(ev) => editCol(i, { nullsFirst: selectToNullsFirst(ev.currentTarget.value) })}
                             >
@@ -488,7 +492,7 @@ export default function IndexForm(props: FormProps) {
                       <option value="">{f.tablespaceUnset}</option>
                     </Show>
                     <option value="pg_default">{f.tablespaceDefault}</option>
-                    <For each={tablespaceOptions(d().tablespace)}>{(t) => <option value={t}>{t}</option>}</For>
+                    <For each={tablespaceChoices(tablespaces() ?? [], d().tablespace)}>{(t) => <option value={t}>{t}</option>}</For>
                   </select>
                 )}
               </FieldRow>
@@ -508,9 +512,13 @@ export default function IndexForm(props: FormProps) {
                     class={inputClass + invalidClass(a.invalid)}
                     aria-describedby={a.describedBy}
                     aria-invalid={a.invalid}
-                    disabled={ro() || !fillfactorEnabled(d().method)}
+                    disabled={ro() || restrictedControlDisabled(fillfactorEnabled(d().method), d().fillfactor === null)}
                     value={d().fillfactor ?? ""}
-                    onInput={(ev) => patch({ fillfactor: fillfactorFromInput(ev.currentTarget.value) })}
+                    onInput={(ev) => {
+                      // Çözümlenemeyen/uzun girdi yok sayılır: son geçerli değer kalır, yazılan metin silinmez.
+                      const v = fillfactorFromInput(ev.currentTarget.value, ev.currentTarget.validity.badInput);
+                      if (v !== undefined) patch({ fillfactor: v });
+                    }}
                   />
                 )}
               </FieldRow>

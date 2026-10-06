@@ -12,7 +12,7 @@ import {
   EXTENSION_PATHS, FORM_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
   columnKeyLabel, exactIssues, extensionEditPatch, extensionOptionLabel, extensionVersionNote, fillfactorEnabled,
   fillfactorFromInput, findExtension, incrementEditPatch, incrementSign, indexEditPatch, indexMethodPatch, indexReadOnlyReason,
-  newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect, orphanRowIssues, ownedByHint, schemaEditPatch,
+  newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect, orphanRowIssues, ownedByHint, restrictedControlDisabled, schemaEditPatch, sequenceSchemaPatch, tablespaceChoices,
   selectToNullsFirst, seqTypeBoundsNote, sequenceDirectionChanged, sequenceEditPatch, sequenceFormatWarnings,
   sequenceStartChanged, sequenceTypeChanged, structuralChange, switchKeyKind, updateInclude,
 } from "./forms-model";
@@ -202,6 +202,16 @@ describe("sequence notları", () => {
     expect(ownedByHint(seq({ ownedBy: { schema: "app", table: "t", column: "id" } }))).toBeNull();
     expect(ownedByHint(seq({ ownedBy: { schema: "other", table: "t", column: "id" } }))).toBe(tdes.sequence.ownedBySchemaMismatch);
   });
+  it("sequenceSchemaPatch: eski şemayı izleyen OWNED BY birlikte taşınır", () => {
+    const owned = { schema: "app", table: "t", column: "id" };
+    expect(sequenceSchemaPatch(seq({ ownedBy: owned }), "new")).toMatchObject({ schema: "new", ownedBy: { schema: "new", table: "t", column: "id" } });
+    const other = { schema: "x", table: "t", column: "id" };
+    expect(sequenceSchemaPatch(seq({ ownedBy: other }), "new").ownedBy).toEqual(other);
+    expect(sequenceSchemaPatch(seq(), "new")).toMatchObject({ schema: "new", ownedBy: null });
+    const d = seq({ ownedBy: owned });
+    sequenceSchemaPatch(d, "new");
+    expect(d.ownedBy).toEqual(owned);
+  });
   it("sequenceEditPatch / asSequence", () => {
     const d = seqObj();
     expect(sequenceEditPatch(d, { cycle: true })).toEqual({ ...d, cycle: true });
@@ -257,13 +267,28 @@ describe("indeks yöntem kuralları", () => {
     expect(fillfactorEnabled("gin")).toBe(false);
     expect(fillfactorEnabled("brin")).toBe(false);
   });
-  it("yöntem değişimi kapalı kalan seçimleri temizler", () => {
+  it("yöntem değişimi yalnızca method'u değiştirir (anahtar tanımı ve fillfactor korunur)", () => {
     const d = idx({ columns: [col("a", { descending: true, nullsFirst: false })], fillfactor: 70 });
     const g = indexMethodPatch(d, "gin");
-    expect(g.columns[0]).toMatchObject({ descending: false, nullsFirst: null });
-    expect(g.fillfactor).toBeNull();
-    expect(indexMethodPatch(d, "gist")).toMatchObject({ method: "gist", fillfactor: 70 });
-    expect(indexMethodPatch(d, "btree").columns[0]).toMatchObject({ descending: true, nullsFirst: false });
+    expect(g).toEqual({ ...d, method: "gin" });
+    expect(g.columns).toBe(d.columns);
+    // btree → hash → btree gidiş-dönüşü aynı tanıma döner (farklı indeks yeniden kurulmaz).
+    expect(indexMethodPatch(indexMethodPatch(d, "hash"), "btree")).toEqual(d);
+    expect(structuralChange(d, indexMethodPatch(indexMethodPatch(d, "brin"), "btree"))).toBe(false);
+  });
+  it("restrictedControlDisabled: desteklenmeyen seçenek yalnızca varsayılandayken kapalı", () => {
+    expect(restrictedControlDisabled(true, true)).toBe(false);
+    expect(restrictedControlDisabled(true, false)).toBe(false);
+    expect(restrictedControlDisabled(false, true)).toBe(true);
+    expect(restrictedControlDisabled(false, false)).toBe(false);
+  });
+  it("tablespaceChoices: pg_default ve pg_global çıkar; mevcut değer listede yoksa başa", () => {
+    const items = [{ value: "pg_default", detail: null }, { value: "pg_global", detail: null }, { value: "fast", detail: null }];
+    expect(tablespaceChoices(items, null)).toEqual(["fast"]);
+    expect(tablespaceChoices(items, "pg_default")).toEqual(["fast"]);
+    expect(tablespaceChoices(items, "fast")).toEqual(["fast"]);
+    expect(tablespaceChoices(items, "slow")).toEqual(["slow", "fast"]);
+    expect(tablespaceChoices([], null)).toEqual([]);
   });
   it("normalizeTablespaceEdit: temizleme yok, pg_default açıkça seçilir", () => {
     expect(normalizeTablespaceEdit(null, "")).toBeNull();
@@ -272,11 +297,17 @@ describe("indeks yöntem kuralları", () => {
     expect(normalizeTablespaceEdit("fast", "pg_default")).toBe("pg_default");
     expect(normalizeTablespaceEdit(null, "fast")).toBe("fast");
   });
-  it("fillfactorFromInput", () => {
+  it("fillfactorFromInput: boş → null, ≤3 rakam → sayı, diğerleri yok sayılır (undefined)", () => {
     expect(fillfactorFromInput("")).toBeNull();
     expect(fillfactorFromInput(" 70 ")).toBe(70);
-    expect(fillfactorFromInput("7.5")).toBeNull();
-    expect(fillfactorFromInput("-3")).toBeNull();
+    expect(fillfactorFromInput("100")).toBe(100);
+    expect(fillfactorFromInput("5")).toBe(5);
+    expect(fillfactorFromInput("7.5")).toBeUndefined();
+    expect(fillfactorFromInput("-3")).toBeUndefined();
+    expect(fillfactorFromInput("1000")).toBeUndefined();
+    expect(fillfactorFromInput("1e3")).toBeUndefined();
+    expect(fillfactorFromInput("", true)).toBeUndefined();
+    expect(fillfactorFromInput("70", true)).toBeUndefined();
   });
   it("indexReadOnlyReason", () => {
     expect(indexReadOnlyReason(null)).toEqual({ constraint: null, invalid: null });

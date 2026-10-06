@@ -865,3 +865,57 @@ describe("designer-controller lookup önbelleği", () => {
     expect(s.api.ddlLookup).toHaveBeenCalledTimes(7);
   });
 });
+
+describe("designer-controller yerel engel (sequence sayıları)", () => {
+  const seqDef: ObjectDef = {
+    kind: "sequence", schema: "app", name: "s", owner: null, dataType: "bigint", increment: "1", minValue: null,
+    maxValue: null, start: "1", cache: "1", cycle: false, ownedBy: null, comment: null,
+  };
+  const SEQ: ObjectRef = { kind: "sequence", oid: 200 };
+  const setNum = (k: "increment" | "start" | "cache" | "minValue" | "maxValue", v: string | null) => (d: ObjectDef) => {
+    if (d.kind === "sequence") (d as Record<string, unknown>)[k] = v;
+  };
+
+  it("biçimsiz sayı: ddlPreview/ddlApply çağrılmaz, previewError yerel metin, kapı stale; düzelince metin kalkar", async () => {
+    const s = setup();
+    s.api.ddlLoad.mockResolvedValue(seqDef);
+    const id = await openAlter(s, "Q1", "S1", SEQ);
+    // Önce geçerli bir düzenleme ve önizleme (kapı hazır).
+    s.ctl.edit(id, setNum("cache", "5"));
+    await settle();
+    expect(s.api.ddlPreview).toHaveBeenCalledTimes(1);
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "ready" });
+    let calls = 1;
+    for (const [k, v] of [["increment", ""], ["start", "abc"], ["cache", "1e3"], ["increment", "-"], ["start", "9223372036854775808"], ["minValue", ""], ["maxValue", "x"]] as const) {
+      s.ctl.edit(id, setNum(k, v));
+      const m = s.ctl.model(id)!;
+      expect(m).toMatchObject({ pending: false, previewError: tdes.sequence.fixNumbers });
+      expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "stale" });
+      await settle();
+      await s.ctl.apply(id);
+      s.ctl.previewNow(id);
+      await flush();
+      expect(s.api.ddlPreview).toHaveBeenCalledTimes(calls);
+      expect(s.api.ddlApply).not.toHaveBeenCalled();
+      // Geri düzelt (bir sonraki durum için temiz taban).
+      s.ctl.edit(id, setNum(k, k === "minValue" || k === "maxValue" ? null : "5"));
+      expect(s.ctl.model(id)!).toMatchObject({ pending: true, previewError: null });
+      await settle();
+      calls++;
+    }
+    expect(s.api.ddlPreview).toHaveBeenCalledTimes(8);
+    expect(s.ctl.model(id)!.previewError).toBeNull();
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "ready" });
+  });
+
+  it("bekleyen önizleme biçimsiz düzenlemeyle iptal edilir (eski yanıt gelmez)", async () => {
+    const s = setup();
+    s.api.ddlLoad.mockResolvedValue(seqDef);
+    const id = await openAlter(s, "Q2", "S1", SEQ);
+    s.ctl.edit(id, setNum("cache", "5"));
+    s.ctl.edit(id, setNum("cache", "abc"));
+    await settle();
+    expect(s.api.ddlPreview).not.toHaveBeenCalled();
+    expect(s.ctl.model(id)!).toMatchObject({ pending: false, previewError: tdes.sequence.fixNumbers, view: null });
+  });
+});

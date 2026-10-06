@@ -31,7 +31,7 @@ import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Api } from "../../ipc/commands";
 import { errorText, toPayload } from "../../ipc/errors";
 import {
-  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, type ApplyGate, type ConfirmState,
+  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, localBlock, type ApplyGate, type ConfirmState,
 } from "./designer-model";
 import { classifyError, designerErrorText, failedText } from "./errors";
 import { PREVIEW_DELAY_MS, createPreviewer, type PreviewDeps, type Previewer } from "./preview";
@@ -282,9 +282,16 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     if (!editable(m)) return;
     const req = planRequest(m);
     if (!req) return;
+    // Yerel engel (ör. biçimsiz sequence sayısı): istek gönderilmez; bekleyen önizleme iptal, görünüm bayat kalır
+    // (sürüm ilerledi → kapı "stale"). Sayılar düzelince sonraki düzenleme normal önizleme ister ve bu metin hemen kalkar.
+    if (localBlock(m.draft)) {
+      e.previewer.cancel();
+      patch(e, { pending: false, previewError: tdes.sequence.fixNumbers });
+      return;
+    }
     const { version } = m;
     const gen = e.gen;
-    patch(e, { pending: true });
+    patch(e, { pending: true, previewError: m.previewError === tdes.sequence.fixNumbers ? null : m.previewError });
     const run = () =>
       api.ddlPreview(m.serverId, m.databaseOid, req).then(
         (view): PreviewOk => ({ view, version, gen }),
@@ -489,6 +496,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const e = entries.get(tabId);
     const m = e?.model();
     if (!e || !m || m.applying || !m.view || finished(m)) return;
+    // Yerel engel: kapı zaten bayat görünüm nedeniyle kapalıdır; ikinci savunma hattı.
+    if (localBlock(m.draft)) return;
     const gate = gateFor(m, true);
     if (!canSubmit(gate, m.confirm)) return;
     const req = planRequest(m);

@@ -170,6 +170,20 @@ export function isSafeIntegerString(s: string): boolean {
   return n >= I64_MIN && n <= I64_MAX;
 }
 
+/**
+ * İstemci tarafı yerel engel: tanım arka uca gönderilemez durumdaysa nedeni (aksi halde null). Sequence sayıları JSON'da
+ * dizgedir ve arka uç çözümlemede (alan doğrulamasından önce) biçimsiz dizgeyi reddeder; bu durumda önizleme/uygulama
+ * isteği hiç gönderilmez. Zorunlu sayılar (increment/start/cache) ve null olmayan min/max `isSafeIntegerString`
+ * olmalıdır (boş dizge de biçimsiz; boş sınır formda `null`'dır). Diğer türler için engel yok.
+ */
+export type LocalBlock = "sequenceNumbers";
+export function localBlock(def: ObjectDef | null): LocalBlock | null {
+  if (!def || def.kind !== "sequence") return null;
+  const ok = [def.increment, def.start, def.cache].every(isSafeIntegerString)
+    && [def.minValue, def.maxValue].every((v) => v === null || isSafeIntegerString(v));
+  return ok ? null : "sequenceNumbers";
+}
+
 // ---- İndeks kolon listesi işlemleri (değişmez; sınır dışı indeks → aynı nesne) ----
 
 const inRange = (i: number, len: number) => Number.isInteger(i) && i >= 0 && i < len;

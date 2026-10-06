@@ -5,10 +5,11 @@ import type { IndexDef } from "../../ipc/bindings/IndexDef";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Risk } from "../../ipc/bindings/Risk";
+import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
 import type { Statement } from "../../ipc/bindings/Statement";
 import {
   addColumn, addInclude, applyGate, applyOptionsFor, canSubmit, cloneDef, confirmFlags, defName, defsEqual, groupIssues,
-  isSafeIntegerString, issuesFor, kindLabel, moveColumn, previewEmptyState, removeColumn, removeInclude, scriptWithRanges,
+  isSafeIntegerString, issuesFor, kindLabel, localBlock, moveColumn, previewEmptyState, removeColumn, removeInclude, scriptWithRanges,
   statementRangesToLineRanges, updateColumn,
   type ApplyGate, type ConfirmState, type GateInput,
 } from "./designer-model";
@@ -431,5 +432,29 @@ describe("previewEmptyState", () => {
   it("bekleyen önizlemede eski görünüm gösterilmeye devam eder", () => {
     expect(previewEmptyState(view(), true, "create")).toBeNull();
     expect(previewEmptyState(view({ empty: true, statements: [] }), true, "alter")).toBe("noChanges");
+  });
+});
+
+describe("localBlock (yerel engel)", () => {
+  const seqDef = (p: Partial<SequenceDef> = {}): ObjectDef => ({
+    kind: "sequence", schema: "app", name: "s", owner: null, dataType: "bigint", increment: "1", minValue: null,
+    maxValue: null, start: "1", cache: "1", cycle: false, ownedBy: null, comment: null, ...p,
+  });
+  it("geçerli sequence ve diğer türler → null", () => {
+    expect(localBlock(seqDef())).toBeNull();
+    expect(localBlock(seqDef({ increment: "-5", minValue: "-100", maxValue: "-1", start: "-1", cache: "+20" }))).toBeNull();
+    expect(localBlock(seqDef({ minValue: "-9223372036854775808", maxValue: "9223372036854775807" }))).toBeNull();
+    expect(localBlock({ kind: "schema", name: "", owner: null, comment: null })).toBeNull();
+    expect(localBlock(null)).toBeNull();
+  });
+  it.each(["", "abc", "1e3", "-", "9223372036854775808", " 1", "1.0"])("zorunlu sayı %j → engel", (v) => {
+    for (const k of ["increment", "start", "cache"] as const) expect(localBlock(seqDef({ [k]: v }))).toBe("sequenceNumbers");
+  });
+  it("min/max: null serbest, boş dizge ve biçimsiz → engel", () => {
+    expect(localBlock(seqDef({ minValue: null, maxValue: null }))).toBeNull();
+    expect(localBlock(seqDef({ minValue: "" }))).toBe("sequenceNumbers");
+    expect(localBlock(seqDef({ maxValue: "" }))).toBe("sequenceNumbers");
+    expect(localBlock(seqDef({ maxValue: "-" }))).toBe("sequenceNumbers");
+    expect(localBlock(seqDef({ minValue: "-9223372036854775809" }))).toBe("sequenceNumbers");
   });
 });
