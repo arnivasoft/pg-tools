@@ -141,6 +141,37 @@ describe("safeFormatSelection", () => {
     const tail = "select 1 -- son";
     expect(safeFormatSelection(tail, 0, tail.length)).toEqual({ from: 0, to: tail.length, snapped: false });
   });
+  it("E-dizesi içindeki seçim (\\' sonrası) kod sanılmaz: ifadeye genişler", () => {
+    const doc = "select E'a\\'  b  from  c' as x; select 1";
+    const [f, t] = sel(doc, "  b  from");
+    const r = safeFormatSelection(doc, f, t)!;
+    expect(r).toEqual({ from: 0, to: doc.indexOf(";"), snapped: true });
+    expect(doc.slice(r.from, r.to)).toBe("select E'a\\'  b  from  c' as x");
+    const lower = "select 1; select e'x\\'  y  ' z";
+    const [f2, t2] = sel(lower, "  y  ");
+    expect(safeFormatSelection(lower, f2, t2)).toEqual({ from: lower.indexOf(" select e"), to: lower.length, snapped: true });
+  });
+  it("E-dizesinde \\\\ ve \\\\\\' dizileri; emoji; ardından gelen gerçek kod", () => {
+    const closed = "select E'\\\\'  a  from  t; select 2";
+    const [f, t] = sel(closed, "  a  from");
+    expect(safeFormatSelection(closed, f, t)).toEqual({ from: f, to: t, snapped: false }); // \\ sonrası ' kapatır
+    const open = "select E'\\\\\\'  a  from  t'; select 2";
+    const [f2, t2] = sel(open, "  a  from");
+    expect(safeFormatSelection(open, f2, t2)).toEqual({ from: 0, to: open.indexOf("; select 2"), snapped: true });
+    const emoji = "select E'😀\\'  😀  ' as x, a  from t; select 2";
+    const [f3, t3] = sel(emoji, "  😀  ");
+    expect(safeFormatSelection(emoji, f3, t3)).toMatchObject({ from: 0, to: emoji.indexOf("; select 2") });
+    const [f4, t4] = sel(emoji, "a  from t");
+    expect(safeFormatSelection(emoji, f4, t4)).toEqual({ from: f4, to: t4, snapped: false });
+  });
+  it("uzun sözcüğün son e'si önek değil; kapanmamış E-dizesi belge sonuna genişler", () => {
+    const named = "select name'x\\'  a  from t";
+    const [f, t] = sel(named, "  a  from");
+    expect(safeFormatSelection(named, f, t)).toEqual({ from: f, to: t, snapped: false });
+    const open = "select 1; select E'x\\'  a  from t";
+    const [f2, t2] = sel(open, "  a  from");
+    expect(safeFormatSelection(open, f2, t2)).toEqual({ from: open.indexOf(" select E"), to: open.length, snapped: true });
+  });
   it("kapanmamış dize belge sonuna kadar sürer: seçim belge sonuna genişler", () => {
     const doc = "select 1; select 'open  text\nmore";
     const [f, t] = sel(doc, "open");

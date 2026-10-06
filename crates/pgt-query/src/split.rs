@@ -116,6 +116,21 @@ mod tests {
         }
     }
 
+    /// Ön yüzle (`src/features/query/sql-lex.test.ts`) paylaşılan tablo: iki taraf aynı sınırları üretmelidir.
+    #[test]
+    fn shared_fixture_cases() {
+        let cases: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/split-cases.json")).expect("split-cases.json");
+        let cases = cases.as_array().expect("dizi");
+        assert!(cases.len() > 20);
+        for case in cases {
+            let sql = case["sql"].as_str().unwrap();
+            let want: Vec<&str> = case["stmts"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+            let got: Vec<&str> = split(sql).iter().map(|s| &sql[s.start..s.end]).collect();
+            assert_eq!(got, want, "{sql:?}");
+        }
+    }
+
     #[test]
     fn begin_then_atomic_only_directly() {
         // `begin; atomic` ayrı ifadeler; ATOMIC tek başına gövde açmaz.

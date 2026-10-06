@@ -153,7 +153,93 @@ async fn columns_carry_postgres_formatted_type_names() {
         assert_eq!(display, ["pgt_fmt_s.e", "pgt_fmt_s.e[]"]);
         let state = run_ok(&mut f.exec, "select statement_timestamp() <> transaction_timestamp()", &AUTO).await;
         assert_eq!(state.rows(), vec![vec![s("t")]], "hâlâ aynı transaction");
+        // Ad sorgusunun savepoint'i bırakılır: kullanıcının savepoint'i ve sonrasındaki işi beklendiği gibi kalır.
+        let asked = f.exec.type_name_queries();
+        run_ok(&mut f.exec, "savepoint user_sp", &AUTO).await;
+        run_ok(&mut f.exec, "create temp table tn_after_sp(i int)", &AUTO).await;
+        let fresh = run_ok(&mut f.exec, "select 1::int2 a, 'x'::varchar(3) b", &AUTO).await;
+        let display: Vec<String> = started_types(&fresh).into_iter().map(|(_, d)| d).collect();
+        assert_eq!(display, ["smallint", "character varying(3)"]);
+        assert_eq!(f.exec.type_name_queries(), asked + 1);
+        run_ok(&mut f.exec, "rollback to savepoint user_sp", &AUTO).await;
+        let gone =
+            run_ok(&mut f.exec, "select count(*) from pg_class where relname = 'tn_after_sp'", &AUTO).await;
+        assert_eq!(gone.rows(), vec![vec![s("0")]]);
+        let kept = run_ok(&mut f.exec, "select count(*) from pg_type where typnamespace = 'pgt_fmt_s'::regnamespace and typname = 'e'", &AUTO).await;
+        assert_eq!(kept.rows(), vec![vec![s("1")]], "savepoint öncesi iş yerinde");
         run_ok(&mut f.exec, "rollback", &AUTO).await;
+    }
+}
+
+/// Kısıtlı rol (`format_type` üzerinde EXECUTE yok): tür adı sorgusu başarısız olur ama kullanıcının transaction'ı
+/// bozulmaz (savepoint), kısa ada düşülür ve sorgu oturumun kalanında yeniden denenmez. Yalnızca bu test için açılan
+/// veritabanında yetki geri alınır; rol ve veritabanı sonda silinir.
+#[tokio::test]
+async fn type_name_lookup_failure_keeps_user_transaction() {
+    const DB: &str = "pgt_tn_restricted";
+    const ROLE: &str = "pgt_tn_user";
+    for ts in servers() {
+        let admin = admin_client(&ts, &ts.config.maintenance_db).await;
+        pgt_core::testing::drop_database(&admin, DB).await;
+        admin.batch_execute(&format!("DROP ROLE IF EXISTS {ROLE}")).await.unwrap();
+        let password = uuid::Uuid::new_v4().simple().to_string();
+        admin
+            .batch_execute(&format!(
+                "SET password_encryption = 'scram-sha-256'; CREATE ROLE {ROLE} LOGIN PASSWORD '{password}'"
+            ))
+            .await
+            .unwrap();
+        admin.batch_execute(&format!("CREATE DATABASE {DB}")).await.unwrap();
+        {
+            let db_admin = admin_client(&ts, DB).await;
+            db_admin
+                .batch_execute("REVOKE EXECUTE ON FUNCTION pg_catalog.format_type(oid, integer) FROM PUBLIC")
+                .await
+                .unwrap();
+        }
+
+        let mut config = ts.config.clone();
+        config.id = uuid::Uuid::new_v4();
+        config.username = ROLE.into();
+        config.maintenance_db = DB.into();
+        let mgr = ConnectionManager::new();
+        mgr.connect(config.clone(), Some(password.clone())).await.unwrap();
+        let open = || mgr.open_dedicated(config.id, Target::Maintenance, QUERY_RW);
+
+        // Kullanıcı transaction'ı içinde.
+        let mut exec = Executor::new(open().await.unwrap());
+        run_ok(&mut exec, "begin", &AUTO).await;
+        run_ok(&mut exec, "create temp table tn_kept(i int)", &AUTO).await;
+        let sink = run_ok(&mut exec, "select 1::int8 a", &AUTO).await;
+        assert_eq!(started_types(&sink), [("int8".to_string(), "int8".to_string())], "kısa ada düşülür");
+        assert_eq!(sink.rows(), vec![vec![s("1")]]);
+        assert_eq!(exec.type_name_queries(), 1);
+        assert!(exec.in_tx());
+        let two = run_ok(&mut exec, "select 2", &AUTO).await;
+        assert_eq!(two.rows(), vec![vec![s("2")]], "transaction kullanılabilir kalır");
+        let other = run_ok(&mut exec, "select 1.5::float8 f, 'x'::varchar(5) v", &AUTO).await;
+        let display: Vec<String> = started_types(&other).into_iter().map(|(_, d)| d).collect();
+        assert_eq!(display, ["float8", "varchar"]);
+        assert_eq!(exec.type_name_queries(), 1, "başarısızlıktan sonra yeniden sorulmaz");
+        let same = run_ok(&mut exec, "select statement_timestamp() <> transaction_timestamp()", &AUTO).await;
+        assert_eq!(same.rows(), vec![vec![s("t")]], "hâlâ aynı transaction");
+        let kept = run_ok(&mut exec, "select count(*) from pg_class where relname = 'tn_kept'", &AUTO).await;
+        assert_eq!(kept.rows(), vec![vec![s("1")]], "transaction'ın önceki işi geri alınmadı");
+        run_ok(&mut exec, "commit", &AUTO).await;
+        assert!(!exec.in_tx());
+        drop(exec);
+
+        // Transaction dışında (otomatik onay): ifade başarılı, sorgu bir kez denenir.
+        let mut exec = Executor::new(open().await.unwrap());
+        let sink = run_ok(&mut exec, "select 1::int8 a", &AUTO).await;
+        assert_eq!(started_types(&sink)[0].1, "int8");
+        run_ok(&mut exec, "select 1.5::float8", &AUTO).await;
+        assert_eq!(exec.type_name_queries(), 1);
+        drop(exec);
+        drop(mgr);
+
+        pgt_core::testing::drop_database(&admin, DB).await;
+        admin.batch_execute(&format!("DROP ROLE IF EXISTS {ROLE}")).await.unwrap();
     }
 }
 

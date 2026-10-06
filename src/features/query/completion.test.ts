@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  analyzeBefore,
   completionWaitMs,
   createCompletionSource,
   contextAt,
@@ -66,6 +67,37 @@ describe("contextAt", () => {
   for (const [input, expected] of cases) {
     it(JSON.stringify(input), () => expect(contextAt(input)).toEqual(expected));
   }
+});
+
+describe("analyzeBefore: E'…' kaçış dizeleri (arka uç lex.rs ile aynı)", () => {
+  const ctx = (s: string) => analyzeBefore(s).context.kind;
+  it("E-dizesinde \\' dizeyi kapatmaz: imleç hâlâ dize içinde", () => {
+    expect(ctx("select E'a\\'  b  from ")).toBe("none");
+    expect(ctx("select e'a\\'  b  from ")).toBe("none");
+    expect(ctx("select E'\\\\\\'  from ")).toBe("none"); // \\ ve \' : hâlâ açık
+    expect(ctx("select E'😀\\' from x.")).toBe("none");
+  });
+  it("\\\\ kaçışından sonraki ' dizeyi kapatır", () => {
+    expect(ctx("select E'\\\\' from ")).toBe("relation");
+    expect(ctx("select E'a\\'b' from ")).toBe("relation");
+    expect(ctx("select E'a''b\\'' from x.")).toBe("schemaMember");
+    expect(ctx("select E'😀\\'😀' from ")).toBe("relation");
+  });
+  it("E-dizesinden sonraki gerçek kod ve kısmi ad", () => {
+    expect(analyzeBefore("select E'\\'', o.na")).toEqual({ context: { kind: "relationMember", relation: "o" }, partial: "na" });
+    expect(ctx("select E'x\\'' ; select ")).toBe("selectList");
+  });
+  it("uzun sözcüğün son e'si önek değil: \\' standart dizeyi kapatır (geçersiz SQL çökmez)", () => {
+    expect(ctx("select name'x\\' from ")).toBe("relation");
+    expect(ctx("select 1e'x\\' from ")).toBe("relation");
+    expect(ctx("select E 'x\\' from ")).toBe("relation");
+    expect(ctx("select U&'x\\' from ")).toBe("relation");
+  });
+  it("kapanmamış E-dizesi: none", () => {
+    expect(ctx("select E'")).toBe("none");
+    expect(ctx("select E'abc\\")).toBe("none");
+    expect(ctx("select E'abc\\'")).toBe("none");
+  });
 });
 
 describe("replaceRange / matchItems", () => {
@@ -369,6 +401,15 @@ describe("statementBounds / scopedTarget", () => {
     ["select (1; |) ; x", "select (1; ) "],
     ["select 1;|", ""],
     ["select '; | ", "select ';  "],
+    // E-dizeleri: \' ve \\' kapatmaz, \\ sonrası ' kapatır.
+    ["select E'\\'; x' | ; select 2", "select E'\\'; x'  "],
+    ["select E'\\'; | x'; select 2", "select E'\\';  x'"],
+    ["select e'a\\\\'; select | ", " select  "],
+    ["select E'\\\\\\'; |'; x", "select E'\\\\\\'; '"],
+    ["select E'😀\\'; 😀' | ; x", "select E'😀\\'; 😀'  "],
+    ["select name'x\\'; select | ", " select  "],
+    ["select E'açık\\'; select | ", "select E'açık\\'; select  "],
+    ["begin atomic select 1; | end; select 2", "begin atomic select 1;  end"],
   ];
   for (const [input, sql] of cases) {
     it(JSON.stringify(input), () => {

@@ -16,6 +16,7 @@
 //! `code`'u bulunur.
 
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use futures_util::StreamExt;
@@ -28,7 +29,7 @@ use tokio_postgres::error::ErrorPosition;
 use crate::classify::{StmtKind, TxOp, analyze, tx_op};
 use crate::events::{Column, EventSink, NOTICES_PER_STMT_MAX, NoticeInfo, QueryEvent};
 use crate::lex::{Kind, lex};
-use crate::type_names::{FORMAT_TYPES_SQL, TypeKey, TypeNameCache};
+use crate::type_names::{FORMAT_TYPES_SQL, TypeKey, TypeNameCache, after_failure};
 
 /// `ExecConfig.limit` üst sınırı; aşan değer buna kısılır.
 pub const MAX_LIMIT: u32 = 1_000_000;
@@ -37,6 +38,13 @@ pub const DEFAULT_CHUNK: u32 = 1000;
 
 const DECLARE_PREFIX: &str = "DECLARE pgt_c NO SCROLL CURSOR FOR ";
 const BEGIN_DECLARE_PREFIX: &str = "BEGIN; DECLARE pgt_c NO SCROLL CURSOR FOR ";
+
+/// Tür adı sorgusunun savepoint adları çağrı başına benzersizdir (kullanıcının aynı adlı savepoint'ine dokunulmasın).
+static TYPE_NAME_SAVEPOINT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn is_cancel(e: &tokio_postgres::Error) -> bool {
+    e.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED)
+}
 
 pub(crate) type TextRows = Vec<Vec<Option<String>>>;
 type PgResult<T> = std::result::Result<T, tokio_postgres::Error>;
@@ -190,6 +198,13 @@ pub struct Executor {
     peak_buffered: usize,
     /// Sütun türlerinin gösterim adları (`format_type`), oturum boyunca.
     type_names: TypeNameCache,
+    /// Ad sorgusu kalıcı olarak (ör. kısıtlı rolde `format_type` yetkisi yok) ya da art arda birkaç kez başarısız
+    /// oldu: oturumun kalanında sorulmaz, kısa adlar kullanılır.
+    type_names_off: bool,
+    /// Ad sorgusunun art arda (geçici) başarısızlık sayısı; başarıda sıfırlanır (bkz. `after_failure`).
+    type_name_failures: u32,
+    /// Sunucuya gönderilen ad sorgusu sayısı (testler: kapatıldıktan sonra yeniden denenmiyor mu).
+    type_name_queries: u32,
 }
 
 impl Executor {
@@ -202,6 +217,9 @@ impl Executor {
             last_path: None,
             peak_buffered: 0,
             type_names: TypeNameCache::default(),
+            type_names_off: false,
+            type_name_failures: 0,
+            type_name_queries: 0,
         }
     }
 
@@ -303,6 +321,12 @@ impl Executor {
     #[doc(hidden)]
     pub fn peak_buffered_rows(&self) -> usize {
         self.peak_buffered
+    }
+
+    /// Test yardımcısı: sunucuya gönderilmiş tür adı sorgusu sayısı (`format_type`).
+    #[doc(hidden)]
+    pub fn type_name_queries(&self) -> u32 {
+        self.type_name_queries
     }
 
     /// Test yardımcısı: NOTICE kanalında görülmüş en büyük birikim.
@@ -426,32 +450,92 @@ impl Executor {
     }
 
     /// Önbellekte olmayan `(oid, typmod)` çiftlerinin gösterim adlarını tek bir salt okunur katalog sorgusuyla alır
-    /// (`type_names`). Kullanıcı transaction'ının içindeyse orada düz bir SELECT olarak çalışır (transaction açmaz,
-    /// kapatmaz). Başarısızlık yok sayılır (kısa ada düşülür); yalnızca iptal (57014: kullanıcı iptali ya da
-    /// `statement_timeout`) ifadenin sonucu olarak döner — iptal isteği bu sorguya denk geldiyse kullanıcının ifadesi
-    /// yine de çalıştırılmamalıdır.
+    /// (`type_names`). Başarısızlık kullanıcının ifadesini etkilemez (kısa ada düşülür); yetki/tanım hatasında (sınıf 42,
+    /// ör. kısıtlı rolde `format_type` üzerinde EXECUTE yok) hemen, diğer hatalarda art arda birkaç kez sonra ad sorgusu
+    /// oturumun kalanında kapatılır (`type_names_off`, kural `type_names::after_failure`). Yalnızca iptal (57014:
+    /// kullanıcı iptali ya da `statement_timeout`) ifadenin sonucu olarak döner — iptal isteği bu sorguya denk geldiyse kullanıcının ifadesi yine de çalıştırılmamalıdır.
+    ///
+    /// Kullanıcı transaction'ının içindeyse sorgu çağrıya özgü `SAVEPOINT pgt_tn_<n>` içinde çalışır: başarısız olursa
+    /// `ROLLBACK TO` + `RELEASE` ile yalnızca alt transaction geri alınır, kullanıcının transaction'ı bozulmaz (aksi
+    /// halde kullanıcının ifadesi 25P02 ile başarısız olurdu). Başarıda yalnızca `RELEASE` (sorgu salt okunurdur).
+    /// Transaction dışında sorgu kendi örtük transaction'ında çalışır; korumaya gerek yoktur.
     async fn resolve_type_names(&mut self, keys: &[TypeKey]) -> PgResult<()> {
+        if self.type_names_off {
+            return Ok(());
+        }
         let missing = self.type_names.missing(keys);
         if missing.is_empty() {
             return Ok(());
         }
+        let savepoint = if self.in_tx {
+            let name = format!("pgt_tn_{}", TYPE_NAME_SAVEPOINT_SEQ.fetch_add(1, Ordering::Relaxed));
+            match self.batch(&format!("SAVEPOINT {name}")).await {
+                Ok(()) => Some(name),
+                Err(e) if is_cancel(&e) => return Err(e),
+                Err(e) if e.code() == Some(&tokio_postgres::error::SqlState::NO_ACTIVE_SQL_TRANSACTION) => {
+                    // İzleme yanılmış: transaction yok (25P01, hiçbir durum değişmedi). Otomatik onaydaki gibi
+                    // korumasız sorulur (sorgu kendi örtük transaction'ında çalışır).
+                    self.in_tx = false;
+                    None
+                }
+                Err(e) => {
+                    // Savepoint açılamadı (transaction zaten hatalı, izleme yanılmış…): korumasız sorgu kullanıcı
+                    // transaction'ını bozabileceğinden bu ifade için sorulmaz; kısa ad kullanılır.
+                    tracing::debug!(code = ?e.code().map(|c| c.code()), "tür adı savepoint'i açılamadı");
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
         let oids: Vec<u32> = missing.iter().map(|k| k.0).collect();
         let mods: Vec<i32> = missing.iter().map(|k| k.1).collect();
+        self.type_name_queries += 1;
         let result = with_notices(
             self.conn.client.query(FORMAT_TYPES_SQL, &[&oids, &mods]),
             &mut self.conn.notices,
             &mut self.notices,
         )
         .await;
-        match result {
+        let failure = match result {
             Ok(rows) => {
                 let names = rows.iter().map(|r| r.try_get::<_, Option<String>>(0).ok().flatten()).collect();
                 self.type_names.store(&missing, names);
-                Ok(())
+                self.type_name_failures = 0;
+                None
             }
-            Err(e) if e.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) => Err(e),
-            Err(e) => {
-                tracing::debug!(code = ?e.code().map(|c| c.code()), "tür adları alınamadı, kısa ad kullanılıyor");
+            Err(e) => Some(e),
+        };
+        if let Some(name) = savepoint {
+            let cleanup = if failure.is_some() {
+                format!("ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}")
+            } else {
+                format!("RELEASE SAVEPOINT {name}")
+            };
+            if let Err(e) = self.batch(&cleanup).await {
+                if is_cancel(&e) {
+                    return Err(e);
+                }
+                // Temizlik hata aldıysa (çalışmadı) bir kez yinelenir; yine olmazsa kullanıcının ifadesi sunucunun
+                // gerçek durumuyla karşılaşır ve oturum katmanı başarısızlıkta transaction durumunu yoklar.
+                tracing::debug!(code = ?e.code().map(|c| c.code()), "tür adı savepoint temizliği başarısız, yineleniyor");
+                if let Err(e) = self.batch(&cleanup).await {
+                    if is_cancel(&e) {
+                        return Err(e);
+                    }
+                    tracing::debug!(code = ?e.code().map(|c| c.code()), "tür adı savepoint temizliği başarısız");
+                }
+            }
+        }
+        match failure {
+            None => Ok(()),
+            Some(e) if is_cancel(&e) => Err(e),
+            Some(e) => {
+                let code = e.code().map(|c| c.code());
+                let (failures, off) = after_failure(code, self.type_name_failures);
+                self.type_name_failures = failures;
+                self.type_names_off = off;
+                tracing::debug!(?code, failures, off, "tür adları alınamadı, kısa ad kullanılıyor");
                 Ok(())
             }
         }
@@ -1031,6 +1115,23 @@ mod db_tests {
             exec.close_cursor().await.unwrap();
             run(&mut exec, "rollback", &auto).await;
             assert!(!temp_table_exists(&mut exec, "hidden_tx").await, "COMMIT edilmemeli");
+        }
+    }
+
+    /// İzleme "transaction var" sanıyor ama yok: tür adı savepoint'i 25P01 ile reddedilir, izleme düzelir ve ad
+    /// otomatik onaydaki gibi (korumasız) sorulur.
+    #[tokio::test]
+    async fn type_name_savepoint_25p01_fixes_tracking_and_still_resolves() {
+        for ts in test_servers() {
+            let (_mgr, mut exec) = executor(&ts).await;
+            exec.set_in_tx(true);
+            let auto = ExecConfig { limit: 5, chunk: 5, autocommit: true };
+            let sink = run(&mut exec, "select 1::int8 a", &auto).await;
+            let Some(QueryEvent::Started { columns, .. }) = sink.0.first() else { panic!("{:?}", sink.0) };
+            assert_eq!(columns[0].type_display, "bigint");
+            assert_eq!(exec.type_name_queries(), 1);
+            assert!(!exec.in_tx(), "izleme düzeltildi");
+            assert!(!exec.type_names_off);
         }
     }
 

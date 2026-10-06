@@ -11,7 +11,7 @@
  *   ilişkilerin `alias.kolon` önerileri + anahtar kelimeler.
  * - Yorum / tek tırnaklı dize / dolar-tırnaklı dize içinde `none` (hiç öneri yok).
  * - Diğer her yerde `keyword`.
- * Sözcük analizi arka uçla aynı fikre dayanır: tırnak ve yorumlar metin boyunca izlenir.
+ * Sözcük analizi arka uçla aynı çözümleyiciyi kullanır (`sql-lex.ts`, `lex.rs`'nin karşılığı).
  */
 import { keywordCompletionSource, PostgreSQL } from "@codemirror/lang-sql";
 import type { Completion, CompletionResult, CompletionSource } from "@codemirror/autocomplete";
@@ -19,6 +19,7 @@ import type { CompletionItem } from "../../ipc/bindings/CompletionItem";
 import type { CompletionKind } from "../../ipc/bindings/CompletionKind";
 import type { CompletionRequest } from "../../ipc/bindings/CompletionRequest";
 import { utf16ToScalar } from "./offsets";
+import { lexSql, separatorTokens } from "./sql-lex";
 
 export type CompletionContextKind =
   | { kind: "schemaMember"; schema: string }
@@ -37,100 +38,69 @@ const LIST_STOP = new Set([
   "union", "intersect", "except", "returning", "using", "fetch", "when", "then", "and", "or",
 ]);
 const WORD_CH = /[\p{L}\p{N}_$]/u;
-const DOLLAR_TAG = /^\$(?:[\p{L}_][\p{L}\p{N}_]*)?\$/u;
 
-/** Metnin sonunda yazılmakta olan kısmi ad (açık tırnaklı ad dahil) ve bağlam. */
+/**
+ * Metnin sonunda yazılmakta olan kısmi ad (açık tırnaklı ad dahil) ve bağlam. Dize/yorum/dolar gövdesi sınırları
+ * arka uçla aynı sözcük çözümleyiciden (`lexSql`) gelir (`E'…'` kaçış dizeleri dahil); sözcükler bağlam için
+ * `WORD_CH` dizilerine bölünür.
+ */
 export function analyzeBefore(text: string): { context: CompletionContextKind; partial: string } {
   const toks: Tok[] = [];
   let partialStart = -1; // sondaki açık tırnaklı kısmi adın başlangıcı
-  let i = 0;
   const n = text.length;
   const none = { context: { kind: "none" } as CompletionContextKind, partial: "" };
-  while (i < n) {
-    const c = text[i]!;
-    if (c === "-" && text[i + 1] === "-") {
-      const nl = text.indexOf("\n", i);
-      if (nl < 0) return none;
-      i = nl + 1;
-    } else if (c === "/" && text[i + 1] === "*") {
-      let depth = 1;
-      i += 2;
-      while (i < n && depth > 0) {
-        if (text[i] === "/" && text[i + 1] === "*") {
-          depth++;
-          i += 2;
-        } else if (text[i] === "*" && text[i + 1] === "/") {
-          depth--;
-          i += 2;
-        } else i++;
-      }
-      if (depth > 0) return none;
-      toks.push({ t: "punct", v: "/**/" });
-    } else if (c === "'") {
-      i++;
-      let closed = false;
-      while (i < n) {
-        if (text[i] === "'") {
-          if (text[i + 1] === "'") {
-            i += 2;
-            continue;
-          }
-          i++;
-          closed = true;
-          break;
-        }
-        i++;
-      }
-      if (!closed) return none;
-      toks.push({ t: "punct", v: "'" });
-    } else if (c === '"') {
-      const start = i;
-      i++;
-      let v = "";
-      let closed = false;
-      while (i < n) {
-        if (text[i] === '"') {
-          if (text[i + 1] === '"') {
-            v += '"';
-            i += 2;
-            continue;
-          }
-          i++;
-          closed = true;
-          break;
-        }
-        v += text[i];
-        i++;
-      }
-      if (!closed) {
-        partialStart = start;
-        break;
-      }
-      toks.push({ t: "ident", v });
-    } else if (c === "$") {
-      const m = DOLLAR_TAG.exec(text.slice(i, i + 80));
-      if (m) {
-        const end = text.indexOf(m[0], i + m[0].length);
-        if (end < 0) return none;
-        i = end + m[0].length;
-        toks.push({ t: "punct", v: "$$" });
-      } else {
+  /** `[from, to)` aralığını `WORD_CH` dizileri (sözcük) ve tek karakterlere (boşluk dışı: noktalama) böler. */
+  const pushWords = (from: number, to: number): void => {
+    let i = from;
+    while (i < to) {
+      const c = text[i]!;
+      if (WORD_CH.test(c)) {
         let j = i;
-        while (j < n && WORD_CH.test(text[j]!)) j++;
+        while (j < to && WORD_CH.test(text[j]!)) j++;
         toks.push({ t: "word", v: text.slice(i, j) });
         i = j;
+      } else {
+        if (c === ".") toks.push({ t: "dot", v: "." });
+        else if (!/\s/.test(c)) toks.push({ t: "punct", v: c });
+        i++;
       }
-    } else if (WORD_CH.test(c)) {
-      let j = i;
-      while (j < n && WORD_CH.test(text[j]!)) j++;
-      toks.push({ t: "word", v: text.slice(i, j) });
-      i = j;
-    } else if (c === ".") {
-      toks.push({ t: "dot", v: "." });
-      i++;
-    } else {
-      if (!/\s/.test(c)) toks.push({ t: "punct", v: c });
-      i++;
+    }
+  };
+  const lexed = lexSql(text);
+  for (let k = 0; k < lexed.length; k++) {
+    const t = lexed[k]!;
+    switch (t.kind) {
+      case "comment":
+        if (!t.closed) return none;
+        if (text[t.start + 1] === "*") toks.push({ t: "punct", v: "/**/" });
+        break;
+      case "str":
+        if (!t.closed) return none;
+        toks.push({ t: "punct", v: "'" });
+        break;
+      case "dollar":
+        if (!t.closed) return none;
+        toks.push({ t: "punct", v: "$$" });
+        break;
+      case "ident":
+        if (!t.closed) {
+          partialStart = t.start;
+          break;
+        }
+        toks.push({ t: "ident", v: text.slice(t.start + 1, t.end - 1).replace(/""/g, '"') });
+        break;
+      case "word":
+        pushWords(t.start, t.end);
+        break;
+      case "punct": {
+        // Etiket açmayan `$` ardındaki bitişik sözcükle tek sözcüktür (`$1`).
+        const next = lexed[k + 1];
+        if (text[t.start] === "$" && next?.kind === "word" && next.start === t.end) {
+          pushWords(t.start, next.end);
+          k++;
+        } else pushWords(t.start, t.end);
+        break;
+      }
     }
   }
   let partial = "";
@@ -221,62 +191,17 @@ export function contextAt(textBefore: string): CompletionContextKind {
 }
 
 /**
- * İmlecin (`pos`, UTF-16) ifadesi: derinlik 0'daki `;` sınırları arası `[from, to)`. Yorum, dize, tırnaklı ad ve
- * dolar-tırnak içindeki `;` sayılmaz (kapanmamışsa metin sonuna kadar sürer). Arka uç yine de yeniden böler.
+ * İmlecin (`pos`, UTF-16) ifadesi: ayırıcı `;`'ler arası `[from, to)`. Ayırıcı kuralı arka uçla aynıdır
+ * (`separatorTokens`: derinlik 0, `BEGIN ATOMIC` gövdesi dışı; yorum, dize — `E'…'` kaçışları dahil —, tırnaklı ad ve
+ * dolar-tırnak içindeki `;` sayılmaz, kapanmamışsa metin sonuna kadar sürer). Arka uç yine de yeniden böler.
  */
 export function statementBounds(text: string, pos: number): { from: number; to: number } {
   let from = 0;
-  let depth = 0;
-  let i = 0;
-  const n = text.length;
-  const skipTo = (needle: string, start: number): number => {
-    const e = text.indexOf(needle, start);
-    return e < 0 ? n : e + needle.length;
-  };
-  while (i < n) {
-    const c = text[i]!;
-    if (c === "-" && text[i + 1] === "-") {
-      i = skipTo("\n", i + 2);
-    } else if (c === "/" && text[i + 1] === "*") {
-      let nest = 1;
-      i += 2;
-      while (i < n && nest > 0) {
-        if (text[i] === "/" && text[i + 1] === "*") {
-          nest++;
-          i += 2;
-        } else if (text[i] === "*" && text[i + 1] === "/") {
-          nest--;
-          i += 2;
-        } else i++;
-      }
-    } else if (c === "'" || c === '"') {
-      i++;
-      while (i < n) {
-        if (text[i] === c) {
-          if (text[i + 1] === c) {
-            i += 2;
-            continue;
-          }
-          i++;
-          break;
-        }
-        i++;
-      }
-    } else if (c === "$") {
-      const m = DOLLAR_TAG.exec(text.slice(i, i + 80));
-      if (m && !(i > 0 && WORD_CH.test(text[i - 1]!))) i = skipTo(m[0], i + m[0].length);
-      else i++;
-    } else {
-      if (c === "(") depth++;
-      else if (c === ")") depth = Math.max(0, depth - 1);
-      else if (c === ";" && depth === 0) {
-        if (i < pos) from = i + 1;
-        else return { from, to: i };
-      }
-      i++;
-    }
+  for (const t of separatorTokens(text)) {
+    if (t.start < pos) from = t.end;
+    else return { from, to: t.start };
   }
-  return { from, to: n };
+  return { from, to: text.length };
 }
 
 /** `scoped` isteğinin ifade metni ve imlecin bu metindeki Unicode scalar ofseti. */

@@ -1,0 +1,327 @@
+[
+  {
+    "sql": "select 1; select 2",
+    "stmts": [
+      "select 1",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select 1;;; select 2;",
+    "stmts": [
+      "select 1",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select 'a;b'; select 2",
+    "stmts": [
+      "select 'a;b'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select 'it''s;'; select 2",
+    "stmts": [
+      "select 'it''s;'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select \"a;b\" from t; select 2",
+    "stmts": [
+      "select \"a;b\" from t",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "create function f() returns int as $$ begin return 1; end $$ language plpgsql; select 2",
+    "stmts": [
+      "create function f() returns int as $$ begin return 1; end $$ language plpgsql",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "do $fn$ begin perform 1; end $fn$; select 2",
+    "stmts": [
+      "do $fn$ begin perform 1; end $fn$",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select 1 /* ; /* ; */ ; */ ; select 2",
+    "stmts": [
+      "select 1 /* ; /* ; */ ; */",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select 1 -- ; \n ; select 2",
+    "stmts": [
+      "select 1 -- ; \n",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "create rule r as on insert to t do also (insert into a values (1); insert into b values (2)); select 3",
+    "stmts": [
+      "create rule r as on insert to t do also (insert into a values (1); insert into b values (2))",
+      "select 3"
+    ]
+  },
+  {
+    "sql": "create function f(a int) returns int language sql begin atomic select case when a > 0 then 1 else 2 end; select a; end; select 9",
+    "stmts": [
+      "create function f(a int) returns int language sql begin atomic select case when a > 0 then 1 else 2 end; select a; end",
+      "select 9"
+    ]
+  },
+  {
+    "sql": "create function f() returns int language sql begin /*c*/ atomic select 1; end; select 2",
+    "stmts": [
+      "create function f() returns int language sql begin /*c*/ atomic select 1; end",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "begin; atomic; select 1",
+    "stmts": [
+      "begin",
+      "atomic",
+      "select 1"
+    ]
+  },
+  {
+    "sql": "begin; select 1; commit",
+    "stmts": [
+      "begin",
+      "select 1",
+      "commit"
+    ]
+  },
+  {
+    "sql": "select a$b$ from t; select $1",
+    "stmts": [
+      "select a$b$ from t",
+      "select $1"
+    ]
+  },
+  {
+    "sql": "select 'çğ;ü'; select 'x'",
+    "stmts": [
+      "select 'çğ;ü'",
+      "select 'x'"
+    ]
+  },
+  {
+    "sql": "-- yalnızca yorum\n/* ve bu */",
+    "stmts": []
+  },
+  {
+    "sql": "",
+    "stmts": []
+  },
+  {
+    "sql": "select 'açık",
+    "stmts": [
+      "select 'açık"
+    ]
+  },
+  {
+    "sql": "select $$açık",
+    "stmts": [
+      "select $$açık"
+    ]
+  },
+  {
+    "sql": "select E'\\'; x'; select 2",
+    "stmts": [
+      "select E'\\'; x'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select e'\\'; x'; select 2",
+    "stmts": [
+      "select e'\\'; x'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select E'a\\'  b  from  c' as x; select 1",
+    "stmts": [
+      "select E'a\\'  b  from  c' as x",
+      "select 1"
+    ]
+  },
+  {
+    "sql": "select E'\\\\'; select 2",
+    "stmts": [
+      "select E'\\\\'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select E'\\\\\\'; x'; select 2",
+    "stmts": [
+      "select E'\\\\\\'; x'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select E'a''b\\';'; select 2",
+    "stmts": [
+      "select E'a''b\\';'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select E'😀\\'; 😀'; select 2",
+    "stmts": [
+      "select E'😀\\'; 😀'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select E'\\😀;'; select 2",
+    "stmts": [
+      "select E'\\😀;'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select E'açık\\'; select 2",
+    "stmts": [
+      "select E'açık\\'; select 2"
+    ]
+  },
+  {
+    "sql": "select E'\\",
+    "stmts": [
+      "select E'\\"
+    ]
+  },
+  {
+    "sql": "select name'x\\'; select 2",
+    "stmts": [
+      "select name'x\\'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select E 'x\\'; select 2",
+    "stmts": [
+      "select E 'x\\'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select 1e'x\\'; select 2",
+    "stmts": [
+      "select 1e'x\\'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select 😀e'x\\'; select 2",
+    "stmts": [
+      "select 😀e'x\\'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select ée'x\\'; select 2",
+    "stmts": [
+      "select ée'x\\'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select x=E'\\';'; select 2",
+    "stmts": [
+      "select x=E'\\';'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select $e'\\';'; select 2",
+    "stmts": [
+      "select $e'\\';'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select 'a'E'\\';'; select 2",
+    "stmts": [
+      "select 'a'E'\\';'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select (E'\\';'); select 2",
+    "stmts": [
+      "select (E'\\';')",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select U&'d\\0061'; select 2",
+    "stmts": [
+      "select U&'d\\0061'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select B'101', X'1F', N'x\\'; select 2",
+    "stmts": [
+      "select B'101', X'1F', N'x\\'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "select U&'\\'; select 2",
+    "stmts": [
+      "select U&'\\'",
+      "select 2"
+    ]
+  },
+  {
+    "sql": "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN true THEN 1 END; SELECT 2; END; SELECT 3",
+    "stmts": [
+      "CREATE FUNCTION f() RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT CASE WHEN true THEN 1 END; SELECT 2; END",
+      "SELECT 3"
+    ]
+  },
+  {
+    "sql": "select 1; select $t$ a; b $T$; c",
+    "stmts": [
+      "select 1",
+      "select $t$ a; b $T$; c"
+    ]
+  },
+  {
+    "sql": "select 1; /* a /* b */ ; select 2",
+    "stmts": [
+      "select 1"
+    ]
+  },
+  {
+    "sql": "select 1 /* a /* b */; x",
+    "stmts": [
+      "select 1 /* a /* b */; x"
+    ]
+  },
+  {
+    "sql": "create function f(a int) returns int language sql begin atomic select case when a > 0 then 1 end; end case; select 9",
+    "stmts": [
+      "create function f(a int) returns int language sql begin atomic select case when a > 0 then 1 end; end case",
+      "select 9"
+    ]
+  },
+  {
+    "sql": "create function f() returns int language sql begin atomic select 1; select 2;",
+    "stmts": [
+      "create function f() returns int language sql begin atomic select 1; select 2;"
+    ]
+  }
+]
