@@ -321,3 +321,36 @@ gerilemeyi yakalayacak kadar uzundur. Her yayından önce çalıştırın.
 Dosya önizleme ile içe aktarma arasında değiştirilirse sonuç değişebilir (uygulama aynı yolu yeniden okur; indeksler kayabilir).
 
 Query Tool arayüzü (Plan 6) için arka uç devir notları: `docs/query-tool-plan6-notes.md`.
+
+## Editör zekâsı testleri (Plan 7)
+
+Arka uç testleri `crates/pgt-query` içindedir; DB'li olanlar `PGT_TEST_URLS` ister (yoksa atlanır) ve listedeki her
+sunucuda ayrı çalışır, `scripts/test-matrix.ps1` hepsini PG 10–18'de koşar (2026-10-06 çalıştırması: 488 test geçti, 0
+başarısız, 1 `ignored` = Windows Credential Manager testi; tek `cargo test` çalıştırması 9 sunucuya birden bağlanır,
+sürüm başına ayrı sonuç satırı yoktur — bir test herhangi bir sürümde başarısız olursa çalıştırma düşer).
+
+| Dosya | Kapsam |
+|---|---|
+| `src/scope.rs` (birim, sunucusuz) | Kapsam çözümleyici: `FROM`/`JOIN` öğeleri, alias'lar, `AS`, çift tırnaklı ad/küçük harfe katlama, CTE (`RECURSIVE`, `MATERIALIZED`, kolon listesi), alt sorgu/`LATERAL`, `UPDATE … FROM`, `DELETE … USING`, `INSERT … RETURNING`, fonksiyon öğeleri, iç içe/korelasyonlu bloklar, bozuk sözdiziminde kısmi sonuç, yorum/dize içindeki sözcükler |
+| `tests/complete.rs` | Plan 5 tamamlama + Plan 7 `Scoped`: alias/tırnaklı ad/`search_path` çözümü (`scoped_resolves_aliases_quoted_names_and_search_path`), CTE ve alt sorgu kolonlarının Parse ile (çalıştırmadan) bulunması, transaction içinde Parse'ın transaction'a ve kilitlere dokunmaması, meşgulken boş liste |
+| `tests/check.rs` + `src/check.rs` | Hata denetimi: hiçbir şey çalıştırılmaz (`check_executes_nothing`: DDL/DML/`VACUUM`/`SET` Parse'ta yalnızca ham ayrıştırılır, PG 10–18), açık transaction'da durum/kilit/yan etki yok ve `Failed`'da denetim yok, kilitli tabloda 200 ms'de vazgeçme, denetim sürerken başlayan `run` BUSY almaz, meşgulken boş liste, konumlar Unicode scalar + önceki DDL bağlamında isim hataları bilgi düzeyi, uzun betikte görünür pencere (`CheckTarget`) |
+| `src/parse_guard.rs` (birim + DB) | Korumalı Parse: zaman aşımına uğrayan adımın iptal edilip sonucunun boşaltılması, bilinmeyen temizliğin yeniden denenmemesi ve kullanıcı savepoint'inin korunması, savepoint hatasında "bozuk" durum, bilinmeyen `SET lock_timeout` sonrası bekleyen geri yükleme (`restore_lock_timeout`) |
+| `src/session.rs` (birim + DB) | Plan 7 ekleri: kullanıcı işlemi arka plan işini (tamamlama/denetim) yola getirir (`user_operation_makes_background_work_yield`; `busy` yalnızca başka kullanıcı işlemi kilidi tutuyorsa, en çok 3 sn bekleme), `lock_timeout`'a dokunan ifadelerin tanınması (`lock_timeout_touching_statements`), doğrulanamayan geri yüklemenin bir sonraki kullanıcı SQL'inden önce uygulanması (`unconfirmed_lock_timeout_restore_is_applied_before_the_next_user_sql`) |
+| `tests/format.rs` + `tests/format/*.sql` | Biçimlendirici: 35 altın dosya çifti (`NN_ad.sql` → `NN_ad.expected.sql`), seçenek birleşimleri, korunan içerik bayt bayt aynı, `--` yorumu satırı bitirir, dize devamı, virgül/yorum, **fuzz** (belirteç eşitliği + eşkuvvetlilik, rastgele birleştirilmiş parçalar ve karakter çorbası), derin iç içelik taşma yapmaz, 5 MB üstü reddedilir, `ten_thousand_lines_are_fast` (10.000 satır: release < 200 ms, debug < 2 s) |
+| `crates/pgt-core` (birim) | `settings_editor_fields_round_trip_and_old_file_loads`: `AppSettings.checkEnabled` / `format` gidiş-dönüşü, eski `settings.json`'ın açılması, geçersiz biçim seçeneğinde yalnızca `format`'ın varsayılana dönmesi |
+
+Altın dosyaları bilerek yeniden üretmek için: `$env:PGT_BLESS = "1"; cargo test -p pgt-query --test format` (çıktıyı gözle
+inceleyin; bu değişken yokken testler karşılaştırır). Yalnızca biçimlendirici (sunucusuz, hızlı):
+`cargo test -p pgt-query --test format`; saf Rust süresi için `cargo test --release -p pgt-query --test format ten_thousand -- --nocapture`.
+Denetim ve kapsamlı tamamlama testleri için Docker'lı tek sunucu (yukarıdaki "Query Tool arka ucu" tarifi):
+`cargo test -p pgt-query --test check --test complete`  (oturum birim testleri için `cargo test -p pgt-query --lib`).
+
+Ön yüz (`bun run test`): `check-model.test.ts`, `format-edit.test.ts` (tablo yukarıda) ve genişletilen `completion.test.ts`
+(alias bağlamı, `Scoped` isteği, `statementBounds`). Lint katmanı/biçimlendir komutunun DOM kısmı elle/CDP ile
+doğrulanır (`docs/smoke-test.md` "Editör zekâsı").
+
+CDP ile Plan 7 ölçümü notları (Plan 6 yönteminin üstüne): CodeMirror'ın görünüm nesnesine `document.querySelector('.cm-content').cmTile.view`
+ile erişilir (bu CodeMirror sürümünde `cmView` değil `cmTile`); büyük belgeyi `view.dispatch({changes: …})` ile tek işlemde yerleştirin —
+`Input.insertText` çok satırlı metni satır satır işler ve belge boyutunun karesiyle yavaşlar (293 KB için 23 sn). `window.__TAURI_INTERNALS__.invoke`
+sarmalanamaz (Tauri'ye yazılamaz görünüyor); IPC sürelerini `window.fetch` (`ipc.localhost/<komut>`) sarmalayarak ölçün. Ctrl+Shift+F için
+`Input.dispatchKeyEvent` `modifiers: 10` (Ctrl 2 + Shift 8), `key: "F"`. Ölçüm betikleri depoda değildir.

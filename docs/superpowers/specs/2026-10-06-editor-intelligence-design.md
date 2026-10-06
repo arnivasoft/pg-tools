@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 3: Gelişmiş Editör Zekâsı Tasarımı
 
 - **Tarih:** 2026-10-06
-- **Durum:** İnceleme bekliyor
+- **Durum:** Uygulandı (Plan 7)
 - **Kapsam:** Query Tool editöründe alias/CTE/alt sorgu çözümlemeli tamamlama, sunucuda `PREPARE`/Parse ile yazarken hata altı çizme, kendi sözcük çözümleyicimiz üstünde SQL biçimlendirici
 - **Önceki alt proje:** Query Tool (`2026-10-06-query-tool-design.md`, Plan 5–6) — `main`'de.
 

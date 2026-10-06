@@ -339,3 +339,116 @@ Exe / kurulum paketi:
 | NSIS kurulum paketi `pg-tools_0.1.0_x64-setup.exe` | **3,56 MiB** (3.737.668 bayt; hedef < 15 MB) |
 
 Plan 3'e göre (3,24 MiB) NSIS +0,32 MiB; exe Plan 5'in 13,34 MiB'ine göre +0,15 MiB (cargo exe karşılaştırması).
+
+## Plan 7 sonu: editör zekâsı (2026-10-06)
+
+Plan 7 alias/CTE/alt sorgu tamamlaması, yazarken hata denetimi (sunucuda yalnızca Parse) ve SQL biçimlendiriciyi
+ekler. Yeni kod `pgt-query`'dedir (`scope`, `check`, `format`, `parse_guard`; yeni bağımlılık yok); ön yüzde
+lint katmanı ve biçimlendir komutu tembel yüklenen `QueryTab`/`codemirror-setup` parçalarındadır. Boşta bellek
+bu yüzden Plan 6'dan anlamlı farklı olmamalıdır. Aynı makinede (bkz. Ortam), seçilen ayarlarla (B + R1), **gerçek
+exe** (`bun run tauri build --no-bundle`; betikler `cargo build` exe'sini reddeder). Karar kuralı uygulanmadı.
+
+    bun run tauri build --no-bundle
+    powershell -NoProfile -File scripts/smoke-release.ps1    # BAŞARILI, çıkış kodu 0 (pencere 141 ms, 6 sn ayakta)
+    powershell -NoProfile -File scripts/measure.ps1 -Runs 5
+
+### Boşta (gerçek exe)
+
+| Çalıştırma | Pencere (ms) | Toplam özel WS (MiB) | Toplam WS (MiB) | Rust özel WS (MiB) | Süreç |
+|---|---|---|---|---|---|
+| 1 | 70 | 77,5 | 358,1 | 7,4 | 7 |
+| 2 | 43 | 78,6 | 359,8 | 7,3 | 7 |
+| 3 | 44 | 78,8 | 360,1 | 7,4 | 7 |
+| 4 | 30 | 76,2 | 357,4 | 7,4 | 7 |
+| 5 | 29 | 75,9 | 356,7 | 7,4 | 7 |
+| **Medyan** | **43** | **77,5** | 358,1 | **7,4** | 7 |
+
+Hedefler karşılandı (pencere < 1 sn, toplam özel WS < 150 MB, Rust < 30 MB). Plan 6'ya göre (76,1 / 7,4 MiB) +1,4 MiB
+fark ölçüm gürültüsü düzeyindedir (aynı exe türünde çalıştırmalar arası 75,9–78,8 MiB). Smoke'tan hemen sonraki ilk
+5 çalıştırmalık denemede 1. çalıştırma 475,2 MiB / 17 süreç ölçtü: bu sırada Docker Desktop yeniden başlatılıyordu ve
+betiğin süreç ağacı yöntemi dışarıdan gelen alt süreçleri de saymış görünüyor (süreç sayısı 7 yerine 17); bu
+çalıştırma hariç medyan 77,1 MiB'dı. Temiz yeniden çalıştırma yukarıdaki tablodur.
+
+### Yazarken denetim ve tamamlama gecikmeleri (CDP, gerçek exe)
+
+Yöntem: Plan 6 CDP yöntemi (`docs/testing.md` "GUI'nin CDP ile sürülmesi"): yalıtılmış `APPDATA`/`LOCALAPPDATA`,
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` = `tauri.conf.json` ayarları + `--remote-debugging-port`, atılabilir PG 18.6
+(Docker, 127.0.0.1, `app` şemasında 30 tablo: `orders(id,customer,total)`, `customers`, `items`, `t4…t30`), sunucu arayüzden
+"Sunucu ekle" ile kaydedildi (parola kaydedilmedi, parola istemi arayüzden dolduruldu), iş sonunda arayüzden silindi
+(`servers.json` boş doğrulandı). Süreler sayfa içinde `performance.now()` ile ölçüldü: son tuş vuruşunun
+`beforeinput` olayından, ilgili DOM öğesinin (`.cm-tooltip-autocomplete li`, `.cm-lint-error`) görünmesini yakalayan
+`MutationObserver`'a kadar; IPC süreleri `window.fetch` (`ipc.localhost/qt_*`) sarmalayıcısıyla. Tuş vuruşları
+`Input.insertText` / `Input.dispatchKeyEvent` ile gönderildi. Aralıklar tek çalıştırmanın (n örnek) en küçük–en büyük değeridir.
+
+| Ölçüm | n | Tuştan görünüre (ms) | `qt_complete` / `qt_check` IPC süresi (ms) | Spec §1.2 hedefi |
+|---|---|---|---|---|
+| Alias kolon tamamlaması `select o.` (`from app.orders o`), **önbellek sıcak** | 10 | 258–275 | 1,3–3,3 | < 150 ms |
+| Aynısı, **soğuk** (her biri o oturumda ilk kez istenen farklı tablo) | 10 | 263–274 | 3,0–3,8 | < 400 ms |
+| CTE sütunları `with x as (select …) select x.` — soğuk (gövde Parse edilir) / sıcak | 6 / 5 | 262–276 / 259–273 | 4,4–5,8 / 1,3–2,0 | (aynı) |
+| Alt sorgu sütunları `from (select …) s` + `s.` — soğuk | 4 | 261–275 | 4,4–4,9 | (aynı) |
+| Hata denetimi: son tuş → kırmızı işaret (`select * from no_such_table_n;`) | 12 | **613–628** | 4,5–5,4 (istek tuştan ~610–623 ms sonra çıkar) | ≤ 700 ms |
+
+- **Denetim: hedef karşılandı.** 600 ms debounce'a ~20 ms eklenir; `qt_check` (Parse) 5 ms sürer. Ölçümün büyük
+  kısmı debounce'tur.
+- **Tamamlama: arka uç hedefi çok aşar; tuştan-görünüre ölçümü sıcak hedefi (< 150 ms) aşar.** Arka uç yanıtı 1–6 ms'dir
+  (soğuk/sıcak, CTE/alt sorgu dahil), ama `qt_complete` isteği tuştan **~270 ms sonra** çıkar ve ölçüm sıcak/soğuk/CTE
+  için aynıdır: Plan 6'dan kalan tamamlama yolunda 150 ms'lik uygulama debounce'u (`completion.ts` `debounceMs`) ile
+  CodeMirror'ın yazarken etkinleştirme gecikmesi (varsayılan 100 ms) üst üste biner. Bu yüzden sıcak/soğuk farkı
+  ölçülemez; soğuk hedef (< 400 ms) karşılanır; sıcak hedef, "tuştan öneri listesine" okunursa **karşılanmaz** (270 ms),
+  isteğin yanıtı olarak okunursa (1–6 ms) karşılanır. Plan 7'de değiştirilmedi; açık iş olarak
+  `docs/smoke-test.md` "Editör zekâsı" sonunda listelenir (`.` tetiklemesinde debounce'u kaldırmak ~110 ms'ye indirmelidir; denenmedi).
+- Soğuk önbellek yalnızca ilk istekte ek ~2 ms (Parse yolunda ek ~3 ms) getirir; LAN gecikmesi ölçülmedi (127.0.0.1).
+
+### Biçimlendirme (CDP, gerçek exe)
+
+10.000 satırlık betikler (ifade + yorum satırı çiftleri), `qt_format` varsayılan seçeneklerle, 7 çalıştırma.
+
+| Girdi | Bayt | Çıktı satırı | `qt_format` gidiş-dönüş (ms) |
+|---|---|---|---|
+| 10.000 satır, kısa satırlar (~11 B/satır) | 111.555 | — | **23,7–24,7** |
+| 10.000 satır, orta (~74 B/satır) | 736.669 | 35.000 | **139,9–144,4** |
+| 10.000 satır, uzun (~120 B/satır, 3 JOIN'li ifade) | 1.195.559 | 50.000 | 221,7–230,1 |
+
+Saf Rust süresi (IPC ve sayfa olmadan): `cargo test --release -p pgt-query --test format ten_thousand -- --nocapture` (`ten_thousand_lines_are_fast`, 10.000 satır, ~58 B/satır, ifade/yorum/`DO`/emoji karışık) tek çalıştırmada **47 ms** (bütçe: release 200 ms, debug 2 s). Gidiş-dönüş farkı IPC dizge kopyalarıdır.
+
+Gidiş-dönüş = `window.__TAURI_INTERNALS__.invoke('qt_format')` çağrısından yanıta (1 MB'lık dizgelerin IPC
+serileştirmesi dahil; Rust tarafı `spawn_blocking`). Hedef < 200 ms: kısa ve orta satırlı betikte karşılanır;
+satır başına 120 B'lık 10.000 satırda (1,2 MB; gerçekçi betikten büyük) aşılır (~225 ms) — sınır olarak kayda geçti.
+Arayüzden (Ctrl+Shift+F, 10.000 satır / 737 KB belge, 3 deneme): tuş vuruşundan belgenin değişmesine **170–174 ms**;
+bu sırada en uzun `requestAnimationFrame` aralığı 32–38 ms, `longtask` (> 50 ms) yok — arayüz donmaz. Aynı belgede
+(10.000 satır, denetim açık) tek karakter yazmak sonraki kareye **9–12 ms** sürer; belgenin tek işlemle yerleştirilmesi 28 ms.
+
+> Not: CDP `Input.insertText` çok satırlı metni **satır satır** işlediğinden büyük belge yapıştırmak belge boyutunun
+> karesiyle yavaşlar (36 KB: 0,5 sn, 72 KB: 1,8 sn, 145 KB: 6,3 sn, 293 KB: 23 sn). Bu CDP'nin artefaktıdır
+> (`EditorView.dispatch` ile tek işlemde 10.000 satır 28 ms); uygulama davranışı olarak okunmamalı.
+
+### Bellek: Query Tool açık + denetim
+
+Taze yalıtılmış profille, sunucu bağlı, tek sorgu sekmesi, denetim açık (`measure.ps1` süreç ağacı yöntemi; MiB):
+
+| Durum | Toplam özel WS (MiB) | Rust özel WS (MiB) |
+|---|---|---|
+| Bağlı, sekme açık, bir sorgu çalıştırıldı, alias tamamlama + denetim kullanıldı | 95,2 | 7,6 |
+| + 10.000 satırlık (737 KB) betik editörde, denetim açık, ~10 sn sonra | 113,2 | 8,3 |
+
+Hedef (Query Tool açık + denetim < 250 MB) karşılandı. (Aynı oturumda defalarca 35.000 satırlık belgeler yüklenip
+biçimlendirilip sayfada 1,2 MB'lık dizgeler tutulan önceki çalıştırmada özel WS 583,7 MiB'a çıktı; temsilî olmadığından
+tabloya alınmadı, yalnızca aşırı kullanımın WebView2 yığınını büyüttüğünün kaydıdır.)
+
+### Paket boyutları
+
+`bun run build` (vite), `dist/assets`:
+
+| Parça | Plan 6 sonu | Plan 7 sonu |
+|---|---|---|
+| `index` (ana) | 228,09 kB (gz 73,83) | **229,04 kB (gz 74,21)** — +0,95 kB (dizgeler/saf modeller; CodeMirror ana pakete girmedi) |
+| `QueryTab` (lazy) | 78,37 kB (gz 26,30) | 90,59 kB (gz 30,02) |
+| `codemirror-setup` (lazy) | 351,57 kB (gz 115,94) | 357,07 kB (gz 117,53) |
+| CSS | 22,35 kB | 22,46 kB |
+
+| | Boyut |
+|---|---|
+| `target\release\pg-tools.exe` (`bun run tauri build --no-bundle`, ön yüz gömülü) | 14,19 MiB (14.884.352 bayt); Plan 6'ya göre +0,49 MiB (13,70 → 14,19) |
+
+NSIS paketi bu çalıştırmada üretilmedi (`--no-bundle`); exe farkı kadar büyümesi beklenir (sıkıştırılmış < 0,5 MiB),
+15 MB hedefinin çok altında.
