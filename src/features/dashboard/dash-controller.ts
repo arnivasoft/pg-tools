@@ -15,13 +15,16 @@ import type { SignalOutcome } from "../../ipc/bindings/SignalOutcome";
 import type { Statements } from "../../ipc/bindings/Statements";
 import type { StatementsOrder } from "../../ipc/bindings/StatementsOrder";
 import type { Api } from "../../ipc/commands";
+import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import { toPayload } from "../../ipc/errors";
 import { SampleRing, toRates, type RateSeries } from "./dash-model";
-import { DEFAULT_INTERVAL_MS, createPoller, defaultPollerDeps, type Poller, type PollerDeps } from "./poller";
+import { DEFAULT_INTERVAL_MS, MIN_INTERVAL_MS, createPoller, defaultPollerDeps, type Poller, type PollerDeps } from "./poller";
 import { revalidate, signalWarnings, type SignalWarning } from "./signal-model";
 
 export type DashStatus = "connecting" | "ready" | "lost" | "gone"; // gone: sunucu silindi
 export type Section = "overview" | "sessions" | "locks" | "settings" | "statements";
+/** Hata anahtarı: bölümler + görünür sekmesi olmayan talep üzerine listeler (`prepared`). */
+export type ErrorKey = Section | "prepared";
 
 export interface DashModel {
   /** Sekme kimliği (arka uç `DashId`'si `info.id`). */
@@ -48,7 +51,7 @@ export interface DashModel {
   statements: Statements | null;
   statementsOrder: StatementsOrder;
   /** Bölüm başına son hata (önceki veri korunur). */
-  sectionError: Partial<Record<Section, string>>;
+  sectionError: Partial<Record<ErrorKey, string>>;
   /** İptal/sonlandırma isteği uçuşta (düğmeler kapalı). */
   signaling: boolean;
 }
@@ -78,6 +81,20 @@ const LOST_CODES = new Set(["not_found", "not_connected", "connection_lost"]);
 const GONE_CODES = new Set(["unknown_server"]);
 
 const emptyRates = (): RateSeries => toRates([], 1);
+
+/**
+ * Kullanıcıya gösterilecek hata metni. SQL hatalarında (`code === "query"`) arka uç dostça `message`'ı verir, PostgreSQL'in
+ * kendi metni `detail`'dadır (ör. 42501 için "permission denied …"): ikisi (ve varsa ipucu) birlikte gösterilir.
+ */
+export function errorText(p: ErrorPayload): string {
+  if (p.code !== "query") return p.message;
+  return [p.message, p.detail, p.hint].filter(Boolean).join(" — ");
+}
+
+/** Geçersiz aralık (0, negatif) → en az `MIN_INTERVAL_MS`; sonlu değilse (NaN) varsayılan. */
+export function clampInterval(ms: number): number {
+  return Number.isFinite(ms) ? Math.max(MIN_INTERVAL_MS, ms) : DEFAULT_INTERVAL_MS;
+}
 
 function gate<Req, Res>(fallback: Res) {
   const [req, setReq] = createSignal<{ value: Req; resolve: (r: Res) => void } | null>(null);
@@ -126,7 +143,28 @@ export function createDashController(deps: DashControllerDeps) {
   /** Yanıt hâlâ geçerli mi: sekme açık ve aynı kuşak. */
   const alive = (tabId: string, e: Entry, gen: number) => entries.get(tabId) === e && e.gen === gen;
 
-  const syncPoller = (e: Entry) => e.poller.setActive(e.tabActive && e.model().status === "ready");
+  const syncPoller = (e: Entry) => {
+    const m = e.model();
+    const on = e.tabActive && m.status === "ready";
+    e.poller.setActive(on);
+    // Arka planda `settings` bölümüne geçildiyse talep üzerine yükleme etkinleşince yapılır.
+    if (on && m.section === "settings" && m.settings === null) void loadSettings(m.id);
+  };
+
+  /**
+   * Liste bölümü vadesinde mi. Yarım tur pay: aksi halde 2 sn aralıkta liste 5 sn yerine bir sonraki tam tur katında
+   * (6 sn) yenilenirdi; pay ile en yakın tura (4 sn) yuvarlanır; 10 sn aralıkta her tur.
+   */
+  const listDue = (e: Entry, section: Section, now: number) => {
+    const at = e.listAt[section];
+    const ms = e.model().intervalMs;
+    return at === undefined || now - at >= Math.max(LIST_MIN_MS, ms) - ms / 2;
+  };
+
+  /** Hemen tur: yalnızca sekme etkin ve hazırken (görünürlük kuralı poller'da); değilse dönüşteki tur getirir. */
+  const kick = (e: Entry) => {
+    if (e.tabActive && e.model().status === "ready") e.poller.refreshNow();
+  };
 
   /** Kimlik artık kullanılamaz: durum `lost`/`gone`, yenileme durur, uçuştaki yanıtlar yoksayılır. */
   const markDown = (e: Entry, status: "lost" | "gone", error: string | null) => {
@@ -139,13 +177,13 @@ export function createDashController(deps: DashControllerDeps) {
   };
 
   /** Hata `code`una göre: kayıp → durum; aksi halde `sectionError[section]` (veri korunur). */
-  const fail = (e: Entry, section: Section, err: unknown) => {
+  const fail = (e: Entry, section: ErrorKey, err: unknown) => {
     const p = toPayload(err);
     if (GONE_CODES.has(p.code)) return markDown(e, "gone", p.message);
     if (LOST_CODES.has(p.code)) return markDown(e, "lost", p.message);
-    update(e, (m) => ({ ...m, sectionError: { ...m.sectionError, [section]: p.message } }));
+    update(e, (m) => ({ ...m, sectionError: { ...m.sectionError, [section]: errorText(p) } }));
   };
-  const clearError = (m: DashModel, section: Section): Partial<Record<Section, string>> => {
+  const clearError = (m: DashModel, section: ErrorKey): Partial<Record<ErrorKey, string>> => {
     if (!(section in m.sectionError)) return m.sectionError;
     const next = { ...m.sectionError };
     delete next[section];
@@ -157,7 +195,7 @@ export function createDashController(deps: DashControllerDeps) {
    * Özet + örnek aynı bölüm hatasını paylaştığından ikisi birlikte başarılıysa silinir (bkz. `tick`).
    */
   const request = async <T>(
-    tabId: string, e: Entry, gen: number, section: Section, p: Promise<T>,
+    tabId: string, e: Entry, gen: number, section: ErrorKey, p: Promise<T>,
     apply: (m: DashModel, v: T) => Partial<DashModel>, clear = true,
   ): Promise<boolean> => {
     try {
@@ -189,8 +227,7 @@ export function createDashController(deps: DashControllerDeps) {
     const jobs: Promise<unknown>[] = [head];
     const now = pd.now();
     const due = (s: Section) => {
-      const at = e.listAt[s];
-      if (at !== undefined && now - at < Math.max(LIST_MIN_MS, m.intervalMs)) return false;
+      if (!listDue(e, s, now)) return false;
       e.listAt[s] = now;
       return true;
     };
@@ -218,7 +255,7 @@ export function createDashController(deps: DashControllerDeps) {
     e.loading.add(kind);
     try {
       if (kind === "settings") await request(tabId, e, e.gen, "settings", api.dashSettings(m.info.id), (_, settings) => ({ settings }));
-      else await request(tabId, e, e.gen, "settings", api.dashPrepared(m.info.id), (_, prepared) => ({ prepared }));
+      else await request(tabId, e, e.gen, "prepared", api.dashPrepared(m.info.id), (_, prepared) => ({ prepared }));
     } finally {
       e.loading.delete(kind);
     }
@@ -329,16 +366,13 @@ export function createDashController(deps: DashControllerDeps) {
     if (!e || e.model().section === section) return;
     patch(e, { section });
     if (section === "settings") {
-      if (e.model().settings === null) void loadSettings(tabId);
+      if (e.tabActive && e.model().settings === null) void loadSettings(tabId); // arka planda: etkinleşince (syncPoller)
       return;
     }
-    // Liste bölümüne giriş: bayatsa hemen yenile (tek uçuşta kuralıyla).
-    if (section !== "overview") {
-      const at = e.listAt[section];
-      if (at === undefined || pd.now() - at >= Math.max(LIST_MIN_MS, e.model().intervalMs)) {
-        delete e.listAt[section];
-        if (e.model().status === "ready") e.poller.refreshNow();
-      }
+    // Liste bölümüne giriş: bayatsa hemen yenile (tek uçuşta kuralıyla); etkin değilse dönüşteki tur getirir.
+    if (section !== "overview" && listDue(e, section, pd.now())) {
+      delete e.listAt[section];
+      kick(e);
     }
   };
 
@@ -352,8 +386,9 @@ export function createDashController(deps: DashControllerDeps) {
   const setIntervalMs = (tabId: string, intervalMs: number) => {
     const e = entries.get(tabId);
     if (!e) return;
-    patch(e, { intervalMs });
-    e.poller.setIntervalMs(intervalMs);
+    const ms = clampInterval(intervalMs);
+    patch(e, { intervalMs: ms });
+    e.poller.setIntervalMs(ms);
   };
 
   /** Elle "Yenile": açık bölümün listesi de beklemeden istenir. */
@@ -362,7 +397,8 @@ export function createDashController(deps: DashControllerDeps) {
     const m = e?.model();
     if (!e || !m || m.status !== "ready") return;
     delete e.listAt[m.section];
-    e.poller.refreshNow();
+    if (!e.tabActive) return;
+    kick(e);
     if (m.section === "settings") void loadSettings(tabId);
   };
 
@@ -371,7 +407,7 @@ export function createDashController(deps: DashControllerDeps) {
     if (!e || e.model().statementsOrder === order) return;
     patch(e, { statementsOrder: order });
     delete e.listAt.statements;
-    if (e.model().status === "ready") e.poller.refreshNow();
+    kick(e);
   };
 
   // ---- iptal / sonlandırma
@@ -396,12 +432,17 @@ export function createDashController(deps: DashControllerDeps) {
         if (!alive(tabId, e, gen)) return "error";
         const p = toPayload(err);
         if (LOST_CODES.has(p.code) || GONE_CODES.has(p.code)) fail(e, "sessions", err);
-        else notify(p.message, "error");
+        else notify(errorText(p), "error");
         return "error";
       }
       if (!alive(tabId, e, gen)) return "error";
       patch(e, { activity: live });
       const check = revalidate(row, live.rows);
+      if (!check.ok && check.reason === "gone" && live.truncated) {
+        // Liste kesildi: pid kesimin ötesinde olabilir; "oturum yok" denemez, işlem yapılmaz.
+        notify(t.dashboard.signal.unverified, "error");
+        return "error";
+      }
       if (!check.ok) {
         notify(check.reason === "gone" ? t.dashboard.signal.notFound : t.dashboard.signal.changed, "info");
         return check.reason === "gone" ? "notFound" : "changed";
@@ -416,9 +457,8 @@ export function createDashController(deps: DashControllerDeps) {
           fail(e, "sessions", err);
           return "error";
         }
-        if (p.code === "42501") notify(t.dashboard.signal.noPrivilege, "error");
-        else if (p.code === "invalid") notify(t.dashboard.signal.ownSession, "error");
-        else notify(p.message, "error");
+        // Yetki hatası (SQLSTATE 42501) `code: "query"` ile gelir: dostça metin + PostgreSQL'in metni (`errorText`).
+        notify(p.code === "invalid" ? t.dashboard.signal.ownSession : errorText(p), "error");
         return "error";
       }
       if (!alive(tabId, e, gen)) return outcome === "sent" ? "sent" : "notFound";
@@ -430,7 +470,8 @@ export function createDashController(deps: DashControllerDeps) {
       notify(t.dashboard.signal.notFound, "info");
       return "notFound";
     } finally {
-      if (entries.get(tabId) === e) patch(e, { signaling: false });
+      // Kuşak değiştiyse (kayıp/yeniden açma) bayrak orada sıfırlandı; yeni kuşağın sinyaline dokunulmaz.
+      if (alive(tabId, e, gen)) patch(e, { signaling: false });
     }
   };
 

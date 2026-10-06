@@ -145,18 +145,22 @@ describe("dash-controller açma ve tur", () => {
     await flush();
     expect(s.api.dashActivity).toHaveBeenCalledTimes(1);
     expect(s.ctl.model(id)?.activity?.rows).toHaveLength(2);
-    // grafik 2 sn'de bir, liste en erken 5 sn'de bir
-    await vi.advanceTimersByTimeAsync(4000);
+    // grafik 2 sn'de bir; liste max(5000, aralık) − yarım tur = 4 sn'de vadesine girer (6 sn'ye kaymaz)
+    await vi.advanceTimersByTimeAsync(2000);
     expect(s.api.dashActivity).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(2000);
     expect(s.api.dashActivity).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(s.api.dashActivity).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(s.api.dashActivity).toHaveBeenCalledTimes(3);
     expect(s.api.dashLocks).not.toHaveBeenCalled();
 
     s.ctl.setSection(id, "locks");
     await flush();
     expect(s.api.dashLocks).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(s.api.dashActivity).toHaveBeenCalledTimes(2);
+    expect(s.api.dashActivity).toHaveBeenCalledTimes(3);
 
     s.ctl.setSection(id, "statements");
     await flush();
@@ -179,6 +183,59 @@ describe("dash-controller açma ve tur", () => {
     expect(s.ctl.model(id)?.intervalMs).toBe(10_000);
   });
 
+  it("aralık 1 sn ise liste 5 sn'de bir; geçersiz aralık sınırlanır (0/negatif → 1 sn, NaN → 2 sn)", async () => {
+    const s = setup();
+    const id = await openActive(s);
+    s.ctl.setIntervalMs(id, 1000);
+    s.ctl.setSection(id, "sessions");
+    await flush();
+    expect(s.api.dashActivity).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(s.api.dashActivity).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(s.api.dashActivity).toHaveBeenCalledTimes(2);
+
+    s.ctl.setIntervalMs(id, 0);
+    expect(s.ctl.model(id)?.intervalMs).toBe(1000);
+    s.ctl.setIntervalMs(id, -500);
+    expect(s.ctl.model(id)?.intervalMs).toBe(1000);
+    s.ctl.setIntervalMs(id, Number.NaN);
+    expect(s.ctl.model(id)?.intervalMs).toBe(2000);
+    // sıkı döngü yok: 2 sn'de bir örnek
+    const n = s.api.dashSample.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(s.api.dashSample.mock.calls.length - n).toBeLessThanOrEqual(5);
+  });
+
+  it("etkin olmayan sekmede bölüm/sıralama değişimi istek yapmaz; etkinleşince yeni bölüm hemen çekilir", async () => {
+    const s = setup();
+    const id = await openActive(s);
+    s.ctl.setActive(null);
+    s.ctl.setSection(id, "sessions");
+    s.ctl.refreshNow(id);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(s.api.dashActivity).not.toHaveBeenCalled();
+    s.ctl.setSection(id, "statements");
+    s.ctl.setStatementsOrder(id, "calls");
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(s.api.dashStatements).not.toHaveBeenCalled();
+    s.ctl.setSection(id, "settings");
+    await flush();
+    expect(s.api.dashSettings).not.toHaveBeenCalled();
+    const n = s.api.dashSample.mock.calls.length;
+    s.ctl.setActive(id);
+    await flush();
+    expect(s.api.dashSample.mock.calls.length).toBe(n + 1);
+    expect(s.api.dashSettings).toHaveBeenCalledTimes(1); // arka planda girilen settings etkinleşince
+    s.ctl.setActive(null);
+    s.ctl.setSection(id, "statements");
+    s.ctl.setActive(id);
+    await flush();
+    expect(s.api.dashStatements).toHaveBeenCalledTimes(1);
+    expect(s.api.dashStatements).toHaveBeenCalledWith("D1", "calls");
+    expect(s.api.dashActivity).not.toHaveBeenCalled();
+  });
+
   it("settings yalnızca talep üzerine: bölüme girişte bir kez, otomatik turda yok, elle Yenile ile yeniden", async () => {
     const s = setup();
     const id = await openActive(s);
@@ -198,6 +255,11 @@ describe("dash-controller açma ve tur", () => {
     await s.ctl.loadPrepared(id);
     expect(s.api.dashPrepared).toHaveBeenCalledWith("D1");
     expect(s.ctl.model(id)?.prepared).toEqual([]);
+    // prepared hatası kendi anahtarına yazılır, settings'i kirletmez
+    s.api.dashPrepared.mockRejectedValueOnce(err("timeout"));
+    await s.ctl.loadPrepared(id);
+    expect(s.ctl.model(id)?.sectionError).toEqual({ prepared: "m:timeout" });
+    expect(s.ctl.model(id)?.prepared).toEqual([]);
   });
 
   it("bölüm hatası öncekı veriyi korur ve sectionError'a yazar", async () => {
@@ -207,13 +269,13 @@ describe("dash-controller açma ve tur", () => {
     await flush();
     const data = s.ctl.model(id)?.activity;
     expect(data?.rows).toHaveLength(2);
-    await vi.advanceTimersByTimeAsync(4000); // 2. ve 4. sn turları: liste henüz vadesinde değil
-    s.api.dashActivity.mockRejectedValueOnce(err("query"));
+    await vi.advanceTimersByTimeAsync(2000); // 2. sn turu: liste henüz vadesinde değil
+    s.api.dashActivity.mockRejectedValueOnce({ ...err("query"), detail: "permission denied for view x" });
     s.api.dashOverview.mockRejectedValueOnce(err("timeout"));
-    await vi.advanceTimersByTimeAsync(2000); // 6. sn: özet hatası + liste hatası aynı turda
+    await vi.advanceTimersByTimeAsync(2000); // 4. sn: özet hatası + liste hatası aynı turda
     const m = s.ctl.model(id)!;
     expect(m.activity).toBe(data);
-    expect(m.sectionError.sessions).toBe("m:query");
+    expect(m.sectionError.sessions).toBe("m:query — permission denied for view x");
     expect(m.sectionError.overview).toBe("m:timeout");
     expect(m.overview).toEqual(overview);
     expect(m.status).toBe("ready");
@@ -295,6 +357,28 @@ describe("dash-controller kayıp / kapatma", () => {
     expect(s.ctl.model(id)?.status).toBe("lost");
   });
 
+  it("reopen sonrası eski DashId'nin yanıtı yoksayılır", async () => {
+    const s = setup();
+    const id = await openActive(s);
+    const d = deferred<Sample>();
+    s.api.dashSample.mockReturnValueOnce(d.promise);
+    await vi.advanceTimersByTimeAsync(2000); // D1 örneği uçuşta
+    s.ctl.serverSessionsClosed("S1", false);
+    expect(s.ctl.model(id)?.status).toBe("lost");
+    await s.ctl.reopen(id);
+    await flush();
+    expect(s.ctl.model(id)?.info?.id).toBe("D2");
+    // eski tur hâlâ uçuşta: yeni kuşağın ilk turu onun bitişini bekler (tek uçuşta)
+    expect(s.ctl.model(id)?.ring.samples()).toHaveLength(0);
+    d.resolve(sample());
+    await flush();
+    // D1 örneği yazılmadı; yalnızca D2'nin ilk örneği var
+    expect(s.ctl.model(id)?.ring.samples()).toHaveLength(1);
+    expect(s.api.dashSample).toHaveBeenLastCalledWith("D2");
+    expect(s.ctl.model(id)?.info?.id).toBe("D2");
+    expect(s.ctl.model(id)?.status).toBe("ready");
+  });
+
   it("close: dash_close çağrılır; uçuştaki yanıt modeli bozmaz", async () => {
     const s = setup();
     const ov = deferred<Overview>();
@@ -344,7 +428,7 @@ describe("dash-controller sinyal", () => {
     return { ...s, id };
   }
 
-  it("signal: sent / notFound / 42501 hatası → durum + uygun toast; çift çağrı (uçuşta) ikinci sinyali göndermez", async () => {
+  it("signal: sent / notFound / yetki (query) hatası → durum + uygun toast; çift çağrı (uçuşta) ikinci sinyali göndermez", async () => {
     const s = await ready();
     const overviewCalls = s.api.dashOverview.mock.calls.length;
     expect(await s.ctl.signal(s.id, row(10), "cancel")).toBe("sent");
@@ -358,9 +442,15 @@ describe("dash-controller sinyal", () => {
     expect(await s.ctl.signal(s.id, row(10), "terminate")).toBe("notFound");
     expect(s.notify).toHaveBeenLastCalledWith(t.dashboard.signal.notFound, "info");
 
-    s.api.dashSignal.mockRejectedValueOnce(err("42501"));
+    // SQLSTATE 42501 arka uçtan `code: "query"` ile gelir: dostça metin + PostgreSQL'in metni birlikte
+    s.api.dashSignal.mockRejectedValueOnce({
+      code: "query", message: "Bu işlem için yetkiniz yok.", detail: "permission denied to terminate process", hint: null,
+    });
     expect(await s.ctl.signal(s.id, row(10), "terminate")).toBe("error");
-    expect(s.notify).toHaveBeenLastCalledWith(t.dashboard.signal.noPrivilege, "error");
+    const text = s.notify.mock.calls.at(-1)?.[0] as string;
+    expect(text).toContain("Bu işlem için yetkiniz yok.");
+    expect(text).toContain("permission denied to terminate process");
+    expect(s.notify.mock.calls.at(-1)?.[1]).toBe("error");
 
     s.api.dashSignal.mockRejectedValueOnce(err("invalid"));
     expect(await s.ctl.signal(s.id, row(10), "cancel")).toBe("error");
@@ -394,9 +484,14 @@ describe("dash-controller sinyal", () => {
     s.api.dashActivity.mockResolvedValueOnce({ rows: [row(10, { user: "bob" })], truncated: false });
     expect(await s.ctl.signal(s.id, row(10), "terminate")).toBe("changed");
     expect(s.notify).toHaveBeenLastCalledWith(t.dashboard.signal.changed, "info");
-    // canlı liste alınamadı → gönderilmez
-    s.api.dashActivity.mockRejectedValueOnce(err("query"));
+    // kesilmiş listede pid yok → "oturum yok" denmez, doğrulanamadı
+    s.api.dashActivity.mockResolvedValueOnce({ rows: [row(11)], truncated: true });
+    expect(await s.ctl.signal(s.id, row(10), "terminate")).toBe("error");
+    expect(s.notify).toHaveBeenLastCalledWith(t.dashboard.signal.unverified, "error");
+    // canlı liste alınamadı → gönderilmez; SQL hatası ayrıntısıyla
+    s.api.dashActivity.mockRejectedValueOnce({ ...err("query"), detail: "d", hint: "h" });
     expect(await s.ctl.signal(s.id, row(10), "cancel")).toBe("error");
+    expect(s.notify).toHaveBeenLastCalledWith("m:query — d — h", "error");
     expect(s.api.dashSignal).not.toHaveBeenCalled();
     // canlı liste en taze haliyle modele yazılır
     s.api.dashActivity.mockResolvedValueOnce({ rows: [row(10), row(12)], truncated: false });
@@ -413,6 +508,31 @@ describe("dash-controller sinyal", () => {
     expect(s.notify).not.toHaveBeenCalled();
     expect(await s.ctl.signal(s.id, row(10), "cancel")).toBe("error"); // lost: gönderilmez
     expect(s.api.dashSignal).toHaveBeenCalledTimes(1);
+  });
+
+  it("signaling kuşağa bağlı: eski sinyalin bitişi yeni kuşağın uçuştaki sinyalini serbest bırakmaz", async () => {
+    const s = await ready();
+    const d1 = deferred<"sent">();
+    const d2 = deferred<"sent">();
+    s.api.dashSignal.mockReturnValueOnce(d1.promise as never).mockReturnValueOnce(d2.promise as never);
+    const first = s.ctl.signal(s.id, row(10), "cancel");
+    await flush();
+    expect(s.api.dashSignal).toHaveBeenCalledTimes(1);
+    s.ctl.serverSessionsClosed("S1", false);
+    expect(s.ctl.model(s.id)?.signaling).toBe(false);
+    await s.ctl.reopen(s.id);
+    const second = s.ctl.signal(s.id, row(10), "cancel");
+    await flush();
+    expect(s.api.dashSignal).toHaveBeenCalledTimes(2);
+    expect(s.api.dashSignal).toHaveBeenLastCalledWith("D2", 10, "cancel");
+    d1.resolve("sent");
+    expect(await first).toBe("sent");
+    expect(s.ctl.model(s.id)?.signaling).toBe(true);
+    expect(await s.ctl.signal(s.id, row(10), "cancel")).toBe("busy");
+    expect(s.api.dashSignal).toHaveBeenCalledTimes(2);
+    d2.resolve("sent");
+    expect(await second).toBe("sent");
+    expect(s.ctl.model(s.id)?.signaling).toBe(false);
   });
 
   it("sekme kapandıktan sonra gelen sinyal yanıtı toast üretmez", async () => {

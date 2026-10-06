@@ -16,12 +16,17 @@ export interface Poller {
   setActive(on: boolean): void;
   setPaused(on: boolean): void;
   setIntervalMs(ms: number): void;
-  /** Hemen bir tur; tur sürüyorsa bitince bir tur daha (birleştirilir, aynı anda iki tur yok). */
+  /**
+   * Hemen bir tur; tur sürüyorsa bitince bir tur daha (birleştirilir, aynı anda iki tur yok). Etkin değil ya da gizliyse
+   * no-op (dönüşteki tur karşılar); duraklatılmışken elle yenileme tek tur yapar.
+   */
   refreshNow(): void;
   dispose(): void;
 }
 
 export const DEFAULT_INTERVAL_MS = 2000;
+/** Arayüzdeki en kısa seçenek (1 sn). */
+export const MIN_INTERVAL_MS = 1000;
 
 /** Tarayıcı varsayılanları; `document` yoksa (test/node) hep görünür sayılır. */
 export function defaultPollerDeps(): PollerDeps {
@@ -118,13 +123,16 @@ export function createPoller(deps: PollerDeps, tick: () => Promise<void>): Polle
       paused = on;
       reconcile();
     },
-    setIntervalMs(ms) {
+    setIntervalMs(raw) {
+      // Savunma: 0/negatif/NaN sıkı döngü kurmasın.
+      const ms = Number.isFinite(raw) && raw > 0 ? Math.max(MIN_INTERVAL_MS, raw) : DEFAULT_INTERVAL_MS;
       if (ms === intervalMs) return;
       intervalMs = ms;
       // Kurulu zamanlayıcı yeni aralıkla yeniden kurulur (tek zamanlayıcı); tur sürüyorsa bitince kurulur.
       if (timer !== null) schedule();
     },
     refreshNow() {
+      if (!active || !deps.visible()) return;
       void run();
     },
     dispose() {

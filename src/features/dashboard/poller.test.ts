@@ -220,6 +220,45 @@ describe("poller", () => {
     p.dispose();
   });
 
+  it("refreshNow etkin değilken ya da gizliyken tur yapmaz", async () => {
+    const f = fakeDeps();
+    const tick = vi.fn(async () => {});
+    const p = createPoller(f.deps, tick);
+    p.refreshNow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tick).not.toHaveBeenCalled();
+    f.setVisible(false);
+    p.setActive(true);
+    p.refreshNow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tick).not.toHaveBeenCalled();
+    f.setVisible(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(tick).toHaveBeenCalledTimes(1);
+    p.dispose();
+  });
+
+  it("geçersiz aralık (0, negatif, NaN) varsayılana döner; sıkı döngü yok", async () => {
+    const f = fakeDeps();
+    const tick = vi.fn(async () => {});
+    const p = createPoller(f.deps, tick);
+    p.setActive(true);
+    await vi.advanceTimersByTimeAsync(0);
+    for (const bad of [0, -100, Number.NaN]) {
+      p.setIntervalMs(bad);
+      const n = tick.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(tick.mock.calls.length).toBe(n);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(tick.mock.calls.length).toBe(n + 1);
+    }
+    p.setIntervalMs(10); // 1 sn altı → 1 sn
+    const n = tick.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(tick.mock.calls.length - n).toBeLessThanOrEqual(2);
+    p.dispose();
+  });
+
   it("duraklatılmışken refreshNow tek tur yapar ama zamanlayıcı kurmaz", async () => {
     const f = fakeDeps();
     const tick = vi.fn(async () => {});

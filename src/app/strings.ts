@@ -341,7 +341,7 @@ export const t = {
         kind === "cancel" ? "İptal isteği gönderildi." : "Sonlandırma isteği gönderildi.",
       notFound: "Oturum artık yok.",
       changed: "Bu pid artık başka bir oturuma ait; işlem yapılmadı.",
-      noPrivilege: "Bu oturumu durdurma yetkiniz yok (yalnızca kendi oturumlarınız ya da pg_signal_backend üyeliği).",
+      unverified: "Oturum doğrulanamadı (liste kesildi); işlem yapılmadı.",
       ownSession: "Kendi dashboard oturumunuzu durduramazsınız.",
     },
   },
