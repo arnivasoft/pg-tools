@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 5: Nesne Oluşturma / Düzenleme Diyalogları Tasarımı
 
 - **Tarih:** 2026-10-06
-- **Durum:** Plan 10–11 uygulandı; Plan 12–13 kalan
+- **Durum:** Plan 10–12 (arka uç Table dahil) uygulandı; Plan 13 (Table arayüzü), Plan 14 (View/MatView, Database, Role) kalan
 - **Kapsam:** Object Explorer'dan nesne **oluşturma, düzenleme, yeniden adlandırma, silme** (Schema, Sequence, Extension, Index, Table/Column/Constraint, View/Materialized View, Database, Role); önizlemeli, korumalı DDL uygulaması
 - **Önceki alt projeler:** Object Explorer (Plan 1–4), Query Tool (5–6), Editör zekâsı (7), Dashboard (8–9) — hepsi `main`'de.
 - **Teslim planları:** Plan 10 (arka uç çerçevesi + Schema, Sequence, Extension, Index) → Plan 11 (ön yüz çerçevesi + aynı dört tür) → Plan 12 (Table arka ucu: kolon/kısıt farkı) → Plan 13 (Table arayüzü) → Plan 14 (View/MatView, Database, Role).
@@ -65,6 +65,7 @@ Object Explorer salt okunurdu; Query Tool SQL yazdırır ama nesne tanımlamak i
   - Tablespace kaldırılamaz (yalnızca değiştirilebilir): varsayılana dönmek için `pg_default` açıkça seçilir.
   - `ApplyOutcome::Applied.created` yeni nesnenin kimliğini (en iyi çaba), `ApplyOutcome::Failed.position` PG hata konumunu (başarısız ifadenin metninde 1 tabanlı karakter sapması) taşır; `DdlTarget.refreshNodeId` uygulamadan sonra yenilenecek ağaç düğümüdür; yüklenen `IndexDef.valid` geçersiz (INVALID) indeksi işaretler.
   - İndeks yapısal değişikliği tek transaction'da `DROP INDEX` + `CREATE INDEX`'tir (tablo, işlem bitene kadar okuma/yazmaya kapalı kalır); kesintisiz yeniden kurma ileri bir plana ertelendi.
+  - **Table arka ucu (Plan 12) sözleşme notları (arayüz Plan 13 için):** `ColumnDef.attnum` ve `ConstraintDef.oid` yalnızca yükleme kimliğidir (alter eşlemesi içindir; yeni satırda boş bırakılır, istemci üretmez). `ColumnDef.dataType` serbest SQL değil, katı dilbilgisiyle doğrulanan tip ifadesi metnidir (ör. `numeric(10,2)`, `public.mytype`, `int4[]`). `DdlTarget.focus` yalnızca kolon/kısıt düğümünde dolar (`column`/`constraint` + `id`); hedef yine tablo `object`'idir. **Odak koruması:** `focus` doluyken drop ve rename eylemleri reddedilir (kolon/kısıt düğümü hiçbir zaman DROP TABLE diyaloğu açmaz; `designer-open.ts` + test); Plan 13 bu korumayı korumalı, kolon/kısıt silme tablo diyaloğu içinden yapılır. Alter'da `ApplyOutcome::Applied.created` tablo için yeni (yeniden adlandırılmış/şeması değişmiş) tablo kimliğini taşır; kolon/kısıt eklemeleri ayrı `created` üretmez. Bölüm düğümleri Table olarak düzenlenebilir (`isPartition`: yalnızca yeniden adlandırma/şema/sahip/tablespace/yorum; kolon/kısıt değişikliği doğrulama hatası). `defaults(Table)` `columns = []` döndürür ve `create` en az bir kolon ister. Geçici: `DesignerView` formu olmayan tür için "form henüz yok" koruması gösterir (`tdes.view.formMissing`); Plan 13 kaldırır. `ddl-kinds.ts` kümelerinde `table` Plan 13'e kadar yoktur (menüde tablo eylemi çıkmaz).
 
 ## 3. Plan ve risk modeli
 
@@ -119,5 +120,6 @@ Her türde ortak: **Ad, Sahip (rol listesi), Yorum**; düzenlemede **Yeniden adl
 
 - **Plan 10 (çerçeve + basit nesneler):** `pgt-ddl` iskeleti, `quote`/`Plan`/risk modeli, `SessionProfile::Ddl`, uygulayıcı + korumalar + `ddl_*` komutları, **Schema/Sequence/Extension/Index** üreticileri + yükleyicileri + Docker gidiş-dönüş testleri; ön yüz: `designer` sekmesi, form kabuğu, önizleme, uygulama çubuğu, silme diyaloğu, Explorer menü bağlantısı ve bu dört tür.
 - **Plan 11 (Tablo):** kolon/kısıt model ve üreticileri (fark → ALTER), form (kolon ve kısıt liste düzenleyicileri), tür kümesi/`lookups`, `USING` ifadesi akışı.
-- **Plan 12 (geri kalan):** View/MatView, Database (transaction dışı hat), Role (parola, üyelik).
+- **Plan 12 (Table arka ucu):** kolon/kısıt farkı, tip dilbilgisi, yükleyici, yönetici/komut entegrasyonu; ön yüzde yalnızca tembel derleme uyumu.
+- **Plan 13 (Table arayüzü), Plan 14 (View/MatView, Database, Role):** kalan.
 - Her plan kendi başına çalışır durumda `main`'e girer; bu spec üçünün ortak otoritesidir.

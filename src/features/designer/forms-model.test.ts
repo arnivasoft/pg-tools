@@ -382,7 +382,8 @@ describe("alan yolu sözleşmesi (sequence/index)", () => {
 
 describe("FORM_PATHS (tür → form eşlemesi)", () => {
   it("her ObjectKind için yol kümesi var", () => {
-    const kinds: Record<ObjectKind, true> = { schema: true, extension: true, sequence: true, index: true };
+    // `table` formu Plan 13'te; o zamana dek yuva yok (DesignerView `formMissing` gösterir).
+    const kinds: Partial<Record<ObjectKind, true>> = { schema: true, extension: true, sequence: true, index: true };
     expect(Object.keys(FORM_PATHS).sort()).toEqual(Object.keys(kinds).sort());
     expect(FORM_PATHS.index).toBe(INDEX_PATHS);
     expect(FORM_PATHS.sequence).toBe(SEQUENCE_PATHS);

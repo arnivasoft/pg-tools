@@ -21,6 +21,8 @@ export const tdes = {
   },
   /** Üst çubuk ve şeritler. */
   view: {
+    /** Geçici koruma (Plan 13 kaldırır): formu henüz olmayan tür. */
+    formMissing: "Bu tür için form henüz yok.",
     statusLabel: "Durum",
     status: {
       loading: "Yükleniyor",

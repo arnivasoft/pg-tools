@@ -55,6 +55,11 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
       const { databaseOid, refreshNodeId } = target;
       const create = mode === "create" ? target.create : null;
       const object = mode === "create" ? null : target.object;
+      // Kolon/kısıt odağı olan hedef (tablo diyaloğu) hiçbir zaman DROP TABLE/yeniden adlandırma diyaloğu açmaz.
+      if (target.focus && (mode === "drop" || mode === "rename")) {
+        notify(tdes.open.none, "info");
+        return;
+      }
       if ((!create && !object) || databaseOid === null) {
         notify(tdes.open.none, "info");
         return;
