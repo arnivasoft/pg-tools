@@ -1574,6 +1574,7 @@ async fn maintenance_body(ts: TestServer) {
         alter(&|n| n.name = format!("{}_x", n.name)),
         alter(&|n| n.tablespace = Some("pgt_yok_ts".into())),
         alter(&|n| n.allow_connections = false),
+        alter(&|n| n.connection_limit = 0),
         PlanRequest::Drop { object, def: ObjectDef::Database(loaded.clone()), cascade: false, force: false },
     ];
     for req in &refused {
@@ -1710,10 +1711,11 @@ async fn role_priv_body(ts: TestServer) {
     let maint = &env.admin;
     let base = cluster_name(&ts, ObjectKind::Role, "mrolepriv").await;
     let (creator, group, member) = (format!("{base}_c"), format!("{base}_g"), format!("{base}_m"));
+    let newcomer = format!("{base}_n");
     let pw = random_password();
     maint
         .batch_execute(&format!(
-            "CREATE ROLE {creator} LOGIN CREATEROLE PASSWORD {}; CREATE ROLE {group}; CREATE ROLE {member}; \
+            "CREATE ROLE {creator} LOGIN CREATEROLE PASSWORD {}; CREATE ROLE {group}; CREATE ROLE {member}; CREATE ROLE {newcomer}; \
              GRANT {group} TO {member}; GRANT {group} TO {creator} WITH ADMIN OPTION",
             quote_literal(&pw)
         ))
@@ -1735,6 +1737,24 @@ async fn role_priv_body(ts: TestServer) {
     assert_eq!((committed, sqlstate.as_deref()), (0, Some("42501")));
     assert_eq!(error.hint.as_deref(), Some(PRIVILEGE_HINT));
     assert_eq!(role_oid(maint, &format!("{base}_s")).await, None);
+    // Süper kullanıcı olmayan bağlantının GRANT'ı: PG 16+'da grantor bu roldür ve yeniden yüklemede salt okunur
+    // (`MEMBER g (grantor c)`) görünür; yine de "var" sayılır → başarı, uyarı YOK.
+    let newcomer_oid = role_oid(maint, &newcomer).await.unwrap();
+    let loaded = f.load_role(newcomer_oid).await;
+    let mut granted = loaded.clone();
+    granted.member_of = vec![RoleMembership { role: group.clone(), admin: false, inherit_option: None, set_option: None }];
+    let object = ObjectRef { kind: ObjectKind::Role, oid: newcomer_oid };
+    let req = PlanRequest::Alter { object, old: ObjectDef::Role(loaded), new: ObjectDef::Role(granted) };
+    let out = f.apply(&req).await;
+    let Ok(ApplyOutcome::Applied { warnings, .. }) = out else { panic!("{out:?}") };
+    assert_eq!(warnings, None, "başarılı GRANT yanlış uyarı vermemeli");
+    let reloaded = f.load_role(newcomer_oid).await;
+    let shown = reloaded.member_of.iter().any(|m| m.role == group)
+        || reloaded.unsupported.iter().any(|u| u.starts_with(&format!("MEMBER {group} ")));
+    assert!(shown, "üyelik verilmiş olmalı: {reloaded:?}");
+    if env.version >= 160000 {
+        assert!(reloaded.unsupported.iter().any(|u| u.contains("(grantor ")), "PG 16+: grantor bağlı rol: {reloaded:?}");
+    }
     // REVOKE (GRANTED BY'sız) süper kullanıcının verdiği üyeliği PG 16+'da kaldırmayabilir (WARNING, etkisiz):
     // yönetici yeniden yükleyip farkı uyarı olarak bildirir. Uyarı ancak ve ancak üyelik gerçekten kaldıysa vardır.
     let member_oid = role_oid(maint, &member).await.unwrap();

@@ -169,7 +169,8 @@ pub const REFRESH_CONCURRENTLY_HINT: &str = "CONCURRENTLY için materialized vie
      koşulsuz bir unique indeksi bulunmalı; normal REFRESH seçin ya da indeks oluşturun.";
 /// Karar 8: veritabanına bağlı başka oturumlar (55006; RENAME / SET TABLESPACE / DROP).
 pub const DATABASE_IN_USE_HINT: &str = "Veritabanına bağlı oturumlar var: Query Tool sekmelerini kapatın ya da Dashboard'dan \
-     oturumları sonlandırın; PG 13+'ta silerken WITH (FORCE) kullanılabilir.";
+     oturumları sonlandırın; PG 13+'ta silerken WITH (FORCE) kullanılabilir. Uygulamanın kendi bağlantısı (ör. Gezgin \
+     yenilemesi) arada yeniden bağlanmış olabilir; birkaç saniye sonra yeniden denemek işe yarayabilir.";
 /// `DROP DATABASE … WITH (FORCE)` sunucu sınırları (55006).
 pub const FORCE_LIMITS_HINT: &str = "WITH (FORCE) oturumları sonlandırır, ancak hazırlanmış transaction'lar (pg_prepared_xacts), \
      mantıksal replikasyon yuvaları ya da etkin abonelikler varken veritabanı silinemez; önce bunları kaldırın.";
@@ -241,13 +242,17 @@ pub(crate) fn target_for(kind: ObjectKind, database_oid: Option<u32>) -> Result<
     }
 }
 
-/// (4a) Bakım veritabanının kendisini yeniden adlandıran, taşıyan, bağlantıya kapatan ya da silen istek (`old`/`def`
+/// (4a) Bakım veritabanının kendisini yeniden adlandıran, taşıyan, bağlantıya kapatan (ALLOW_CONNECTIONS false ya da
+/// CONNECTION LIMIT 0) ya da silen istek (`old`/`def`
 /// nesne denetiminden geçmiştir: sunucudaki güncel ad). Yorum/ayar/sahip/bağlantı sınırı değişimi serbesttir.
 fn touches_maintenance(req: &PlanRequest, maintenance_db: &str) -> bool {
     match req {
         PlanRequest::Alter { old: ObjectDef::Database(o), new: ObjectDef::Database(n), .. } => {
             o.name == maintenance_db
-                && (o.name != n.name || o.tablespace != n.tablespace || (o.allow_connections && !n.allow_connections))
+                && (o.name != n.name
+                    || o.tablespace != n.tablespace
+                    || (o.allow_connections && !n.allow_connections)
+                    || (o.connection_limit != 0 && n.connection_limit == 0))
         }
         PlanRequest::Drop { def: ObjectDef::Database(d), .. } => d.name == maintenance_db,
         _ => false,
@@ -350,10 +355,17 @@ pub(crate) fn failure_payload_for(kind: ObjectKind, failed: Option<&Statement>, 
 }
 
 /// Üyelik kümesi (rol, admin) farklı mı: PG 16+ salt okunur `inheritOption`/`setOption` karşılaştırılmaz.
+/// Yüklemede salt okunur (`unsupported`: başka grantor / birden çok grantor) listelenen üyelikler de VARDIR: süper
+/// kullanıcı olmayan bağlantının başarılı GRANT'ı kendi adıyla grantor olur ve oraya düşer (yanlış uyarı olmasın).
+/// Onların admin bayrağı bilinmez → istenen değer varsayılır (istenmeyen bir üyelik kaldıysa yine fark sayılır).
 fn memberships_differ(intended: &RoleDef, loaded: &RoleDef) -> bool {
     let key = |m: &RoleMembership| (m.role.clone(), m.admin);
     let a: std::collections::BTreeSet<_> = intended.member_of.iter().map(key).collect();
-    let b: std::collections::BTreeSet<_> = loaded.member_of.iter().map(key).collect();
+    let mut b: std::collections::BTreeSet<_> = loaded.member_of.iter().map(key).collect();
+    for role in loaded.unsupported.iter().filter_map(|e| load::unsupported_membership_role(e)) {
+        let admin = intended.member_of.iter().find(|m| m.role == role).is_some_and(|m| m.admin);
+        b.insert((role.to_string(), admin));
+    }
     a != b
 }
 
@@ -1325,8 +1337,9 @@ mod tests {
         let close = alter(&|n| n.allow_connections = false);
         let comment = alter(&|n| n.comment = Some("c".into()));
         let limit = alter(&|n| n.connection_limit = 5);
+        let no_conn = alter(&|n| n.connection_limit = 0);
         let drop = PlanRequest::Drop { object, def: ObjectDef::Database(d("postgres")), cascade: false, force: false };
-        for r in [&rename, &move_ts, &close, &drop] {
+        for r in [&rename, &move_ts, &close, &no_conn, &drop] {
             assert!(touches_maintenance(r, "postgres"), "{r:?}");
             assert!(!touches_maintenance(r, "other"), "{r:?}");
         }
@@ -1352,6 +1365,17 @@ mod tests {
         b.member_of[0].admin = true;
         assert!(memberships_differ(&a, &b));
         b.member_of.clear();
+        assert!(memberships_differ(&a, &b));
+        // Başka grantor ile kaydedilmiş (salt okunur) üyelik var sayılır.
+        b.unsupported = vec![crate::load::grantor_label("g", "creator")];
+        assert!(!memberships_differ(&a, &b));
+        b.unsupported = vec![crate::load::multi_grantor_label("g")];
+        assert!(!memberships_differ(&a, &b));
+        // İstenmeyen ama kalan salt okunur üyelik fark sayılır.
+        let mut none = a.clone();
+        none.member_of.clear();
+        assert!(memberships_differ(&none, &b));
+        b.unsupported = vec!["IN DATABASE d: work_mem=1".into()];
         assert!(memberships_differ(&a, &b));
     }
 

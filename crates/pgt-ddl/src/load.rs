@@ -707,6 +707,31 @@ async fn load_database(mgr: &ConnectionManager, server: Uuid, target: Target, oi
     }))
 }
 
+const MEMBER_PREFIX: &str = "MEMBER ";
+const MULTI_GRANTOR_SUFFIX: &str = " (birden çok grantor)";
+const GRANTOR_INFIX: &str = " (grantor ";
+
+/// Salt okunur üyelik etiketi: aynı rol için birden çok grantor (PG 16+).
+pub(crate) fn multi_grantor_label(role: &str) -> String {
+    format!("{MEMBER_PREFIX}{role}{MULTI_GRANTOR_SUFFIX}")
+}
+
+/// Salt okunur üyelik etiketi: önyükleme süper kullanıcısından başka grantor (PG 16+).
+pub(crate) fn grantor_label(role: &str, grantor: &str) -> String {
+    format!("{MEMBER_PREFIX}{role}{GRANTOR_INFIX}{grantor})")
+}
+
+/// `unsupported` girdisi salt okunur bir üyelik etiketiyse (yukarıdaki iki üreticinin biçimi) üye olunan rolün adı.
+/// Ad ilk `" (grantor "` ayıracına kadar alınır (rol adında bu dizi beklenmez; grantor adında olabilir).
+pub(crate) fn unsupported_membership_role(entry: &str) -> Option<&str> {
+    let rest = entry.strip_prefix(MEMBER_PREFIX)?;
+    if let Some(role) = rest.strip_suffix(MULTI_GRANTOR_SUFFIX) {
+        return Some(role);
+    }
+    let (role, grantor) = rest.split_once(GRANTOR_INFIX)?;
+    grantor.ends_with(')').then_some(role)
+}
+
 /// Üyelik satırları → (üyelikler, desteklenmeyen). PG 16+'da aynı rol için birden çok grantor satırı → `MEMBER r
 /// (birden çok grantor)`; tek satırlı üyeliği önyükleme süper kullanıcısından (oid 10) başkası vermişse → `MEMBER r
 /// (grantor g)` (inceleme M-1: GRANTED BY'sız REVOKE PG 16+'da WARNING ile etkisizdir, sessizce "başarılı" görünürdü).
@@ -717,12 +742,12 @@ fn memberships(rows: &[Row]) -> (Vec<RoleMembership>, Vec<String>) {
     for r in rows {
         let role: String = r.get("role");
         if r.get::<_, i32>("grants") > 1 {
-            unsupported.push(format!("MEMBER {role} (birden çok grantor)"));
+            unsupported.push(multi_grantor_label(&role));
             continue;
         }
         if !r.get::<_, bool>("grantor_is_bootstrap") {
             let grantor: Option<String> = r.get("grantor");
-            unsupported.push(format!("MEMBER {role} (grantor {})", grantor.unwrap_or_default()));
+            unsupported.push(grantor_label(&role, &grantor.unwrap_or_default()));
             continue;
         }
         list.push(RoleMembership {
@@ -805,6 +830,20 @@ mod tests {
             pairs,
             [("odd", ""), ("search_path", "\"$user\", public"), ("timezone", "UTC"), ("work_mem", "64MB"), ("x.y", "a=b")]
         );
+    }
+
+    #[test]
+    fn membership_labels_round_trip_to_the_role_name() {
+        assert_eq!(grantor_label("app", "creator"), "MEMBER app (grantor creator)");
+        assert_eq!(multi_grantor_label("app"), "MEMBER app (birden çok grantor)");
+        for role in ["app", "Ünï kod", "a)b", "x (y)"] {
+            assert_eq!(unsupported_membership_role(&grantor_label(role, "g")), Some(role), "{role}");
+            assert_eq!(unsupported_membership_role(&grantor_label(role, "g (grantor h)")), Some(role), "{role}");
+            assert_eq!(unsupported_membership_role(&multi_grantor_label(role)), Some(role), "{role}");
+        }
+        for other in ["IN DATABASE d: work_mem=1", "MEMBER app", "INDEX m_i", "MEMBER app (grantor g"] {
+            assert_eq!(unsupported_membership_role(other), None, "{other}");
+        }
     }
 
     #[test]
