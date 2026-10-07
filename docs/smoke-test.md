@@ -376,6 +376,8 @@ Plan 13 sonu: index-*.js = 233088 B; TableForm-*.js = 81467 B (index.html yalnı
 
 Plan 15 Task 1: index-*.js = 232805 B (taban 233088 B; tavan 233088 B; `t.query.editorSettings` bloğu tembel `strings-editor.ts`'e taşındı, "Satır uzunluğu" artık yalnızca QueryTab-*.js'te).
 
+Plan 16 sonu: index-*.js = 232805 B (değişmedi; yeni TS yalnızca bindingler).
+
 Plan 15 sonu: index-*.js = 232805 B; ViewForm-*.js = 12996 B; DatabaseForm-*.js = 14925 B; RoleForm-*.js = 23369 B; SettingsEditor-*.js = 8457 B (index.html yalnızca solid/web/Icon parçalarını önyükler; View/Database/Role/Settings metinleri ana pakette yok).
 
 Notlar: Birimler — Plan 2, Plan 6 ve Plan 7 satırlarının bellek ve exe/paket değerleri `measure.ps1`/bayt sayısından geldiği için başlıktaki "MB" orada MiB'dir (Plan 6: 3,56 / 76,1 / 109,1 / 7,4 MiB; Plan 7: exe 14,19 / 77,5 / 113,2 / 7,4 MiB) (1 MiB = 1.048.576 bayt); Plan 1 satırının birimi belirsiz kaynaktandır (bkz. `docs/performance.md` "Birimler"). Plan 2 satırı `scripts/measure.ps1 -Runs 5` ile ölçüldü (8 sn boşta, sunucu yok, seçilen WebView2/tokio ayarlarıyla); yöntem ve denenen ayarlar `docs/performance.md`'de. Plan 1 satırı: ölçüm `target/release/pg-tools.exe` doğrudan çalıştırılarak yapıldı (kurulum yapılmadı); boşta 5 sn, sunucu bağlı değil. Toplam bellek, WebView2 alt süreçleri dahil 7 sürecin çalışma kümesi toplamıdır (paylaşılan sayfalar tekrar sayıldığından özel bellek ≈191 MB). Açılış süresi `MainWindowHandle` oluşana kadar geçen süredir; içerik çizimi dahil olmayabilir. Yukarıdaki kutucuklar GUI üzerinden elle uygulanmadı; sürüm öncesi işaretlenmelidir.
@@ -483,3 +485,23 @@ Bilinen sınırlar:
 - [ ] Ayarlar: `search_path` = `"$user", MySchema` → büyük harf ön uyarısı; `App.Mode` özel ayarı yazımıyla kalır. **[—]**
 - [ ] Parola gizliliği: önizleme/kopya/Query Tool'da aç (ikisi de kapalı + gerekçe) parolayı hiçbir yerde göstermez; uygulama sonrası, yeniden yüklemede ve sekme kapanınca alanlar boş; geliştirici konsolunda/uygulama günlüğünde parola yok. **[—]**
 - [ ] Klavye/erişilebilirlik/tema: tüm alanlar etiketli; radio/onay kutuları klavyeyle; hatalar ekran okuyucuda okunur; açık/koyu tema; uzun sorgu metni yatay sayfa kaydırması yaratmaz; dar pencerede (≈1100 px) form taşmaz. **[—]**
+
+## Veri düzenleyici arka ucu (Plan 16)
+
+Plan 16 yalnızca arka uçtur; **GUI maddeleri Plan 17 bölümündedir** (Explorer'da "Verileri Görüntüle/Düzenle" henüz yok). Arka uç Query Tool'dan elle sınanmaz; Docker testleriyle (`scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`; kapsayıcılar sonda silinir) kapsanan maddelerin özeti:
+
+- Kaynak yükleme: PK / benzersiz indeks / anahtarsız / bölümlü (PG 11+ PK) / üretilmiş (PG 12+) / kimlik / yetkisiz rol; salt okunurluk gerekçeleri.
+- Gidiş-dönüş: insert -> `returned` == okunan; `float`/`timestamptz`/`bytea`/`json`/dizi/`NULL` ile `''` ayrımı; düşmanca değerler (`'`, `\`, `--`, `;`, Unicode).
+- Bayat `xmin` -> `row_conflict` ve hiçbir şey yazılmaz; silinmiş satır; kısıt ihlali -> tam geri alma; tetikleyici `RETURN NULL` -> conflict; kilit zaman aşımı (55P03); iptal; üretim/kilit kapıları; hücre değerlerinin günlüğe düşmediği (yakalama testi).
+- Bölümlü ana tabloya INSERT: PG 12–18'de `RETURNING xmin` 0A000 verir; sürüm bu durumda `txid_current()` tabanlıdır (alt transaction'da yazan tetikleyiciyle de sınandı).
+- Kalıtım: sıradan tablo `ONLY` ile okunur/yazılır (üst tablo çocuk satırlarını göstermez, onlara yazamaz; çocuk kendi kaynağıyla düzenlenir); bölümlü tablo bölüm satırlarını içerir.
+- İptal bayrağı son ifadeden sonra, `COMMIT`'ten önce de denetlenir (geri alınır).
+
+Bilinen sınırlar:
+- Bayat veri denetimi kapalı başarısız olur; istisna: kayıplı metin gidiş-dönüşlü anahtar (float anahtar + `extra_float_digits < 1`, ISO olmayan `DateStyle`/`IntervalStyle` ile tarih/aralık anahtarı; okuma filtresindeki `set_config` dahil) aynı `xmin`'e sahip başka bir satıra çözümlenirse yazma o satıra gidebilir.
+- Float anahtar + PG 10–11'de `extra_float_digits` nedeniyle anahtar metni yuvarlanabilir.
+- Aynı değere eşzamanlı yazma da çakışma sayılır (`xmin` değişir).
+- Filtrede `\` içeren dize için `E'…'` gerekir.
+- Yalnız kolon düzeyi UPDATE yetkisi `NoPrivilege` sayılır (tablo düzeyi `has_table_privilege`).
+- PG 18 `NOT NULL NOT VALID` kısıtı Docker'da sınanmadı; `outcomeUnknown = true` (SQLSTATE'siz COMMIT hatası; birim testiyle eşlemesi sınandı) yolu Docker'da sınanmadı.
+- `src-tauri` testkit `fixture()` yalnızca ilk `PGT_TEST_URLS` adresini kullanır.

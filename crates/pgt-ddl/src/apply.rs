@@ -50,7 +50,18 @@ pub(crate) async fn prepare_session(client: &Client, lock_timeout_ms: u32) -> Re
 /// Uygulama bağlantısı: `Ddl` profiliyle ayrı bağlantı + açık `SET`'ler. Sunucu kapsamlı türler (Database/Role)
 /// `Target::Maintenance`'ta, diğerleri `Target::Database(oid)`'de.
 pub(crate) async fn open_apply_conn(mgr: &ConnectionManager, server: Uuid, target: Target, lock_timeout_ms: u32) -> Result<DedicatedConn> {
-    let conn = mgr.open_dedicated(server, target, SessionProfile::Ddl { lock_timeout_ms }).await?;
+    open_apply_conn_as(mgr, server, target, SessionProfile::Ddl { lock_timeout_ms }).await
+}
+
+/// `open_apply_conn`'un profil parametreli hâli: yalnızca yazılabilir uygulama profilleri (`Ddl`, veri düzenleyicinin
+/// `Data`'sı); ikisi de aynı açık `SET`'lerle hazırlanır. Uygulama her zaman kendi bağlantısını açar (Query Tool
+/// oturumu kullanıcı SQL'iyle değiştirilmiş olabilir; paylaşılmaz).
+pub(crate) async fn open_apply_conn_as(mgr: &ConnectionManager, server: Uuid, target: Target, profile: SessionProfile) -> Result<DedicatedConn> {
+    let lock_timeout_ms = match profile {
+        SessionProfile::Ddl { lock_timeout_ms } | SessionProfile::Data { lock_timeout_ms } => lock_timeout_ms,
+        _ => return Err(Error::Invalid("uygulama bağlantısı yalnızca Ddl/Data profiliyle açılır".into())),
+    };
+    let conn = mgr.open_dedicated(server, target, profile).await?;
     prepare_session(&conn.client, lock_timeout_ms).await?;
     Ok(conn)
 }
@@ -216,12 +227,12 @@ pub(crate) fn cancelled_error() -> Error {
     Error::Query { sqlstate: Some(CANCELED_SQLSTATE.into()), message: CANCELLED_MESSAGE.into(), detail: None, hint: None }
 }
 
-fn idx(i: usize) -> u32 {
+pub(crate) fn idx(i: usize) -> u32 {
     u32::try_from(i).unwrap_or(u32::MAX)
 }
 
 /// Hata ifadenin çalışması sırasında geldiyse ve iptal istendiyse iptal hatasına çevirir.
-fn statement_error(e: tokio_postgres::Error, reg: &Registration<'_>) -> (Error, Option<u32>) {
+pub(crate) fn statement_error(e: tokio_postgres::Error, reg: &Registration<'_>) -> (Error, Option<u32>) {
     statement_error_at(e, reg, false)
 }
 
@@ -245,7 +256,7 @@ pub(crate) fn error_position(e: &tokio_postgres::Error) -> Option<u32> {
 }
 
 /// Blok içi hatadan sonra transaction'ı geri alır; bağlantı kopmuşsa hata yok sayılır (sunucu zaten geri alır).
-async fn rollback(client: &Client) {
+pub(crate) async fn rollback(client: &Client) {
     if let Err(e) = client.batch_execute("ROLLBACK").await {
         tracing::debug!(sqlstate = e.code().map(|c| c.code()), "ROLLBACK başarısız");
     }

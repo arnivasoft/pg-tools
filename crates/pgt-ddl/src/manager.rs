@@ -145,8 +145,8 @@ pub struct CreateContext {
 }
 
 /// İptal isteğinin yutulmasına karşı yeniden gönderme: sayı ve aralık.
-const CANCEL_RESENDS: u32 = 3;
-const CANCEL_RESEND_AFTER: Duration = Duration::from_millis(200);
+pub(crate) const CANCEL_RESENDS: u32 = 3;
+pub(crate) const CANCEL_RESEND_AFTER: Duration = Duration::from_millis(200);
 
 const FIND_SCHEMA_SQL: &str = "SELECT oid FROM pg_namespace WHERE nspname = $1";
 const FIND_EXTENSION_SQL: &str = "SELECT oid FROM pg_extension WHERE extname = $1";
@@ -202,10 +202,10 @@ pub const MEMBERSHIP_WARNING: &str = "Üyelikler uygulama sonrasında istenenden
      grantor'a ait üyelikleri etkilemedi (PG 16+). Rolü yeniden yükleyip kontrol edin.";
 
 /// Çağıran gelecek düşerse sunucudaki ifadeyi iptal eder (`armed` yalnızca çalıştırıcı bitince kapanır).
-struct CancelOnDrop {
-    handle: pgt_core::connection::CancelHandle,
-    rt: tokio::runtime::Handle,
-    armed: bool,
+pub(crate) struct CancelOnDrop {
+    pub(crate) handle: pgt_core::connection::CancelHandle,
+    pub(crate) rt: tokio::runtime::Handle,
+    pub(crate) armed: bool,
 }
 
 impl Drop for CancelOnDrop {
@@ -947,7 +947,7 @@ pub(crate) fn plan_view(req: &PlanRequest, version_num: u32) -> PlanView {
 }
 
 /// (8) `lock_timeout` sınırı (`SessionProfile::Ddl` doğrulamasıyla aynı; bağlantıdan önce).
-fn check_lock_timeout(ms: u32) -> Result<()> {
+pub(crate) fn check_lock_timeout(ms: u32) -> Result<()> {
     if ms > MAX_STATEMENT_TIMEOUT_MS {
         return Err(Error::Invalid(format!("lock_timeout en fazla {MAX_STATEMENT_TIMEOUT_MS} ms olabilir.")));
     }

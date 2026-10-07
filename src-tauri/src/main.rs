@@ -2,6 +2,7 @@
 
 mod commands;
 mod dash;
+mod data;
 mod ddl;
 mod logging;
 mod query;
@@ -34,6 +35,7 @@ fn main() {
                 state.dash.close_all();
                 // Uçuştaki DDL uygulamasının sahibi (arayüz) gitti: iptal et (sunucu tarafı tx bağlantı düşünce geri alınır).
                 state.ddl.cancel_all();
+                state.data.cancel_all();
                 tauri::async_runtime::spawn(async move { query::close_all_on_reload(&query).await });
             }
         })
@@ -101,6 +103,11 @@ fn main() {
             ddl::ddl_preview,
             ddl::ddl_apply,
             ddl::ddl_cancel,
+            data::data_load,
+            data::data_select,
+            data::data_preview,
+            data::data_apply,
+            data::data_cancel,
             store_cmds::qt_history_push_many,
             store_cmds::qt_history_list,
             store_cmds::qt_history_clear,
@@ -121,7 +128,7 @@ fn main() {
                 let query = state.query.clone();
                 state.dash.close_all();
                 // Uçuştaki DDL iptalleri arka planda gönderilir; süreç bitmeden ulaşmaları için kısa bekleme.
-                let ddl_cancels = state.ddl.cancel_all();
+                let ddl_cancels = state.ddl.cancel_all() + state.data.cancel_all();
                 // Zaman aşımı geleceği çalışma zamanı İÇİNDE kurulmalı: dışarıda `tokio::time::timeout` "no reactor running" ile panikler.
                 tauri::async_runtime::block_on(async move {
                     if ddl_cancels > 0 {

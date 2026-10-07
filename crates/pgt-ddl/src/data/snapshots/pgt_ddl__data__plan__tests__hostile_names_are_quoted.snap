@@ -1,0 +1,8 @@
+---
+source: crates/pgt-ddl/src/data/plan.rs
+expression: render(&p)
+---
+[Safe] INSERT INTO "my ""schema"""."t;DROP" ("x'); DROP TABLE t; --", "a/*") VALUES ('v', 'w') RETURNING "a""b", "x'); DROP TABLE t; --", "user", "a/*", "a\b", xmin::pg_catalog.text
+[Safe] UPDATE ONLY "my ""schema"""."t;DROP" SET "a\b" = 'z' WHERE "user" = 'u' AND "a""b" = 'k' AND xmin::pg_catalog.text = '9' RETURNING "a""b", "x'); DROP TABLE t; --", "user", "a/*", "a\b", xmin::pg_catalog.text
+[Destructive] DELETE FROM ONLY "my ""schema"""."t;DROP" WHERE "user" = 'u' AND "a""b" = 'k' AND xmin::pg_catalog.text = '9'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
