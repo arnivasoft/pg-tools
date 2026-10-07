@@ -1282,6 +1282,52 @@ describe("designer-controller Plan 15: parola", () => {
     expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "ready" });
   });
 
+  it("setSecret yalnızca rol taslağı password='set' ve status='ready' iken saklar; değer değişmedikçe registry dürtülmez", async () => {
+    // password = keep (alter yüklemesi): saklanmaz
+    let s = setup();
+    let id = await openRoleAlter(s);
+    s.ctl.setSecret(id, SECRET);
+    expect(s.ctl.secretReady(id)).toBe(false);
+    // rol dışı tür: saklanmaz
+    s = setup();
+    id = await openAlter(s);
+    s.ctl.setSecret(id, SECRET);
+    expect(s.ctl.secretReady(id)).toBe(false);
+    // yükleniyor (ready değil): saklanmaz
+    s = setup();
+    s.api.ddlLoad.mockReturnValueOnce(new Promise(() => {}));
+    void s.ctl.openAlter({ tabId: "R1", serverId: "S1", databaseOid: null, object: ROLE, refreshNodeId: null });
+    s.ctl.setSecret("R1", SECRET);
+    expect(s.ctl.secretReady("R1")).toBe(false);
+    // bağlantı kesik: saklanmaz
+    s = setup();
+    id = await roleWithPasswordPlan(s);
+    s.ctl.serverSessionsClosed("S1", false);
+    s.ctl.setSecret(id, SECRET);
+    expect(s.ctl.secretReady(id)).toBe(false);
+    // set + ready: saklanır (dürtme sayısı designer-reactivity.test.ts'te); model nesnesi değişmez
+    s = setup();
+    id = await roleWithPasswordPlan(s);
+    const before = s.ctl.model(id);
+    s.ctl.setSecret(id, SECRET);
+    expect(s.ctl.secretReady(id)).toBe(true);
+    s.ctl.setSecret(id, null);
+    expect(s.ctl.secretReady(id)).toBe(false);
+    expect(s.ctl.model(id)).toBe(before);
+  });
+
+  it("connectedUser: sunucu kaydının kullanıcı adı (yoksa null); bilinmeyen sekme null", async () => {
+    const s = setup({
+      serverInfo: (id) => (id === "S1" ? { name: "prod-1", locked: false, production: false, username: "app_user" } : null),
+    });
+    const id = await openRoleAlter(s);
+    expect(s.ctl.connectedUser(id)).toBe("app_user");
+    expect(s.ctl.connectedUser("YOK")).toBeNull();
+    const s2 = setup();
+    const id2 = await openRoleAlter(s2);
+    expect(s2.ctl.connectedUser(id2)).toBeNull();
+  });
+
   it("role_password_missing hata kodu gateError metnine eşlenir ve uygulama yeniden denenebilir", async () => {
     const s = setup();
     const id = await roleWithPasswordPlan(s);

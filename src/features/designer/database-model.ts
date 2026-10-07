@@ -52,8 +52,8 @@ export function needsNoSessions(original: DatabaseDef | null, d: DatabaseDef): b
   return original !== null && (original.name !== d.name || original.tablespace !== d.tablespace);
 }
 
-/** "Sınırsız" kutusu: işaretli → -1; kaldırılınca yüklü sınır >= 0 ise o (0 dahil), yoksa 100. */
-export function unlimitedToggle(original: DatabaseDef | null, unlimited: boolean): number {
+/** "Sınırsız" kutusu: işaretli → -1; kaldırılınca yüklü sınır >= 0 ise o (0 dahil), yoksa 100 (Database ve Role). */
+export function unlimitedToggle(original: { connectionLimit: number } | null, unlimited: boolean): number {
   if (unlimited) return -1;
   return original !== null && original.connectionLimit >= 0 ? original.connectionLimit : 100;
 }

@@ -46,11 +46,19 @@ export const DATABASE_PATHS: ReadonlySet<string> = new Set([
   "name", "owner", "template", "encoding", "localeProvider", "lcCollate", "lcCtype", "providerLocale", "tablespace",
   "connectionLimit", "isTemplate", "allowConnections", "settings", "comment",
 ]);
-/** Tür → bilinen yollar (testte denetlenir). Geçici: role yolları Plan 15 Task 5 ile gelir. */
+/**
+ * `memberOf` kökü `memberOf[i].role`, `settings` kökü `settings[i].name|value` alt yollarını kapsar; `cascade`/`old.*`
+ * genel şeride düşer (Role'de `cascade` gönderilmez).
+ */
+export const ROLE_PATHS: ReadonlySet<string> = new Set([
+  "name", "login", "superuser", "createdb", "createrole", "inherit", "replication", "bypassrls", "connectionLimit", "validUntil",
+  "password", "memberOf", "settings", "comment",
+]);
+/** Tür → bilinen yollar (testte denetlenir; her `ObjectKind` için). */
 export const FORM_PATHS = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
-  view: VIEW_PATHS, materialized_view: MATVIEW_PATHS, database: DATABASE_PATHS,
-} satisfies Partial<Record<ObjectKind, ReadonlySet<string>>>;
+  view: VIEW_PATHS, materialized_view: MATVIEW_PATHS, database: DATABASE_PATHS, role: ROLE_PATHS,
+} satisfies Record<ObjectKind, ReadonlySet<string>>;
 
 /**
  * İsteğe bağlı alan: boş ya da yalnızca boşluk → `null`; aksi halde metin OLDUĞU GİBİ (kırpılmaz — kullanıcının yazdığı

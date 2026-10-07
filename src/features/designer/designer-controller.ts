@@ -97,7 +97,8 @@ export interface DesignerModel {
   cascade: boolean;
 }
 
-export interface ServerInfo { name: string; locked: boolean; production: boolean }
+/** `username`: sunucu kaydındaki bağlantı kullanıcısı (Role formunun kendini kilitleme uyarıları; isteğe bağlı). */
+export interface ServerInfo { name: string; locked: boolean; production: boolean; username?: string }
 export interface FocusRequest { field: string; seq: number }
 
 export const DEFAULT_LOCK_TIMEOUT_MS = 5000;
@@ -679,13 +680,25 @@ export function createDesignerController(deps: DesignerControllerDeps) {
 
   // ---- parola
   /**
-   * Formun girdiği parola (iki alan eşleşince değer, aksi halde `null`). `null`/boş → silinir. Bilinmeyen sekme için
-   * saklanmaz. Her çağrıda `registry` dürtülür (`secretReady` ve kapı tepkisel).
+   * Formun girdiği parola (iki alan eşleşince değer, aksi halde `null`). Yalnızca taslak rolün parola niyeti `set` ve
+   * sekme `ready` iken saklanır; aksi halde (`null`/boş, bilinmeyen sekme, başka tür/niyet, yükleniyor/kesik) silinir.
+   * `registry` yalnızca saklanan değer gerçekten değişince dürtülür (`secretReady` ve kapı tepkisel).
    */
   const setSecret = (tabId: string, value: string | null): void => {
-    if (value && entries.has(tabId)) secrets.set(tabId, value);
-    else secrets.delete(tabId);
-    bump();
+    const m = entries.get(tabId)?.model();
+    const accept = !!value && !!m && m.status === "ready" && m.draft?.kind === "role" && m.draft.password === "set";
+    if (accept) {
+      if (secrets.get(tabId) === value) return;
+      secrets.set(tabId, value!);
+      bump();
+    } else {
+      forgetSecret(tabId);
+    }
+  };
+  /** Sekmenin sunucu kaydındaki kullanıcı adı (kendini kilitleme uyarıları için; kayıt yoksa `null`). */
+  const connectedUser = (tabId: string): string | null => {
+    const m = model(tabId);
+    return m ? (deps.serverInfo(m.serverId)?.username ?? null) : null;
   };
 
   // ---- odak
@@ -716,6 +729,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     setCascade,
     setSecret,
     secretReady,
+    connectedUser,
     previewNow,
     apply,
     cancelApply,

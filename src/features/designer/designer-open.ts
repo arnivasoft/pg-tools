@@ -166,7 +166,7 @@ export function createDesigner(deps: DesignerDeps) {
     notify: deps.notify,
     serverInfo: (id) => {
       const c = deps.query.servers().find((s) => s.id === id);
-      return c ? { name: c.name, locked: c.readOnlyLock, production: isProductionLabel(c.label) } : null;
+      return c ? { name: c.name, locked: c.readOnlyLock, production: isProductionLabel(c.label), username: c.username } : null;
     },
     refreshNode: (id) => deps.explorer.refresh(id),
     onApplied: (info) => {
