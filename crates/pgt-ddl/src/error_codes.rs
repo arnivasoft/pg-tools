@@ -32,6 +32,10 @@ pub const MAINTENANCE_TEMPLATE: &str = "Bakım veritabanı şablon olarak kullan
      template0, template1 ya da başka bir veritabanı seçin.";
 /// Veritabanı kapsamlı türde `database_oid` yok; kodlu değildir (düz `invalid`).
 pub const NEEDS_DATABASE: &str = "Bu nesne türü bir veritabanı gerektirir.";
+/// Veri düzenleyici: güncellenen/silinen satır başka oturumca değişmiş ya da silinmiş (anahtar + `xmin` 0 satır
+/// eşledi); tüm transaction geri alındı.
+pub const ROW_CONFLICT_MESSAGE: &str =
+    "Satır başka bir oturum tarafından değiştirilmiş ya da silinmiş; değişiklikler uygulanmadı.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -43,16 +47,18 @@ pub enum DdlErrorCode {
     PlanChanged,
     InvalidDef,
     RolePasswordMissing,
+    RowConflict,
 }
 
 /// Arayüzün eşleştirebileceği kodların tam listesi (`DdlErrorCode`'un serde adları).
-pub const DDL_ERROR_CODES: [&str; 6] = [
+pub const DDL_ERROR_CODES: [&str; 7] = [
     "locked",
     "confirmation_required",
     "production_confirmation_required",
     "plan_changed",
     "invalid_def",
     "role_password_missing",
+    "row_conflict",
 ];
 
 impl DdlErrorCode {
@@ -64,6 +70,7 @@ impl DdlErrorCode {
             DdlErrorCode::PlanChanged => DDL_ERROR_CODES[3],
             DdlErrorCode::InvalidDef => DDL_ERROR_CODES[4],
             DdlErrorCode::RolePasswordMissing => DDL_ERROR_CODES[5],
+            DdlErrorCode::RowConflict => DDL_ERROR_CODES[6],
         }
     }
 
@@ -76,6 +83,7 @@ impl DdlErrorCode {
             m if m == PLAN_CHANGED => (Self::PlanChanged, PLAN_CHANGED),
             m if m == INVALID_DEF => (Self::InvalidDef, INVALID_DEF),
             m if m == ROLE_PASSWORD_MISSING => (Self::RolePasswordMissing, ROLE_PASSWORD_MISSING),
+            m if m == ROW_CONFLICT_MESSAGE => (Self::RowConflict, ROW_CONFLICT_MESSAGE),
             _ => return None,
         })
     }
@@ -95,6 +103,18 @@ pub fn ddl_payload(e: &Error) -> ErrorPayload {
 mod tests {
     use super::*;
 
+    fn marker_of(c: DdlErrorCode) -> &'static str {
+        match c {
+            DdlErrorCode::Locked => LOCKED_MESSAGE,
+            DdlErrorCode::ConfirmationRequired => CONFIRMATION_REQUIRED,
+            DdlErrorCode::ProductionConfirmationRequired => PRODUCTION_CONFIRMATION_REQUIRED,
+            DdlErrorCode::PlanChanged => PLAN_CHANGED,
+            DdlErrorCode::InvalidDef => INVALID_DEF,
+            DdlErrorCode::RolePasswordMissing => ROLE_PASSWORD_MISSING,
+            DdlErrorCode::RowConflict => ROW_CONFLICT_MESSAGE,
+        }
+    }
+
     #[test]
     fn every_marker_maps_to_its_code_without_prefix() {
         let cases = [
@@ -104,6 +124,7 @@ mod tests {
             (PLAN_CHANGED, "plan_changed"),
             (INVALID_DEF, "invalid_def"),
             (ROLE_PASSWORD_MISSING, "role_password_missing"),
+            (ROW_CONFLICT_MESSAGE, "row_conflict"),
         ];
         for (marker, code) in cases {
             let p = ddl_payload(&Error::Invalid(marker.into()));
@@ -135,13 +156,18 @@ mod tests {
             DdlErrorCode::PlanChanged,
             DdlErrorCode::InvalidDef,
             DdlErrorCode::RolePasswordMissing,
+            DdlErrorCode::RowConflict,
         ];
         for c in all {
             assert_eq!(serde_json::to_value(c).unwrap(), c.as_str());
             assert!(DDL_ERROR_CODES.contains(&c.as_str()));
+            // as_str → işaret metni → from_marker gidiş-dönüşü.
+            let (_, marker) = DdlErrorCode::from_marker(marker_of(c)).unwrap();
+            assert_eq!(DdlErrorCode::from_marker(marker).map(|(k, _)| k), Some(c));
         }
         assert_eq!(all.len(), DDL_ERROR_CODES.len());
-        assert_eq!(DDL_ERROR_CODES.len(), 6);
+        assert_eq!(DDL_ERROR_CODES.len(), 7);
+        assert_eq!(DDL_ERROR_CODES[6], "row_conflict");
         // pgt-core bağlantı kodu ile çakışmaz.
         assert!(!DDL_ERROR_CODES.contains(&"password_required"));
     }
