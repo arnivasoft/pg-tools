@@ -744,3 +744,139 @@ async fn select_created_session_state_makes_session_non_reapable() {
         }
     }
 }
+
+// --- Açıkça salt okunur okuma oturumu (Plan 17 Task 2: `open_read_only`, veri düzenleyici okuma yolu) ---
+
+/// Teste özel tablo `t` ve `t_try(sql)` fonksiyonu (testler paralel koşar): fonksiyon ifadeyi çalıştırır, başarıda
+/// `ok`, hatada SQLSTATE döner (salt okunur oturumda çağrılabilir; yazma girişimi alt-transaction'da yakalanır).
+fn ro_setup(t: &str) -> String {
+    format!(
+        "drop table if exists {t}; drop table if exists {t}_new; create table {t}(i int);
+         create or replace function {t}_try(q text) returns text language plpgsql as $$
+         begin execute q; return 'ok'; exception when others then return sqlstate; end $$;"
+    )
+}
+
+impl Fx {
+    async fn open_ro(&self, mode: TxMode) -> SessionId {
+        let opts = SessionOptions { mode, statement_timeout_ms: 0 };
+        self.qm.open_read_only(self.ts.config.id, Target::Maintenance, opts).await.unwrap()
+    }
+
+    /// Oturum salt okunur: varsayılan `on`, INSERT/CREATE TABLE 25006 ile reddedilir, SELECT çalışır, tablo boş kalır.
+    async fn assert_read_only(&self, id: SessionId, t: &str, ctx: &str) {
+        assert_eq!(self.run_ok(id, "show default_transaction_read_only").await.first_value(), "on", "{ctx}");
+        for sql in [format!("insert into {t} values (1)"), format!("create table {t}_new(i int)")] {
+            let try_sql = format!("select {t}_try('{sql}')");
+            assert_eq!(self.run_ok(id, &try_sql).await.first_value(), "25006", "{ctx}: {sql}");
+            // Kullanıcı yolu: ifade doğrudan çalıştırılınca sunucu reddeder.
+            let sink = self.run(id, &sql).await;
+            let (_, error, _) = sink.failed().unwrap_or_else(|| panic!("{ctx}: {sql}: {:?}", sink.events));
+            assert!(error.message.contains("read-only transaction"), "{ctx}: {sql}: {error:?}");
+            if self.qm.tx_state(id).unwrap() == TxState::Failed {
+                self.qm.tx(id, TxAction::Rollback).await.unwrap();
+            }
+        }
+        assert_eq!(self.run_ok(id, &format!("select count(*) from {t}")).await.first_value(), "0", "{ctx}");
+        if self.qm.tx_state(id).unwrap() != TxState::Idle {
+            self.qm.tx(id, TxAction::Rollback).await.unwrap();
+        }
+        assert_eq!(self.count(t).await, 0, "{ctx}");
+        let exists: bool =
+            self.admin().await.query_one(&format!("select to_regclass('{t}_new') is not null"), &[]).await.unwrap().get(0);
+        assert!(!exists, "{ctx}");
+    }
+
+    async fn pid(&self, id: SessionId) -> i32 {
+        self.run_ok(id, "select pg_backend_pid()").await.first_value().parse().unwrap()
+    }
+}
+
+/// (a) Kilitsiz sunucuda `open_read_only` oturumu salt okunurdur (25006), SELECT çalışır.
+#[tokio::test]
+async fn open_read_only_session_rejects_writes_on_unlocked_server() {
+    const T: &str = "qs_ro_a";
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup(&ro_setup(T)).await;
+        let id = fx.open_ro(TxMode::Autocommit).await;
+        assert_eq!(fx.run_ok(id, "select 41 + 1").await.first_value(), "42");
+        fx.assert_read_only(id, T, "açılış").await;
+        fx.qm.close(id, ClosePolicy::Refuse).await.unwrap();
+    }
+}
+
+/// (b) `set_options` (mod ve zaman aşımı değişimi) salt okunurluğu bozmaz.
+#[tokio::test]
+async fn open_read_only_survives_set_options() {
+    const T: &str = "qs_ro_b";
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup(&ro_setup(T)).await;
+        let id = fx.open_ro(TxMode::Autocommit).await;
+        fx.qm.set_options(id, SessionOptions { mode: TxMode::Manual, statement_timeout_ms: 4321 }).await.unwrap();
+        assert_eq!(fx.run_ok(id, "show statement_timeout").await.first_value(), "4321ms");
+        fx.qm.tx(id, TxAction::Rollback).await.unwrap();
+        fx.assert_read_only(id, T, "manual + 4321ms").await;
+        fx.qm.set_options(id, SessionOptions { mode: TxMode::Autocommit, statement_timeout_ms: 0 }).await.unwrap();
+        fx.assert_read_only(id, T, "autocommit + 0").await;
+        fx.qm.close(id, ClosePolicy::Rollback).await.unwrap();
+    }
+}
+
+/// (c) Bağlantı düşüp oturum sessizce yeniden açıldığında (uyku ve kopan bağlantı yolları) hâlâ salt okunurdur.
+#[tokio::test]
+async fn open_read_only_survives_reconnect() {
+    const T: &str = "qs_ro_c";
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup(&ro_setup(T)).await;
+        let id = fx.open_ro(TxMode::Autocommit).await;
+        fx.qm.set_options(id, SessionOptions { mode: TxMode::Autocommit, statement_timeout_ms: 4321 }).await.unwrap();
+
+        // Kopan bağlantı: durumsuz oturum sessizce yeniden bağlanır.
+        let pid = fx.pid(id).await;
+        terminate(&fx, pid).await;
+        let pid2 = fx.pid(id).await;
+        assert_ne!(pid, pid2, "yeniden bağlandı");
+        assert_eq!(fx.run_ok(id, "show statement_timeout").await.first_value(), "4321ms");
+        fx.assert_read_only(id, T, "kopan bağlantı sonrası").await;
+
+        // Uyku: yazma girişimleri oturumu durumlu yapmış olabilir; yeni, durumsuz oturumla da denenir.
+        let fresh = fx.open_ro(TxMode::Autocommit).await;
+        let pid = fx.pid(fresh).await;
+        fx.qm.reap_idle(Duration::ZERO);
+        assert!(fx.qm.is_asleep(fresh).unwrap());
+        let pid2 = fx.pid(fresh).await;
+        assert_ne!(pid, pid2, "uykudan uyandı");
+        fx.assert_read_only(fresh, T, "uyku sonrası").await;
+    }
+}
+
+/// (d) Regresyon: normal `open` kilitsiz sunucuda yazabilir; (e) kilitli sunucuda iki yol da salt okunurdur.
+#[tokio::test]
+async fn plain_open_writes_unless_locked_and_read_only_open_never_does() {
+    const T: &str = "qs_ro_d";
+    for ts in servers() {
+        let fx = fixture(&ts).await;
+        fx.setup(&ro_setup(T)).await;
+        let id = fx.open(TxMode::Autocommit).await;
+        assert_eq!(fx.run_ok(id, "show default_transaction_read_only").await.first_value(), "off");
+        fx.run_ok(id, &format!("insert into {T} values (1)")).await;
+        assert_eq!(fx.count(T).await, 1);
+        fx.qm.close(id, ClosePolicy::Refuse).await.unwrap();
+
+        let locked = fixture_with(&ts, true, None, None).await;
+        locked.setup(&ro_setup("qs_ro_de")).await;
+        for id in [locked.open(TxMode::Autocommit).await, locked.open_ro(TxMode::Autocommit).await] {
+            assert_eq!(locked.run_ok(id, "show default_transaction_read_only").await.first_value(), "on");
+            assert_eq!(locked.run_ok(id, "select qs_ro_de_try('insert into qs_ro_de values (1)')").await.first_value(), "25006");
+            // Kilit istemci tarafında da reddeder (sunucuya gitmez).
+            let (r, sink) = locked.run_with(id, "insert into qs_ro_de values (1)", 100).await;
+            assert_eq!(invalid_message(r), LOCKED_WRITE_MESSAGE);
+            assert!(sink.events.is_empty());
+            assert_eq!(locked.count("qs_ro_de").await, 0);
+            locked.qm.close(id, ClosePolicy::Refuse).await.unwrap();
+        }
+    }
+}

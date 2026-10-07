@@ -74,6 +74,7 @@ fn main() {
             commands::preview_pgadmin_import,
             commands::apply_pgadmin_import,
             query::qt_open,
+            query::qt_open_readonly,
             query::qt_analyze,
             query::qt_run,
             query::qt_more,

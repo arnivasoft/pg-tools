@@ -507,6 +507,9 @@ struct SessionSlot {
     server: Uuid,
     target: Target,
     guard: Guard,
+    /// Açıkça salt okunur açıldı (`open_read_only`, veri düzenleyici okuma yolu): kilitten bağımsız olarak her
+    /// bağlantı (açılış ve yeniden açılış) `default_transaction_read_only = on` ile kurulur.
+    force_read_only: bool,
     /// Kilitsiz okunur (`tx_state`); yalnızca `inner` kilidi tutulurken yazılır.
     state: StdMutex<TxState>,
     inner: Mutex<Inner>,
@@ -575,8 +578,14 @@ impl SessionSlot {
     }
 
     fn profile(&self, opts: &SessionOptions) -> SessionProfile {
-        SessionProfile::Query { read_only: self.guard.locked, statement_timeout_ms: opts.statement_timeout_ms }
+        session_profile(self.guard, self.force_read_only, opts)
     }
+}
+
+/// Oturum bağlantısının profili; açılış ve yeniden açılış **yalnızca** bunu kullanır: salt okunur =
+/// kilit ∨ açıkça salt okunur. (`set_options` bağlantıyı yeniden kurmaz, yalnızca `statement_timeout` uygular.)
+fn session_profile(guard: Guard, force_read_only: bool, opts: &SessionOptions) -> SessionProfile {
+    SessionProfile::Query { read_only: guard.locked || force_read_only, statement_timeout_ms: opts.statement_timeout_ms }
 }
 
 /// Boşta oturum uyutulabilir mi: transaction yok, oturum durumu yok, süre doldu.
@@ -928,11 +937,23 @@ impl QueryManager {
     /// Bağlı bir sunucuda yeni bir sorgu oturumu açar. Sunucunun salt okunur kilidi ve üretim etiketi açılışta
     /// okunur (değişirse oturumlar `close_sessions_of` ile kapatılmalıdır).
     pub async fn open(&self, server: Uuid, db: Target, opts: SessionOptions) -> Result<SessionId> {
+        self.open_with(server, db, opts, false).await
+    }
+
+    /// `open`'ın aynısı, ancak oturum kilitten bağımsız olarak **açıkça salt okunurdur**
+    /// (`default_transaction_read_only = on`); yeniden açılışta ve `set_options` sonrasında da korunur. Veri
+    /// düzenleyicinin okuma yolu içindir (yazma `data_*` komutlarıyla ayrı oturumda yapılır). Kilitli sunucuda
+    /// `open` ile aynı davranır. Not: `read_only` bir korumadır, güvenlik sınırı değildir (`SessionProfile`).
+    pub async fn open_read_only(&self, server: Uuid, db: Target, opts: SessionOptions) -> Result<SessionId> {
+        self.open_with(server, db, opts, true).await
+    }
+
+    async fn open_with(&self, server: Uuid, db: Target, opts: SessionOptions, force_read_only: bool) -> Result<SessionId> {
         if !self.mgr.is_connected(server) {
             return Err(Error::NotConnected);
         }
         let guard = self.current_guard(server)?;
-        let profile = SessionProfile::Query { read_only: guard.locked, statement_timeout_ms: opts.statement_timeout_ms };
+        let profile = session_profile(guard, force_read_only, &opts);
         let conn = self.mgr.open_dedicated(server, db, profile).await?;
         // Bağlanırken kilit/etiket değişmiş, sunucu silinmiş ya da bağlantısı kesilmiş (hedef değişikliği de
         // bağlantıyı keser) olabilir (`close_sessions_of` henüz haritada
@@ -949,6 +970,7 @@ impl QueryManager {
             server,
             target: db,
             guard,
+            force_read_only,
             state: StdMutex::new(TxState::Idle),
             inner: Mutex::new(Inner {
                 exec: Some(Executor::new(conn)),
@@ -966,7 +988,7 @@ impl QueryManager {
             completions: StdMutex::default(),
         });
         self.map().insert(id, slot);
-        tracing::debug!(%server, session = %id, locked = guard.locked, "sorgu oturumu açıldı");
+        tracing::debug!(%server, session = %id, locked = guard.locked, force_read_only, "sorgu oturumu açıldı");
         Ok(id)
     }
 
@@ -1701,11 +1723,18 @@ impl QueryManager {
     /// Test yardımcısı: bağlantısız (uykuda) bir oturum ekler.
     #[cfg(test)]
     fn insert_sleeping(&self, guard: Guard, state: TxState) -> SessionId {
+        self.insert_sleeping_with(guard, state, false)
+    }
+
+    /// Test yardımcısı: `insert_sleeping`, `force_read_only` seçilebilir.
+    #[cfg(test)]
+    fn insert_sleeping_with(&self, guard: Guard, state: TxState, force_read_only: bool) -> SessionId {
         let id = Uuid::new_v4();
         let slot = Arc::new(SessionSlot {
             server: Uuid::new_v4(),
             target: Target::Maintenance,
             guard,
+            force_read_only,
             state: StdMutex::new(state),
             inner: Mutex::new(Inner {
                 exec: None,
@@ -1932,6 +1961,26 @@ mod tests {
         let qm = manager();
         let err = qm.open(Uuid::new_v4(), Target::Maintenance, SessionOptions::default()).await.unwrap_err();
         assert!(matches!(err, Error::NotConnected), "{err:?}");
+        let err = qm.open_read_only(Uuid::new_v4(), Target::Maintenance, SessionOptions::default()).await.unwrap_err();
+        assert!(matches!(err, Error::NotConnected), "{err:?}");
+    }
+
+    /// Açıkça salt okunur yuva (veri düzenleyici okuma yolu) kilitsiz sunucuda da salt okunur profil üretir;
+    /// `open` ile açılan yuva yalnızca kilide bakar. Yeniden açılış (`wake`) aynı `profile()`'ı kullanır.
+    #[test]
+    fn force_read_only_slot_profile_is_read_only_even_when_unlocked() {
+        let qm = manager();
+        let opts = SessionOptions { mode: TxMode::Manual, statement_timeout_ms: 1234 };
+        let profile = |id| qm.slot(id).unwrap().profile(&opts);
+        let query = |read_only| SessionProfile::Query { read_only, statement_timeout_ms: 1234 };
+        assert_eq!(profile(qm.insert_sleeping_with(PLAIN, TxState::Idle, true)), query(true));
+        assert_eq!(profile(qm.insert_sleeping_with(PROD, TxState::Idle, true)), query(true));
+        assert_eq!(profile(qm.insert_sleeping_with(LOCKED, TxState::Idle, true)), query(true));
+        assert_eq!(profile(qm.insert_sleeping(PLAIN, TxState::Idle)), query(false));
+        assert_eq!(profile(qm.insert_sleeping(LOCKED, TxState::Idle)), query(true));
+        for (guard, force, want) in [(PLAIN, false, false), (PLAIN, true, true), (LOCKED, false, true), (LOCKED, true, true)] {
+            assert_eq!(session_profile(guard, force, &opts), query(want), "{guard:?} {force}");
+        }
     }
 
     /// Kapılar ağa gitmeden çalışır: geçen betik yeniden bağlanmaya çalışır (`NotConnected`), geçmeyen
