@@ -11,7 +11,6 @@ import { Button } from "../../ui/Button";
 import { inputClass } from "../../ui/Field";
 import { CommentField, FieldRow, FreeSqlNote, invalidClass } from "./FormParts";
 import { exactIssues, normalizeEmpty, orphanRowIssues } from "./forms-model";
-import { withPrimaryKeyNotNull } from "./table-constraints";
 import { createColumnRenames, type TableSectionProps } from "./table-form-state";
 import {
   addTableColumn, allowedValueSources, applySerialFix, columnDetailsHaveIssues, columnLockGate, columnTypeWarning, newColumn, originalColumn,
@@ -33,9 +32,11 @@ export function TableColumns(props: TableSectionProps) {
   const renames = createColumnRenames(props.editor, () => props.original);
   const removed = createMemo(() => removedColumns(props.original, d()));
 
-  /** Tek kolon düzenlemesi; ardından PK üyelerinin NOT NULL'ı korunur (değer kaynağı/ad değişimi onu düşürebilir). */
-  const editColumn = (i: number, f: (c: ColumnDef) => ColumnDef) =>
-    props.editor.edit((x) => withPrimaryKeyNotNull(updateTableColumn(x, i, f)));
+  /**
+   * Tek kolon düzenlemesi. PK üyelerinin NOT NULL'ını burada ZORLAMAYIN: editör her düzenlemeden sonra
+   * `reconcilePrimaryKeyNotNull` ile zorlar ve kaydeder (önceden zorlanırsa kayıt kaçar, PK'dan çıkınca geri dönmez).
+   */
+  const editColumn = (i: number, f: (c: ColumnDef) => ColumnDef) => props.editor.edit((x) => updateTableColumn(x, i, f));
 
   const rowEls: Array<HTMLElement | undefined> = [];
   const nameEls: Array<HTMLInputElement | undefined> = [];
@@ -138,7 +139,7 @@ export function TableColumns(props: TableSectionProps) {
                           onClick={() => {
                             const attnum = c.attnum;
                             if (attnum === null) return;
-                            props.editor.edit((x) => withPrimaryKeyNotNull(restoreColumn(x, o(), attnum)));
+                            props.editor.edit((x) => restoreColumn(x, o(), attnum));
                             focusLater(() => nameEls[d().columns.findIndex((k) => k.attnum === attnum)] ?? addEl);
                           }}
                         >

@@ -8,7 +8,7 @@ import {
   removedConstraints, restoreConstraint, supportsDeferrable, supportsNotValid, switchConstraintType, unsupportedKind, updateConstraint,
   updateFkPair, withDeferrable, withFkActions, withFkTarget, withInitiallyDeferred, withPrimaryKeyNotNull,
   columnChoices, constraintStructureChanged, fkRefColumnSource, switchConstraintTypeSnap, withFkTargetSnap,
-  fkSelfNameOnly, noInheritBlocked, restoreConstraintWithPk, scanNoteVisible, stableAddType, reconcilePrimaryKeyNotNull, NO_PK_FORCED,
+  fkSelfNameOnly, noInheritBlocked, scanNoteVisible, stableAddType, reconcilePrimaryKeyNotNull, NO_PK_FORCED,
 } from "./table-constraints";
 import type { SelfSnap } from "./table-constraints";
 import { columnRefs, newColumn, renameTable, renameTableColumn, selfRefs } from "./table-model";
@@ -467,15 +467,13 @@ describe("Task 7 inceleme düzeltmeleri", () => {
     expect(danglingColumns(r3, r3.constraints[0]!)).toEqual(["a"]);
   });
 
-  it("restoreConstraintWithPk: geri alınan PK, NOT NULL'ı kaldırılmış kolonu yeniden NOT NULL yapar; geri alınamıyorsa aynen", () => {
+  it("geri alınan PK + reconcile: NOT NULL'ı kaldırılmış kolon yeniden NOT NULL ve zorlanmış kaydedilir", () => {
     const o = T({ columns: [col("a", 1, true), col("b", 2)], constraints: [pk(["a"], 1)] });
     const d: TableDef = { ...structuredClone(o), constraints: [], columns: [col("a", 1, false), col("b", 2)] };
-    const r = restoreConstraintWithPk(d, o, 1, []);
-    expect(r.d.columns.map((c) => c.notNull)).toEqual([true, false]);
-    expect(r.d.constraints).toHaveLength(1);
-    const same = restoreConstraintWithPk(r.d, o, 1, [7]);
-    expect(same.d).toBe(r.d);
-    expect(same.snap).toEqual([7]);
+    const r = restoreConstraintSnap(d, o, 1, []);
+    const k = reconcilePrimaryKeyNotNull(d, r.d, NO_PK_FORCED);
+    expect(k.d.columns.map((c) => c.notNull)).toEqual([true, false]);
+    expect(k.forced.loaded).toEqual([1]);
   });
 
   it("m-1: kendine-başvuran FK'nin hedef anahtarı silinir/yeniden kurulursa FK da yeniden kurulur sayılır", () => {
@@ -519,18 +517,22 @@ describe("reconcilePrimaryKeyNotNull (final inceleme I-1)", () => {
   it("S44 bileşimi: PK'ya ekle (zorlanır, kaydedilir) → çıkar (false'a döner) → yüklenenle aynı", () => {
     const o = T({ columns: [col("id", 1, true), col("code", 2)], constraints: [pk(["id"], 100)] });
     const step = (before: TableDef, f: (c: ConstraintDef) => ConstraintDef, forced = NO_PK_FORCED) =>
-      reconcilePrimaryKeyNotNull(before, withPrimaryKeyNotNull(updateConstraint(before, 0, f)), forced);
+      reconcilePrimaryKeyNotNull(before, updateConstraint(before, 0, f), forced);
     const a = step(o, (c) => addConstraintColumn(c, "columns", "code"));
     expect(a.d.columns.map((c) => c.notNull)).toEqual([true, true]);
     expect(a.forced).toEqual({ loaded: [2], fresh: [] });
     const b = step(a.d, (c) => removeConstraintColumn(c, "columns", 1), a.forced);
     expect(defsEqual({ ...b.d, kind: "table" }, { ...o, kind: "table" })).toBe(true);
     expect(b.forced).toEqual({ loaded: [], fresh: [] });
-    // Kayıt olmadan (ör. yüklenen NOT NULL) çıkarılan kolon NOT NULL kalır; kimlik kolonu hiç zorlanmış sayılmaz.
+    // Kayıt olmadan (ör. yüklenen NOT NULL) çıkarılan kolon NOT NULL kalır; kimlik kolonunun kaydı korunur.
     const c = step(o, (k) => removeConstraintColumn(k, "columns", 0));
     expect(c.d.columns[0]!.notNull).toBe(true);
     const ident = T({ columns: [{ ...col("i", 1, true), identity: "always" }], constraints: [pk(["i"], 1)] });
-    expect(reconcilePrimaryKeyNotNull(ident, ident, { loaded: [1], fresh: [] }).forced.loaded).toEqual([]);
+    // Kimlik kolonuna dokunulmaz ama kayıt korunur (kimlikten çıkıp PK dışındaysa false'a döner).
+    const ik = reconcilePrimaryKeyNotNull(ident, ident, { loaded: [1], fresh: [] });
+    expect([ik.d, ik.forced.loaded]).toEqual([ident, [1]]);
+    const left = { ...ident, columns: [{ ...ident.columns[0]!, identity: null }], constraints: [] };
+    expect(reconcilePrimaryKeyNotNull(ident, left, ik.forced).d.columns[0]!.notNull).toBe(false);
   });
   it("değişiklik yoksa aynı nesne; yeni kolon sıraları silmede hizalanır", () => {
     const d = T({ columns: [col("a"), col("b"), col("c")], constraints: [pk(["c"])] });

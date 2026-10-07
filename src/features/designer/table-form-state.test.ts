@@ -275,7 +275,8 @@ describe("createTableFormState", () => {
     const M = await import("./table-model");
     const { defsEqual } = await import("./designer-model");
     const [st, dispose] = s.solid.createRoot((d) => [s.createTableFormState(s.props), d] as const);
-    const editC = (i: number, f: (c: ConstraintDef) => ConstraintDef) => st.editor.edit((x) => K.withPrimaryKeyNotNull(K.updateConstraint(x, i, f)));
+    // UI çağrı yerleriyle aynı: önceden zorlama yok (yalnızca editörün reconcile'ı zorlar).
+    const editC = (i: number, f: (c: ConstraintDef) => ConstraintDef) => st.editor.edit((x) => K.updateConstraint(x, i, f));
     const notNull = () => (s.draft() as TableDef).columns.map((c) => c.notNull);
     return { s, K, M, st, dispose, editC, notNull, same: () => defsEqual(s.draft()!, loaded) };
   }
@@ -305,7 +306,7 @@ describe("createTableFormState", () => {
     t.editC(1, (c) => t.K.addConstraintColumn(c, "columns", "code")); // yeniden ekle → kart silinince de geri dönmeli
     t.st.editor.editSnap((d, snap) => t.K.removeConstraintSnap(d, 1, snap));
     expect(t.notNull()).toEqual([true, false]);
-    t.st.editor.editSnap((d, snap) => t.K.restoreConstraintWithPk(d, original, 100, snap));
+    t.st.editor.editSnap((d, snap) => t.K.restoreConstraintSnap(d, original, 100, snap));
     expect(t.same()).toBe(true);
     t.dispose();
   });
@@ -339,6 +340,80 @@ describe("createTableFormState", () => {
     t.s.setDraft(T({ name: "orders", columns: [{ ...col("id", 1), notNull: true }, { ...col("code", 2), notNull: true }], constraints: [pkC(["id", "code"], 100)] }));
     t.editC(0, (c) => t.K.removeConstraintColumn(c, "columns", 1));
     expect(t.notNull()).toEqual([true, true]);
+    t.dispose();
+  });
+  // Yeniden inceleme I-1R: çağrı yerinde önceden zorlanan NOT NULL kaydedilemiyordu.
+  const orders3 = () =>
+    T({ name: "orders", columns: [{ ...col("id", 1), notNull: true }, col("code", 2), col("note", 3)], constraints: [pkC(["id"], 100), uqC(["code"], 101)] });
+
+  it("I-1R Repro A: PK üyesi yüklü kolonu sil + geri al + PK'dan çıkar → yüklenenle aynı (ad değişimli varyant dahil)", async () => {
+    for (const renamed of [false, true]) {
+      const loaded = orders3();
+      const original = structuredClone(loaded) as TableDef;
+      const t = await pkSetup(loaded);
+      const { createColumnRenames } = await import("./table-form-state");
+      const r = createColumnRenames(t.st.editor, () => original);
+      t.editC(0, (c) => t.K.addConstraintColumn(c, "columns", "code"));
+      if (renamed) for (const v of ["c", "co", "code2"]) r.rename(1, v);
+      r.remove(1); // çöp kutusu (yeniden adlandırılmışsa önce özgün adına döner)
+      t.st.editor.edit((x) => t.M.restoreColumn(x, original, 2)); // Geri al (UI ile aynı: önceden zorlama yok)
+      expect(t.notNull()).toEqual([true, true, false]);
+      t.editC(0, (c) => t.K.removeConstraintColumn(c, "columns", 1));
+      expect(t.notNull()).toEqual([true, false, false]);
+      expect(t.same()).toBe(true);
+      t.dispose();
+    }
+  });
+
+  it("I-1R Repro A (zorlamasız başlangıç): note PK'ya, sil, geri al, PK'dan çıkar → yüklenenle aynı", async () => {
+    const loaded = orders3();
+    const original = structuredClone(loaded) as TableDef;
+    const t = await pkSetup(loaded);
+    t.editC(0, (c) => t.K.addConstraintColumn(c, "columns", "note"));
+    t.st.editor.edit((x) => t.M.removeTableColumn(x, 2));
+    t.st.editor.edit((x) => t.M.restoreColumn(x, original, 3));
+    t.editC(0, (c) => t.K.removeConstraintColumn(c, "columns", 1));
+    expect(t.same()).toBe(true);
+    t.dispose();
+  });
+
+  it("I-1R Repro B: PK üyesi yüklü kolonda IDENTITY → yok/default → PK'dan çıkar → yüklenenle aynı (serial hızlı düzeltme dahil)", async () => {
+    for (const back of ["none", "default", "serial"] as const) {
+      const loaded = orders3();
+      const t = await pkSetup(loaded);
+      const orig = (loaded as TableDef).columns[1]!;
+      const editCol = (f: (c: TableDef["columns"][number]) => TableDef["columns"][number]) =>
+        t.st.editor.edit((x) => t.M.updateTableColumn(x, 1, f));
+      t.editC(0, (c) => t.K.addConstraintColumn(c, "columns", "code"));
+      if (back === "serial") {
+        editCol((c) => t.M.withDataType(c, orig, "serial"));
+        editCol((c) => t.M.applySerialFix(c, orig));
+        editCol((c) => t.M.withValueSource(c, "none", orig));
+        editCol((c) => t.M.withDataType(c, orig, "integer"));
+      } else {
+        editCol((c) => t.M.withValueSource(c, "identity_always", orig));
+        editCol((c) => t.M.withValueSource(c, back, orig));
+        if (back === "default") editCol((c) => t.M.withValueSource(c, "none", orig));
+      }
+      expect(t.notNull()[1]).toBe(true); // hâlâ PK üyesi
+      t.editC(0, (c) => t.K.removeConstraintColumn(c, "columns", 1));
+      expect(t.notNull()).toEqual([true, false, false]);
+      expect(t.same()).toBe(true);
+      t.dispose();
+    }
+  });
+
+  it("I-1R küçük: yeni kolon PK'da IDENTITY → yok → PK'dan çıkar → NOT NULL false", async () => {
+    const t = await pkSetup(T({ name: "n", columns: [col("a", 1)], constraints: [] }));
+    t.st.editor.edit(t.M.addTableColumn);
+    t.st.editor.edit((x) => t.M.updateTableColumn(x, 1, (c) => ({ ...c, name: "n1", dataType: "integer" })));
+    t.st.editor.editSnap((d, snap) => t.K.addConstraintSnap(d, "primary_key", snap));
+    t.editC(0, (c) => t.K.addConstraintColumn(c, "columns", "n1"));
+    t.st.editor.edit((x) => t.M.updateTableColumn(x, 1, (c) => t.M.withValueSource(c, "identity_by_default")));
+    t.st.editor.edit((x) => t.M.updateTableColumn(x, 1, (c) => t.M.withValueSource(c, "none")));
+    expect(t.notNull()).toEqual([false, true]);
+    t.editC(0, (c) => t.K.removeConstraintColumn(c, "columns", 0));
+    expect(t.notNull()).toEqual([false, false]);
     t.dispose();
   });
 });

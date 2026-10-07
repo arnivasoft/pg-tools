@@ -18,9 +18,9 @@ import { exactIssues, normalizeEmpty, orphanRowIssues } from "./forms-model";
 import {
   addConstraintColumn, addConstraintSnap, addFkPair, availableColumns, canAddPrimaryKey, canRestoreConstraint, columnChoices, constraintColumns,
   constraintLabel, constraintStructureChanged, danglingColumns, fkRefColumnSource, newConstraint, notValidMode, originalConstraint,
-  fkSelfNameOnly, noInheritBlocked, removeConstraintColumn, removeConstraintSnap, removeFkPair, removedConstraints, restoreConstraintWithPk,
+  fkSelfNameOnly, noInheritBlocked, removeConstraintColumn, removeConstraintSnap, removeFkPair, removedConstraints, restoreConstraintSnap,
   scanNoteVisible, stableAddType, supportsDeferrable, switchConstraintTypeSnap, unsupportedKind, updateConstraint, updateFkPair,
-  withDeferrable, withFkActions, withFkTargetSnap, withInitiallyDeferred, withPrimaryKeyNotNull, type ColumnListName, type ConstraintType,
+  withDeferrable, withFkActions, withFkTargetSnap, withInitiallyDeferred, type ColumnListName, type ConstraintType,
 } from "./table-constraints";
 import type { TableSectionProps } from "./table-form-state";
 import { structureLocked } from "./table-model";
@@ -182,7 +182,7 @@ export function TableConstraints(props: TableSectionProps) {
                             disabled={!allowed()}
                             onClick={() => {
                               if (oid === null || !allowed()) return;
-                              props.editor.editSnap((x, snap) => restoreConstraintWithPk(x, o(), oid, snap));
+                              props.editor.editSnap((x, snap) => restoreConstraintSnap(x, o(), oid, snap));
                               focusLater(() => nameEls[d().constraints.findIndex((k) => k.oid === oid)] ?? addEl);
                             }}
                           >
@@ -275,8 +275,8 @@ function ConstraintCard(props: CardProps) {
   const dangling = createMemo(() => danglingColumns(props.draft, c(), props.editor.snap().includes(i)));
   const restructured = () => nvMode() === "validate" && constraintStructureChanged(props.original, props.draft, c());
 
-  /** Kısıt düzenlemesi (sayı değişmez); ardından PK üyelerinin NOT NULL'ı korunur. */
-  const editC = (f: (k: ConstraintDef) => ConstraintDef) => props.editor.edit((x) => withPrimaryKeyNotNull(updateConstraint(x, i, f)));
+  /** Kısıt düzenlemesi (sayı değişmez). PK üyelerinin NOT NULL'ını editör uzlaştırır (`reconcilePrimaryKeyNotNull`). */
+  const editC = (f: (k: ConstraintDef) => ConstraintDef) => props.editor.edit((x) => updateConstraint(x, i, f));
   const setTarget = (patch: { refSchema?: string; refTable?: string }) =>
     props.editor.editSnap((x, snap) => withFkTargetSnap(x, i, patch, snap));
 

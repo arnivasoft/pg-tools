@@ -3,7 +3,6 @@
 // hepsi değişmezdir (girdi nesnesi değiştirilmez, sınır dışı indeks → aynı nesne). `oid` yalnızca yükleme kimliğidir:
 // istemci asla üretmez/değiştirmez.
 import { ttbl } from "../../app/strings-table";
-import type { ColumnDef } from "../../ipc/bindings/ColumnDef";
 import type { ConstraintDef } from "../../ipc/bindings/ConstraintDef";
 import type { ConstraintKind } from "../../ipc/bindings/ConstraintKind";
 import type { FkAction } from "../../ipc/bindings/FkAction";
@@ -205,17 +204,18 @@ function alignFresh(before: TableDef, after: TableDef): number[] {
 }
 
 /**
- * Bir düzenlemenin ardından PRIMARY KEY üyelerinin NOT NULL'ını uzlaştırır:
- * - üye olup NOT NULL olmayan kolon NOT NULL yapılır ve "zorlanmış" kaydedilir (düzenleme içinde `withPrimaryKeyNotNull`
- *   ile zorlanmış — önceki değeri false, şimdi üye ve true — kolon da kaydedilir);
- * - zorlanmış kolon artık üye değilse NOT NULL eski değerine (false) döner (kimlik kolonu hariç: hep NOT NULL);
- *   böylece PK'ya ekle-çıkar ya da sil-geri al "değişiklik yok" planına döner.
+ * Bir düzenlemenin ardından PRIMARY KEY üyelerinin NOT NULL'ını uzlaştırır. Formda PK üyelerinin NOT NULL'ını zorlayan
+ * TEK yer budur (editör her düzenlemeden sonra çağırır); çağrı yerleri `withPrimaryKeyNotNull` ile önceden zorlamamalı,
+ * aksi halde zorlama kaydedilemez (ör. geri alınan kolon, kimlikten dönen kolon) ve PK'dan çıkınca geri dönmez.
+ * - üye olup NOT NULL olmayan kolon NOT NULL yapılır ve "zorlanmış" kaydedilir;
+ * - zorlanmış kolon artık üye değilse NOT NULL eski değerine (false) döner; böylece PK'ya ekle-çıkar ya da sil-geri al
+ *   "değişiklik yok" planına döner;
+ * - kimlik kolonu hep NOT NULL'dır: dokunulmaz ama kaydı korunur (kimlikten çıkıp PK'dan da çıkınca false'a döner).
  * Kullanıcının kendi işaretlediği NOT NULL (üye değilken) zorlanmış sayılmaz. Değişen yoksa `after` aynen döner.
  */
 export function reconcilePrimaryKeyNotNull(before: TableDef, after: TableDef, forced: PkForced): { d: TableDef; forced: PkForced } {
   const members = pkMembers(after);
   const from = alignFresh(before, after);
-  const beforeFresh = before.columns.filter((c) => c.attnum === null);
   const loaded = new Set(forced.loaded);
   const fresh: boolean[] = [];
   const nextLoaded: number[] = [];
@@ -223,24 +223,18 @@ export function reconcilePrimaryKeyNotNull(before: TableDef, after: TableDef, fo
   let changed = false;
   const columns = after.columns.map((col) => {
     let wasForced: boolean;
-    let prev: ColumnDef | undefined;
     if (col.attnum === null) {
       const k = from[ordinal++]!;
       wasForced = k >= 0 && forced.fresh[k] === true;
-      prev = k >= 0 ? beforeFresh[k] : undefined;
-    } else {
-      const attnum = col.attnum;
-      wasForced = loaded.has(attnum);
-      prev = before.columns.find((c) => c.attnum === attnum);
-    }
+    } else wasForced = loaded.has(col.attnum);
     let out = col;
     let isForced = false;
-    if (col.identity !== null) isForced = false;
+    if (col.identity !== null) isForced = wasForced;
     else if (members.has(col.name)) {
       if (!col.notNull) {
         out = { ...col, notNull: true };
         isForced = true;
-      } else isForced = wasForced || (prev !== undefined && !prev.notNull);
+      } else isForced = wasForced;
     } else if (wasForced && col.notNull) out = { ...col, notNull: false };
     if (out !== col) changed = true;
     if (col.attnum === null) fresh.push(isForced);
@@ -511,12 +505,6 @@ export function constraintStructureChanged(original: TableDef | null, d: TableDe
     const now = d.constraints.find((x) => x.oid === ok.oid);
     return !now || shapeChanged(original, d, names, ok, now);
   });
-}
-
-/** Geri alma + PRIMARY KEY üyelerinin NOT NULL'ı (geri alınan PK, NOT NULL'ı kaldırılmış kolonu yeniden zorunlu yapar). */
-export function restoreConstraintWithPk(d: TableDef, original: TableDef, oid: number, snap: SelfSnap): WithSnap {
-  const r = restoreConstraintSnap(d, original, oid, snap);
-  return r.d === d ? r : { d: withPrimaryKeyNotNull(r.d), snap: r.snap };
 }
 
 /** Bölümlenmiş tablo oluştururken CHECK NO INHERIT reddedilir: kutu kapalı (işaretliyse kaldırılabilsin diye açık kalır). */
