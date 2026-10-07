@@ -148,7 +148,8 @@ impl DataManager {
     }
 
     /// Kapılardan geçen planı ayrı bağlantıda tek transaction'da uygular. Kapı reddi ve bağlantı kurulamaması `Err`;
-    /// ifade hatası, çakışma ve iptal `Ok(DataOutcome::Failed)` (hiçbir ifade kalıcı değildir).
+    /// ifade hatası, çakışma ve iptal `Ok(DataOutcome::Failed)` (hiçbir ifade kalıcı değildir; tek istisna
+    /// SQLSTATE'siz `COMMIT` hatası → `outcome_unknown = true`, kalıcılaşmış olabilir).
     pub async fn apply(&self, server: Uuid, db_oid: u32, set: &DataChangeSet, opts: &DataApplyOptions) -> Result<DataOutcome> {
         let started = Instant::now();
         let mut statements = 0usize;
@@ -234,13 +235,7 @@ impl DataManager {
                 elapsed_ms: elapsed_ms(started),
                 results,
             },
-            ExecResult::Conflict { index } => DataOutcome::Failed {
-                failed_index: index,
-                sqlstate: None,
-                position: None,
-                error: ddl_payload(&Error::Invalid(ROW_CONFLICT_MESSAGE.into())),
-                conflict: true,
-            },
+            ExecResult::Conflict { index } => conflict_outcome(index),
             ExecResult::Failed { index, error, position, outcome_unknown } => failed_outcome(index, error, position, outcome_unknown),
         })
     }
@@ -285,8 +280,20 @@ impl DataManager {
     }
 }
 
+/// Çakışma (`index`. ifade ≠ 1 satır): geri alındı, sonuç bellidir.
+fn conflict_outcome(index: u32) -> DataOutcome {
+    DataOutcome::Failed {
+        failed_index: index,
+        sqlstate: None,
+        position: None,
+        error: ddl_payload(&Error::Invalid(ROW_CONFLICT_MESSAGE.into())),
+        conflict: true,
+        outcome_unknown: false,
+    }
+}
+
 /// PG hatası/iptal → `Failed` (çakışma değil). Yük `failure_payload` (PG iletisi yalnızca kullanıcıya); `COMMIT`
-/// yanıtsızsa belirsiz sonuç ipucu.
+/// yanıtsızsa (`outcome_unknown`: yalnızca SQLSTATE'siz COMMIT hatası) belirsiz sonuç ipucu ve bayrağı.
 fn failed_outcome(index: u32, error: Error, position: Option<u32>, outcome_unknown: bool) -> DataOutcome {
     let payload = if outcome_unknown { apply::unknown_outcome_payload(&error) } else { apply::failure_payload(&error) };
     DataOutcome::Failed {
@@ -295,5 +302,45 @@ fn failed_outcome(index: u32, error: Error, position: Option<u32>, outcome_unkno
         position,
         error: payload,
         conflict: false,
+        outcome_unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query(sqlstate: Option<&str>) -> Error {
+        Error::Query { sqlstate: sqlstate.map(str::to_string), message: "m".into(), detail: None, hint: None }
+    }
+
+    #[test]
+    fn failed_outcome_flags_only_unknown_commit_outcome() {
+        // SQLSTATE'siz COMMIT hatası: kalıcılaşmış olabilir → `outcome_unknown` + belirsizlik ipucu.
+        let DataOutcome::Failed { failed_index, sqlstate, conflict, outcome_unknown, error, .. } =
+            failed_outcome(2, query(None), None, true)
+        else {
+            panic!("Failed bekleniyordu")
+        };
+        assert_eq!((failed_index, sqlstate, conflict, outcome_unknown), (2, None, false, true));
+        assert_eq!(error.hint, apply::unknown_outcome_payload(&query(None)).hint);
+
+        // Sıradan ifade hatası ve iptal: sonuç belli (hiçbir şey yazılmadı).
+        for (e, pos) in [(query(Some("23505")), Some(4)), (apply::cancelled_error(), None)] {
+            let DataOutcome::Failed { outcome_unknown, conflict, position, .. } = failed_outcome(0, e, pos, false) else {
+                panic!("Failed bekleniyordu")
+            };
+            assert_eq!((outcome_unknown, conflict, position), (false, false, pos));
+        }
+    }
+
+    #[test]
+    fn conflict_outcome_is_known_and_coded() {
+        let DataOutcome::Failed { failed_index, sqlstate, position, error, conflict, outcome_unknown } = conflict_outcome(3)
+        else {
+            panic!("Failed bekleniyordu")
+        };
+        assert_eq!((failed_index, sqlstate, position, conflict, outcome_unknown), (3, None, None, true, false));
+        assert_eq!(error.code, "row_conflict");
     }
 }

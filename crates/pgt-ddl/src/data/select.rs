@@ -1,5 +1,7 @@
 //! Veri düzenleyici SELECT üreticisi (saf). Biçim:
-//! `SELECT "c1", …, xmin::pg_catalog.text AS "__pgt_xmin" FROM "s"."t"[ WHERE (<filtre>\n)][ ORDER BY "k1" ASC, …]`.
+//! `SELECT "c1", …, xmin::pg_catalog.text AS "__pgt_xmin" FROM [ONLY ]"s"."t"[ WHERE (<filtre>\n)][ ORDER BY "k1" ASC, …]`.
+//! `ONLY` yalnızca sıradan tabloda (`RelKind::Table`: kalıtım çocuklarının satırları hariç); bölümlü tablo,
+//! görünüm, MV ve yabancı tabloda yok.
 //!
 //! Kolon listesi kaynağın **tüm** kolonlarıdır (`attnum` sırası); sürüm kolonu (`xmin::pg_catalog.text`; tip adı
 //! `search_path`'ten bağımsız) yalnızca
@@ -35,7 +37,9 @@ pub fn select_sql(source: &DataSource, req: &SelectRequest) -> std::result::Resu
     }
     // Kolonsuz görünüm (`SELECT FROM v`) PG 9.4+'ta geçerlidir.
     let mut sql = if items.is_empty() { "SELECT".to_string() } else { format!("SELECT {}", items.join(", ")) };
-    sql.push_str(" FROM ");
+    // Kalıtım: sıradan tablo `ONLY` ile okunur (çocuk satırları üst tablonun sekmesinde görünmez ve oradan
+    // düzenlenmez; plan da `UPDATE/DELETE ONLY` üretir). Bölümlü tablo bölümleriyle birlikte okunur.
+    sql.push_str(if source.relkind == RelKind::Table { " FROM ONLY " } else { " FROM " });
     sql.push_str(&qualified(&source.schema, &source.name));
     if let Some(f) = filter {
         sql.push_str(" WHERE ");
@@ -172,6 +176,8 @@ mod tests {
         // Sürüm ifadesi tip adını nitelikli yazar (`search_path`'ten bağımsız).
         assert_eq!(out.sql.contains("xmin::pg_catalog.text AS "), out.has_version, "{}", out.sql);
         assert!(!out.sql.contains("xmin::text"), "{}", out.sql);
+        // Kalıtım: sıradan tablo `ONLY` ile okunur (çocuk satırları gelmez); bölümlü tablo bölümleriyle okunur.
+        assert_eq!(out.sql.contains(" FROM ONLY "), s.relkind == RelKind::Table, "{}", out.sql);
         out
     }
 

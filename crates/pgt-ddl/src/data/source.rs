@@ -178,6 +178,10 @@ pub fn choose_key(candidates: &[KeyCandidate]) -> Option<DataKey> {
 /// Girdi: şema, ad, her kolon için (ad, tip OID'si, üretilmiş, kimlik) kaynak sırasıyla ve anahtar (kaynak, ad,
 /// kolonlar). `type_display` ve yetkiler dahil değildir (yetki değişimi parmak izini bozmaz; yazma yetkisi PG'de
 /// yine denetlenir).
+///
+/// Kararlılık: `DefaultHasher`'ın algoritması Rust/std sürümleri ve derlemeler arasında **kararlı değildir**. Parmak
+/// izi yalnızca **aynı süreç içinde** karşılaştırılır (yükle → seç/önizle/uygula); asla kalıcılaştırılmaz (diske,
+/// ayara, geçmişe yazılmaz) ve başka bir derlemenin ürettiğiyle karşılaştırılmaz.
 pub fn fingerprint(schema: &str, name: &str, columns: &[DataColumn], key: Option<&DataKey>) -> String {
     let mut h = DefaultHasher::new();
     schema.hash(&mut h);

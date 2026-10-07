@@ -285,13 +285,17 @@ impl fmt::Debug for RowResult {
     }
 }
 
-/// `data_apply` sonucu. Başarısızlıkta hiçbir ifade kalıcı değildir (tek transaction).
+/// `data_apply` sonucu. Başarısızlıkta hiçbir ifade kalıcı değildir (tek transaction) — **tek istisna**
+/// `Failed.outcome_unknown = true`.
 ///
 /// `Failed.conflict`: satır bayat/silinmiş (`row_conflict`; bu durumda `sqlstate = None`). `position`: PG'nin hata
-/// konumu, başarısız ifadenin metnine göre. `ErrorPayload` yalnızca `Serialize` olduğundan bu tip de yalnızca
-/// arayüze gider (`Deserialize` yok; `ApplyOutcome` kalıbı).
+/// konumu, başarısız ifadenin metnine göre. `outcome_unknown`: `COMMIT` SQLSTATE'siz başarısız oldu (bağlantı
+/// koptu, yanıt alınamadı) — değişiklikler **kalıcılaşmış olabilir**; arayüz yeniden denemeden önce veriyi yeniden
+/// yüklemelidir. Çakışma, iptal ve sıradan ifade/ertelenmiş kısıt hatalarında `false`'tur (hiçbir şey yazılmadı).
+/// `ErrorPayload` yalnızca `Serialize` olduğundan bu tip de yalnızca arayüze gider (`Deserialize` yok;
+/// `ApplyOutcome` kalıbı).
 // `Debug` elle: dönen satırları ve hata metnini (PG `detail`'i satır verisi içerebilir) yazmaz; yalnızca sayılar,
-// `sqlstate`, konum, hata **kodu** ve `conflict`.
+// `sqlstate`, konum, hata **kodu**, `conflict` ve `outcome_unknown`.
 #[derive(Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(tag = "outcome", rename_all = "snake_case", rename_all_fields = "camelCase")]
 #[ts(export)]
@@ -308,6 +312,7 @@ pub enum DataOutcome {
         position: Option<u32>,
         error: ErrorPayload,
         conflict: bool,
+        outcome_unknown: bool,
     },
 }
 
@@ -320,13 +325,14 @@ impl fmt::Debug for DataOutcome {
                 .field("elapsed_ms", elapsed_ms)
                 .field("results", &results.len())
                 .finish(),
-            DataOutcome::Failed { failed_index, sqlstate, position, error, conflict } => f
+            DataOutcome::Failed { failed_index, sqlstate, position, error, conflict, outcome_unknown } => f
                 .debug_struct("Failed")
                 .field("failed_index", failed_index)
                 .field("sqlstate", sqlstate)
                 .field("position", position)
                 .field("code", &error.code)
                 .field("conflict", conflict)
+                .field("outcome_unknown", outcome_unknown)
                 .finish(),
         }
     }
@@ -481,6 +487,7 @@ mod tests {
             position: None,
             error: ErrorPayload { code: "row_conflict".into(), message: "m".into(), detail: None, hint: None },
             conflict: true,
+            outcome_unknown: false,
         };
         let v = serde_json::to_value(&failed).unwrap();
         assert_eq!(v["outcome"], "failed");
@@ -489,6 +496,21 @@ mod tests {
         assert_eq!(v["position"], serde_json::Value::Null);
         assert_eq!(v["error"]["code"], "row_conflict");
         assert_eq!(v["conflict"], true);
+        assert_eq!(v["outcomeUnknown"], false);
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys.len(), 7, "{keys:?}");
+
+        // SQLSTATE'siz COMMIT hatası: kalıcılaşmış olabilir.
+        let unknown = DataOutcome::Failed {
+            failed_index: 0,
+            sqlstate: None,
+            position: None,
+            error: ErrorPayload { code: "unknown_outcome".into(), message: "m".into(), detail: None, hint: None },
+            conflict: false,
+            outcome_unknown: true,
+        };
+        let v = serde_json::to_value(&unknown).unwrap();
+        assert_eq!((v["conflict"].clone(), v["outcomeUnknown"].clone()), (json!(false), json!(true)));
     }
 
     const SECRET: &str = "gizli-değer";
@@ -547,11 +569,12 @@ mod tests {
                 hint: Some("gizli_ipucu".into()),
             },
             conflict: false,
+            outcome_unknown: false,
         };
         let d = format!("{failed:?}");
         assert_eq!(
             d,
-            r#"Failed { failed_index: 1, sqlstate: Some("23505"), position: Some(3), code: "query", conflict: false }"#
+            r#"Failed { failed_index: 1, sqlstate: Some("23505"), position: Some(3), code: "query", conflict: false, outcome_unknown: false }"#
         );
         let pretty = format!("{failed:#?}");
         for needle in [SECRET, "gizli_kolon", "gizli_anahtar", "gizli_ipucu", "duplicate"] {

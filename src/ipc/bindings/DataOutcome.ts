@@ -3,10 +3,14 @@ import type { ErrorPayload } from "./ErrorPayload";
 import type { RowResult } from "./RowResult";
 
 /**
- * `data_apply` sonucu. Başarısızlıkta hiçbir ifade kalıcı değildir (tek transaction).
+ * `data_apply` sonucu. Başarısızlıkta hiçbir ifade kalıcı değildir (tek transaction) — **tek istisna**
+ * `Failed.outcome_unknown = true`.
  *
  * `Failed.conflict`: satır bayat/silinmiş (`row_conflict`; bu durumda `sqlstate = None`). `position`: PG'nin hata
- * konumu, başarısız ifadenin metnine göre. `ErrorPayload` yalnızca `Serialize` olduğundan bu tip de yalnızca
- * arayüze gider (`Deserialize` yok; `ApplyOutcome` kalıbı).
+ * konumu, başarısız ifadenin metnine göre. `outcome_unknown`: `COMMIT` SQLSTATE'siz başarısız oldu (bağlantı
+ * koptu, yanıt alınamadı) — değişiklikler **kalıcılaşmış olabilir**; arayüz yeniden denemeden önce veriyi yeniden
+ * yüklemelidir. Çakışma, iptal ve sıradan ifade/ertelenmiş kısıt hatalarında `false`'tur (hiçbir şey yazılmadı).
+ * `ErrorPayload` yalnızca `Serialize` olduğundan bu tip de yalnızca arayüze gider (`Deserialize` yok;
+ * `ApplyOutcome` kalıbı).
  */
-export type DataOutcome = { "outcome": "applied", statements: number, elapsedMs: number, results: Array<RowResult>, } | { "outcome": "failed", failedIndex: number, sqlstate: string | null, position: number | null, error: ErrorPayload, conflict: boolean, };
+export type DataOutcome = { "outcome": "applied", statements: number, elapsedMs: number, results: Array<RowResult>, } | { "outcome": "failed", failedIndex: number, sqlstate: string | null, position: number | null, error: ErrorPayload, conflict: boolean, outcomeUnknown: boolean, };

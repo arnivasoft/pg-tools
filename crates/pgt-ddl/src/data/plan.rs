@@ -2,8 +2,10 @@
 //! `INSERT`/`UPDATE`/`DELETE` ifadelerine çevirir. Biçimler:
 //!
 //! - `INSERT INTO "s"."t" ("c1", …) VALUES (<v1>, …) RETURNING <dönüş>` (hiç kolon yoksa `DEFAULT VALUES`)
-//! - `UPDATE "s"."t" SET "c1" = <v1>, … WHERE "k1" = '<a>' AND … AND xmin::pg_catalog.text = '<sürüm>' RETURNING <dönüş>`
-//! - `DELETE FROM "s"."t" WHERE "k1" = '<a>' AND … AND xmin::pg_catalog.text = '<sürüm>'`
+//! - `UPDATE ONLY "s"."t" SET "c1" = <v1>, … WHERE "k1" = '<a>' AND … AND xmin::pg_catalog.text = '<sürüm>' RETURNING <dönüş>`
+//! - `DELETE FROM ONLY "s"."t" WHERE "k1" = '<a>' AND … AND xmin::pg_catalog.text = '<sürüm>'`
+//!
+//! `ONLY` yalnızca sıradan tabloda (`RelKind::Table`; kalıtım çocukları hariç); bölümlü tabloda yazılmaz.
 //!
 //! `<dönüş>` = `returning_clause` (kaynak kolon sırası + `xmin::pg_catalog.text`; şema yolundan bağımsız tip adı).
 //! İstisna: bölümlü üst tabloya `INSERT` (`insert_returning_clause`) — PG 12+ yönlendirilen satırın sistem kolonunu
@@ -32,7 +34,8 @@ const VERSION_EXPR: &str = "xmin::pg_catalog.text";
 /// Bölümlü üst tabloya eklenen satırın sürümü: satırı ekleyen (üst düzey) transaction'ın 32 bit kimliği = satırın
 /// `xmin`'i. Uygulama alt transaction (SAVEPOINT) açmaz; tetikleyicinin EXCEPTION bloğu satır yazılmadan kapanır.
 /// Yanlış olursa kapalı başarısız olur (sonraki UPDATE/DELETE 0 satır → `row_conflict`). PG 10–18'de `txid_current`.
-pub const INSERTED_VERSION_EXPR: &str = "(pg_catalog.txid_current() % 4294967296)::pg_catalog.text";
+/// Fonksiyon, işleç (`OPERATOR(pg_catalog.%)`) ve tip nitelikli: `search_path`'teki kullanıcı nesneleri araya giremez.
+pub const INSERTED_VERSION_EXPR: &str = "(pg_catalog.txid_current() OPERATOR(pg_catalog.%) 4294967296)::pg_catalog.text";
 
 pub const DELETE_NOTE: &str = "Satır silinir (geri alınamaz).";
 pub const KEY_CHANGE_WARNING: &str = "Anahtar kolonu değiştiriliyor; bu satırı gösteren yabancı anahtarlar etkilenebilir.";
@@ -113,6 +116,9 @@ fn plan_with(source: &DataSource, changes: &[RowChange], lim: Limits) -> std::re
     }
 
     let table = qualified(&source.schema, &source.name);
+    // Kalıtım: sıradan tablonun UPDATE/DELETE'i `ONLY` — aynı anahtarlı çocuk satırına (çocuğun kendi PK'sı ayrıdır)
+    // üst tablo üzerinden dokunulmaz. Bölümlü tabloda `ONLY` YOK (satırlar bölümlerdedir); INSERT'te anlamsız.
+    let target = if source.relkind == RelKind::Table { format!("ONLY {table}") } else { table.clone() };
     let returning = returning_clause(source);
     let insert_returning = insert_returning_clause(source);
     let mut statements = Vec::with_capacity(changes.len());
@@ -138,7 +144,7 @@ fn plan_with(source: &DataSource, changes: &[RowChange], lim: Limits) -> std::re
                 let assigns: Vec<String> =
                     ordered(source, set).iter().map(|(c, v)| format!("{} = {}", quote_ident(&c.name), value_sql(v))).collect();
                 let sql = format!(
-                    "UPDATE {table} SET {} WHERE {} RETURNING {returning}",
+                    "UPDATE {target} SET {} WHERE {} RETURNING {returning}",
                     assigns.join(", "),
                     where_sql(key, kv, version)
                 );
@@ -146,7 +152,7 @@ fn plan_with(source: &DataSource, changes: &[RowChange], lim: Limits) -> std::re
             }
             RowChange::Delete { key: kv, version } => {
                 same_row |= !seen.insert(kv.as_slice());
-                let sql = format!("DELETE FROM {table} WHERE {}", where_sql(key, kv, version));
+                let sql = format!("DELETE FROM {target} WHERE {}", where_sql(key, kv, version));
                 statements.push(stmt(sql, Risk::Destructive, Some(DELETE_NOTE)));
             }
         }
@@ -477,7 +483,13 @@ mod tests {
                 "DELETE FROM public.t WHERE id = '1' AND xmin::pg_catalog.text = '6'".to_string(),
             ]
         );
-        assert_eq!(INSERTED_VERSION_EXPR, "(pg_catalog.txid_current() % 4294967296)::pg_catalog.text");
+        // İşleç de nitelikli: `search_path`'teki kullanıcı tanımlı `%` araya giremez.
+        assert_eq!(
+            INSERTED_VERSION_EXPR,
+            "(pg_catalog.txid_current() OPERATOR(pg_catalog.%) 4294967296)::pg_catalog.text"
+        );
+        // Bölümlü kaynakta `ONLY` yok: bölümlerdeki satırlar dahildir.
+        assert!(sqls(&p).iter().all(|q| !q.contains("ONLY public")), "{:?}", sqls(&p));
         assert_eq!(insert_returning_clause(&s), format!("{cols}, {INSERTED_VERSION_EXPR}"));
         // Sıradan tablo (bölümün kendisi dahil) `xmin` kullanır.
         assert_eq!(insert_returning_clause(&table()), returning_clause(&table()));
@@ -491,14 +503,15 @@ mod tests {
             sqls(&p),
             ["INSERT INTO public.t (id, status) VALUES ('1', 'a') RETURNING id, \"name\", status, note, xmin::pg_catalog.text"]
         );
+        // Sıradan tabloda UPDATE/DELETE `ONLY`: kalıtım çocuklarının satırlarına dokunmaz; INSERT'te `ONLY` yok.
         let p = ok(&s, vec![upd(&["7"], "123", vec![e("note", CellValue::Null), e("name", t("x"))])]);
         assert_eq!(
             sqls(&p),
-            ["UPDATE public.t SET \"name\" = 'x', note = NULL WHERE id = '7' AND xmin::pg_catalog.text = '123' \
+            ["UPDATE ONLY public.t SET \"name\" = 'x', note = NULL WHERE id = '7' AND xmin::pg_catalog.text = '123' \
               RETURNING id, \"name\", status, note, xmin::pg_catalog.text"]
         );
         let p = ok(&s, vec![del(&["7"], "123")]);
-        assert_eq!(sqls(&p), ["DELETE FROM public.t WHERE id = '7' AND xmin::pg_catalog.text = '123'"]);
+        assert_eq!(sqls(&p), ["DELETE FROM ONLY public.t WHERE id = '7' AND xmin::pg_catalog.text = '123'"]);
         assert_eq!(p.statements[0].note.as_deref(), Some(DELETE_NOTE));
         let p = ok(&s, vec![ins(vec![])]);
         assert_eq!(

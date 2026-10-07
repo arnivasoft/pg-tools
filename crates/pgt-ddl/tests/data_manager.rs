@@ -111,10 +111,12 @@ fn applied(r: Result<DataOutcome>) -> Vec<RowResult> {
     }
 }
 
-/// (failed_index, sqlstate, position, error, conflict)
+/// (failed_index, sqlstate, position, error, conflict). Bu testlerdeki her başarısızlığın sonucu bellidir
+/// (`outcome_unknown = false`: hiçbir şey yazılmadı).
 fn failed(r: Result<DataOutcome>) -> (u32, Option<String>, Option<u32>, ErrorPayload, bool) {
     match r {
-        Ok(DataOutcome::Failed { failed_index, sqlstate, position, error, conflict }) => {
+        Ok(DataOutcome::Failed { failed_index, sqlstate, position, error, conflict, outcome_unknown }) => {
+            assert!(!outcome_unknown, "sonuç belli olmalıydı: {error:?}");
             (failed_index, sqlstate, position, error, conflict)
         }
         other => panic!("Failed bekleniyordu: {other:?}"),
@@ -727,19 +729,29 @@ async fn part_body(ts: TestServer) {
     let env = setup_in(&ts, PFX, "part").await;
     let f = fx(&env, &ts, false, None);
     if major(&env) >= 11 {
-        // Satır düzeyi tetikleyici alt transaction (EXCEPTION bloğu) açar; dönen sürüm yine satırın xmin'idir.
+        // Satır düzeyi tetikleyici iki alt transaction (EXCEPTION bloğu) açar ve ikisinde de YAZAR (alt transaction
+        // kimliği gerçekten atanır): ilki geri alınır, ikincisi üst transaction'a katılır. Dönen sürüm
+        // (`txid_current()` tabanlı) yine satırın xmin'idir.
         env.sql(
             "CREATE TABLE t_p (id int, k int, v text, PRIMARY KEY (id, k)) PARTITION BY RANGE (k);
              CREATE TABLE t_p1 PARTITION OF t_p FOR VALUES FROM (0) TO (50);
              CREATE TABLE t_p2 PARTITION OF t_p FOR VALUES FROM (50) TO (100);
+             CREATE TABLE t_p_log (n int);
              CREATE FUNCTION t_p_trg() RETURNS trigger LANGUAGE plpgsql AS $$
-               BEGIN BEGIN PERFORM 1 / 0; EXCEPTION WHEN division_by_zero THEN NULL; END; RETURN NEW; END $$;
-             CREATE TRIGGER t_p_trg BEFORE INSERT ON t_p1 FOR EACH ROW EXECUTE PROCEDURE t_p_trg();",
+               BEGIN
+                 BEGIN INSERT INTO t_p_log VALUES (1); PERFORM 1 / 0; EXCEPTION WHEN division_by_zero THEN NULL; END;
+                 BEGIN INSERT INTO t_p_log VALUES (2); EXCEPTION WHEN OTHERS THEN NULL; END;
+                 RETURN NEW;
+               END $$;
+             CREATE TRIGGER t_p_trg BEFORE INSERT ON t_p1 FOR EACH ROW EXECUTE PROCEDURE t_p_trg();
+             CREATE TRIGGER t_p_trg BEFORE INSERT ON t_p2 FOR EACH ROW EXECUTE PROCEDURE t_p_trg();",
         )
         .await;
         let src = f.load(&env, "t_p").await;
         assert!(src.editable, "{src:?}");
         let r = applied(f.apply(&set_of(&src, vec![ins(vec![e("id", t("1")), e("k", t("5")), e("v", t("a"))]), ins(vec![e("id", t("2")), e("k", t("70"))])])).await);
+        let log = simple_rows(&env.admin, "SELECT array_agg(n ORDER BY n)::text FROM t_p_log").await;
+        assert_eq!(log, [vec![s("{2,2}")]], "her iki bölümde tetikleyici çalışmalı; geri alınan alt transaction'ın yazısı yok");
         let rows = f.rows(&env, &src).await;
         assert_eq!(row(&rows, "1"), returned(&r[0]), "bölümlü üst tabloya INSERT: dönen sürüm = okunan xmin");
         assert_eq!(row(&rows, "2"), returned(&r[1]));
@@ -759,24 +771,44 @@ async fn part_body(ts: TestServer) {
         let p1 = f.load(&env, "t_p1").await;
         let r = applied(f.apply(&set_of(&p1, vec![ins(vec![e("id", t("3")), e("k", t("6"))])])).await);
         assert_eq!(row(&f.rows(&env, &p1).await, "3"), returned(&r[0]));
+        // Bölümlü üst tablo `ONLY` kullanmaz: bölüme doğrudan yazılan satır üst tabloda görünür ve oradan düzenlenir.
+        let rows = f.rows(&env, &src).await;
+        assert_eq!(row(&rows, "3"), returned(&r[0]));
+        let r = applied(f.apply(&set_of(&src, vec![upd(&["3", "6"], &ver(row(&rows, "3")), vec![e("v", t("p"))])])).await);
+        assert_eq!(&returned(&r[0])[..3], &[s("3"), s("6"), s("p")]);
+        applied(f.apply(&set_of(&src, vec![del(&["3", "6"], &ver(returned(&r[0])))])).await);
+        assert!(!has(&f.rows(&env, &p1).await, "3"));
     } else {
         eprintln!("PG {}: bölümlü tabloda PK (PG 11+) yok; bölümlü adım atlandı", major(&env));
     }
 
-    // Kalıtım: çocuk kendi PK'sıyla düzenlenir; üst tablodan okunan çocuk satırı üst tablo üzerinden güncellenir.
+    // Kalıtım: üst tablo `ONLY` ile okunur ve yazılır — çocuk satırları üst tabloda görünmez ve üst tablo
+    // üzerinden düzenlenemez (aynı anahtar + çocuğun sürümü → 0 satır → çakışma); çocuk kendi kaynağıyla düzenlenir.
     env.sql(
         "CREATE TABLE t_par (id int PRIMARY KEY, v text);
          CREATE TABLE t_chi (extra int) INHERITS (t_par);
-         ALTER TABLE t_chi ADD PRIMARY KEY (id);",
+         ALTER TABLE t_chi ADD PRIMARY KEY (id);
+         INSERT INTO t_par VALUES (2, 'üst');",
     )
     .await;
     let chi = f.load(&env, "t_chi").await;
     let r = applied(f.apply(&set_of(&chi, vec![ins(vec![e("id", t("1")), e("v", t("c")), e("extra", t("9"))])])).await);
-    assert_eq!(row(&f.rows(&env, &chi).await, "1"), returned(&r[0]));
+    let cr = returned(&r[0]).clone();
+    assert_eq!(row(&f.rows(&env, &chi).await, "1"), &cr);
     let par = f.load(&env, "t_par").await;
     let rows = f.rows(&env, &par).await;
-    let pr = row(&rows, "1").clone();
-    let r = applied(f.apply(&set_of(&par, vec![upd(&["1"], &ver(&pr), vec![e("v", t("p"))])])).await);
-    assert_eq!(&returned(&r[0])[..2], &[s("1"), s("p")]);
-    assert_eq!(row(&f.rows(&env, &chi).await, "1")[..3], [s("1"), s("p"), s("9")]);
+    assert!(!has(&rows, "1"), "üst tablo çocuk satırını göstermemeli: {rows:?}");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(conflict(f.apply(&set_of(&par, vec![upd(&["1"], &ver(&cr), vec![e("v", t("p"))])])).await), 0);
+    assert_eq!(conflict(f.apply(&set_of(&par, vec![del(&["1"], &ver(&cr))])).await), 0);
+    assert_eq!(row(&f.rows(&env, &chi).await, "1"), &cr, "çocuk satırı değişmemeli");
+    // Üst tablonun kendi satırı üst tablodan düzenlenir.
+    let r = applied(f.apply(&set_of(&par, vec![upd(&["2"], &ver(row(&rows, "2")), vec![e("v", t("üst2"))])])).await);
+    assert_eq!(&returned(&r[0])[..2], &[s("2"), s("üst2")]);
+    // Çocuk kendi kaynağıyla güncellenir ve silinir.
+    let r = applied(f.apply(&set_of(&chi, vec![upd(&["1"], &ver(&cr), vec![e("v", t("c2"))])])).await);
+    assert_eq!(&returned(&r[0])[..3], &[s("1"), s("c2"), s("9")]);
+    applied(f.apply(&set_of(&chi, vec![del(&["1"], &ver(returned(&r[0])))])).await);
+    assert!(f.rows(&env, &chi).await.is_empty());
+    assert_eq!(f.rows(&env, &par).await.len(), 1);
 }

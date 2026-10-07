@@ -493,12 +493,15 @@ Plan 16 yalnızca arka uçtur; **GUI maddeleri Plan 17 bölümündedir** (Explor
 - Kaynak yükleme: PK / benzersiz indeks / anahtarsız / bölümlü (PG 11+ PK) / üretilmiş (PG 12+) / kimlik / yetkisiz rol; salt okunurluk gerekçeleri.
 - Gidiş-dönüş: insert -> `returned` == okunan; `float`/`timestamptz`/`bytea`/`json`/dizi/`NULL` ile `''` ayrımı; düşmanca değerler (`'`, `\`, `--`, `;`, Unicode).
 - Bayat `xmin` -> `row_conflict` ve hiçbir şey yazılmaz; silinmiş satır; kısıt ihlali -> tam geri alma; tetikleyici `RETURN NULL` -> conflict; kilit zaman aşımı (55P03); iptal; üretim/kilit kapıları; hücre değerlerinin günlüğe düşmediği (yakalama testi).
-- Bölümlü ana tabloya INSERT: PG 12–18'de `RETURNING xmin` 0A000 verir; sürüm bu durumda `txid_current()` tabanlıdır.
+- Bölümlü ana tabloya INSERT: PG 12–18'de `RETURNING xmin` 0A000 verir; sürüm bu durumda `txid_current()` tabanlıdır (alt transaction'da yazan tetikleyiciyle de sınandı).
+- Kalıtım: sıradan tablo `ONLY` ile okunur/yazılır (üst tablo çocuk satırlarını göstermez, onlara yazamaz; çocuk kendi kaynağıyla düzenlenir); bölümlü tablo bölüm satırlarını içerir.
+- İptal bayrağı son ifadeden sonra, `COMMIT`'ten önce de denetlenir (geri alınır).
 
 Bilinen sınırlar:
+- Bayat veri denetimi kapalı başarısız olur; istisna: kayıplı metin gidiş-dönüşlü anahtar (float anahtar + `extra_float_digits < 1`, ISO olmayan `DateStyle`/`IntervalStyle` ile tarih/aralık anahtarı; okuma filtresindeki `set_config` dahil) aynı `xmin`'e sahip başka bir satıra çözümlenirse yazma o satıra gidebilir.
 - Float anahtar + PG 10–11'de `extra_float_digits` nedeniyle anahtar metni yuvarlanabilir.
 - Aynı değere eşzamanlı yazma da çakışma sayılır (`xmin` değişir).
 - Filtrede `\` içeren dize için `E'…'` gerekir.
 - Yalnız kolon düzeyi UPDATE yetkisi `NoPrivilege` sayılır (tablo düzeyi `has_table_privilege`).
-- PG 18 `NOT NULL NOT VALID` kısıtı Docker'da sınanmadı; `unknown_outcome` (SQLSTATE'siz COMMIT hatası) yolu Docker'da sınanmadı.
+- PG 18 `NOT NULL NOT VALID` kısıtı Docker'da sınanmadı; `outcomeUnknown = true` (SQLSTATE'siz COMMIT hatası; birim testiyle eşlemesi sınandı) yolu Docker'da sınanmadı.
 - `src-tauri` testkit `fixture()` yalnızca ilk `PGT_TEST_URLS` adresini kullanır.

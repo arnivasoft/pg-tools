@@ -3,20 +3,20 @@ source: crates/pgt-ddl/src/data/select.rs
 expression: render(&cases)
 ---
 -- PK'lı tablo varsayılan (version_index=3, has_version=true)
-SELECT id, "name", status, xmin::pg_catalog.text AS __pgt_xmin FROM public.t ORDER BY id ASC
+SELECT id, "name", status, xmin::pg_catalog.text AS __pgt_xmin FROM ONLY public.t ORDER BY id ASC
 
 -- çok kolonlu anahtar varsayılan sıralama (version_index=3, has_version=true)
-SELECT a, b, c, xmin::pg_catalog.text AS __pgt_xmin FROM "App"."Orders" ORDER BY c ASC, a ASC
+SELECT a, b, c, xmin::pg_catalog.text AS __pgt_xmin FROM ONLY "App"."Orders" ORDER BY c ASC, a ASC
 
 -- istek sıralaması (desc) (version_index=3, has_version=true)
-SELECT a, b, c, xmin::pg_catalog.text AS __pgt_xmin FROM "App"."Orders" ORDER BY b DESC, a ASC
+SELECT a, b, c, xmin::pg_catalog.text AS __pgt_xmin FROM ONLY "App"."Orders" ORDER BY b DESC, a ASC
 
 -- filtreli (version_index=3, has_version=true)
-SELECT id, "name", status, xmin::pg_catalog.text AS __pgt_xmin FROM public.t WHERE (status = 'a'
+SELECT id, "name", status, xmin::pg_catalog.text AS __pgt_xmin FROM ONLY public.t WHERE (status = 'a'
 ) ORDER BY id ASC
 
 -- anahtarsız tablo (version_index=2, has_version=true)
-SELECT x, y, xmin::pg_catalog.text AS __pgt_xmin FROM public.t
+SELECT x, y, xmin::pg_catalog.text AS __pgt_xmin FROM ONLY public.t
 
 -- bölümlü tablo (version_index=2, has_version=true)
 SELECT id, k, xmin::pg_catalog.text AS __pgt_xmin FROM public.p ORDER BY id ASC, k ASC
@@ -31,10 +31,10 @@ SELECT id FROM public.m
 SELECT id FROM public.f
 
 -- boşluk filtre yok sayılır (version_index=3, has_version=true)
-SELECT id, "name", status, xmin::pg_catalog.text AS __pgt_xmin FROM public.t ORDER BY id ASC
+SELECT id, "name", status, xmin::pg_catalog.text AS __pgt_xmin FROM ONLY public.t ORDER BY id ASC
 
 -- kolonsuz tablo (version_index=0, has_version=true)
-SELECT xmin::pg_catalog.text AS __pgt_xmin FROM public.t
+SELECT xmin::pg_catalog.text AS __pgt_xmin FROM ONLY public.t
 
 -- kolonsuz görünüm (version_index=0, has_version=false)
 SELECT FROM public.v0

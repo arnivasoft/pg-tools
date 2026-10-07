@@ -3,7 +3,7 @@ source: crates/pgt-ddl/src/data/select.rs
 expression: render(&cases)
 ---
 -- __pgt_xmin çakışması (version_index=2, has_version=true)
-SELECT id, __pgt_xmin, xmin::pg_catalog.text AS __pgt_xmin_1 FROM public.t ORDER BY id ASC
+SELECT id, __pgt_xmin, xmin::pg_catalog.text AS __pgt_xmin_1 FROM ONLY public.t ORDER BY id ASC
 
 -- __pgt_xmin ve _1 çakışması (version_index=3, has_version=true)
-SELECT id, __pgt_xmin_1, __pgt_xmin, xmin::pg_catalog.text AS __pgt_xmin_2 FROM public.t ORDER BY id ASC
+SELECT id, __pgt_xmin_1, __pgt_xmin, xmin::pg_catalog.text AS __pgt_xmin_2 FROM ONLY public.t ORDER BY id ASC

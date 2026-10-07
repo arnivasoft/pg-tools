@@ -9,36 +9,36 @@ expression: render_cases(&cases)
 [Safe] INSERT INTO public.t DEFAULT VALUES RETURNING id, "name", status, note, xmin::pg_catalog.text
 
 -- Update iki kolon
-[Safe] UPDATE public.t SET "name" = 'Ali', status = 'b' WHERE id = '1' AND xmin::pg_catalog.text = '736' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE ONLY public.t SET "name" = 'Ali', status = 'b' WHERE id = '1' AND xmin::pg_catalog.text = '736' RETURNING id, "name", status, note, xmin::pg_catalog.text
 
 -- Update DEFAULT/NULL (kaynak sırası)
-[Safe] UPDATE public.t SET status = NULL, note = DEFAULT WHERE id = '1' AND xmin::pg_catalog.text = '736' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE ONLY public.t SET status = NULL, note = DEFAULT WHERE id = '1' AND xmin::pg_catalog.text = '736' RETURNING id, "name", status, note, xmin::pg_catalog.text
 
 -- çok kolonlu anahtarlı Update
-[Safe] UPDATE "App"."Order Lines" SET qty = '5' WHERE order_id = '10' AND line_no = '2' AND xmin::pg_catalog.text = '99' RETURNING order_id, line_no, qty, xmin::pg_catalog.text
+[Safe] UPDATE ONLY "App"."Order Lines" SET qty = '5' WHERE order_id = '10' AND line_no = '2' AND xmin::pg_catalog.text = '99' RETURNING order_id, line_no, qty, xmin::pg_catalog.text
 
 -- Delete
-[Destructive] DELETE FROM public.t WHERE id = '1' AND xmin::pg_catalog.text = '736'  -- Satır silinir (geri alınamaz).
+[Destructive] DELETE FROM ONLY public.t WHERE id = '1' AND xmin::pg_catalog.text = '736'  -- Satır silinir (geri alınamaz).
 
 -- çok kolonlu anahtarlı Delete
-[Destructive] DELETE FROM "App"."Order Lines" WHERE order_id = '10' AND line_no = '2' AND xmin::pg_catalog.text = '99'  -- Satır silinir (geri alınamaz).
+[Destructive] DELETE FROM ONLY "App"."Order Lines" WHERE order_id = '10' AND line_no = '2' AND xmin::pg_catalog.text = '99'  -- Satır silinir (geri alınamaz).
 
 -- karışık sıralı küme (istemci sırası korunur)
-[Destructive] DELETE FROM public.t WHERE id = '3' AND xmin::pg_catalog.text = '10'  -- Satır silinir (geri alınamaz).
+[Destructive] DELETE FROM ONLY public.t WHERE id = '3' AND xmin::pg_catalog.text = '10'  -- Satır silinir (geri alınamaz).
 [Safe] INSERT INTO public.t (id) VALUES ('4') RETURNING id, "name", status, note, xmin::pg_catalog.text
-[Safe] UPDATE public.t SET note = 'n' WHERE id = '2' AND xmin::pg_catalog.text = '11' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE ONLY public.t SET note = 'n' WHERE id = '2' AND xmin::pg_catalog.text = '11' RETURNING id, "name", status, note, xmin::pg_catalog.text
 [Safe] INSERT INTO public.t DEFAULT VALUES RETURNING id, "name", status, note, xmin::pg_catalog.text
 
 -- anahtar kolonu güncelleme
-[Safe] UPDATE public.t SET id = '100', "name" = 'x' WHERE id = '1' AND xmin::pg_catalog.text = '5' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE ONLY public.t SET id = '100', "name" = 'x' WHERE id = '1' AND xmin::pg_catalog.text = '5' RETURNING id, "name", status, note, xmin::pg_catalog.text
 WARN: Anahtar kolonu değiştiriliyor; bu satırı gösteren yabancı anahtarlar etkilenebilir.
 
 -- aynı satır iki kez
-[Safe] UPDATE public.t SET "name" = 'a' WHERE id = '1' AND xmin::pg_catalog.text = '5' RETURNING id, "name", status, note, xmin::pg_catalog.text
-[Safe] UPDATE public.t SET status = 'b' WHERE id = '1' AND xmin::pg_catalog.text = '5' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE ONLY public.t SET "name" = 'a' WHERE id = '1' AND xmin::pg_catalog.text = '5' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE ONLY public.t SET status = 'b' WHERE id = '1' AND xmin::pg_catalog.text = '5' RETURNING id, "name", status, note, xmin::pg_catalog.text
 WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
 
 -- aynı satır Update + Delete
-[Safe] UPDATE public.t SET "name" = 'a' WHERE id = '1' AND xmin::pg_catalog.text = '5' RETURNING id, "name", status, note, xmin::pg_catalog.text
-[Destructive] DELETE FROM public.t WHERE id = '1' AND xmin::pg_catalog.text = '5'  -- Satır silinir (geri alınamaz).
+[Safe] UPDATE ONLY public.t SET "name" = 'a' WHERE id = '1' AND xmin::pg_catalog.text = '5' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM ONLY public.t WHERE id = '1' AND xmin::pg_catalog.text = '5'  -- Satır silinir (geri alınamaz).
 WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).

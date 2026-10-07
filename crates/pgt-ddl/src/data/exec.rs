@@ -4,7 +4,8 @@
 //! - Her ifade ayrı `simple_query` ile (metin protokolü: dönen hücreler Query Tool okumasıyla aynı metin biçimindedir;
 //!   ifade tek olduğundan çok ifadeli dizge sorunu yok). Etkilenen satır sayısı `CommandComplete`'ten.
 //! - ≠ 1 satır (bayat/silinmiş satır, `BEFORE` tetikleyicisi `RETURN NULL`, kural) → `ROLLBACK` + `Conflict`.
-//! - PG hatası → `ROLLBACK` + `Failed` (konum `error_position`); iptal bayrağı her ifadeden önce denetlenir.
+//! - PG hatası → `ROLLBACK` + `Failed` (konum `error_position`); iptal bayrağı her ifadeden ve `COMMIT`'ten önce
+//!   denetlenir (bayrak kalkmışsa `ROLLBACK` + iptal sonucu).
 //! - `COMMIT` hatası: SQLSTATE'li (ertelenmiş kısıt) → `Failed` (son ifade); SQLSTATE'siz → sonuç belirsiz.
 //! - `standard_conforming_strings` her ifade öncesi yeniden kurulmaz (DDL'den farklı): ifadeler serbest SQL içermez
 //!   ve `quote_literal` ters eğik çizgili değeri `E'…'` ile yazdığı için metin bu ayardan bağımsızdır.
@@ -95,6 +96,12 @@ pub(crate) async fn run_changes(client: &Client, statements: &[Statement], reg: 
             }
         }
     }
+    // Son ifade çalışırken gelen (sunucuda bir şeyi kesmeye yetişmeyen) iptal: COMMIT yerine geri alınır.
+    if reg.cancelled() {
+        apply::rollback(client).await;
+        let index = apply::idx(statements.len().saturating_sub(1));
+        return ExecResult::Failed { index, error: apply::cancelled_error(), position: None, outcome_unknown: false };
+    }
     // SQLSTATE'li COMMIT hatasında sunucu transaction'ı zaten geri almıştır; SQLSTATE yoksa sonuç belirsizdir.
     if let Err(e) = client.batch_execute("COMMIT").await {
         let outcome_unknown = e.code().is_none();
@@ -104,4 +111,45 @@ pub(crate) async fn run_changes(client: &Client, statements: &[Statement], reg: 
         return ExecResult::Failed { index, error, position: None, outcome_unknown };
     }
     ExecResult::Done(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use pgt_core::testing::{admin_client, test_servers};
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::apply::CancelMap;
+    use crate::plan::Risk;
+
+    fn st(sql: &str) -> Statement {
+        Statement { sql: sql.into(), risk: Risk::Safe, transactional: true, note: None, redacted: false }
+    }
+
+    /// Docker (`PGT_TEST_URLS` yoksa atlanır). İptal bayrağı son ifade çalışırken kurulur (sunucuya iptal isteği
+    /// gitmez, ifade biter): `COMMIT` yerine `ROLLBACK` + iptal sonucu (son ifade); hiçbir satır kalıcı değildir.
+    #[tokio::test]
+    async fn cancel_flagged_before_commit_rolls_back() {
+        for ts in test_servers() {
+            let c = admin_client(&ts, &ts.config.maintenance_db).await;
+            c.batch_execute("CREATE TEMP TABLE pgt_exec_cancel (id int)").await.unwrap();
+            let map = CancelMap::default();
+            let id = Uuid::new_v4();
+            let reg = map.register(id).unwrap();
+            let stmts = [st("INSERT INTO pgt_exec_cancel VALUES (1)"), st("INSERT INTO pgt_exec_cancel SELECT 2 FROM pg_sleep(1)")];
+            let (res, _) = tokio::join!(run_changes(&c, &stmts, &reg), async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                // Tutamaç yok → yalnızca bayrak.
+                assert!(matches!(map.request(id), Some(None)));
+            });
+            let ExecResult::Failed { index, error, position, outcome_unknown } = res else { panic!("{res:?}") };
+            assert_eq!((index, apply::sqlstate(&error), position, outcome_unknown), (1, Some("57014"), None, false));
+            let n: i64 = c.query_one("SELECT count(*) FROM pgt_exec_cancel", &[]).await.unwrap().get(0);
+            assert_eq!(n, 0, "iptal edilen uygulama kalıcılaşmamalı");
+            // Bağlantı transaction dışında kalır.
+            c.batch_execute("DROP TABLE pgt_exec_cancel").await.unwrap();
+        }
+    }
 }
