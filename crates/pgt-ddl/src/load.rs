@@ -587,7 +587,8 @@ async fn load_view(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> 
     }))
 }
 
-/// MatView yükleyicisi. Normalleştirme: sahip `Some`; boş yorum `None`; tablespace varsayılan ise `None`; `query` View
+/// MatView yükleyicisi. Normalleştirme: sahip `Some`; boş yorum `None`; tablespace yalnızca `reltablespace = 0`
+/// (veritabanı varsayılanı) ise `None`, aksi halde ad (varsayılanı başka olan veritabanında açık `pg_default` dahil); `query` View
 /// gibi; `with_data = relispopulated`; `refresh = None`; `unsupported` = `WITH (k=v)` (fillfactor dışı seçenekler),
 /// `INDEX ad`, `COMMENT c` (her grup ad sırasıyla). Üretici yeniden kurmada `INDEX ` önekini arar.
 async fn load_matview(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {

@@ -26,6 +26,9 @@ pub const REFRESH_NOTE: &str = "ACCESS EXCLUSIVE kilit: yenileme süresince okun
 pub const REFRESH_CONCURRENTLY_NOTE: &str = "Benzersiz (UNIQUE) bir indeks gerekir; okumalar sürer";
 pub const REFRESH_NO_DATA_NOTE: &str = "Veri boşaltılır; sorgulanamaz hale gelir";
 pub const GRANT_WARNING: &str = "Yetkiler (GRANT) yeniden verilmelidir";
+/// Yeniden kurmada kaybolan ama `unsupported` listesinde görünmeyen ekler (genel uyarı metni).
+pub const REBUILD_UNLISTED_LOSSES: &str = "varsa toast.* depolama seçenekleri, genişletilmiş istatistikler (CREATE STATISTICS), \
+     kolon STATISTICS/STORAGE ayarları, CLUSTER ON ve güvenlik etiketleri (SECURITY LABEL)";
 pub const REFRESH_IGNORED_WARNING: &str = "Tanım değişti, görünüm yeniden kuruluyor; yenileme seçimi yok sayıldı";
 const REFRESH_NO_DATA_CONCURRENTLY: &str = "Veri yokken CONCURRENTLY kullanılamaz.";
 const REFRESH_WHILE_EMPTYING: &str = "Veriyi boşaltırken yenileme seçilemez.";
@@ -184,13 +187,13 @@ fn validate_alter(old: &MatViewDef, new: &MatViewDef, rebuild: bool) -> Vec<Fiel
 /// DEĞİŞMEZ (yükleyici, Task 6): yüklenen MV'de `owner` hiçbir zaman `None` değildir; `refresh` her zaman `None`'dır.
 ///
 /// Sorgu değiştiyse yeniden kurma: DROP eski (DataLoss) + CREATE yeni (yeni ad/şema/tablespace/fillfactor/withData) +
-/// sahip (`new ?? old`, her zaman) + yorum (doluysa); `refresh` yok sayılır (uyarı). Aksi halde sıra (sonrakiler YENİ
-/// adı kullanır): rename, set schema, set tablespace, fillfactor SET/RESET, owner, comment, REFRESH (kurallar tablosu).
+/// yorum (doluysa) + sahip (`new ?? old`, her zaman); `refresh` yok sayılır (uyarı). Aksi halde sıra (sonrakiler YENİ
+/// adı kullanır): rename, set schema, set tablespace, fillfactor SET/RESET, comment, REFRESH (kurallar tablosu), owner.
 ///
-/// Not (sıra bilerek değiştirilmez, Global Constraints): `OWNER TO`, `COMMENT` ve `REFRESH`'ten ÖNCE gelir. Süper
-/// kullanıcı olmayan bağlı rol nesneyi INHERIT'siz ama SET yetkili bir role (PG 16+) devrederse sonraki COMMENT/REFRESH
-/// sahiplik (PG 17+: MAINTAIN) denetimine takılıp plan geri alınabilir; ayrıca REFRESH sorguyu yeni sahip olarak çalıştırır.
-/// İleride Docker vakasıyla kapsanacak (sahip değişimi + REFRESH tek planda).
+/// `OWNER TO` **en sonda** (Task 6 inceleme M-1, Database ile aynı kural): kendisi eski sahibin haklarını ister, öncekiler
+/// bu yüzden yetki bulur. Önce gelseydi süper kullanıcı olmayan bağlı rolün INHERIT'siz ama SET yetkili (PG 16+) role
+/// devrinden sonra COMMENT/REFRESH sahiplik (PG 17+: MAINTAIN) denetiminde 42501 verirdi (Docker ile doğrulandı).
+/// Bedeli: REFRESH sorguyu ESKİ sahip olarak çalıştırır; yeni sahibin SELECT eksikliği ancak sonraki yenilemede görünür.
 pub fn alter(old: &MatViewDef, new: &MatViewDef, _ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     let rebuild = old.query != new.query;
     let errs = validate_alter(old, new, rebuild);
@@ -208,11 +211,11 @@ pub fn alter(old: &MatViewDef, new: &MatViewDef, _ctx: &BuildCtx) -> Result<Plan
             Some(REBUILD_DROP_NOTE),
         ));
         statements.push(create_stmt(new));
-        if let Some(o) = new.owner.as_ref().or(old.owner.as_ref()) {
-            statements.push(owner_stmt(&q, o));
-        }
         if new.comment.is_some() {
             statements.push(comment_stmt(&q, &new.comment));
+        }
+        if let Some(o) = new.owner.as_ref().or(old.owner.as_ref()) {
+            statements.push(owner_stmt(&q, o));
         }
         let (indexes, others): (Vec<&String>, Vec<&String>) =
             old.unsupported.iter().partition(|u| u.starts_with("INDEX "));
@@ -221,10 +224,12 @@ pub fn alter(old: &MatViewDef, new: &MatViewDef, _ctx: &BuildCtx) -> Result<Plan
             warnings.push(format!("İndeksler yeniden oluşturulmaz: {}", names.join(", ")));
         }
         warnings.push(GRANT_WARNING.to_string());
-        if !others.is_empty() {
-            let others: Vec<&str> = others.iter().map(|s| s.as_str()).collect();
-            warnings.push(format!("Kaybolacaklar: {}", others.join(", ")));
-        }
+        let others: Vec<&str> = others.iter().map(|s| s.as_str()).collect();
+        warnings.push(if others.is_empty() {
+            format!("Kaybolacaklar: {REBUILD_UNLISTED_LOSSES}")
+        } else {
+            format!("Kaybolacaklar: {}; ayrıca {REBUILD_UNLISTED_LOSSES}", others.join(", "))
+        });
         if new.refresh.is_some() {
             warnings.push(REFRESH_IGNORED_WARNING.to_string());
         }
@@ -269,17 +274,17 @@ pub fn alter(old: &MatViewDef, new: &MatViewDef, _ctx: &BuildCtx) -> Result<Plan
         };
         statements.push(stmt(sql, Risk::Safe, None));
     }
-    if let Some(o) = &new.owner
-        && new.owner != old.owner
-    {
-        statements.push(owner_stmt(&q, o));
-    }
     if old.comment != new.comment {
         statements.push(comment_stmt(&q, &new.comment));
     }
     // Doğrulama hata yollarını eledi.
     if let Ok(Some((prefix, suffix, note))) = refresh_rule(old, new) {
         statements.push(stmt(format!("REFRESH MATERIALIZED VIEW {prefix}{q}{suffix}"), Risk::Destructive, Some(note)));
+    }
+    if let Some(o) = &new.owner
+        && new.owner != old.owner
+    {
+        statements.push(owner_stmt(&q, o));
     }
     Ok(Plan { statements, warnings })
 }
@@ -591,8 +596,8 @@ mod tests {
             [
                 "DROP MATERIALIZED VIEW public.mv",
                 "CREATE MATERIALIZED VIEW app.w WITH (fillfactor = 80) TABLESPACE slow AS (SELECT 1, 2\n) WITH NO DATA",
-                "ALTER MATERIALIZED VIEW app.w OWNER TO a",
                 "COMMENT ON MATERIALIZED VIEW app.w IS 'c'",
+                "ALTER MATERIALIZED VIEW app.w OWNER TO a",
             ]
         );
         assert_eq!(p.statements[0].risk, Risk::DataLoss);
@@ -604,7 +609,7 @@ mod tests {
             [
                 "İndeksler yeniden oluşturulmaz: mv_a_idx, \"Mv Uniq\"",
                 GRANT_WARNING,
-                "Kaybolacaklar: WITH (autovacuum_enabled=false)",
+                &format!("Kaybolacaklar: WITH (autovacuum_enabled=false); ayrıca {REBUILD_UNLISTED_LOSSES}"),
                 REFRESH_IGNORED_WARNING,
             ]
         );
@@ -623,7 +628,7 @@ mod tests {
             ]
         );
         assert_eq!(p.statements[1].note.as_deref(), Some(WITH_DATA_NOTE));
-        assert_eq!(p.warnings, [GRANT_WARNING]);
+        assert_eq!(p.warnings, [GRANT_WARNING.to_string(), format!("Kaybolacaklar: {REBUILD_UNLISTED_LOSSES}")]);
         // Yeniden kurmada REFRESH tablosu uygulanmaz (false → false + refresh: hata değil, yok sayılır).
         let p = alter_ok(
             &MatViewDef { with_data: false, ..m() },
@@ -635,7 +640,7 @@ mod tests {
         let p = alter_ok(&MatViewDef { with_data: false, ..m() }, &MatViewDef { query: "SELECT 2".into(), ..m() });
         assert_eq!(sqls(&p), ["DROP MATERIALIZED VIEW public.mv", "CREATE MATERIALIZED VIEW public.mv AS (SELECT 2\n) WITH DATA"]);
         assert_eq!(p.statements[1].note.as_deref(), Some(WITH_DATA_NOTE));
-        assert_eq!(p.warnings, [GRANT_WARNING]);
+        assert_eq!(p.warnings, [GRANT_WARNING.to_string(), format!("Kaybolacaklar: {REBUILD_UNLISTED_LOSSES}")]);
     }
 
     #[test]
@@ -659,9 +664,9 @@ mod tests {
                 "ALTER MATERIALIZED VIEW public.\"select\" SET SCHEMA \"App\"",
                 "ALTER MATERIALIZED VIEW \"App\".\"select\" SET TABLESPACE fast",
                 "ALTER MATERIALIZED VIEW \"App\".\"select\" SET (fillfactor = 50)",
-                "ALTER MATERIALIZED VIEW \"App\".\"select\" OWNER TO b",
                 "COMMENT ON MATERIALIZED VIEW \"App\".\"select\" IS NULL",
                 "REFRESH MATERIALIZED VIEW \"App\".\"select\"",
+                "ALTER MATERIALIZED VIEW \"App\".\"select\" OWNER TO b",
             ]
         );
         assert_eq!(p.risk(), Risk::Destructive);

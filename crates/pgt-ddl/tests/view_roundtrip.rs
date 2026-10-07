@@ -604,9 +604,48 @@ async fn mredef_body(ts: TestServer) {
     matview_fixed_point(&env, &l3).await;
 }
 
-docker_test!(matview_alter_tablespace_fillfactor_owner_comment_rename_schema, malter_body, "malter");
-
 const TS_NAME: &str = "pgt_ddl_vw_ts";
+
+/// Varsayılan tablespace'i `TS_NAME` olan ikinci veritabanı (açık `pg_default` gidiş-dönüşü için).
+async fn mts_db_name(ts: &TestServer) -> String {
+    common::db_name_in(ts, PFX, "mts").await
+}
+
+#[tokio::test]
+async fn matview_alter_tablespace_fillfactor_owner_comment_rename_schema() {
+    for ts in servers() {
+        guarded(malter_body(ts.clone()), async {
+            cleanup_in(&ts, PFX, "malter").await;
+            let maint = admin_client(&ts, &ts.config.maintenance_db).await;
+            pgt_core::testing::drop_database(&maint, &mts_db_name(&ts).await).await;
+            let _ = maint.batch_execute(&format!("DROP TABLESPACE IF EXISTS {TS_NAME}")).await;
+        })
+        .await;
+    }
+}
+
+/// Planı verilen istemcide tek transaction'da çalıştırır (ikinci veritabanı için `Env::exec_tx` karşılığı).
+async fn exec_tx_on(db: &tokio_postgres::Client, plan: &Plan) {
+    db.batch_execute("BEGIN").await.unwrap();
+    for st in &plan.statements {
+        if let Err(e) = db.batch_execute(&st.sql).await {
+            panic!("ifade başarısız: {}\n  hata: {}", st.sql, common::db_message(&e));
+        }
+    }
+    db.batch_execute("COMMIT").await.unwrap();
+}
+
+async fn mload_in(env: &Env, db: &tokio_postgres::Client, db_oid: u32, name: &str) -> MatViewDef {
+    let oid: u32 = db
+        .query_one("SELECT c.oid FROM pg_class c WHERE c.relname = $1::text AND c.relnamespace = 'public'::regnamespace", &[&name])
+        .await
+        .unwrap()
+        .get(0);
+    match load(&env.mgr, env.server, db_oid, ObjectRef { kind: ObjectKind::MaterializedView, oid }).await {
+        Ok(ObjectDef::MaterializedView(d)) => d,
+        other => panic!("{name} yüklenemedi: {other:?}"),
+    }
+}
 
 async fn malter_body(ts: TestServer) {
     let env = setup_in(&ts, PFX, "malter").await;
@@ -627,33 +666,84 @@ async fn malter_body(ts: TestServer) {
     // fillfactor RESET, yorum kaldırma, sahip geri.
     let l = malter_and_check(&env, &l, &MatViewDef { fillfactor: None, comment: None, owner: Some(env.me.clone()), ..l.clone() }).await;
     assert_eq!((l.fillfactor, l.comment.clone()), (None, None));
-    // Gerçek bir tablespace (sunucu dosya sistemine COPY TO PROGRAM ile dizin açılabiliyorsa).
+    // Gerçek bir tablespace. UYARI: `COPY … TO PROGRAM` sunucu makinesinde kabuk komutu çalıştırır (`mkdir`) ve küme
+    // düzeyinde tablespace oluşturur; yalnızca geçici `pgt-matrix-*` kapsayıcılarına karşı koşturun (paylaşılan bir
+    // geliştirme sunucusuna `PGT_TEST_URLS` vermeyin). Komut reddedilirse (süper kullanıcı değil) bölüm atlanır.
     let _ = env.try_sql(&format!("DROP TABLESPACE IF EXISTS {TS_NAME}")).await;
     let made = env.try_sql(&format!("COPY (SELECT 1) TO PROGRAM 'mkdir -p /tmp/{TS_NAME}'")).await.is_ok()
         && env.try_sql(&format!("CREATE TABLESPACE {TS_NAME} LOCATION '/tmp/{TS_NAME}'")).await.is_ok();
-    if made {
-        let l = malter_and_check(&env, &l, &MatViewDef { tablespace: Some(TS_NAME.into()), ..l.clone() }).await;
-        assert_eq!(l.tablespace.as_deref(), Some(TS_NAME));
-        // Yeniden kurma tablespace'i korur.
-        let l = malter_and_check(&env, &l, &MatViewDef { query: "SELECT id FROM vw.t".into(), ..l.clone() }).await;
-        assert_eq!(l.tablespace.as_deref(), Some(TS_NAME));
-        let l = malter_and_check(&env, &l, &MatViewDef { tablespace: Some("pg_default".into()), ..l.clone() }).await;
-        assert_eq!(l.tablespace, None);
-        // Tablespace temizlenemez (ALTER ile None): yerel alan hatası.
-        let x = MatViewDef { tablespace: Some(TS_NAME.into()), ..l.clone() };
-        let e = build::alter(&om(&x), &om(&l), &env.ctx(false)).unwrap_err();
-        assert_eq!(e[0].path, "tablespace");
-        env.sql(&format!("DROP TABLESPACE {TS_NAME}")).await;
-    } else {
+    if !made {
         eprintln!("PG {major}: tablespace oluşturulamadı, SET TABLESPACE atlandı");
+        return;
     }
+    let l = malter_and_check(&env, &l, &MatViewDef { tablespace: Some(TS_NAME.into()), ..l.clone() }).await;
+    assert_eq!(l.tablespace.as_deref(), Some(TS_NAME));
+    // Yeniden kurma tablespace'i korur.
+    let l = malter_and_check(&env, &l, &MatViewDef { query: "SELECT id FROM vw.t".into(), ..l.clone() }).await;
+    assert_eq!(l.tablespace.as_deref(), Some(TS_NAME));
+    // Varsayılanı pg_default olan veritabanında pg_default'a dönüş: reltablespace = 0 → `None`.
+    let l = malter_and_check(&env, &l, &MatViewDef { tablespace: Some("pg_default".into()), ..l.clone() }).await;
+    assert_eq!(l.tablespace, None);
+    // Tablespace temizlenemez (ALTER ile None): yerel alan hatası.
+    let x = MatViewDef { tablespace: Some(TS_NAME.into()), ..l.clone() };
+    let e = build::alter(&om(&x), &om(&l), &env.ctx(false)).unwrap_err();
+    assert_eq!(e[0].path, "tablespace");
+
+    // Varsayılanı TS_NAME olan veritabanı: açık `TABLESPACE pg_default` reltablespace = 1663 saklar → `Some("pg_default")`
+    // yüklenir; noop boş; yeniden kurma nesneyi veritabanı varsayılanına (TS_NAME) KAYDIRMAZ.
+    let maint = admin_client(&ts, &ts.config.maintenance_db).await;
+    let mts = mts_db_name(&ts).await;
+    pgt_core::testing::drop_database(&maint, &mts).await;
+    maint.batch_execute(&format!("CREATE DATABASE {mts} TEMPLATE template0 ENCODING 'UTF8' TABLESPACE {TS_NAME}")).await.unwrap();
+    let mts_oid: u32 = maint.query_one("SELECT oid FROM pg_database WHERE datname = $1", &[&mts]).await.unwrap().get(0);
+    {
+        let db = admin_client(&ts, &mts).await;
+        let ctx = env.ctx(false);
+        let pd_def = MatViewDef { tablespace: Some("pg_default".into()), ..matview("public", "m_pd", "SELECT 1 AS x") };
+        exec_tx_on(&db, &build::create(&om(&pd_def), &ctx).unwrap()).await;
+        exec_tx_on(&db, &build::create(&om(&matview("public", "m_dflt", "SELECT 1 AS x")), &ctx).unwrap()).await;
+        let pd = mload_in(&env, &db, mts_oid, "m_pd").await;
+        assert_eq!(pd.tablespace.as_deref(), Some("pg_default"));
+        assert_eq!(mload_in(&env, &db, mts_oid, "m_dflt").await.tablespace, None, "veritabanı varsayılanı (0) → None");
+        assert_mnoop(&env, &pd);
+        // Yerinde temizleme yine hata.
+        let e = build::alter(&om(&pd), &om(&MatViewDef { tablespace: None, ..pd.clone() }), &ctx).unwrap_err();
+        assert_eq!(e[0].path, "tablespace");
+        // Yeniden kurma açık pg_default'u korur.
+        let rebuilt = MatViewDef { query: "SELECT 2 AS x".into(), ..pd.clone() };
+        exec_tx_on(&db, &build::alter(&om(&pd), &om(&rebuilt), &ctx).unwrap()).await;
+        let pd2 = mload_in(&env, &db, mts_oid, "m_pd").await;
+        assert_eq!(pd2.tablespace.as_deref(), Some("pg_default"), "yeniden kurma veritabanı varsayılanına kaymamalı");
+        assert_mnoop(&env, &pd2);
+    }
+    pgt_core::testing::drop_database(&maint, &mts).await;
+    env.sql(&format!("DROP TABLESPACE {TS_NAME}")).await;
 }
 
 // ================================================================================================================
-// PG 16+: INHERIT'siz (SET yetkili) role sahip devri ve sonraki ifadeler (Task 3 inceleme N-1)
+// PG 16+: INHERIT'siz (SET yetkili) role sahip devri — OWNER TO en sonda (Task 6 inceleme M-1)
 // ================================================================================================================
 
-docker_test!(owner_change_to_noinherit_role_order, owner_order_body, "oorder");
+/// Vakadaki ek roller: `a` (bağlı rol), `b` (a'nın INHERIT FALSE, SET TRUE üyesi olduğu rol), `c` (üyelik yok).
+fn order_roles() -> [String; 3] {
+    let r = common::role_name_in(PFX, "oorder");
+    [format!("{r}_a"), format!("{r}_b"), format!("{r}_c")]
+}
+
+#[tokio::test]
+async fn owner_change_to_noinherit_role_order() {
+    for ts in servers() {
+        guarded(owner_order_body(ts.clone()), async {
+            // Önce veritabanı (roller nesne sahibi), sonra ek roller (panikte de sızmasın).
+            cleanup_in(&ts, PFX, "oorder").await;
+            let maint = admin_client(&ts, &ts.config.maintenance_db).await;
+            for r in order_roles() {
+                maint.batch_execute(&format!("DROP ROLE IF EXISTS {r}")).await.unwrap();
+            }
+        })
+        .await;
+    }
+}
 
 async fn owner_order_body(ts: TestServer) {
     let env = setup_in(&ts, PFX, "oorder").await;
@@ -663,29 +753,39 @@ async fn owner_order_body(ts: TestServer) {
         return;
     }
     let maint = admin_client(&ts, &ts.config.maintenance_db).await;
-    let (a, b) = (format!("{}_a", env.role), format!("{}_b", env.role));
-    maint.batch_execute(&format!("DROP ROLE IF EXISTS {a}; DROP ROLE IF EXISTS {b}; CREATE ROLE {a}; CREATE ROLE {b}")).await.unwrap();
+    let [a, b, c] = order_roles();
+    for r in [&a, &b, &c] {
+        maint.batch_execute(&format!("DROP ROLE IF EXISTS {r}; CREATE ROLE {r}")).await.unwrap();
+    }
     maint.batch_execute(&format!("GRANT {b} TO {a} WITH INHERIT FALSE, SET TRUE")).await.unwrap();
     base_table(&env, "vw").await;
-    env.sql(&format!("GRANT USAGE, CREATE ON SCHEMA vw TO {a}, {b}; GRANT SELECT ON vw.t TO {a}, {b}")).await;
+    env.sql(&format!("GRANT USAGE, CREATE ON SCHEMA vw TO {a}, {b}, {c}; GRANT SELECT ON vw.t TO {a}, {b}, {c}")).await;
+    // Bağlı rol `a` (süper kullanıcı değil) nesneleri oluşturur.
     env.sql(&format!("SET ROLE {a}")).await;
-    let mut outcomes = vec![];
-    // Bağlı rol `a` (süper kullanıcı değil) görünümü/MV'yi `b`'ye devrederken yorum/yenileme de değişiyor.
-    let vplan = build::create(&ov(&view("vw", "v", "SELECT id FROM vw.t")), &env.ctx(false)).unwrap();
-    env.exec_tx(&vplan).await;
-    let mplan = build::create(&om(&matview("vw", "mv", "SELECT id FROM vw.t")), &env.ctx(false)).unwrap();
-    env.exec_tx(&mplan).await;
+    for d in [view("vw", "v", "SELECT id FROM vw.t"), view("vw", "v2", "SELECT id FROM vw.t")] {
+        env.exec_tx(&build::create(&ov(&d), &env.ctx(false)).unwrap()).await;
+    }
+    env.exec_tx(&build::create(&om(&matview("vw", "mv", "SELECT id FROM vw.t")), &env.ctx(false)).unwrap()).await;
     env.sql("RESET ROLE").await;
     let vl = vload(&env, "vw", "v").await;
+    let v2 = vload(&env, "vw", "v2").await;
     let ml = mload(&env, "vw", "mv").await;
-    env.sql(&format!("SET ROLE {a}")).await;
     let vnew = ViewDef { owner: Some(b.clone()), comment: Some("k".into()), ..vl.clone() };
-    outcomes.push(("view OWNER+COMMENT", env.try_exec_tx(&valter(&env, &vl, &vnew)).await));
     let mnew = MatViewDef { owner: Some(b.clone()), comment: Some("k".into()), refresh: Some(MatViewRefresh::Normal), ..ml.clone() };
-    outcomes.push(("matview OWNER+COMMENT+REFRESH", env.try_exec_tx(&malter(&env, &ml, &mnew)).await));
-    // Yalnızca sahip devri tek başına başarılı.
-    let vonly = ViewDef { owner: Some(b.clone()), ..vl.clone() };
-    outcomes.push(("view yalnız OWNER", env.try_exec_tx(&valter(&env, &vl, &vonly)).await));
+    let vplan = valter(&env, &vl, &vnew);
+    let mplan = malter(&env, &ml, &mnew);
+    assert!(sqls(&vplan).last().unwrap().contains(" OWNER TO "), "{:?}", sqls(&vplan));
+    assert!(sqls(&mplan).last().unwrap().contains(" OWNER TO "), "{:?}", sqls(&mplan));
+    let cplan = valter(&env, &v2, &ViewDef { owner: Some(c.clone()), comment: Some("z".into()), ..v2.clone() });
+    // Sahip devri + yorum (+ REFRESH) tek planda başarılı: OWNER TO en sonda, öncekiler `a`'nın sahipliğiyle çalışır.
+    // REFRESH sorguyu eski sahip (`a`) olarak çalıştırır.
+    env.sql(&format!("SET ROLE {a}")).await;
+    let outcomes = [
+        ("view OWNER+COMMENT", env.try_exec_tx(&vplan).await),
+        ("matview OWNER+COMMENT+REFRESH", env.try_exec_tx(&mplan).await),
+        // SET yetkisi olmayan role devir: OWNER TO'nun kendisi 42501 (plan geri alınır).
+        ("view COMMENT+OWNER (SET yetkisiz rol)", env.try_exec_tx(&cplan).await),
+    ];
     env.sql("RESET ROLE").await;
     for (what, r) in &outcomes {
         match r {
@@ -693,12 +793,14 @@ async fn owner_order_body(ts: TestServer) {
             Err(e) => eprintln!("PG {major}: {what} → SQLSTATE {}", sqlstate(e)),
         }
     }
-    assert!(outcomes[0].1.as_ref().is_err_and(|e| sqlstate(e) == "42501"), "{:?}", outcomes[0].1);
-    assert!(outcomes[1].1.as_ref().is_err_and(|e| sqlstate(e) == "42501"), "{:?}", outcomes[1].1);
-    assert!(outcomes[2].1.is_ok(), "{:?}", outcomes[2].1);
-    // Temizlik: nesneleri sil (veritabanı silinince de gider), rolleri kaldır.
-    env.sql("DROP SCHEMA vw CASCADE").await;
-    maint.batch_execute(&format!("DROP ROLE {a}; DROP ROLE {b}")).await.unwrap();
+    assert!(outcomes[0].1.is_ok(), "{:?}", outcomes[0].1);
+    assert!(outcomes[1].1.is_ok(), "{:?}", outcomes[1].1);
+    assert!(outcomes[2].1.as_ref().is_err_and(|e| sqlstate(e) == "42501" && e.contains("OWNER TO")), "{:?}", outcomes[2].1);
+    let vl2 = vload(&env, "vw", "v").await;
+    assert_eq!((vl2.owner.as_deref(), vl2.comment.as_deref()), (Some(b.as_str()), Some("k")));
+    let ml2 = mload(&env, "vw", "mv").await;
+    assert_eq!((ml2.owner.as_deref(), ml2.comment.as_deref(), ml2.with_data), (Some(b.as_str()), Some("k"), true));
+    assert_eq!(vload(&env, "vw", "v2").await, v2, "başarısız plan geri alınmış olmalı");
 }
 
 // ================================================================================================================

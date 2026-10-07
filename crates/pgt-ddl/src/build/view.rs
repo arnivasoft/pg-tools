@@ -158,8 +158,8 @@ fn validate_alter(old: &ViewDef, new: &ViewDef, recreate: bool, ctx: &BuildCtx) 
 /// rolün olarak kalır ve OWNER ifadesi üretilmez.
 ///
 /// Sıra (sonrakiler YENİ adı kullanır): rename, set schema, sorgu (`CREATE OR REPLACE VIEW`, tüm yeni seçeneklerle) ya da
-/// seçenek farkı (RESET sonra SET), owner, comment. `recreate` ve sorgu değişmişse: DROP eski + CREATE yeni + owner
-/// (her zaman) + comment (doluysa). Sahip `None`'a çekilemez (yok sayılır); yorum `None` ise `IS NULL`.
+/// seçenek farkı (RESET sonra SET), comment, owner (**en sonda**). `recreate` ve sorgu değişmişse: DROP eski + CREATE
+/// yeni + comment (doluysa) + owner (her zaman, en sonda). Sahip `None`'a çekilemez (yok sayılır); yorum `None` ise `IS NULL`.
 pub fn alter(old: &ViewDef, new: &ViewDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     let query_changed = old.query != new.query;
     let recreate = new.recreate && query_changed;
@@ -181,11 +181,11 @@ pub fn alter(old: &ViewDef, new: &ViewDef, ctx: &BuildCtx) -> Result<Plan, Vec<F
             Some(RECREATE_DROP_NOTE),
         ));
         statements.push(stmt(define_sql("CREATE VIEW", new), Risk::Safe, None));
-        if let Some(o) = new.owner.as_ref().or(old.owner.as_ref()) {
-            statements.push(stmt(format!("ALTER VIEW {q} OWNER TO {}", quote_ident(o)), Risk::Safe, None));
-        }
         if new.comment.is_some() {
             statements.push(stmt(comment_sql(&q, &new.comment), Risk::Safe, None));
+        }
+        if let Some(o) = new.owner.as_ref().or(old.owner.as_ref()) {
+            statements.push(stmt(format!("ALTER VIEW {q} OWNER TO {}", quote_ident(o)), Risk::Safe, None));
         }
         warnings.push(RECREATE_GRANT_WARNING.to_string());
         if !old.unsupported.is_empty() {
@@ -241,13 +241,15 @@ pub fn alter(old: &ViewDef, new: &ViewDef, ctx: &BuildCtx) -> Result<Plan, Vec<F
             statements.push(stmt(format!("ALTER VIEW {q} SET ({})", set.join(", ")), Risk::Safe, None));
         }
     }
+    if old.comment != new.comment {
+        statements.push(stmt(comment_sql(&q, &new.comment), Risk::Safe, None));
+    }
+    // OWNER TO en sonda: kendisi eski sahibin haklarını ister, öncekiler bu yüzden yetki bulur. Önce gelseydi PG 16+'da
+    // INHERIT'siz (SET yetkili) yeni sahibe devirden sonra COMMENT 42501 verirdi (Task 6 inceleme M-1).
     if let Some(o) = &new.owner
         && new.owner != old.owner
     {
         statements.push(stmt(format!("ALTER VIEW {q} OWNER TO {}", quote_ident(o)), Risk::Safe, None));
-    }
-    if old.comment != new.comment {
-        statements.push(stmt(comment_sql(&q, &new.comment), Risk::Safe, None));
     }
     Ok(Plan { statements, warnings })
 }
@@ -461,8 +463,8 @@ mod tests {
                 "ALTER VIEW public.v RENAME TO \"select\"",
                 "ALTER VIEW public.\"select\" SET SCHEMA \"App\"",
                 "CREATE OR REPLACE VIEW \"App\".\"select\" WITH (security_barrier = true) AS (SELECT 2\n)",
-                "ALTER VIEW \"App\".\"select\" OWNER TO b",
                 "COMMENT ON VIEW \"App\".\"select\" IS NULL",
+                "ALTER VIEW \"App\".\"select\" OWNER TO b",
             ]
         );
         insta::assert_snapshot!(render(&p));
@@ -492,8 +494,8 @@ mod tests {
             [
                 "DROP VIEW public.v",
                 "CREATE VIEW app.w WITH (check_option = local) AS (SELECT 1, 2\n)",
-                "ALTER VIEW app.w OWNER TO a",
                 "COMMENT ON VIEW app.w IS 'c'",
+                "ALTER VIEW app.w OWNER TO a",
             ]
         );
         assert_eq!(p.statements[0].risk, Risk::DataLoss);
