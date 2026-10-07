@@ -7,7 +7,7 @@
 //! sorguyu doğrulamaz (yüklü `pg_get_viewdef` metni kapıya takılsa bile görünüm yeniden adlandırılabilir).
 
 use super::freesql::{check_free_sql, composed_is_clean, wrap};
-use super::{BuildCtx, check_ident, check_schema_ident, check_text, err, stmt};
+use super::{BuildCtx, check_ident, check_old_ident, check_old_schema_ident, check_schema_ident, check_text, err, stmt};
 use crate::model::{CheckOption, FieldError, ViewDef};
 use crate::plan::{Plan, Risk};
 use crate::quote::{qualified, quote_ident, quote_literal};
@@ -102,8 +102,10 @@ pub fn create(d: &ViewDef) -> Plan {
 /// Alter doğrulaması: eskinin yalnızca kimliği, yeninin yalnızca değişen ya da ifadeye yazılan alanları.
 fn validate_alter(old: &ViewDef, new: &ViewDef, recreate: bool, ctx: &BuildCtx) -> Vec<FieldError> {
     let mut e = vec![];
-    check_schema_ident("old.schema", &old.schema, &mut e);
-    check_ident("old.name", &old.name, &mut e);
+    // Eski (yüklü) kimlik gevşek: başka araçla oluşturulmuş yanıltıcı ad (ör. U+200B) yeniden adlandırılabilsin;
+    // yalnızca `quote_ident` ile yerleşir. Sistem şeması yine reddedilir. YENİ adlar katı kurala tabidir.
+    check_old_schema_ident("old.schema", &old.schema, &mut e);
+    check_old_ident("old.name", &old.name, &mut e);
     if !e.is_empty() {
         return e;
     }
@@ -142,6 +144,10 @@ fn validate_alter(old: &ViewDef, new: &ViewDef, recreate: bool, ctx: &BuildCtx) 
     e
 }
 
+/// DEĞİŞMEZ (yükleyici, Task 6): yüklenen görünümde `owner` hiçbir zaman `None` değildir (`pg_class.relowner` her zaman
+/// vardır). `recreate` sahibi `new.owner ?? old.owner` ile "her zaman" yazar; ikisi de `None` olursa yeni görünüm bağlı
+/// rolün olarak kalır ve OWNER ifadesi üretilmez.
+///
 /// Sıra (sonrakiler YENİ adı kullanır): rename, set schema, sorgu (`CREATE OR REPLACE VIEW`, tüm yeni seçeneklerle) ya da
 /// seçenek farkı (RESET sonra SET), owner, comment. `recreate` ve sorgu değişmişse: DROP eski + CREATE yeni + owner
 /// (her zaman) + comment (doluysa). Sahip `None`'a çekilemez (yok sayılır); yorum `None` ise `IS NULL`.
@@ -606,8 +612,16 @@ mod tests {
         }
         // Eski taraf: yalnızca kimlik, `old.` önekiyle.
         let bad_old = ViewDef { name: "a\nb".into(), ..v() };
-        assert_eq!(paths(balter(&o(bad_old.clone()), &o(v()), &ctx()).unwrap_err()), ["old.name"]);
-        assert_eq!(paths(bdrop(&o(bad_old), false, &ctx()).unwrap_err()), ["name"]);
+        let empty_old = ViewDef { name: String::new(), ..v() };
+        assert_eq!(paths(balter(&o(empty_old.clone()), &o(v()), &ctx()).unwrap_err()), ["old.name"]);
+        assert_eq!(paths(bdrop(&o(empty_old), false, &ctx()).unwrap_err()), ["name"]);
+        let sys_old = ViewDef { schema: "pg_catalog".into(), ..v() };
+        assert_eq!(paths(balter(&o(sys_old.clone()), &o(v()), &ctx()).unwrap_err()), ["old.schema"]);
+        assert_eq!(paths(bdrop(&o(sys_old), false, &ctx()).unwrap_err()), ["schema"]);
+        // Satır sonlu yüklü ad: eski tarafta gevşek (yalnızca `quote_ident` ile yerleşir), yeni adda katı.
+        assert_single_statements(&alter_ok(&bad_old, &v()));
+        assert!(bdrop(&o(bad_old.clone()), false, &ctx()).is_ok());
+        assert_eq!(paths(balter(&o(v()), &o(bad_old), &ctx()).unwrap_err()), ["name"]);
     }
 
     #[test]
@@ -648,5 +662,27 @@ mod tests {
         assert!(balter(&o(old.clone()), &o(ViewDef { name: "w".into(), ..old.clone() }), &ctx()).is_ok());
         let r = ViewDef { query: "SELECT 2".into(), recreate: true, ..old.clone() };
         assert_eq!(paths(balter(&o(old.clone()), &o(r), &ctx()).unwrap_err()), ["comment"]);
+    }
+
+    #[test]
+    fn old_side_identity_is_lenient_new_side_strict() {
+        // Başka araçla oluşturulmuş sıfır genişlikli boşluklu ad / şema: yeniden adlandırılabilir, taşınabilir, silinebilir.
+        let zw = ViewDef { schema: "s\u{200b}x".into(), name: "v\u{200b}x".into(), ..v() };
+        let p = alter_ok(&zw, &ViewDef { schema: "app".into(), name: "vx".into(), ..zw.clone() });
+        assert_eq!(sqls(&p), ["ALTER VIEW \"s\u{200b}x\".\"v\u{200b}x\" RENAME TO vx", "ALTER VIEW \"s\u{200b}x\".vx SET SCHEMA app"]);
+        let p = bdrop(&o(zw.clone()), false, &ctx()).unwrap();
+        assert_eq!(sqls(&p), ["DROP VIEW \"s\u{200b}x\".\"v\u{200b}x\""]);
+        assert!(crate::build::validate_identity(&o(zw.clone())).is_empty());
+        // Ad değişmeden kalan düzenlemeler (yorum, sorgu, recreate) eski adı yeniden yazar ve serbesttir.
+        assert_single_statements(&alter_ok(&zw, &ViewDef { comment: Some("k".into()), ..zw.clone() }));
+        assert_single_statements(&alter_ok(&zw, &ViewDef { query: "SELECT 2".into(), recreate: true, ..zw.clone() }));
+        // YENİ ad/şema olarak aynı karakter reddedilir (create ve alter).
+        assert_eq!(paths(validate(&zw, &ctx())), ["schema", "name"]);
+        assert_eq!(paths(balter(&o(v()), &o(ViewDef { name: "v\u{200b}x".into(), ..v() }), &ctx()).unwrap_err()), ["name"]);
+        assert_eq!(paths(balter(&o(v()), &o(ViewDef { schema: "s\u{200b}x".into(), ..v() }), &ctx()).unwrap_err()), ["schema"]);
+        // NUL eski tarafta da reddedilir.
+        let nul = ViewDef { name: "a\0".into(), ..v() };
+        assert_eq!(paths(balter(&o(nul.clone()), &o(v()), &ctx()).unwrap_err()), ["old.name"]);
+        assert_eq!(paths(bdrop(&o(nul), false, &ctx()).unwrap_err()), ["name"]);
     }
 }

@@ -38,6 +38,14 @@ fn valid_guc_name(name: &str) -> bool {
     })
 }
 
+/// Ad büyük/küçük harf KARARI (inceleme I-1): PG `ALTER … SET` sırasında adı kanonik yazımına çevirip saklar
+/// (`timezone` → `TimeZone`, `DateStyle`, `IntervalStyle`). Bu yüzden:
+/// - yükleyiciler (Task 6/7) ayar adlarını **küçük harfe çevirerek** döndürür (GUC araması harfe duyarsızdır);
+/// - YENİ taraf dilbilgisi yalnızca küçük harftir; büyük harfli ad açık bir "küçük harfle yazın" iletisiyle reddedilir;
+/// - ESKİ taraf adları (yalnızca `RESET` hedefi) katı dilbilgisinden geçmez: `validate_old_setting_names` yalnızca
+///   boş/NUL/denetim karakteri denetler (yükleyici küçültmeyi unutsa ya da eski bir istemci kanonik adı gönderse bile
+///   `RESET "TimeZone"` güvenli ve geçerlidir; ad yalnızca `quote_ident` ile yerleşir).
+///
 /// `settings[i].name|value` doğrulaması; yinelenen ad → `settings[i].name`.
 pub fn validate_settings(list: &[ConfigSetting], errs: &mut Vec<FieldError>) {
     let mut seen = HashSet::new();
@@ -46,6 +54,15 @@ pub fn validate_settings(list: &[ConfigSetting], errs: &mut Vec<FieldError>) {
         let vp = format!("settings[{i}].value");
         let name_ok = if s.name.chars().count() > MAX_GUC_NAME {
             errs.push(err(&np, format!("Ayar adı en çok {MAX_GUC_NAME} karakter olabilir.")));
+            false
+        } else if !valid_guc_name(&s.name) && valid_guc_name(&s.name.to_ascii_lowercase()) {
+            errs.push(err(
+                &np,
+                format!(
+                    "Ayar adı küçük harfle yazılmalı: '{}' (PostgreSQL ayar adlarını büyük/küçük harfe duyarsız eşler).",
+                    s.name.to_ascii_lowercase()
+                ),
+            ));
             false
         } else if !valid_guc_name(&s.name) {
             errs.push(err(
@@ -70,6 +87,21 @@ pub fn validate_settings(list: &[ConfigSetting], errs: &mut Vec<FieldError>) {
             && let Err(m) = split_guc_list(&s.value)
         {
             errs.push(err(&vp, m));
+        }
+    }
+}
+
+/// ESKİ (yüklü) taraf ayar adları: yalnızca `RESET <ad>` hedefi olarak yazılır; boş/NUL/denetim karakteri denetlenir,
+/// katı dilbilgisi uygulanmaz (bkz. `validate_settings` üstündeki karar). Yol: `<prefix>settings[i].name`.
+pub fn validate_old_setting_names(prefix: &str, list: &[ConfigSetting], errs: &mut Vec<FieldError>) {
+    for (i, s) in list.iter().enumerate() {
+        let np = format!("{prefix}settings[{i}].name");
+        if s.name.is_empty() {
+            errs.push(err(&np, "Ayar adı boş olamaz."));
+        } else if s.name.contains('\0') {
+            errs.push(err(&np, "Ayar adı NUL karakteri içeremez."));
+        } else if s.name.chars().any(char::is_control) {
+            errs.push(err(&np, "Ayar adı denetim karakteri (satır sonu, sekme vb.) içeremez."));
         }
     }
 }
@@ -257,6 +289,31 @@ mod tests {
         let (removed, set) = diff_settings(&old, &new);
         assert_eq!(removed, ["m", "z"]);
         assert_eq!(set.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["b", "y"]);
+    }
+
+    #[test]
+    fn canonical_mixed_case_names_old_side_lenient_new_side_lowercase() {
+        // Yeni taraf: PG'nin kanonik yazımı (TimeZone) reddedilir, ileti küçük harfli adı söyler.
+        let mut e = vec![];
+        validate_settings(&[s("TimeZone", "UTC")], &mut e);
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].path, "settings[0].name");
+        assert!(e[0].message.contains("küçük harf") && e[0].message.contains("'timezone'"), "{e:?}");
+        // Dilbilgisine küçültmeyle de uymayan ad genel iletiyi alır.
+        let mut e = vec![];
+        validate_settings(&[s("Time-Zone", "UTC")], &mut e);
+        assert!(!e[0].message.contains("küçük harfle yazılmalı"), "{e:?}");
+        // Eski taraf (RESET hedefi): kanonik ad kabul, `RESET "TimeZone"` güvenli biçimde yazılır.
+        let mut e = vec![];
+        validate_old_setting_names("old.", &[s("TimeZone", "UTC"), s("DateStyle", "ISO, MDY"), s("x\"; --", "")], &mut e);
+        assert!(e.is_empty(), "{e:?}");
+        assert_eq!(guc_name_sql("TimeZone"), "\"TimeZone\"");
+        assert_eq!(guc_name_sql("x\"; --"), "\"x\"\"; --\"");
+        // Eski tarafta yalnızca boş/NUL/denetim karakteri reddedilir.
+        let mut e = vec![];
+        validate_old_setting_names("old.", &[s("", ""), s("a\0", ""), s("a\nb", ""), s("ok", "")], &mut e);
+        let p: Vec<_> = e.into_iter().map(|e| e.path).collect();
+        assert_eq!(p, ["old.settings[0].name", "old.settings[1].name", "old.settings[2].name"]);
     }
 
     #[test]
