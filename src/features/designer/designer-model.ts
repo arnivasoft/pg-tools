@@ -2,6 +2,7 @@
 // İstemci SQL üretmez; yalnızca arka ucun döndürdüğü PlanView'i yorumlar.
 import type { ApplyOptions } from "../../ipc/bindings/ApplyOptions";
 import type { DdlCreate } from "../../ipc/bindings/DdlCreate";
+import type { DdlFocus } from "../../ipc/bindings/DdlFocus";
 import type { FieldError } from "../../ipc/bindings/FieldError";
 import type { IndexColumn } from "../../ipc/bindings/IndexColumn";
 import type { IndexDef } from "../../ipc/bindings/IndexDef";
@@ -295,4 +296,13 @@ export function designerTabKey(open: ReadonlyArray<{ key: string }>, t: Designer
     if (Number.isInteger(k) && k >= n) n = k + 1;
   }
   return `${prefix}${n}`;
+}
+
+/** Tablo diyaloğu odak alanı: `column:<attnum>` / `constraint:<oid>` (`requestFocus` alanı; `name` gibi düz alanlarla çakışmaz). */
+export function focusFieldOf(f: DdlFocus): string {
+  return `${f.kind}:${f.id}`;
+}
+export function parseFocusField(field: string): DdlFocus | null {
+  const m = /^(column|constraint):([0-9]+)$/.exec(field);
+  return m ? ({ kind: m[1] as DdlFocus["kind"], id: Number(m[2]) }) : null;
 }
