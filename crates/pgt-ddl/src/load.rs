@@ -9,6 +9,8 @@
 //!   (ASC → NULLS LAST, DESC → NULLS FIRST varsayılandır); `constraint` kısıta ait indekste kısıt adı.
 //! - Table: bkz. `load_table` (kolonlar attnum, kısıtlar ad sırasıyla; `partition_by` hiç dolmaz, bölümleme
 //!   `partition_text` ile salt okunur gösterilir; modellenmeyen kısıt/özellikler `unsupported` listesindedir).
+//! - View/MatView: bkz. `load_view`/`load_matview` (`query` = `pg_get_viewdef` sondaki `;` soyulmuş; MV `refresh`
+//!   her zaman `None`; yeniden kurmada kaybolacak ekler `unsupported` listesinde).
 //!
 //! Okuma salt okunur katalog bağlantısındandır; SQL/değerler günlüğe yazılmaz.
 
@@ -55,6 +57,10 @@ static TABLE_CONSTRAINTS_SQL: VersionedSql = VersionedSql(&[
     (15, include_str!("sql/load_table_constraints.pg15.sql")),
     (18, include_str!("sql/load_table_constraints.sql")),
 ]);
+/// `security_invoker` (PG 15+) reloptions'ta yer alır; eski sürümlerde anahtar bulunmaz → tek dosya.
+static VIEW_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_view.sql"))]);
+static MATVIEW_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_matview.sql"))]);
+const RELATION_COLUMNS_SQL: &str = include_str!("sql/load_relation_columns.sql");
 
 const SYSTEM_ERROR: &str = "sistem nesnesi düzenlenemez";
 
@@ -84,8 +90,10 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: u32, obj:
         ObjectKind::Extension => load_extension(mgr, server, database_oid, obj.oid).await,
         ObjectKind::Index => load_index(mgr, server, database_oid, obj.oid).await,
         ObjectKind::Table => load_table(mgr, server, database_oid, obj.oid).await,
-        // Yer tutucu: yükleyiciler Plan 14 Task 6'da.
-        ObjectKind::View | ObjectKind::MaterializedView | ObjectKind::Database | ObjectKind::Role => {
+        ObjectKind::View => load_view(mgr, server, database_oid, obj.oid).await,
+        ObjectKind::MaterializedView => load_matview(mgr, server, database_oid, obj.oid).await,
+        // Yer tutucu: yükleyiciler Plan 14 Task 7'de.
+        ObjectKind::Database | ObjectKind::Role => {
             Err(Error::Invalid("Bu tür henüz desteklenmiyor.".into()))
         }
     }
@@ -475,9 +483,170 @@ async fn load_table(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) ->
     }))
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// View / Materialized View
+// ---------------------------------------------------------------------------------------------------------------
+
+/// `pg_get_viewdef` metni → `query`: baş/son boşluk kırpılır, sondaki TEK `;` soyulur, kalan sağdan kırpılır. Dış
+/// parantez soyulmaz (PG sarmalamaz; üreticinin `(…\n)` sarmalı yeniden ayrıştırmada kaybolur). Sabit nokta: yüklü
+/// sorguyla yeniden oluşturulan görünümün yüklü sorgusu aynıdır (Docker testleri).
+fn view_query(def: &str) -> String {
+    let t = def.trim();
+    t.strip_suffix(';').unwrap_or(t).trim_end().to_string()
+}
+
+/// PG `parse_bool` doğru biçimleri (büyük/küçük harf duyarsız; `t`/`tr`/`tru`, `y`/`ye` önekleri dahil).
+fn reloption_true(v: &str) -> bool {
+    let v = v.to_ascii_lowercase();
+    matches!(v.as_str(), "t" | "tr" | "tru" | "true" | "y" | "ye" | "yes" | "on" | "1")
+}
+
+/// Görünüm reloptions'ı: `check_option`, `security_barrier`, `security_invoker`; başka anahtar (beklenmez) `unsupported`'a.
+fn view_options(opts: &[String]) -> (Option<CheckOption>, bool, bool, Vec<String>) {
+    let (mut check, mut barrier, mut invoker, mut other) = (None, false, false, vec![]);
+    for o in opts {
+        let (k, v) = o.split_once('=').unwrap_or((o.as_str(), ""));
+        match (k, v.to_ascii_lowercase().as_str()) {
+            ("check_option", "local") => check = Some(CheckOption::Local),
+            ("check_option", "cascaded") => check = Some(CheckOption::Cascaded),
+            ("security_barrier", _) => barrier = reloption_true(v),
+            ("security_invoker", _) => invoker = reloption_true(v),
+            _ => other.push(format!("WITH ({o})")),
+        }
+    }
+    (check, barrier, invoker, other)
+}
+
+/// Kolon satırları → (kolonlar, varsayılanı olan kolon adları, yorumlu kolon adları); adlar ad sırasıyla.
+fn relation_columns(rows: &[Row]) -> (Vec<ViewColumn>, Vec<String>, Vec<String>) {
+    let columns = rows.iter().map(|r| ViewColumn { name: r.get("name"), data_type: r.get("data_type") }).collect();
+    let mut defaults: Vec<String> =
+        rows.iter().filter(|r| r.get::<_, bool>("has_default")).map(|r| r.get("name")).collect();
+    let mut comments: Vec<String> = rows
+        .iter()
+        .filter(|r| r.get::<_, Option<String>>("comment").is_some_and(|c| !c.is_empty()))
+        .map(|r| r.get("name"))
+        .collect();
+    defaults.sort();
+    comments.sort();
+    (columns, defaults, comments)
+}
+
+/// Başlık + kolon satırları (başlık yoksa kolon sorgusu çalışmaz).
+async fn fetch_relation(
+    mgr: &ConnectionManager,
+    server: Uuid,
+    db: u32,
+    sql: &'static VersionedSql,
+    oid: u32,
+) -> Result<(Vec<Row>, Vec<Row>)> {
+    mgr.run(server, Target::Database(db), move |c| async move {
+        let params: [&(dyn ToSql + Sync); 1] = [&oid];
+        let head = c.client.query(sql.pick(PgVersion(c.version_num())), &params).await?;
+        let cols = if head.is_empty() { Vec::new() } else { c.client.query(RELATION_COLUMNS_SQL, &params).await? };
+        Ok((head, cols))
+    })
+    .await
+}
+
+/// Görünüm/MV ortak kapıları: geçici → `Invalid` (geçici şema `pg_temp_N` sistem sayılmadan önce), sistem → `Invalid`.
+fn refuse_temp_or_system(r: &Row) -> Result<()> {
+    if r.get::<_, String>("persistence") == "t" {
+        return Err(Error::Invalid("geçici görünüm düzenlenemez".to_string()));
+    }
+    refuse_system(r)
+}
+
+/// View yükleyicisi. Normalleştirme: sahip `Some`; boş yorum `None`; `query` = `view_query(pg_get_viewdef(oid, true))`;
+/// seçenekler reloptions'tan (`security_*` yalnızca doğru değerlerde `true`); `recreate = false`; `columns` attnum
+/// sırasıyla; `unsupported` = `TRIGGER t`, `RULE r`, `DEFAULT c`, `COMMENT c` (her grup ad sırasıyla).
+async fn load_view(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
+    let (head, cols) = fetch_relation(mgr, server, db, &VIEW_SQL, oid).await?;
+    let h = head.first().ok_or_else(|| not_found("görünüm"))?;
+    refuse_temp_or_system(h)?;
+    let (check_option, security_barrier, security_invoker, other) = view_options(&h.get::<_, Vec<String>>("options"));
+    let (columns, defaults, comments) = relation_columns(&cols);
+    let mut unsupported = vec![];
+    unsupported.extend(h.get::<_, Vec<String>>("triggers").into_iter().map(|t| format!("TRIGGER {t}")));
+    unsupported.extend(h.get::<_, Vec<String>>("rules").into_iter().map(|r| format!("RULE {r}")));
+    unsupported.extend(defaults.into_iter().map(|c| format!("DEFAULT {c}")));
+    unsupported.extend(comments.into_iter().map(|c| format!("COMMENT {c}")));
+    unsupported.extend(other);
+    Ok(ObjectDef::View(ViewDef {
+        schema: h.get("schema"),
+        name: h.get("name"),
+        owner: Some(h.get("owner")),
+        query: view_query(&h.get::<_, Option<String>>("query").unwrap_or_default()),
+        check_option,
+        security_barrier,
+        security_invoker,
+        comment: h.get::<_, Option<String>>("comment").filter(|c| !c.is_empty()),
+        recreate: false,
+        columns,
+        unsupported,
+    }))
+}
+
+/// MatView yükleyicisi. Normalleştirme: sahip `Some`; boş yorum `None`; tablespace varsayılan ise `None`; `query` View
+/// gibi; `with_data = relispopulated`; `refresh = None`; `unsupported` = `WITH (k=v)` (fillfactor dışı seçenekler),
+/// `INDEX ad`, `COMMENT c` (her grup ad sırasıyla). Üretici yeniden kurmada `INDEX ` önekini arar.
+async fn load_matview(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
+    let (head, cols) = fetch_relation(mgr, server, db, &MATVIEW_SQL, oid).await?;
+    let h = head.first().ok_or_else(|| not_found("materialized view"))?;
+    refuse_temp_or_system(h)?;
+    let (columns, _defaults, comments) = relation_columns(&cols);
+    let mut unsupported: Vec<String> =
+        h.get::<_, Vec<String>>("other_options").into_iter().map(|o| format!("WITH ({o})")).collect();
+    unsupported.extend(h.get::<_, Vec<String>>("indexes").into_iter().map(|i| format!("INDEX {i}")));
+    unsupported.extend(comments.into_iter().map(|c| format!("COMMENT {c}")));
+    Ok(ObjectDef::MaterializedView(MatViewDef {
+        schema: h.get("schema"),
+        name: h.get("name"),
+        owner: Some(h.get("owner")),
+        query: view_query(&h.get::<_, Option<String>>("query").unwrap_or_default()),
+        tablespace: h.get("tablespace"),
+        fillfactor: h.get::<_, Option<String>>("fillfactor").and_then(|s| s.parse::<u32>().ok()),
+        with_data: h.get("populated"),
+        comment: h.get::<_, Option<String>>("comment").filter(|c| !c.is_empty()),
+        refresh: None,
+        columns,
+        unsupported,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_query_strips_one_trailing_semicolon_only() {
+        assert_eq!(view_query(" SELECT 1 AS x;"), "SELECT 1 AS x");
+        assert_eq!(view_query(" SELECT t.a,\n    t.b\n   FROM t;\n"), "SELECT t.a,\n    t.b\n   FROM t");
+        assert_eq!(view_query(" SELECT ';'::text AS s;"), "SELECT ';'::text AS s");
+        assert_eq!(view_query("SELECT 1 ;"), "SELECT 1");
+        assert_eq!(view_query("SELECT 1"), "SELECT 1");
+        assert_eq!(view_query("SELECT 1;;"), "SELECT 1;");
+        // Dış parantez korunur.
+        assert_eq!(view_query(" (SELECT 1) UNION (SELECT 2);"), "(SELECT 1) UNION (SELECT 2)");
+    }
+
+    #[test]
+    fn view_options_follow_reloptions() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(view_options(&[]), (None, false, false, vec![]));
+        assert_eq!(
+            view_options(&s(&["check_option=local", "security_barrier=true", "security_invoker=on"])),
+            (Some(CheckOption::Local), true, true, vec![])
+        );
+        assert_eq!(view_options(&s(&["check_option=CASCADED"])).0, Some(CheckOption::Cascaded));
+        for f in ["false", "off", "0", "no", "f"] {
+            assert!(!view_options(&s(&[&format!("security_barrier={f}")])).1, "{f}");
+        }
+        for t in ["true", "on", "1", "yes", "t", "TRUE"] {
+            assert!(view_options(&s(&[&format!("security_invoker={t}")])).2, "{t}");
+        }
+        assert_eq!(view_options(&s(&["x=1"])).3, ["WITH (x=1)"]);
+    }
 
     #[test]
     fn strips_only_fully_wrapping_parens() {
