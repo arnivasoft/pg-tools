@@ -515,3 +515,15 @@ görünür olmasını bekler.
 
 Pencere süresi yeni anlamıyla (temalı ilk çizimle görünür) 349 ms; 1 sn hedefinin altında. Bellek Plan 7 ile aynı
 (77,5 → 77,4 MiB). Paket: `index` 229,15 → 229,27 kB (gz 74,26 → 74,31), CSS 22,51 → 22,66 kB; exe 14.934.016 bayt.
+
+
+## Plan 17 sonu: veri düzenleyici (elle ölçüm bekliyor)
+
+Paket (ölçüldü, `bun run build`): ana `index-*.js` = 232.343 B (Plan 16 sonundan 462 B küçük; `t.query.history/messages/check/format/confirm` tembel dosyalara taşındı), `index.html` yalnızca solid/web/Icon önyükler, mapDeps 21 girdi. Veri sekmesi kodu ve metinleri `DataTabs-*.js` (68.672 B) ve `data-open-*.js` (1.281 B) tembel parçalarındadır; veri sekmesi açılana kadar yüklenmez, boşta bellek/açılış değişmez.
+
+Aşağıdaki ölçümler **elle** yapılır (ajan çalıştırmaz); sonuçlar buraya işlenir. Hepsi `[—]`:
+
+- [ ] 10.000 satırlı veri sekmesi belleği: `bun run tauri build --no-bundle`, ardından Docker PG'de 10k satırlı tabloyu bağlayıp "Verileri Görüntüle/Düzenle" ile aç, "Daha fazla" ile 10.000 satıra çık, 8 sn bekle; `powershell -NoProfile -File scripts/measure.ps1` yöntemindeki gibi toplam özel WS (MiB) oku (WebView2 alt süreçleri dahil; Plan 6 karşılaştırması: 10.000 satırlı sorgu sekmesi en çok 109,1 MiB). **[—]**
+- [ ] 100k satırlı tabloda ilk açılış süresi: menü tıklamasından ilk 1000 satırın çizilmesine kadar (DevTools Performance ya da `performance.now()` ile, CDP); hedef: yüklenen sayfa 1000 satır, tabloyu tarayan sorgu yok (`LIMIT` + sıralama yoksa). **[—]**
+- [ ] Kaydırma: 100k satırlı tabloda (50.000 satır sınırına kadar "Daha fazla" ile yükleyerek) fare tekerleği ve PageDown ile kaydırma akıcı; DOM'da yalnızca görünür pencere (~100 hücre) bulunur (Elements sayacı). **[—]**
+- [ ] Sekme kapatınca bellek geri iner (10k satırlı sekme kapatıldıktan sonra toplam özel WS boşta değerine yaklaşır). **[—]**
