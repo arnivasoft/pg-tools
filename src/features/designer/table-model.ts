@@ -287,6 +287,28 @@ export function renameTableColumn(d: TableDef, i: number, next: string, refs: re
   return { ...d, columns, constraints, partitionBy: d.partitionBy && keys ? { ...d.partitionBy, keys } : d.partitionBy };
 }
 
+/**
+ * Kolonu siler; yüklü kolon yeniden adlandırılmışsa önce özgün adına döndürülür (verilen başvuru konumlarıyla: kısıt ve
+ * bölümleme başvuruları da özgün adı alır). Böylece silinen kolona başvuran kısıt özgün adı gösterir ve geri alma
+ * (restoreColumn) yüklenen tanımı birebir geri getirir.
+ */
+export function removeColumnRestoringName(d: TableDef, i: number, original: TableDef | null, refs: readonly ColumnRef[]): TableDef {
+  if (!inRange(i, d.columns.length)) return d;
+  const c = d.columns[i]!;
+  const o = originalColumn(original, c);
+  const back = o && o.name !== c.name ? renameTableColumn(d, i, o.name, refs) : d;
+  return removeTableColumn(back, i);
+}
+
+/**
+ * Kolon satırı kilitleri: `structure` — yapı denetimleri (ad, tip, NOT NULL, kaynak, collation, USING, ekle/sil/geri al)
+ * kapalı (salt okunur sekme ya da bölüm/kalıtımlı tablo); `comment` — yorum kapalı (yalnızca salt okunur sekme: arka uç
+ * bölüm/kalıtımlı tablonun kolon yorumunu kabul eder).
+ */
+export function columnLockGate(readOnly: boolean, original: TableDef | null): { structure: boolean; comment: boolean } {
+  return { structure: readOnly || structureLocked(original), comment: readOnly };
+}
+
 /** Tabloyu hedefleyen FK'lerin konumları (refSchema/refTable = taslağın şema/adı). */
 export function selfRefs(d: TableDef): number[] {
   const out: number[] = [];

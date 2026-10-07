@@ -31,6 +31,8 @@ export function createTypeSuggestions(lookup: (query: string | null) => Promise<
   let token = 0;
   let timer: unknown = null;
   let disposed = false;
+  /** Son gönderilen (bekleyen ya da yanıtlanmış) sorgu; hata olursa unutulur (yeniden denenebilsin). */
+  let lastQuery: string | null | undefined;
   const cancel = () => {
     token++;
     if (timer !== null) {
@@ -38,8 +40,9 @@ export function createTypeSuggestions(lookup: (query: string | null) => Promise<
       timer = null;
     }
   };
-  const done = (mine: number, r: LookupItem[]) => {
+  const done = (mine: number, r: LookupItem[], failed = false) => {
     if (disposed || mine !== token) return;
+    if (failed) lastQuery = undefined;
     setItems(r);
     setBusy(false);
   };
@@ -48,8 +51,11 @@ export function createTypeSuggestions(lookup: (query: string | null) => Promise<
     busy,
     query: (text) => {
       if (disposed) return;
-      cancel();
       const q = typeQueryOf(text);
+      // Aynı sorgu (ör. `numeric(` sonrası her vuruş): yeniden sorgulanmaz, aria-busy titremez.
+      if (q === lastQuery) return;
+      lastQuery = q;
+      cancel();
       const mine = token;
       setBusy(true);
       timer = timers.setTimer(() => {
@@ -60,11 +66,12 @@ export function createTypeSuggestions(lookup: (query: string | null) => Promise<
         } catch (e) {
           p = Promise.reject(e);
         }
-        p.then((r) => done(mine, r), () => done(mine, []));
+        p.then((r) => done(mine, r), () => done(mine, [], true));
       }, TYPE_QUERY_DELAY_MS);
     },
     dispose: () => {
       disposed = true;
+      lastQuery = undefined;
       cancel();
       setBusy(false);
     },

@@ -170,35 +170,80 @@ describe("createTableFormState", () => {
     dispose();
   });
 
-  it("createColumnRenamer: başvurular odak oturumunun ilk vuruşunda alınır; ara ad başka kolonun başvurusunu çalmaz; PK NOT NULL", async () => {
-    const pkC = (columns: string[], oid: number): ConstraintDef => ({
-      oid, name: null, deferrable: false, initiallyDeferred: false, notValid: false, kind: { type: "primary_key", columns, include: [] },
-    });
-    const uqC = (columns: string[], oid: number): ConstraintDef => ({
-      oid, name: null, deferrable: false, initiallyDeferred: false, notValid: false, kind: { type: "unique", columns, include: [], nullsNotDistinct: false },
-    });
+  const pkC = (columns: string[], oid: number): ConstraintDef => ({
+    oid, name: null, deferrable: false, initiallyDeferred: false, notValid: false, kind: { type: "primary_key", columns, include: [] },
+  });
+  const uqC = (columns: string[], oid: number): ConstraintDef => ({
+    oid, name: null, deferrable: false, initiallyDeferred: false, notValid: false, kind: { type: "unique", columns, include: [], nullsNotDistinct: false },
+  });
+  const listsOf = (d: TableDef) => d.constraints.map((c) => (c.kind as { columns: string[] }).columns);
+
+  it("createColumnRenames: ara ad başka kolonun başvurusunu çalmaz; kendine-başvuru hedefi ve PK taşınır", async () => {
     const self: ConstraintDef = {
       ...fk("t", 3), kind: { type: "foreign_key", columns: ["i"], refSchema: "public", refTable: "t", refColumns: ["id"], matchType: "simple", onUpdate: "no_action", onDelete: "no_action" },
     };
-    const s = await setup(T({ columns: [col("id", 1), col("i", 2)], constraints: [pkC(["id"], 1), uqC(["i"], 2), self] }));
-    const { createColumnRenamer } = await import("./table-form-state");
+    const s = await setup(T({ columns: [{ ...col("id", 1), notNull: true }, col("i", 2)], constraints: [pkC(["id"], 1), uqC(["i"], 2), self] }));
+    const { createColumnRenames } = await import("./table-form-state");
     const [st, dispose] = s.solid.createRoot((d) => [s.createTableFormState(s.props), d] as const);
-    const r = createColumnRenamer(st.editor, () => 0);
-    r.begin();
-    r.input("i"); // ara ad = 2. kolonun adı
-    r.input("ix");
-    r.end();
+    const r = createColumnRenames(st.editor, () => null);
+    r.rename(0, "i"); // ara ad = 2. kolonun adı
+    r.rename(0, "ix");
     let d = s.draft() as TableDef;
     expect(d.columns.map((c) => c.name)).toEqual(["ix", "i"]);
-    expect(d.constraints.map((c) => (c.kind as { columns: string[] }).columns)).toEqual([["ix"], ["i"], ["i"]]);
-    expect((d.constraints[2]!.kind as { refColumns: string[] }).refColumns).toEqual(["ix"]); // kendine-başvuru hedefi
-    expect(d.columns[0]!.notNull).toBe(true); // PK üyesi
-    // Yeni oturum: ikinci kolonu yeniden adlandırmak yalnızca onun başvurularını taşır.
-    const r2 = createColumnRenamer(st.editor, () => 1);
-    r2.begin();
-    r2.input("j");
+    expect(listsOf(d)).toEqual([["ix"], ["i"], ["i"]]);
+    expect((d.constraints[2]!.kind as { refColumns: string[] }).refColumns).toEqual(["ix"]);
+    r.rename(1, "j"); // ikinci kolon yalnızca kendi başvurularını taşır
     d = s.draft() as TableDef;
-    expect(d.constraints.map((c) => (c.kind as { columns: string[] }).columns)).toEqual([["ix"], ["j"], ["j"]]);
+    expect(listsOf(d)).toEqual([["ix"], ["j"], ["j"]]);
+    dispose();
+  });
+
+  it("I-1: ad değişimi NOT NULL'a dokunmaz (PK(id) + nullable x → ara 'id' → 'idx' notNull false kalır)", async () => {
+    const s = await setup(T({ columns: [{ ...col("id", 1), notNull: true }, col("x", 2)], constraints: [pkC(["id"], 1)] }));
+    const { createColumnRenames } = await import("./table-form-state");
+    const [st, dispose] = s.solid.createRoot((d) => [s.createTableFormState(s.props), d] as const);
+    const r = createColumnRenames(st.editor, () => null);
+    for (const v of ["i", "id", "idx"]) r.rename(1, v);
+    const d = s.draft() as TableDef;
+    expect(d.columns[1]).toMatchObject({ name: "idx", notNull: false });
+    expect(listsOf(d)).toEqual([["id"]]);
+    dispose();
+  });
+
+  it("I-2: başvurular odak oturumları arasında korunur (x'e 'i' yaz, odaktan çık, dön, 'x' yaz → UNIQUE(x), UNIQUE(i))", async () => {
+    const s = await setup(T({ columns: [col("x", 1), col("i", 2)], constraints: [uqC(["x"], 1), uqC(["i"], 2)] }));
+    const { createColumnRenames } = await import("./table-form-state");
+    const [st, dispose] = s.solid.createRoot((d) => [s.createTableFormState(s.props), d] as const);
+    const r = createColumnRenames(st.editor, () => null);
+    r.rename(0, "i");
+    st.editor.edit((d) => ({ ...d, columns: d.columns.map((c, k) => (k === 1 ? { ...c, dataType: "text" } : c)) })); // başka alan düzenlemesi
+    r.rename(0, "x");
+    expect(listsOf(s.draft() as TableDef)).toEqual([["x"], ["i"]]);
+    // Dış değişim (yeniden yükleme) kaydı düşürür: yeni taslağın adlarından yeniden alınır.
+    s.setDraft(T({ columns: [col("a", 1), col("b", 2)], constraints: [uqC(["b"], 1), uqC(["a"], 2)] }));
+    r.rename(0, "a2");
+    expect(listsOf(s.draft() as TableDef)).toEqual([["b"], ["a2"]]);
+    dispose();
+  });
+
+  it("M-1: yeniden adlandırılmış yüklü kolonu silmek önce özgün adı geri yazar; geri alma birebir yüklenen tanım", async () => {
+    const { defsEqual } = await import("./designer-model");
+    const { restoreColumn } = await import("./table-model");
+    const loaded = T({ columns: [col("x", 1), col("y", 2)], constraints: [uqC(["x"], 1)] });
+    const s = await setup(loaded);
+    const { createColumnRenames } = await import("./table-form-state");
+    const [st, dispose] = s.solid.createRoot((d) => [s.createTableFormState(s.props), d] as const);
+    const original = structuredClone(loaded) as TableDef;
+    const r = createColumnRenames(st.editor, () => original);
+    r.rename(0, "z");
+    expect(listsOf(s.draft() as TableDef)).toEqual([["z"]]);
+    r.remove(0);
+    let d = s.draft() as TableDef;
+    expect(d.columns.map((c) => c.name)).toEqual(["y"]);
+    expect(listsOf(d)).toEqual([["x"]]);
+    st.editor.edit((x) => restoreColumn(x, original, 1));
+    d = s.draft() as TableDef;
+    expect(defsEqual(d as ObjectDef, loaded)).toBe(true);
     dispose();
   });
 });

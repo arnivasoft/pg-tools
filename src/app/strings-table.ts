@@ -61,7 +61,6 @@ export const ttbl = {
     dataType: "Veri tipi",
     dataTypePlaceholder: "ör. integer, text, numeric(10,2)",
     dataTypeHint: "Listeden seçin ya da yazın (ör. character varying(50), timestamp(3) with time zone, int4[]).",
-    typesLoading: "Tipler yükleniyor…",
     notNull: "NOT NULL",
     notNullIdentity: "Kimlik kolonu her zaman NOT NULL'dır.",
     notNullPrimaryKey: "PRIMARY KEY kolonu her zaman NOT NULL'dır.",

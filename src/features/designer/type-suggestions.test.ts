@@ -84,4 +84,39 @@ describe("createTypeSuggestions", () => {
       dispose();
     });
   });
+
+  it("m-2: sorgu metni değişmezse yeniden sorgulanmaz (busy titremez); hata sonrası aynı sorgu yeniden denenir", async () => {
+    const solid = await import("solid-js");
+    const { createTypeSuggestions, TYPE_QUERY_DELAY_MS } = await import("./type-suggestions");
+    const t = fakeTimers();
+    const calls: Array<string | null> = [];
+    let fail = false;
+    await solid.createRoot(async (dispose) => {
+      const s = createTypeSuggestions(async (q) => {
+        calls.push(q);
+        if (fail) throw new Error("x");
+        return [item(`${q}`)];
+      }, t.deps);
+      s.query("numeric(");
+      t.advance(TYPE_QUERY_DELAY_MS);
+      await flush();
+      expect(s.busy()).toBe(false);
+      s.query("numeric(1");
+      s.query("numeric(10,2)");
+      expect(s.busy()).toBe(false);
+      t.advance(TYPE_QUERY_DELAY_MS);
+      expect(calls).toEqual(["numeric"]);
+      fail = true;
+      s.query("text");
+      t.advance(TYPE_QUERY_DELAY_MS);
+      await flush();
+      fail = false;
+      s.query("text");
+      t.advance(TYPE_QUERY_DELAY_MS);
+      await flush();
+      expect(calls).toEqual(["numeric", "text", "text"]);
+      expect(s.items()).toEqual([item("text")]);
+      dispose();
+    });
+  });
 });

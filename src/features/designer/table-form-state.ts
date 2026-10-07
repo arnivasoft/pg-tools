@@ -7,8 +7,8 @@ import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import type { DesignerController, DesignerModel } from "./designer-controller";
 import type { FormProps } from "./FormParts";
-import { createSnapTracker, withPrimaryKeyNotNull, type SelfSnap, type WithSnap } from "./table-constraints";
-import { asTable, columnRefs, renameTableColumn, rowOfFocus, type ColumnRef, type TableDraft, type TableSection } from "./table-model";
+import { createSnapTracker, type SelfSnap, type WithSnap } from "./table-constraints";
+import { asTable, columnRefs, removeColumnRestoringName, renameTableColumn, rowOfFocus, type ColumnRef, type TableDraft, type TableSection } from "./table-model";
 
 /** Kolon/kısıt bölümüne odak: `index === null` → satır bulunamadı (şerit gösterilir). `seq` her istekte değişir. */
 export interface TableHighlight {
@@ -22,6 +22,8 @@ export interface TableEditor {
   edit: (fn: (d: TableDef) => TableDef) => void;
   /** Anlık görüntülü düzenleme: tablo adı/şeması, kısıt ekle/sil/geri al, FK hedefi (`*Snap` sarmalayıcıları). */
   editSnap: (fn: (d: TableDef, snap: SelfSnap) => WithSnap) => void;
+  /** Taslağın dışarıdan (yükleme/yeniden yükleme) kaç kez değiştiği; formun kendi düzenlemeleri artırmaz. */
+  epoch: () => number;
 }
 
 /**
@@ -59,9 +61,21 @@ export function createTableFormState(props: StateProps): TableFormState {
   // Denetleyicinin güncel taslağı (memo zinciri değil: düzenlemeden hemen sonra okunur).
   const current = () => asTable(props.designer.model(props.tabId)?.draft ?? null);
   const tracker = createSnapTracker(current);
+  let epochCount = 0;
+  let epochSeen: TableDef | null | undefined;
+  // Her düzenlemeden önce ve dağıtıcıda örneklenir (tembel örnekleme dış değişimi kaçırmasın).
+  const epoch = () => {
+    const d = current();
+    if (d !== epochSeen) {
+      if (!tracker.isOwn(d)) epochCount++;
+      epochSeen = d;
+    }
+    return epochCount;
+  };
 
   const editSnap = (fn: (d: TableDef, snap: SelfSnap) => WithSnap) => {
     let next: SelfSnap | null = null;
+    epoch();
     // Toplu: taslak ve anlık görüntü birlikte kaydedilmeden etkiler (odak dağıtıcının "dış değişim" denetimi) çalışmasın.
     batch(() => {
       props.designer.edit(props.tabId, (d: ObjectDef) => {
@@ -96,6 +110,7 @@ export function createTableFormState(props: StateProps): TableFormState {
       if (lastDraft !== null && !tracker.isOwn(d)) setHighlight(null);
       lastDraft = d;
     }
+    epoch();
     const req = props.designer.focusRequest(props.tabId);
     if (!req || !d || props.model.status !== "ready") return;
     if (req.field === "name") {
@@ -112,25 +127,42 @@ export function createTableFormState(props: StateProps): TableFormState {
     props.designer.consumeFocus(props.tabId, req.seq);
   });
 
-  return { section, setSection, highlight, editor: { edit, editSnap } };
+  return { section, setSection, highlight, editor: { edit, editSnap, epoch } };
 }
 
 /**
- * Kolon adı düzenleme oturumu (ad girdisinin odak süresi): başvuru konumları (kısıt kolon listeleri, kendine-başvuran FK
- * hedef kolonları, bölümleme anahtarları) oturumun İLK vuruşunda — ad henüz odaklanmadaki değerdeyken — formun
- * SelfSnap'iyle alınır ve oturum boyunca sabit kalır: yazım sırasındaki ara ad (ör. başka bir kolonun adı) o kolonun
- * başvurularını çalmaz. Her vuruştan sonra PK üyelerinin NOT NULL'ı korunur. `begin`/`end` odak/odak kaybında çağrılır.
+ * Kolon yeniden adlandırma başvuru kaydı (form başına bir tane; tüm kolon satırları paylaşır). Her satırın başvuru
+ * konumları (kısıt kolon listeleri, kendine-başvuran FK hedef kolonları, bölümleme anahtarları) o satırın İLK ad
+ * düzenlemesinde formun SelfSnap'iyle alınır ve odak oturumları boyunca KORUNUR: yazım sırasındaki (ya da odaktan çıkıp
+ * dönülen) ara ad başka kolonun başvurularını çalmaz. Başka satırın kaydında olan konumlar yeni kayda alınmaz.
+ *
+ * Kayıt yalnızca başvuruları taşıyan yapı değişince düşer: kısıtlar/bölümleme anahtarları ya da kolon sayısı kaydın son
+ * çıktısından farklıysa (kısıt düzenlemesi, kolon ekle/sil/geri al) ya da taslak dışarıdan değiştiyse (yükleme/yeniden
+ * yükleme; `epoch`). Ad değişimi PK üyeliğini değiştirmez (başvurular kolonla taşınır): NOT NULL'a dokunulmaz.
  */
-export function createColumnRenamer(editor: TableEditor, index: () => number) {
-  let refs: ColumnRef[] | null = null;
+export function createColumnRenames(editor: TableEditor, original: () => TableDef | null) {
+  const byRow = new Map<number, ColumnRef[]>();
+  let key: string | null = null;
+  const keyOf = (d: TableDef) => `${editor.epoch()}|${d.columns.length}|${JSON.stringify([d.constraints, d.partitionBy])}`;
+  const refsFor = (d: TableDef, i: number, snap: SelfSnap): ColumnRef[] => {
+    if (key !== keyOf(d)) byRow.clear();
+    const have = byRow.get(i);
+    if (have) return have;
+    const claimed = new Set<string>();
+    for (const [row, refs] of byRow) if (row !== i) for (const r of refs) claimed.add(JSON.stringify(r));
+    const refs = columnRefs(d, d.columns[i]?.name ?? "", snap).filter((r) => !claimed.has(JSON.stringify(r)));
+    byRow.set(i, refs);
+    return refs;
+  };
   return {
-    begin: () => (refs = null),
-    end: () => (refs = null),
-    input: (next: string) =>
+    rename: (i: number, next: string) =>
       editor.editSnap((d, snap) => {
-        const i = index();
-        refs ??= columnRefs(d, d.columns[i]?.name ?? "", snap);
-        return { d: withPrimaryKeyNotNull(renameTableColumn(d, i, next, refs)), snap };
+        const out = renameTableColumn(d, i, next, refsFor(d, i, snap));
+        key = keyOf(out);
+        return { d: out, snap };
       }),
+    /** Kolonu sil (yeniden adlandırılmış yüklü kolon önce özgün adına döner: geri alma birebir). Kayıt düşer. */
+    remove: (i: number) =>
+      editor.editSnap((d, snap) => ({ d: removeColumnRestoringName(d, i, original(), refsFor(d, i, snap)), snap })),
   };
 }

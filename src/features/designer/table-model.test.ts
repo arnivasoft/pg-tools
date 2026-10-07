@@ -5,7 +5,7 @@ import type { ConstraintDef } from "../../ipc/bindings/ConstraintDef";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import { defsEqual, groupIssues } from "./designer-model";
 import {
-  addPartitionKey, addTableColumn, applySerialFix, columnDetailsHaveIssues, columnTypeWarning, primaryKeyMember, partitionColumnChoices, partitionKeyLabel, allowedValueSources, asTable, columnRefs, newColumn, originalColumn, removePartitionKey, removeTableColumn,
+  addPartitionKey, addTableColumn, applySerialFix, columnDetailsHaveIssues, columnLockGate, removeColumnRestoringName, columnTypeWarning, primaryKeyMember, partitionColumnChoices, partitionKeyLabel, allowedValueSources, asTable, columnRefs, newColumn, originalColumn, removePartitionKey, removeTableColumn,
   removedColumns, renameTable, renameTableColumn, restoreColumn, rowOfFocus, sectionHasIssues, selfRefs, serialFix, storageGate, structureLocked,
   switchPartitionKeyKind, tableEditPatch, tableSections, typeQueryOf, typeTextWarning, updatePartitionKey, updateTableColumn, usingVisible,
   valueExpr, valueSourceOf, withCollation, withDataType, withPartitionStrategy, withValueExpr, withValueSource,
@@ -404,5 +404,22 @@ describe("kolon ızgarası yardımcıları (Task 6)", () => {
     expect(columnDetailsHaveIssues(iss("columns[1].using"), 1)).toBe(true);
     expect(columnDetailsHaveIssues(iss("columns[1].dataType"), 1)).toBe(false);
     expect(columnDetailsHaveIssues(iss("columns[11].using"), 1)).toBe(false);
+  });
+  it("removeColumnRestoringName: yeniden adlandırılmış yüklü kolon özgün adla silinir; yeni/adı aynı kolon düz silinir", () => {
+    const o = T({ columns: [col("x", 1), col("y", 2)], constraints: [uq(["x"], 1)], partitionBy: null });
+    const renamed = renameTableColumn(o, 0, "z", columnRefs(o, "x", []));
+    const out = removeColumnRestoringName(renamed, 0, o, columnRefs(o, "x", []));
+    expect(out.columns.map((c) => c.name)).toEqual(["y"]);
+    expect((out.constraints[0]!.kind as { columns: string[] }).columns).toEqual(["x"]);
+    expect(defsEqual({ kind: "table", ...restoreColumn(out, o, 1) }, { kind: "table", ...o })).toBe(true);
+    const plain = T({ columns: [col("n", null)] });
+    expect(removeColumnRestoringName(plain, 0, o, []).columns).toEqual([]);
+    expect(removeColumnRestoringName(plain, 5, o, [])).toBe(plain);
+  });
+  it("columnLockGate: bölüm/kalıtımlı tabloda yapı kilitli ama yorum açık; salt okunur sekmede ikisi de kilitli", () => {
+    expect(columnLockGate(false, T({ isPartition: true }))).toEqual({ structure: true, comment: false });
+    expect(columnLockGate(false, T({ inherits: true }))).toEqual({ structure: true, comment: false });
+    expect(columnLockGate(true, T())).toEqual({ structure: true, comment: true });
+    expect(columnLockGate(false, null)).toEqual({ structure: false, comment: false });
   });
 });

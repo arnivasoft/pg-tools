@@ -1,7 +1,7 @@
 // Table formu Kolonlar bölümü (TableForm parçası): kolon ızgarası (ad, tip seçici, NOT NULL, değer kaynağı + ifade,
 // ayrıntılarda collation/yorum/USING), silinecek kolonlar listesi (geri al), kolon ekle, Explorer odağı (satır vurgusu +
 // kaydırma). Satırlar sıra numarası listesiyle çizilir (düzenlemede odak kaybolmaz). Kolon yeniden adlandırma kısıt ve
-// bölümleme anahtarlarına konum anlık görüntüsüyle yayılır (editSnap + columnRefs). İstemci SQL üretmez.
+// bölümleme anahtarlarına konum anlık görüntüsüyle yayılır (createColumnRenames). İstemci SQL üretmez.
 import { Settings2, Trash2, Undo } from "lucide-solid";
 import { For, Show, createEffect, createMemo, createSignal, createUniqueId, on } from "solid-js";
 import { ttbl } from "../../app/strings-table";
@@ -12,10 +12,10 @@ import { inputClass } from "../../ui/Field";
 import { CommentField, FieldRow, FreeSqlNote, invalidClass } from "./FormParts";
 import { exactIssues, normalizeEmpty, orphanRowIssues } from "./forms-model";
 import { withPrimaryKeyNotNull } from "./table-constraints";
-import { createColumnRenamer, type TableSectionProps } from "./table-form-state";
+import { createColumnRenames, type TableSectionProps } from "./table-form-state";
 import {
-  addTableColumn, allowedValueSources, applySerialFix, columnDetailsHaveIssues, columnTypeWarning, newColumn, originalColumn,
-  primaryKeyMember, removeTableColumn, removedColumns, restoreColumn, serialFix, structureLocked, updateTableColumn,
+  addTableColumn, allowedValueSources, applySerialFix, columnDetailsHaveIssues, columnLockGate, columnTypeWarning, newColumn, originalColumn,
+  primaryKeyMember, removedColumns, restoreColumn, serialFix, updateTableColumn,
   usingVisible, valueExpr, valueSourceOf, withCollation, withDataType, withValueExpr, withValueSource, type ValueSource,
 } from "./table-model";
 import { TypeInput } from "./TypeInput";
@@ -27,7 +27,10 @@ export function TableColumns(props: TableSectionProps) {
   const d = () => props.draft;
   const len = () => d().columns.length;
   const rows = createMemo(() => d().columns.map((_, i) => i), undefined, { equals: (a, b) => a.length === b.length });
-  const editable = () => !props.readOnly && !structureLocked(props.original);
+  const lock = createMemo(() => columnLockGate(props.readOnly, props.original));
+  const editable = () => !lock().structure;
+  // Ad değişimi ve silme başvuru kaydı (satırlar paylaşır; odak oturumları boyunca korunur).
+  const renames = createColumnRenames(props.editor, () => props.original);
   const removed = createMemo(() => removedColumns(props.original, d()));
 
   /** Tek kolon düzenlemesi; ardından PK üyelerinin NOT NULL'ı korunur (değer kaynağı/ad değişimi onu düşürebilir). */
@@ -88,13 +91,15 @@ export function TableColumns(props: TableSectionProps) {
               {...props}
               index={i}
               editable={editable()}
+              commentLocked={lock().comment}
+              rename={(v) => renames.rename(i, v)}
               editColumn={editColumn}
               collationList={collationList}
               loadCollations={loadCollations}
               rowRef={(el) => (rowEls[i] = el)}
               nameRef={(el) => (nameEls[i] = el)}
               onRemove={() => {
-                props.editor.edit((x) => removeTableColumn(x, i));
+                renames.remove(i);
                 focusLater(() => (len() === 0 ? addEl : nameEls[Math.min(i, len() - 1)]));
               }}
             />
@@ -157,6 +162,8 @@ function ColumnRow(
   props: TableSectionProps & {
     index: number;
     editable: boolean;
+    commentLocked: boolean;
+    rename: (next: string) => void;
     editColumn: (i: number, f: (c: ColumnDef) => ColumnDef) => void;
     collationList: string;
     loadCollations: () => void;
@@ -187,9 +194,6 @@ function ColumnRow(
   // Hatası olan satırın ayrıntıları ve tipi yeni değişen yüklü kolonun USING alanı kendiliğinden açılır.
   createEffect(on(() => columnDetailsHaveIssues(props.issues, i), (v) => v && setOpen(true)));
   createEffect(on(showUsing, (v, prev) => v && !prev && setOpen(true), { defer: true }));
-
-  // Yeniden adlandırma: başvuru konumları odak oturumunun ilk vuruşunda anlık görüntüyle alınır (createColumnRenamer).
-  const renamer = createColumnRenamer(props.editor, () => i);
 
   const setSource = (s: ValueSource) => props.editColumn(i, (k) => withValueSource(k, s, orig()));
   const exprPath = () => (source() === "default" ? p("default") : p("generated"));
@@ -257,9 +261,7 @@ function ColumnRow(
                 aria-invalid={a.invalid}
                 disabled={ro()}
                 value={c().name}
-                onFocus={renamer.begin}
-                onBlur={renamer.end}
-                onInput={(ev) => renamer.input(ev.currentTarget.value)}
+                onInput={(ev) => props.rename(ev.currentTarget.value)}
               />
             )}
           </FieldRow>
@@ -397,7 +399,7 @@ function ColumnRow(
             value={c().comment}
             path={p("comment")}
             issues={props.issues}
-            disabled={ro()}
+            disabled={props.commentLocked}
             onChange={(v) => props.editColumn(i, (k) => ({ ...k, comment: v === null ? null : normalizeEmpty(v) }))}
           />
           <Show when={showUsing()}>
