@@ -2642,6 +2642,7 @@ dependencies = [
  "insta",
  "pgt-catalog",
  "pgt-core",
+ "postgres-protocol",
  "serde",
  "serde_json",
  "tempfile",

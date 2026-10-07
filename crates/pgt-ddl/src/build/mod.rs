@@ -337,7 +337,7 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         // Bağlı/bakım veritabanı koruması yöneticide (Task 8); şablon ve FORCE sürüm kapısı üreticide.
         ObjectDef::Database(d) => database::drop(d, o.force, ctx),
         // DROP OWNED / REASSIGN OWNED otomatikleştirilmez (Karar 9).
-        ObjectDef::Role(d) => Ok(role::drop(d)),
+        ObjectDef::Role(d) => role::drop(d),
     }
 }
 

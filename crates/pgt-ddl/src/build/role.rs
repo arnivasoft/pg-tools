@@ -3,9 +3,9 @@
 //!
 //! Parola (Karar 6): tanımda yalnızca NİYET vardır (`keep | set | clear`). `set` için üretici tek bir gizlenmiş ifade
 //! üretir (`ALTER ROLE <q> PASSWORD ********`, `redacted = true`; `********` bilerek tırnaksızdır: kopyalanıp
-//! çalıştırılırsa sözdizimi hatası verir, parolayı "********" yapmaz). Gerçek değer yalnızca uygulayıcıda,
-//! kapılardan sonra `password_sql` ile çalıştırma listesinde kurulur; bu modül değeri hiç görmez, plan özeti değerden
-//! bağımsızdır.
+//! çalıştırılırsa sözdizimi hatası verir, parolayı "********" yapmaz). Gerçek ifade yalnızca uygulayıcıda, kapılardan
+//! sonra `materialize_password` ile çalıştırma listesinde kurulur ve düz metin değil istemci tarafı SCRAM-SHA-256
+//! doğrulayıcısı taşır (inceleme M-1); üreticiler değeri hiç görmez, plan özeti değerden bağımsızdır.
 //!
 //! Rolün sahibi yoktur (Karar 5); yalnızca "üye olduğu roller" düzenlenir. PG 16+ üyelik başına `INHERIT`/`SET`
 //! seçenekleri salt okunurdur ve üretici tarafından OKUNMAZ (Karar 4). Tüm ifadeler transaction içindedir.
@@ -29,14 +29,20 @@ pub const SELF_MEMBER_MSG: &str = "Rol kendisine üye olamaz.";
 pub const DUPLICATE_MEMBER_MSG: &str = "Bu rol birden çok kez listelenmiş.";
 pub const CLEAR_ON_CREATE_MSG: &str = "Yeni rolde parola kaldırılamaz.";
 pub const PASSWORD_NOTE: &str = "Parola gizlendi; uygulamada girilen değer kullanılır.";
-pub const PASSWORD_WARNING: &str =
-    "Parola sunucuya düz metin gider; log_statement ve pg_stat_statements açıksa sunucu günlüğüne düşebilir";
+pub const PASSWORD_WARNING: &str = "Parola istemcide SCRAM-SHA-256 ile özetlenir; düz metin sunucuya gönderilmez \
+     (günlüklere ve pg_stat_statements'a yalnızca doğrulayıcı düşebilir)";
 pub const MD5_RENAME_WARNING: &str = "MD5 ile saklanan parola ad değişince temizlenir (SCRAM etkilenmez)";
 pub const NOLOGIN_NOTE: &str = "Mevcut oturumlar sürer; yeni girişler reddedilir";
 pub const REVOKE_NOTE: &str = "Bu rolün yetkileri kaybolur";
 pub const DROP_NOTE: &str = "Rolün sahip olduğu nesne ya da yetki varsa başarısız olur (REASSIGN OWNED / DROP OWNED gerekir)";
 pub const SECRET_EMPTY_MSG: &str = "Parola boş olamaz.";
 pub const SECRET_NUL_MSG: &str = "Parola NUL karakteri içeremez.";
+pub const SECRET_TOO_LONG_MSG: &str = "Parola en çok 1024 bayt olabilir.";
+const VERIFIER_MSG: &str = "Parola özeti üretilemedi.";
+pub const RESERVED_MEMBER_MSG: &str = "public ve none üye olunacak rol olarak kullanılamaz.";
+pub const PREDEFINED_ALTER_MSG: &str = "Önceden tanımlı (pg_*) rolün adı, öznitelikleri, parolası ve ayarları \
+     değiştirilemez (PostgreSQL ayrılmış rolleri korur); yorum ve üyelikler düzenlenebilir.";
+pub const PREDEFINED_DROP_MSG: &str = "Önceden tanımlı (pg_*) roller silinemez.";
 
 /// Verilmesi plan uyarısı gerektiren öznitelikler ve etkileri (öznitelik sırasıyla).
 pub const SUPERUSER_WARNING: &str = "SUPERUSER veriliyor: tüm yetki denetimleri atlanır (sunucu üzerinde tam denetim)";
@@ -56,21 +62,69 @@ pub(crate) fn password_redacted(role: &str) -> Statement {
     }
 }
 
-/// YALNIZCA uygulayıcı çağırır (kapılardan sonra, çalıştırma listesinde). Değer günlüğe/hataya yazılmaz.
-/// Çağıran önce `check_secret` ile değeri doğrular (NUL `quote_literal`'da yalnızca debug-assert edilir).
-#[cfg_attr(not(test), allow(dead_code))] // Task 8 (uygulayıcı) kullanır.
-pub(crate) fn password_sql(role: &str, secret: &Secret) -> String {
-    format!("ALTER ROLE {} PASSWORD {}", quote_ident(role), quote_literal(secret.expose()))
+/// Somutlaştırılmış parola ifadesi: `ALTER ROLE <q> PASSWORD 'SCRAM-SHA-256$4096:<tuz>$<StoredKey>:<ServerKey>'`.
+/// Düz metin İÇERMEZ (istemci tarafı özet, inceleme M-1); doğrulayıcı yine de çevrimdışı kırmaya açık olduğundan gizli
+/// sayılır: `Debug` maskelidir, düşerken baytlar sıfırlanır (en iyi çaba), `Statement`'e hiç konmaz, günlüğe yazılmaz.
+pub(crate) struct PasswordStatement(String);
+
+#[cfg_attr(not(test), allow(dead_code))] // Task 8 (uygulayıcı) çağırır.
+impl PasswordStatement {
+    /// Yalnızca sürücüye vermek için (çalıştırma listesinde; hata yükünde/günlükte kullanılmaz).
+    pub(crate) fn sql(&self) -> &str {
+        &self.0
+    }
 }
 
-/// Parola değerinin kabul kuralı (uygulama kapısı): boş değil, NUL yok. İleti değeri (ya da uzunluğunu) taşımaz.
-#[cfg_attr(not(test), allow(dead_code))] // Task 8 (uygulayıcı) kullanır.
-pub(crate) fn check_secret(secret: &Secret) -> Result<(), &'static str> {
+impl std::fmt::Debug for PasswordStatement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PasswordStatement(********)")
+    }
+}
+
+impl Drop for PasswordStatement {
+    fn drop(&mut self) {
+        zero(std::mem::take(&mut self.0));
+    }
+}
+
+fn zero(s: String) {
+    let mut b = s.into_bytes();
+    b.fill(0);
+    std::hint::black_box(&b);
+}
+
+/// Parola üst sınırı (bayt; ileti sabittir, uzunluğu yankılamaz).
+pub const MAX_SECRET_BYTES: usize = 1024;
+
+/// YALNIZCA uygulayıcı çağırır (kapılardan sonra, çalıştırma listesinde). Değer kabul kuralından geçer
+/// (`check_secret`), ardından psql `\password` / libpq `PQencryptPasswordConn` gibi istemcide SCRAM-SHA-256 ile
+/// özetlenir (rastgele tuz, 4096 tur, SASLprep); sunucuya, `log_min_error_statement` günlüğüne, `pg_stat_statements`'a
+/// ya da hata metnine düz metin hiç gitmez. Sunucunun `password_encryption` ayarından bağımsızdır (PG 10+ SCRAM
+/// doğrulayıcısını olduğu gibi saklar). Hata iletileri sabittir.
+#[cfg_attr(not(test), allow(dead_code))] // Task 8 (uygulayıcı) çağırır.
+pub(crate) fn materialize_password(role: &str, secret: &Secret) -> Result<PasswordStatement, &'static str> {
+    check_secret(secret)?;
+    let verifier = postgres_protocol::password::scram_sha_256(secret.expose().as_bytes());
+    // Kütüphane sözleşmesi: doğrulayıcı yalnızca base64/ASCII; savunma olarak yine denetlenir (tırnak/ters bölü yok).
+    if !verifier.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'$' | b':' | b'-')) {
+        zero(verifier);
+        return Err(VERIFIER_MSG);
+    }
+    let sql = format!("ALTER ROLE {} PASSWORD {}", quote_ident(role), quote_literal(&verifier));
+    zero(verifier);
+    Ok(PasswordStatement(sql))
+}
+
+/// Parola değerinin kabul kuralı (uygulama kapısı): boş değil, NUL yok, ≤ `MAX_SECRET_BYTES`. İleti değeri (ya da
+/// uzunluğunu) taşımaz.
+fn check_secret(secret: &Secret) -> Result<(), &'static str> {
     let v = secret.expose();
     if v.is_empty() {
         Err(SECRET_EMPTY_MSG)
     } else if v.contains('\0') {
         Err(SECRET_NUL_MSG)
+    } else if v.len() > MAX_SECRET_BYTES {
+        Err(SECRET_TOO_LONG_MSG)
     } else {
         Ok(())
     }
@@ -205,6 +259,10 @@ fn check_memberships(
         let before = e.len();
         if written(m) {
             check_ident(&path, &m.role, e);
+            // GRANT'ta `public`/`none` rol belirtimi biçimleridir; sunucu reddeder (inceleme n-1). `pg_*` meşrudur.
+            if e.len() == before && (m.role == "public" || m.role == "none") {
+                e.push(err(&path, RESERVED_MEMBER_MSG));
+            }
         }
         if e.len() != before {
             continue;
@@ -318,6 +376,23 @@ fn validate_alter(old: &RoleDef, new: &RoleDef) -> Vec<FieldError> {
     if !e.is_empty() {
         return e;
     }
+    // Yüklü önceden tanımlı rol (inceleme n-2): ad gevşek kalır, ama PG'nin "Cannot alter reserved roles" ile
+    // reddedeceği değişiklikler (rename, öznitelik, parola, ayar) önceden açık iletiyle durdurulur; yorum ve üyelikler
+    // serbest.
+    if old.name.starts_with("pg_") {
+        let attrs_changed = flags(old).iter().zip(flags(new)).any(|(a, b)| a.0 != b.0)
+            || old.connection_limit != new.connection_limit
+            || old.valid_until != new.valid_until;
+        let (removed, set) = diff_settings(&old.settings, &new.settings);
+        if old.name != new.name
+            || attrs_changed
+            || new.password != PasswordChange::Keep
+            || !removed.is_empty()
+            || !set.is_empty()
+        {
+            return vec![err("name", PREDEFINED_ALTER_MSG)];
+        }
+    }
     if new.name != old.name {
         check_new_role_name("name", &new.name, &mut e);
     }
@@ -345,8 +420,13 @@ fn validate_alter(old: &RoleDef, new: &RoleDef) -> Vec<FieldError> {
 /// Sıra (sonrakiler YENİ adı kullanır): rename, `WITH` (yalnız değişenler), parola, REVOKE/REVOKE ADMIN OPTION FOR,
 /// GRANT/GRANT … WITH ADMIN OPTION (ikisi de rol adı sırasıyla), ayarlar (RESET sonra SET), yorum.
 ///
-/// Parola yalnızca YENİ tanımın niyetiyle belirlenir (`old.password` yükleyicide her zaman `keep`; farklı gönderen
-/// eski taraf yöneticide `plan_changed` olur).
+/// Parola yalnızca YENİ tanımın niyetiyle belirlenir; üretici `old.password`'ı okumaz. Bunun güvenli olması yöneticinin
+/// (Task 8) şu kapılarına bağlıdır (her biri açık testle):
+/// 1. `old.password != keep` (yükleyici her zaman `keep` döndürür) → yeniden yükleme eşitliği bozulur → `plan_changed`;
+/// 2. `ApplyOptions.password` verilmiş ama planda gizlenmiş (`redacted`) ifade yok → reddedilir (parola kullanılmaz);
+/// 3. planda gizlenmiş ifade var ama `ApplyOptions.password` yok → `role_password_missing`;
+/// 4. gizlenmiş ifade `materialize_password` ile yalnızca çalıştırma listesinde somutlaşır; bu ifade başarısız olursa
+///    hata yükünde `position = None` döner ve sorgu metni/ayrıntı yankılanmaz.
 pub fn alter(old: &RoleDef, new: &RoleDef, _ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     let errs = validate_alter(old, new);
     if !errs.is_empty() {
@@ -424,11 +504,15 @@ pub fn alter(old: &RoleDef, new: &RoleDef, _ctx: &BuildCtx) -> Result<Plan, Vec<
 
 /// `DROP ROLE <q>` — Destructive. Ortak kurallar (CASCADE/FORCE yok, gevşek kimlik) `build::drop_with`'tedir; sahip
 /// olunan nesne/yetki varsa PG 2BP01 verir, plan geri alınır (REASSIGN/DROP OWNED üretilmez).
-pub fn drop(r: &RoleDef) -> Plan {
-    Plan {
+/// Yüklü önceden tanımlı (`pg_*`) rol: sunucu reddeder; açık iletiyle önceden durdurulur (inceleme n-2).
+pub fn drop(r: &RoleDef) -> Result<Plan, Vec<FieldError>> {
+    if r.name.starts_with("pg_") {
+        return Err(vec![err("name", PREDEFINED_DROP_MSG)]);
+    }
+    Ok(Plan {
         statements: vec![stmt(format!("DROP ROLE {}", quote_ident(&r.name)), Risk::Destructive, Some(DROP_NOTE))],
         warnings: vec![],
-    }
+    })
 }
 
 #[cfg(test)]
@@ -510,12 +594,78 @@ mod tests {
         assert!(!red[0].sql.contains('\''), "maske tırnaksız olmalı (kopyalanan betik çalışmasın)");
         // Aynı istek her zaman aynı hash (değer isteğin parçası değildir).
         assert_eq!(plan_hash(&p.statements), plan_hash(&create(&r, &ctx()).statements));
-        // Somutlaştırma yalnızca tırnaklı değer üretir; tek ifade kalır.
-        let sql = password_sql("app", &Secret::new("x'; DROP ROLE app; --"));
-        assert_eq!(sql, "ALTER ROLE app PASSWORD 'x''; DROP ROLE app; --'");
-        assert!(scan_semicolons(&sql).is_clean());
-        assert_eq!(password_sql("Ünï", &Secret::new("a\\b")), "ALTER ROLE \"Ünï\" PASSWORD E'a\\\\b'");
-        assert!(check_secret(&Secret::new("")).is_err() && check_secret(&Secret::new("a\0b")).is_err());
+        // Somutlaştırma (inceleme M-1 kararı: istemci tarafı SCRAM) düz metni değil doğrulayıcıyı tek tırnaklı değer
+        // olarak yazar; tek ifade kalır.
+        let st = materialize_password("app", &Secret::new("x'; DROP ROLE app; --")).unwrap();
+        assert!(st.sql().starts_with("ALTER ROLE app PASSWORD 'SCRAM-SHA-256$4096:"), "{}", st.sql());
+        assert!(!st.sql().contains("DROP ROLE"));
+        assert!(scan_semicolons(st.sql()).is_clean());
+        assert!(materialize_password("Ünï", &Secret::new("a\\b")).unwrap().sql().starts_with("ALTER ROLE \"Ünï\" PASSWORD 'SCRAM"));
+        assert!(materialize_password("app", &Secret::new("")).is_err() && materialize_password("app", &Secret::new("a\0b")).is_err());
+    }
+
+    /// `^SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$` (regex bağımlılığı olmadan).
+    fn is_scram_verifier(v: &str) -> bool {
+        let b64 = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
+        let Some(rest) = v.strip_prefix("SCRAM-SHA-256$4096:") else { return false };
+        let Some((salt, keys)) = rest.split_once('$') else { return false };
+        let Some((stored, server)) = keys.split_once(':') else { return false };
+        b64(salt) && b64(stored) && b64(server)
+    }
+
+    /// `ALTER ROLE <q> PASSWORD '<doğrulayıcı>'` → doğrulayıcı.
+    fn verifier_of<'a>(sql: &'a str, q: &str) -> &'a str {
+        let lit = sql.strip_prefix(&format!("ALTER ROLE {q} PASSWORD ")).expect(sql);
+        lit.strip_prefix('\'').and_then(|l| l.strip_suffix('\'')).expect(sql)
+    }
+
+    #[test]
+    fn materialized_password_is_client_side_scram() {
+        let hostile = [
+            "düz",
+            "x'; DROP ROLE app; --",
+            "a\\b",
+            "E'\\x27'",
+            "satır\nsonu\r\tsekme",
+            "\"; --",
+            "/* */ $$ $x$",
+            "日本語パスワード",
+            "\u{202e}ters\u{200b}",
+            "SCRAM-SHA-256$4096:AAAA$BBBB:CCCC",
+            "md5d41d8cd98f00b204e9800998ecf8427e",
+        ];
+        let long = "p".repeat(MAX_SECRET_BYTES);
+        for pw in hostile.iter().copied().chain([long.as_str()]) {
+            for role_name in ["app", "Ünï", "r'\"; --"] {
+                let st = materialize_password(role_name, &Secret::new(pw)).unwrap();
+                let q = quote_ident(role_name);
+                let v = verifier_of(st.sql(), &q);
+                assert!(is_scram_verifier(v), "{pw:?}: {v}");
+                // Ad dışındaki tek parça doğrulayıcıdır; düz metin içermez.
+                assert!(!v.contains(pw) && !st.sql().contains(&quote_literal(pw)), "düz metin sızdı: {pw:?}");
+                assert!(scan_semicolons(st.sql()).is_clean(), "{pw:?}");
+                assert!(!st.sql().contains('\\') && st.sql().matches('\'').count() == 2 + q.matches('\'').count());
+                // Debug/format! maskeli.
+                let dbg = format!("{st:?} {:?}", Some(&st));
+                assert_eq!(dbg, "PasswordStatement(********) Some(PasswordStatement(********))");
+            }
+        }
+        // İki çağrı farklı tuz (ve dolayısıyla farklı anahtarlar) verir.
+        let a = materialize_password("app", &Secret::new("aynı")).unwrap();
+        let b = materialize_password("app", &Secret::new("aynı")).unwrap();
+        let salt = |s: &PasswordStatement| verifier_of(s.sql(), "app").split('$').nth(1).unwrap().split(':').nth(1).unwrap().to_string();
+        assert_ne!(salt(&a), salt(&b));
+        assert_ne!(a.sql(), b.sql());
+        // Hatalar: sabit ileti, değer/uzunluk yankılanmaz.
+        let over = "p".repeat(MAX_SECRET_BYTES + 1);
+        for (bad, want) in [("", SECRET_EMPTY_MSG), ("Gizli\0Parola", SECRET_NUL_MSG), (over.as_str(), SECRET_TOO_LONG_MSG)] {
+            let e = materialize_password("app", &Secret::new(bad)).unwrap_err();
+            assert_eq!(e, want);
+            assert!(!e.contains("Gizli") && !e.contains("ppp"));
+        }
+        assert!(SECRET_TOO_LONG_MSG.contains(&MAX_SECRET_BYTES.to_string()));
+        // Uyarı artık istemci tarafı özeti söyler.
+        assert!(PASSWORD_WARNING.contains("SCRAM-SHA-256") && PASSWORD_WARNING.contains("düz metin sunucuya gönderilmez"));
     }
 
     #[test]
@@ -550,10 +700,11 @@ mod tests {
         }
         assert_eq!(check_secret(&Secret::new("")), Err(SECRET_EMPTY_MSG));
         assert_eq!(check_secret(&Secret::new("a\0b")), Err(SECRET_NUL_MSG));
-        // Somutlaştırılmış metin yalnızca çalıştırma için; gizlenmiş ifadeyle aynı hedef.
-        let real = password_sql("app2", &secret);
-        assert_eq!(real, "ALTER ROLE app2 PASSWORD E'GizliParola-7f3a''\\\\'");
-        assert!(scan_semicolons(&real).is_clean());
+        // Somutlaştırılmış metin yalnızca çalıştırma için; gizlenmiş ifadeyle aynı hedef, düz metin yok.
+        let real = materialize_password("app2", &secret).unwrap();
+        assert!(is_scram_verifier(verifier_of(real.sql(), "app2")), "{}", real.sql());
+        assert!(!real.sql().contains("GizliParola") && !format!("{real:?}").contains("SCRAM"));
+        assert!(scan_semicolons(real.sql()).is_clean());
         // Gizlenmiş ifadenin hash'i parolanın içeriğinden bağımsız iki istekte aynıdır.
         assert_eq!(plan_hash(&plans[0].statements), plan_hash(&create(&r, &ctx()).statements));
         // Gizlenmiş ifade bayrağı hash'e girer: aynı metin bayraksız farklı özet verir.
@@ -918,6 +1069,53 @@ mod tests {
     }
 
     #[test]
+    fn public_and_none_are_not_membership_targets() {
+        for bad in ["public", "none"] {
+            let e = create_err(&RoleDef { member_of: vec![m(bad, false)], ..role("r") });
+            assert_eq!(paths(e.clone()), ["memberOf[0].role"], "{bad}");
+            assert_eq!(e[0].message, RESERVED_MEMBER_MSG);
+            let e = alter_err(&role("r"), &RoleDef { member_of: vec![m(bad, true)], ..role("r") });
+            assert_eq!(paths(e), ["memberOf[0].role"], "{bad}");
+        }
+        // Büyük harfli (tırnaklı) adlar ve pg_* roller meşru.
+        for ok in ["Public", "NONE", "pg_monitor"] {
+            assert_eq!(create(&RoleDef { member_of: vec![m(ok, false)], ..role("r") }, &ctx()).statements.len(), 2);
+        }
+    }
+
+    #[test]
+    fn loaded_predefined_roles_friendly_errors() {
+        let pre = RoleDef { member_of: vec![m("a", false)], settings: vec![s("work_mem", "1MB")], ..role("pg_monitor") };
+        let changes = [
+            RoleDef { name: "monitor2".into(), ..pre.clone() },
+            RoleDef { login: true, ..pre.clone() },
+            RoleDef { connection_limit: 3, ..pre.clone() },
+            RoleDef { valid_until: Some("infinity".into()), ..pre.clone() },
+            RoleDef { password: PasswordChange::Set, ..pre.clone() },
+            RoleDef { password: PasswordChange::Clear, ..pre.clone() },
+            RoleDef { settings: vec![], ..pre.clone() },
+            RoleDef { settings: vec![s("work_mem", "2MB")], ..pre.clone() },
+        ];
+        for new in changes {
+            let e = alter_err(&pre, &new);
+            assert_eq!(paths(e.clone()), ["name"], "{new:?}");
+            assert_eq!(e[0].message, PREDEFINED_ALTER_MSG);
+        }
+        // Yorum ve üyelikler serbest; ad gevşek (kimlik doğrulaması boş).
+        let p = alter_ok(&pre, &RoleDef { comment: Some("c".into()), member_of: vec![m("b", true)], ..pre.clone() });
+        assert_eq!(sqls(&p), ["REVOKE a FROM pg_monitor", "GRANT b TO pg_monitor WITH ADMIN OPTION", "COMMENT ON ROLE pg_monitor IS 'c'"]);
+        assert!(alter_ok(&pre, &pre).statements.is_empty());
+        assert!(validate_identity(&o(&pre)).is_empty());
+        // Silme: açık ileti.
+        let e = drop_with(&o(&pre), DropOptions::default(), &ctx()).unwrap_err();
+        assert_eq!(paths(e.clone()), ["name"]);
+        assert_eq!(e[0].message, PREDEFINED_DROP_MSG);
+        // Önek büyük/küçük harfe duyarlı (PG IsReservedName gibi).
+        assert!(drop_with(&o(&role("PG_x")), DropOptions::default(), &ctx()).is_ok());
+        assert_eq!(sqls(&alter_ok(&role("Pg_y"), &role("pgy"))), ["ALTER ROLE \"Pg_y\" RENAME TO pgy"]);
+    }
+
+    #[test]
     fn reserved_names() {
         for bad in ["public", "none", "pg_x", "pg_", "pg_read_all_data"] {
             let e = create_err(&role(bad));
@@ -1117,7 +1315,7 @@ mod tests {
                 assert!(p.statements.iter().all(|s| s.transactional));
             }
             // Parola somutlaştırma hostile değerle de tek ifade.
-            assert!(scan_semicolons(&password_sql(n, &Secret::new(n))).is_clean(), "{n:?}");
+            assert!(scan_semicolons(materialize_password(n, &Secret::new(n)).unwrap().sql()).is_clean(), "{n:?}");
         }
         let p = create(&RoleDef { member_of: vec![m("g\"; DROP ROLE x; --", false)], ..role("r\"; --") }, &ctx());
         assert_eq!(

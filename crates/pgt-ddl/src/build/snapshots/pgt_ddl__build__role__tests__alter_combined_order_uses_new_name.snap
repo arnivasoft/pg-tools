@@ -14,4 +14,4 @@ expression: render(&p)
 [Safe] ALTER ROLE "Select" SET work_mem = '2MB'
 [Safe] COMMENT ON ROLE "Select" IS 'yeni'
 WARN: MD5 ile saklanan parola ad değişince temizlenir (SCRAM etkilenmez)
-WARN: Parola sunucuya düz metin gider; log_statement ve pg_stat_statements açıksa sunucu günlüğüne düşebilir
+WARN: Parola istemcide SCRAM-SHA-256 ile özetlenir; düz metin sunucuya gönderilmez (günlüklere ve pg_stat_statements'a yalnızca doğrulayıcı düşebilir)

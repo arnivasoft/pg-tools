@@ -10,6 +10,6 @@ expression: out
 [Safe] ALTER ROLE app SET search_path = '$user', 'public'
 [Safe] ALTER ROLE app SET work_mem = '64MB'
 [Safe] COMMENT ON ROLE app IS 'it''s'
-WARN: Parola sunucuya düz metin gider; log_statement ve pg_stat_statements açıksa sunucu günlüğüne düşebilir
+WARN: Parola istemcide SCRAM-SHA-256 ile özetlenir; düz metin sunucuya gönderilmez (günlüklere ve pg_stat_statements'a yalnızca doğrulayıcı düşebilir)
 
 [Safe] CREATE ROLE r WITH NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1

@@ -9,6 +9,7 @@ pgt-core.workspace = true
 pgt-catalog.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
+postgres-protocol.workspace = true
 serde.workspace = true
 uuid.workspace = true
 ts-rs.workspace = true
