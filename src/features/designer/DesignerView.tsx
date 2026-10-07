@@ -27,6 +27,7 @@ const FORMS: Partial<Record<ObjectKind, FormEntry>> = {
   table: { view: lazy(() => import("./TableForm")), paths: FORM_PATHS.table },
   view: { view: viewForm, paths: FORM_PATHS.view },
   materialized_view: { view: viewForm, paths: FORM_PATHS.materialized_view },
+  database: { view: lazy(() => import("./DatabaseForm")), paths: FORM_PATHS.database },
 };
 
 const NO_PATHS: ReadonlySet<string> = new Set();

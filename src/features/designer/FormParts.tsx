@@ -178,3 +178,53 @@ export function FreeSqlNote(props: { id?: string }) {
     </p>
   );
 }
+
+/** Onay kutusu + alan hatası/uyarı/ipucu (aria-describedby ile bağlı); hata yolu `path` (alt yollar dahil). */
+export function CheckRow(props: {
+  label: string;
+  path: string;
+  issues: FieldIssues;
+  hint?: string;
+  /** İstemci ön uyarısı (hata değil). */
+  warning?: string | null;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  const id = createUniqueId();
+  const errors = () => issuesFor(props.issues, props.path);
+  const describedBy = () =>
+    [errors().length > 0 ? `${id}-err` : null, props.warning ? `${id}-warn` : null, props.hint ? `${id}-hint` : null]
+      .filter(Boolean)
+      .join(" ") || undefined;
+  return (
+    <div class="flex flex-col gap-1">
+      <label class="flex items-center gap-2 text-[13px]">
+        <input
+          type="checkbox"
+          aria-describedby={describedBy()}
+          aria-invalid={errors().length > 0}
+          disabled={props.disabled}
+          checked={props.checked}
+          onChange={(ev) => props.onChange(ev.currentTarget.checked)}
+        />
+        {props.label}
+      </label>
+      <Show when={errors().length > 0}>
+        <span id={`${id}-err`} class="text-xs text-danger">
+          {errors().join(" ")}
+        </span>
+      </Show>
+      <Show when={props.warning}>
+        <span id={`${id}-warn`} class="text-xs text-warn-text">
+          {props.warning}
+        </span>
+      </Show>
+      <Show when={props.hint}>
+        <span id={`${id}-hint`} class="text-xs text-muted">
+          {props.hint}
+        </span>
+      </Show>
+    </div>
+  );
+}

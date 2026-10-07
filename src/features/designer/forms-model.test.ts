@@ -8,7 +8,7 @@ import type { SchemaDef } from "../../ipc/bindings/SchemaDef";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
 import { addColumn, groupIssues, issuesFor, moveColumn, removeColumn, updateColumn } from "./designer-model";
 import {
-  EXTENSION_PATHS, FORM_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
+  DATABASE_PATHS, EXTENSION_PATHS, FORM_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
   columnKeyLabel, exactIssues, extensionEditPatch, extensionOptionLabel, extensionVersionNote, fillfactorEnabled,
   fillfactorFromInput, findExtension, incrementEditPatch, incrementSign, indexEditPatch, indexMethodPatch, indexReadOnlyReason,
   newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect, orphanRowIssues, ownedByHint, restrictedControlDisabled, schemaEditPatch, sequenceSchemaPatch, tablespaceChoices,
@@ -423,5 +423,22 @@ describe("view/matview onay kutusu yolları alan hatasıdır", () => {
     const gm = groupIssues([{ path: "withData", message: "d" }] as never, MATVIEW_PATHS);
     expect(gm.general).toEqual([]);
     expect(issuesFor(gm, "withData")).toEqual(["d"]);
+  });
+});
+
+describe("DATABASE_PATHS", () => {
+  it("Plan 15 Task 4 yol kümesi; FORM_PATHS.database aynı", () => {
+    expect([...DATABASE_PATHS].sort()).toEqual(
+      ["name", "owner", "template", "encoding", "localeProvider", "lcCollate", "lcCtype", "providerLocale", "tablespace", "connectionLimit", "isTemplate", "allowConnections", "settings", "comment"].sort(),
+    );
+    expect(FORM_PATHS.database).toBe(DATABASE_PATHS);
+  });
+  it("settings[i].name kökte; force/cascade/old.* genel", () => {
+    const g = groupIssues(
+      [{ path: "settings[0].name", message: "a" }, { path: "force", message: "b" }, { path: "old.name", message: "c" }] as never,
+      DATABASE_PATHS,
+    );
+    expect(g.byPath.get("settings[0].name")).toEqual(["a"]);
+    expect(g.general).toHaveLength(2);
   });
 });

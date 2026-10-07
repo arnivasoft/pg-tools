@@ -38,10 +38,18 @@ export const VIEW_PATHS: ReadonlySet<string> = new Set([
 export const MATVIEW_PATHS: ReadonlySet<string> = new Set([
   "schema", "name", "owner", "query", "tablespace", "fillfactor", "withData", "refresh", "comment",
 ]);
-/** Tür → bilinen yollar (testte denetlenir). Geçici: database/role yolları Plan 15 formlarıyla gelir. */
+/**
+ * `settings` kökü `settings[i].name|value` alt yollarını kapsar; `force`/`cascade`/`old.*` genel şeride düşer
+ * (Database'te `cascade` gönderilmez; `force` yalnızca silme isteğinde).
+ */
+export const DATABASE_PATHS: ReadonlySet<string> = new Set([
+  "name", "owner", "template", "encoding", "localeProvider", "lcCollate", "lcCtype", "providerLocale", "tablespace",
+  "connectionLimit", "isTemplate", "allowConnections", "settings", "comment",
+]);
+/** Tür → bilinen yollar (testte denetlenir). Geçici: role yolları Plan 15 Task 5 ile gelir. */
 export const FORM_PATHS = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
-  view: VIEW_PATHS, materialized_view: MATVIEW_PATHS,
+  view: VIEW_PATHS, materialized_view: MATVIEW_PATHS, database: DATABASE_PATHS,
 } satisfies Partial<Record<ObjectKind, ReadonlySet<string>>>;
 
 /**

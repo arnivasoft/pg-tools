@@ -8,8 +8,8 @@ import type { MatViewRefresh } from "../../ipc/bindings/MatViewRefresh";
 import type { ViewColumn } from "../../ipc/bindings/ViewColumn";
 import type { ViewDef } from "../../ipc/bindings/ViewDef";
 import { inputClass } from "../../ui/Field";
-import { issuesFor, type FieldIssues } from "./designer-model";
-import { CommentField, FieldRow, FreeSqlNote, OwnerSelect, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
+import { issuesFor } from "./designer-model";
+import { CheckRow, CommentField, FieldRow, FreeSqlNote, OwnerSelect, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
 import { fillfactorFromInput, normalizeEmpty, normalizeTablespaceEdit, tablespaceChoices } from "./forms-model";
 import {
   asMatView, asView, checkOptionFromSelect, lossList, matviewEditPatch, matviewRebuild, recreateVisible, refreshChoices,
@@ -25,47 +25,6 @@ function Section(props: { title: string; children: JSX.Element }) {
       </h3>
       {props.children}
     </section>
-  );
-}
-
-/** Onay kutusu + alan hatası/ipucu (aria-describedby ile bağlı); IndexForm.CheckField ile aynı kalıp (yerel: parça paylaşımı yok). */
-function CheckRow(props: {
-  label: string;
-  path: string;
-  issues: FieldIssues;
-  hint?: string;
-  checked: boolean;
-  disabled: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  const id = createUniqueId();
-  const errors = () => issuesFor(props.issues, props.path);
-  const describedBy = () =>
-    [errors().length > 0 ? `${id}-err` : null, props.hint ? `${id}-hint` : null].filter(Boolean).join(" ") || undefined;
-  return (
-    <div class="flex flex-col gap-1">
-      <label class="flex items-center gap-2 text-[13px]">
-        <input
-          type="checkbox"
-          aria-describedby={describedBy()}
-          aria-invalid={errors().length > 0}
-          disabled={props.disabled}
-          checked={props.checked}
-          onChange={(ev) => props.onChange(ev.currentTarget.checked)}
-        />
-        {props.label}
-      </label>
-      <Show when={errors().length > 0}>
-        <span id={`${id}-err`} class="text-xs text-danger">
-          {errors().join(" ")}
-        </span>
-      </Show>
-      <Show when={props.hint}>
-        <span id={`${id}-hint`} class="text-xs text-muted">
-          {props.hint}
-        </span>
-      </Show>
-    </div>
   );
 }
 
