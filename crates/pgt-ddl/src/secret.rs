@@ -3,8 +3,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-#[derive(Clone, PartialEq, Eq, Deserialize, TS)]
-#[serde(transparent)]
+#[derive(Clone, PartialEq, Eq, TS)]
 #[ts(export, type = "string")]
 pub struct Secret(String);
 
@@ -22,6 +21,13 @@ impl Secret {
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Secret(********)")
+    }
+}
+
+/// Girdi düz dizgedir (`serde(transparent)` ile aynı; elle yazıldı çünkü ts-rs o özniteliği ayrıştıramıyor).
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        String::deserialize(d).map(Secret)
     }
 }
 
