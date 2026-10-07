@@ -8,6 +8,7 @@ import type { MatViewRefresh } from "../../ipc/bindings/MatViewRefresh";
 import type { ViewColumn } from "../../ipc/bindings/ViewColumn";
 import type { ViewDef } from "../../ipc/bindings/ViewDef";
 import { inputClass } from "../../ui/Field";
+import { issuesFor, type FieldIssues } from "./designer-model";
 import { CommentField, FieldRow, FreeSqlNote, OwnerSelect, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
 import { fillfactorFromInput, normalizeEmpty, normalizeTablespaceEdit, tablespaceChoices } from "./forms-model";
 import {
@@ -24,6 +25,47 @@ function Section(props: { title: string; children: JSX.Element }) {
       </h3>
       {props.children}
     </section>
+  );
+}
+
+/** Onay kutusu + alan hatası/ipucu (aria-describedby ile bağlı); IndexForm.CheckField ile aynı kalıp (yerel: parça paylaşımı yok). */
+function CheckRow(props: {
+  label: string;
+  path: string;
+  issues: FieldIssues;
+  hint?: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  const id = createUniqueId();
+  const errors = () => issuesFor(props.issues, props.path);
+  const describedBy = () =>
+    [errors().length > 0 ? `${id}-err` : null, props.hint ? `${id}-hint` : null].filter(Boolean).join(" ") || undefined;
+  return (
+    <div class="flex flex-col gap-1">
+      <label class="flex items-center gap-2 text-[13px]">
+        <input
+          type="checkbox"
+          aria-describedby={describedBy()}
+          aria-invalid={errors().length > 0}
+          disabled={props.disabled}
+          checked={props.checked}
+          onChange={(ev) => props.onChange(ev.currentTarget.checked)}
+        />
+        {props.label}
+      </label>
+      <Show when={errors().length > 0}>
+        <span id={`${id}-err`} class="text-xs text-danger">
+          {errors().join(" ")}
+        </span>
+      </Show>
+      <Show when={props.hint}>
+        <span id={`${id}-hint`} class="text-xs text-muted">
+          {props.hint}
+        </span>
+      </Show>
+    </div>
   );
 }
 
@@ -183,7 +225,7 @@ export default function ViewForm(props: FormProps) {
                   aria-required="true"
                   class={`${inputClass} !h-auto resize-y overflow-x-auto py-1 font-mono leading-snug${invalidClass(a.invalid)}`}
                   aria-describedby={[a.describedBy, noteId, escId, alter() && !isMv() && originalView() && d().query !== originalView()!.query ? corId : null]
-                    .filter((x) => x !== null)
+                    .filter(Boolean)
                     .join(" ")}
                   aria-invalid={a.invalid}
                   disabled={props.readOnly}
@@ -233,43 +275,35 @@ export default function ViewForm(props: FormProps) {
                     </select>
                   )}
                 </FieldRow>
-                <label class="flex items-center gap-2 text-[13px]">
-                  <input
-                    type="checkbox"
-                    disabled={props.readOnly}
-                    checked={v().securityBarrier}
-                    onChange={(ev) => patchView({ securityBarrier: ev.currentTarget.checked })}
-                  />
-                  {tview.view.securityBarrier}
-                </label>
-                <label class="flex items-center gap-2 text-[13px]">
-                  <input
-                    type="checkbox"
-                    disabled={props.readOnly}
-                    checked={v().securityInvoker}
-                    onChange={(ev) => patchView({ securityInvoker: ev.currentTarget.checked })}
-                  />
-                  {tview.view.securityInvoker}
-                </label>
+                <CheckRow
+                  label={tview.view.securityBarrier}
+                  path="securityBarrier"
+                  issues={props.issues}
+                  disabled={props.readOnly}
+                  checked={v().securityBarrier}
+                  onChange={(c) => patchView({ securityBarrier: c })}
+                />
+                <CheckRow
+                  label={tview.view.securityInvoker}
+                  path="securityInvoker"
+                  issues={props.issues}
+                  disabled={props.readOnly}
+                  checked={v().securityInvoker}
+                  onChange={(c) => patchView({ securityInvoker: c })}
+                />
                 <Show when={recreateVisible(props.model.mode, originalView(), v())}>
-                  <div class="flex flex-col gap-2">
-                    <label class="flex items-center gap-2 text-[13px]">
-                      <input
-                        type="checkbox"
-                        disabled={props.readOnly}
-                        checked={v().recreate}
-                        aria-describedby={`${noteId}-re`}
-                        onChange={(ev) => patchView({ recreate: ev.currentTarget.checked })}
-                      />
-                      {tview.view.recreate}
-                    </label>
-                    <p id={`${noteId}-re`} class="text-xs text-muted">
-                      {tview.view.recreateNote}
-                    </p>
-                    <Show when={v().recreate}>
-                      <LossNote items={lossList(originalView())} />
-                    </Show>
-                  </div>
+                  <CheckRow
+                    label={tview.view.recreate}
+                    path="recreate"
+                    issues={props.issues}
+                    hint={tview.view.recreateNote}
+                    disabled={props.readOnly}
+                    checked={v().recreate}
+                    onChange={(c) => patchView({ recreate: c })}
+                  />
+                  <Show when={v().recreate}>
+                    <LossNote items={lossList(originalView())} />
+                  </Show>
                 </Show>
               </Section>
             )}
@@ -321,27 +355,19 @@ export default function ViewForm(props: FormProps) {
                       />
                     )}
                   </FieldRow>
-                  <div class="flex flex-col gap-1">
-                    <label class="flex items-center gap-2 text-[13px]">
-                      <input
-                        type="checkbox"
-                        disabled={props.readOnly}
-                        checked={m().withData}
-                        aria-describedby={m().withData ? undefined : `${noteId}-wd`}
-                        onChange={(ev) =>
-                          props.designer.edit(props.tabId, (x) =>
-                            x.kind === "materialized_view" ? { ...withDataPatch(originalMv(), x, ev.currentTarget.checked), kind: "materialized_view" } : x,
-                          )
-                        }
-                      />
-                      {tview.mv.withData}
-                    </label>
-                    <Show when={!m().withData}>
-                      <p id={`${noteId}-wd`} class="text-xs text-muted">
-                        {tview.mv.withNoDataNote}
-                      </p>
-                    </Show>
-                  </div>
+                  <CheckRow
+                    label={tview.mv.withData}
+                    path="withData"
+                    issues={props.issues}
+                    hint={m().withData ? undefined : tview.mv.withNoDataNote}
+                    disabled={props.readOnly}
+                    checked={m().withData}
+                    onChange={(c) =>
+                      props.designer.edit(props.tabId, (x) =>
+                        x.kind === "materialized_view" ? { ...withDataPatch(originalMv(), x, c), kind: "materialized_view" } : x,
+                      )
+                    }
+                  />
                   <Show when={choices().length > 1}>
                     <FieldRow label={tview.mv.refresh} path="refresh" issues={props.issues}>
                       {(a) => (

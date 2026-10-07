@@ -411,3 +411,17 @@ describe("view/matview yolları", () => {
     expect(g.general).toHaveLength(2);
   });
 });
+
+describe("view/matview onay kutusu yolları alan hatasıdır", () => {
+  it("securityBarrier/securityInvoker/recreate (view) ve withData (MV) byPath'e düşer, genel şeride değil", () => {
+    const gv = groupIssues(
+      [{ path: "securityBarrier", message: "a" }, { path: "securityInvoker", message: "b" }, { path: "recreate", message: "c" }] as never,
+      VIEW_PATHS,
+    );
+    expect(gv.general).toEqual([]);
+    expect(issuesFor(gv, "recreate")).toEqual(["c"]);
+    const gm = groupIssues([{ path: "withData", message: "d" }] as never, MATVIEW_PATHS);
+    expect(gm.general).toEqual([]);
+    expect(issuesFor(gm, "withData")).toEqual(["d"]);
+  });
+});
