@@ -535,7 +535,7 @@ describe("designer-controller uygulama sonuçları", () => {
     expect(s.refreshNode).not.toHaveBeenCalled();
     expect(s.api.ddlLoad).toHaveBeenCalledTimes(1);
     // Kısmen kalıcı: hemen yeniden yükleme ipucu; bayat temele karşı önizleme ve otomatik gönderim yok
-    expect(m).toMatchObject({ gateError: tdes.gate.partial, needsReload: true, view: null });
+    expect(m).toMatchObject({ gateError: tdes.gate.partialChanged, needsReload: true, view: null });
     await settle();
     expect(s.api.ddlPreview).toHaveBeenCalledTimes(1);
     expect(s.api.ddlApply).toHaveBeenCalledTimes(1);
@@ -1389,5 +1389,173 @@ describe("designer-controller Plan 15: sunucu kapsamı", () => {
     s.tick(3_600_000);
     for (const r of reqs) await s.ctl.lookup(id, r);
     expect(s.api.ddlLookup).toHaveBeenCalledTimes(6);
+  });
+});
+
+describe("designer-controller Plan 15: uygulama sonrası akışlar", () => {
+  const DB5: ObjectRef = { kind: "database", oid: 5 };
+  const vdef = (p: Record<string, unknown> = {}): ObjectDef => ({
+    kind: "view", schema: "public", name: "v", owner: null, query: "SELECT 1", checkOption: null, securityBarrier: false,
+    securityInvoker: false, comment: null, recreate: false, columns: [], unsupported: [], ...p,
+  }) as ObjectDef;
+
+  it("database drop: o veritabanına ait (veritabanı kapsamlı) açık sekmeler gone; sunucu kapsamlı ve diğer veritabanı/sunucu sekmeleri etkilenmez", async () => {
+    const s = setup();
+    const a = await openAlter(s, "A5"); // S1 / db 5
+    const c = await openCreate(s, "C5"); // S1 / db 5 (create)
+    await s.ctl.openAlter({ tabId: "A6", serverId: "S1", databaseOid: 6, object: OBJ, refreshNodeId: null });
+    await s.ctl.openAlter({ tabId: "B5", serverId: "S2", databaseOid: 5, object: OBJ, refreshNodeId: null });
+    const r = await openRoleAlter(s, "R1");
+    await s.ctl.openAlter({ tabId: "D5", serverId: "S1", databaseOid: null, object: DB5, refreshNodeId: "dbs" });
+    await s.ctl.openAlter({ tabId: "D6", serverId: "S1", databaseOid: null, object: { kind: "database", oid: 6 }, refreshNodeId: "dbs" });
+    // Silme diyaloğunun başarı yolu: objectDropped(sunucu, null, database ref)
+    s.ctl.objectDropped("S1", null, DB5);
+    expect(s.ctl.model(a)).toMatchObject({ status: "gone", error: tdes.status.gone });
+    expect(s.ctl.model(c)).toMatchObject({ status: "gone", error: tdes.status.gone });
+    expect(s.ctl.model("D5")).toMatchObject({ status: "gone", error: tdes.status.dropped });
+    for (const id of ["A6", "B5", r, "D6"]) expect(s.ctl.model(id)!.status).toBe("ready");
+    // sekmeler kapanmaz
+    expect(s.ctl.ids()).toEqual(expect.arrayContaining([a, c, "D5"]));
+    // doğrudan çağrı: sunucu kapsamlı (null) sekmeler hiçbir zaman eşleşmez
+    s.ctl.databaseDropped("S1", 6);
+    expect(s.ctl.model("A6")!.status).toBe("gone");
+    expect(s.ctl.model(r)!.status).toBe("ready");
+    expect(s.ctl.model("D6")!.status).toBe("ready");
+  });
+
+  it("view recreate planı DataLoss → üretimde ad yazılmadan gönderilmez (kapı regresyonu)", async () => {
+    const s = setup();
+    s.servers.S1!.production = true;
+    s.api.ddlLoad.mockResolvedValue(vdef());
+    const id = await openAlter(s, "V1", "S1", { kind: "view", oid: 900 });
+    s.api.ddlPreview.mockResolvedValue(risky("data_loss", "hv"));
+    s.ctl.edit(id, (d) => {
+      if (d.kind === "view") { d.query = "SELECT 2"; d.recreate = true; }
+    });
+    await settle();
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "needsProductionName", expected: "prod-1" });
+    s.ctl.setConfirm(id, { checked: true });
+    await s.ctl.apply(id);
+    expect(s.api.ddlApply).not.toHaveBeenCalled();
+    s.ctl.setConfirm(id, { typedName: "prod-1" });
+    await s.ctl.apply(id);
+    expect(s.api.ddlApply).toHaveBeenCalledTimes(1);
+    expect(s.api.ddlApply.mock.calls[0]![2]).toMatchObject({ op: "alter", new: { recreate: true } });
+  });
+
+  it("applied.warnings sekmede ve toast'ta görünür, yeniden yüklemede korunur, sonraki uygulamada temizlenir", async () => {
+    const s = setup();
+    const id = await readyToApply(s);
+    expect(s.ctl.model(id)!.postApplyWarnings).toEqual([]);
+    s.api.ddlApply.mockResolvedValueOnce({ ...applied(null, 2), warnings: ["üyelik farkı: a", "üyelik farkı: b"] } as ApplyOutcome);
+    await s.ctl.apply(id);
+    await flush();
+    expect(s.notify).toHaveBeenCalledExactlyOnceWith(tdes.apply.appliedWarnings(2, 2), "info");
+    expect(tdes.apply.appliedWarnings(2, 2)).toContain("2 uyarı");
+    expect(s.ctl.model(id)!.postApplyWarnings).toEqual(["üyelik farkı: a", "üyelik farkı: b"]);
+    // uygulama sonrası yükleme ve elle yeniden yükleme korur
+    await s.ctl.reload(id);
+    expect(s.ctl.model(id)).toMatchObject({ status: "ready", postApplyWarnings: ["üyelik farkı: a", "üyelik farkı: b"] });
+    // sonraki uygulama temizler (uçuşta da görünmez)
+    s.ctl.edit(id, rename("baska"));
+    await settle();
+    const d = deferred<ApplyOutcome>();
+    s.api.ddlApply.mockReturnValueOnce(d.promise);
+    const p = s.ctl.apply(id);
+    expect(s.ctl.model(id)!.postApplyWarnings).toEqual([]);
+    d.resolve(applied());
+    await p;
+    await flush();
+    expect(s.ctl.model(id)!.postApplyWarnings).toEqual([]);
+    expect(s.notify).toHaveBeenLastCalledWith(tdes.apply.applied(1), "success");
+    // kapanışta model (ve uyarılar) gider
+    s.ctl.close(id);
+    expect(s.ctl.model(id)).toBeUndefined();
+  });
+
+  it("failed.created: ağaç yenilenir, create yeniden gönderilemez (gate partial), 'Düzenle olarak aç' openAlter'ı created ile çağırır", async () => {
+    const onApplied = vi.fn();
+    const s = setup({ onApplied });
+    const id = await openRoleCreate(s);
+    s.api.ddlPreview.mockResolvedValue(view({ hash: "hc" }));
+    s.ctl.edit(id, (d) => {
+      if (d.kind === "role") d.name = "yeni_rol";
+    });
+    await settle();
+    s.api.ddlApply.mockResolvedValueOnce({
+      outcome: "failed", failedIndex: 1, committed: 1, sqlstate: "42501", position: null, error: err("query", "denied"), created: ROLE,
+    });
+    await s.ctl.apply(id);
+    await flush();
+    expect(s.refreshNode).toHaveBeenCalledExactlyOnceWith("roles");
+    expect(s.ctl.model(id)).toMatchObject({ mode: "create", partialCreated: ROLE });
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "partial" });
+    // düzenleme + taze önizleme sonrası bile kapı kapalı; apply gönderilmez
+    s.ctl.edit(id, (d) => {
+      if (d.kind === "role") d.comment = "x";
+    });
+    await settle();
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "partial" });
+    await s.ctl.apply(id);
+    // yeniden yükleme (varsayılanlar) de kısmi durumu silmez
+    await s.ctl.reload(id, { force: true });
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "partial" });
+    await s.ctl.apply(id);
+    expect(s.api.ddlApply).toHaveBeenCalledTimes(1);
+    expect(onApplied).not.toHaveBeenCalled();
+    // Düzenle olarak aç: aynı sekme alter'a döner, created yüklenir
+    s.api.ddlLoad.mockResolvedValueOnce(role({ name: "yeni_rol" }));
+    await s.ctl.openCreatedAsAlter(id);
+    expect(s.api.ddlLoad).toHaveBeenCalledExactlyOnceWith("S1", null, ROLE);
+    expect(s.ctl.ids()).toEqual([id]);
+    expect(s.ctl.model(id)).toMatchObject({ mode: "alter", object: ROLE, kind: "role", status: "ready", partialCreated: null, databaseOid: null });
+    expect(s.ctl.findAlter("S1", null, ROLE)).toBe(id);
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "stale" });
+    // başlık güncellemesi yüklenen tanımla
+    expect(onApplied).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ tabId: id, kind: "role", mode: "create", object: ROLE, after: role({ name: "yeni_rol" }) }));
+    // kısmi durum yoksa çağrı etkisiz
+    await s.ctl.openCreatedAsAlter(id);
+    expect(s.api.ddlLoad).toHaveBeenCalledTimes(1);
+  });
+
+  it("failed.created yokken eski davranış (yeniden denenebilir)", async () => {
+    const s = setup();
+    const id = await openRoleCreate(s);
+    s.api.ddlPreview.mockResolvedValue(view({ hash: "hc" }));
+    s.ctl.edit(id, (d) => {
+      if (d.kind === "role") d.name = "yeni_rol";
+    });
+    await settle();
+    s.api.ddlApply.mockResolvedValueOnce({
+      outcome: "failed", failedIndex: 0, committed: 0, sqlstate: "42501", position: null, error: err("query", "denied"),
+    });
+    await s.ctl.apply(id);
+    await settle();
+    expect(s.refreshNode).not.toHaveBeenCalled();
+    expect(s.ctl.model(id)!.partialCreated).toBeNull();
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "ready" });
+    // yeniden deneme gönderilir; committed > 0 ama created yok: eski kısmi yol (yeniden yükleme ipucu), partial kapısı yok
+    s.api.ddlApply.mockResolvedValueOnce({
+      outcome: "failed", failedIndex: 1, committed: 1, sqlstate: "XX000", position: null, error: err("query", "x"),
+    });
+    await s.ctl.apply(id);
+    expect(s.api.ddlApply).toHaveBeenCalledTimes(2);
+    expect(s.refreshNode).not.toHaveBeenCalled();
+    expect(s.ctl.model(id)).toMatchObject({ gateError: tdes.gate.partialChanged, needsReload: true, partialCreated: null });
+    await s.ctl.openCreatedAsAlter(id);
+    expect(s.api.ddlLoad).not.toHaveBeenCalled();
+  });
+
+  it("failed.created alter'da (ör. yeniden adlandırma sonrası hata): nesne kimliği güncellenir, yeniden yükleme ipucu", async () => {
+    const s = setup();
+    const id = await readyToApply(s);
+    const moved: ObjectRef = { kind: "schema", oid: 101 };
+    s.api.ddlApply.mockResolvedValueOnce({
+      outcome: "failed", failedIndex: 1, committed: 1, sqlstate: "42501", position: null, error: err("query", "denied"), created: moved,
+    });
+    await s.ctl.apply(id);
+    expect(s.refreshNode).toHaveBeenCalledWith("N-parent");
+    expect(s.ctl.model(id)).toMatchObject({ mode: "alter", object: moved, needsReload: true, gateError: tdes.gate.partialChanged, partialCreated: null });
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "stale" });
   });
 });

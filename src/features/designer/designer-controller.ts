@@ -95,6 +95,16 @@ export interface DesignerModel {
   concurrently: boolean;
   /** Silme isteği için (`planRequest(m, "drop")`). */
   cascade: boolean;
+  /**
+   * Son başarılı uygulamanın `applied.warnings` iletileri (arka uç metni; SQL/değer/parola içermez). Yeniden yüklemede
+   * korunur; bir sonraki uygulamada ve kapanışta temizlenir.
+   */
+  postApplyWarnings: string[];
+  /**
+   * Kısmi create (`failed.created`): oluşturulan nesne. Doluyken create yeniden gönderilmez (kapı `partial`);
+   * `openCreatedAsAlter` sekmeyi bu nesnenin düzenlemesine çevirir. Yalnızca create kipinde dolar.
+   */
+  partialCreated: ObjectRef | null;
 }
 
 /** `username`: sunucu kaydındaki bağlantı kullanıcısı (Role formunun kendini kilitleme uyarıları; isteğe bağlı). */
@@ -291,6 +301,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       connected: m.status !== "disconnected" && m.status !== "gone" && (!fresh || info !== null),
       loading: m.status === "loading" || m.status === "error",
       secretMissing: planHasRedacted(m.view) && !secretReady(m.id),
+      partial: m.mode === "create" && m.partialCreated !== null,
     });
   };
 
@@ -358,7 +369,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       applying: false, applyId: null, outcome: null, applyError: null, gateError: null, needsReload: false,
       lockTimeoutMs: DEFAULT_LOCK_TIMEOUT_MS, confirm: emptyConfirm(),
       locked: info?.locked ?? false, production: info?.production ?? false,
-      concurrently: false, cascade: false,
+      concurrently: false, cascade: false, postApplyWarnings: [], partialCreated: null,
     });
     const [focus, setFocus] = createSignal<FocusRequest | null>(null);
     const previewer = createPreviewer<PreviewOk>(pd, onPreview(tabId), onPreviewError(tabId), delay);
@@ -494,7 +505,11 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   const applied = async (tabId: string, e: Entry, mode: DesignerMode, out: Extract<ApplyOutcome, { outcome: "applied" }>) => {
     const m = e.model();
     forgetSecret(tabId);
-    notify(tdes.apply.applied(out.statements), "success");
+    const warnings = out.warnings ?? [];
+    if (warnings.length > 0) notify(tdes.apply.appliedWarnings(out.statements, warnings.length), "info");
+    else notify(tdes.apply.applied(out.statements), "success");
+    // Uyarılar sekmede kalıcı (yeniden yükleme `setBase` bunlara dokunmaz).
+    patch(e, { postApplyWarnings: [...warnings] });
     dropLookups(m.serverId, m.databaseOid);
     refresh(e.refreshNodeId);
     if ((mode === "alter" || out.created) && m.draft) {
@@ -525,10 +540,23 @@ export function createDesignerController(deps: DesignerControllerDeps) {
 
   const failed = (e: Entry, out: Extract<ApplyOutcome, { outcome: "failed" }>) => {
     patch(e, { applyError: failedText(out) });
+    if (out.created) {
+      // Kısmi uygulama: nesne oluştu/yeniden adlandırıldı (ör. CREATE DATABASE kalıcı, sonraki SET/COMMENT başarısız).
+      refresh(e.refreshNodeId);
+      const created = { ...out.created };
+      if (e.model().mode === "create") {
+        // Aynı create yeniden gönderilmez (42P04/42710): kapı `partial`, arayüz "Düzenle olarak aç" sunar.
+        notify(tdes.apply.committed(out.committed), "error");
+        patch(e, { partialCreated: created });
+        return;
+      }
+      // Alter: kimlik değişmiş olabilir; yeniden yükleme yeni nesneyle yapılır (aşağıdaki kısmi yol).
+      patch(e, { object: created });
+    }
     if (out.committed > 0) {
       // Bir kısmı kalıcı: nesne değişti, `original` bayat. Taslak korunur; bayat temele karşı önizleme istenmez.
       notify(tdes.apply.committed(out.committed), "error");
-      patch(e, { gateError: tdes.gate.partial, needsReload: true });
+      patch(e, { gateError: tdes.gate.partialChanged, needsReload: true });
       return;
     }
     // Aynı `expectedHash` ile yeniden gönderilmez: görünüm düştü, yenisi istenir.
@@ -568,7 +596,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const gen = e.gen;
     const mode = m.mode;
     e.previewer.cancel();
-    patch(e, { applying: true, applyId: options.applyId, gateError: null, applyError: null, outcome: null });
+    patch(e, { applying: true, applyId: options.applyId, gateError: null, applyError: null, outcome: null, postApplyWarnings: [] });
     let out: ApplyOutcome;
     try {
       out = await api.ddlApply(m.serverId, m.databaseOid, req, options);
@@ -583,6 +611,30 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     patch(e, { applying: false, applyId: null, outcome: out, view: null, viewFor: -1, confirm: emptyConfirm() });
     if (out.outcome === "applied") await applied(tabId, e, mode, out);
     else failed(e, out);
+  };
+
+  /**
+   * "Düzenle olarak aç" (kısmi create): aynı sekme, oluşturulan nesnenin alter sekmesine çevrilir (`openAlter` ile;
+   * sekme kimliği ve `refreshNodeId` korunur). Yükleme başarılıysa başlık `onApplied` ile güncellenir. Kısmi durum
+   * yoksa ya da uygulama sürüyorsa etkisizdir.
+   */
+  const openCreatedAsAlter = async (tabId: string): Promise<void> => {
+    const e = entries.get(tabId);
+    const m = e?.model();
+    if (!e || !m || m.mode !== "create" || !m.partialCreated || m.applying) return;
+    const object = { ...m.partialCreated };
+    entries.delete(tabId);
+    secrets.delete(tabId);
+    e.gen++;
+    e.previewer.dispose();
+    await openAlter({ tabId, serverId: m.serverId, databaseOid: m.databaseOid, object, refreshNodeId: e.refreshNodeId });
+    const n = entries.get(tabId)?.model();
+    if (!n || n.status !== "ready" || !n.original) return;
+    try {
+      deps.onApplied?.({ tabId, kind: n.kind, mode: "create", before: null, after: cloneDef(n.original), object: { ...object } });
+    } catch {
+      /* başlık/ek yenileme hatası sonucu etkilemez */
+    }
   };
 
   /** Uçuştaki uygulamayı iptal ister; sonuç `apply`'ın yanıtıyla gelir (iptal hatası yok sayılır). */
@@ -617,7 +669,20 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     }
   };
 
-  /** Silme diyaloğu başarıyla sildi: aynı nesnenin alter sekmeleri `gone`. */
+  /**
+   * Veritabanı silindi: o veritabanına ait (veritabanı kapsamlı, `databaseOid === oid`) tüm sekmeler `gone` ("Nesne
+   * artık yok"); sekmeler kapanmaz. Sunucu kapsamlı (`null`) sekmeler etkilenmez.
+   */
+  const databaseDropped = (serverId: string, databaseOid: number) => {
+    dropLookups(serverId, databaseOid);
+    for (const e of entries.values()) {
+      const m = e.model();
+      if (m.serverId !== serverId || m.databaseOid !== databaseOid || m.status === "gone") continue;
+      markDown(e, "gone", tdes.status.gone);
+    }
+  };
+
+  /** Silme diyaloğu başarıyla sildi: aynı nesnenin alter sekmeleri `gone`; Database ise o veritabanının sekmeleri de. */
   const objectDropped = (serverId: string, databaseOid: number | null, object: ObjectRef) => {
     dropLookups(serverId, databaseOid);
     for (const e of entries.values()) {
@@ -625,6 +690,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       if (!matchesObject(m, { serverId, databaseOid, object }) || m.status === "gone") continue;
       markDown(e, "gone", tdes.status.dropped);
     }
+    if (object.kind === "database") databaseDropped(serverId, object.oid);
   };
 
   /** Sekme kapandı: önizleyici kapanır, uçuştaki yanıtlar yoksayılır, uçuştaki apply için `ddl_cancel`. */
@@ -740,6 +806,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     serverChanged,
     serverSessionsClosed,
     objectDropped,
+    databaseDropped,
+    openCreatedAsAlter,
     drop,
     close,
     isDirty: (tabId: string) => model(tabId)?.dirty ?? false,

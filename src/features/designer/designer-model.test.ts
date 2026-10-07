@@ -522,6 +522,15 @@ describe("Plan 15: sunucu kapsamı, gizlenmiş plan, parola kapısı", () => {
     expect(applyGate(gin({ view: redactedView() }))).toEqual({ kind: "ready" });
   });
 
+  it("applyGate: partial (kısmi create) locked/disconnected'dan sonra, diğer her şeyden önce", () => {
+    expect(applyGate(gin({ partial: true }))).toEqual({ kind: "blocked", reason: "partial" });
+    expect(applyGate(gin({ partial: true, viewIsCurrent: false, pending: true, loading: true }))).toEqual({ kind: "blocked", reason: "partial" });
+    expect(applyGate(gin({ partial: true, view: view({ risk: "data_loss" }), production: true }))).toEqual({ kind: "blocked", reason: "partial" });
+    expect(applyGate(gin({ partial: true, locked: true }))).toEqual({ kind: "blocked", reason: "locked" });
+    expect(applyGate(gin({ partial: true, connected: false }))).toEqual({ kind: "blocked", reason: "disconnected" });
+    expect(applyGate(gin({ partial: false }))).toEqual({ kind: "ready" });
+  });
+
   it("applyOptionsFor: gizlenmiş planda parola geçer; gizlenmemiş planda verilen parola null'a çekilir", () => {
     const c = { checked: false, typedName: "" };
     expect(applyOptionsFor("a", 5000, redactedView(), { kind: "ready" }, c, "Gizli-1")).toMatchObject({ password: "Gizli-1" });

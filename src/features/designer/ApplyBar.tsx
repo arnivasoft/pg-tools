@@ -2,6 +2,7 @@
 // Kapı (`peekApplyGate`) yalnızca arayüz içindir; denetleyici `apply` anında kapıyı yeniden hesaplar (arayüze güvenmez).
 // Enter yıkıcı eylemi onaylamaz: onay kutusu ve Uygula ayrı denetimlerdir, ad alanında Enter gönderim yapmaz.
 // Gizlenmiş (parola) ifadeli planda "Query Tool'da aç" kapalıdır (`scriptActionsEnabled`; işleyici de erken döner).
+// Kısmi create (`partialCreated`): Uygula kapalı (kapı `partial`), şerit "Düzenle olarak aç" sunar (aynı sekme alter olur).
 import { Play, SquareTerminal, X } from "lucide-solid";
 import { For, Show, createUniqueId } from "solid-js";
 import { tdes } from "../../app/strings-designer";
@@ -54,9 +55,22 @@ export default function ApplyBar(props: {
   const failed = () => (props.model.outcome?.outcome === "failed" ? props.model.outcome : null);
   // Kısmen kalıcı hata/plan değişimi yeniden yükleme şeridinde (DesignerView) gösterilir; burada tekrarlanmaz.
   const gateError = () => (props.model.needsReload ? null : props.model.gateError);
+  const partial = () => props.model.mode === "create" && props.model.partialCreated !== null;
 
   return (
     <div class="shrink-0 border-t border-border bg-panel">
+      <Show when={partial()}>
+        <div role="alert" class="flex items-center gap-3 border-b border-border px-3 py-1.5 text-[12px]">
+          <p class="min-w-0 flex-1 text-danger">{tdes.gate.partial}</p>
+          <Button
+            title={tdes.gate.openAsAlterTitle}
+            disabled={applying()}
+            onClick={() => void props.designer.openCreatedAsAlter(id())}
+          >
+            {tdes.gate.openAsAlter}
+          </Button>
+        </div>
+      </Show>
       <Show when={gateError() || props.model.applyError}>
         <div role="alert" class="border-b border-border px-3 py-1.5 text-[12px] text-danger">
           <Show when={gateError()}>{(e) => <p>{e()}</p>}</Show>

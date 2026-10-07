@@ -94,6 +94,7 @@ export const tdes = {
       stale: "Önizleme güncel değil",
       invalid: "Formdaki hataları düzeltin",
       empty: "Uygulanacak değişiklik yok",
+      partial: "Nesne oluşturuldu; düzenleme olarak açın",
     },
     needsConfirm: "Uygulamak için etkisini anladığınızı onaylayın",
     needsName: "Uygulamak için onaylayıp sunucu adını yazın",
@@ -101,13 +102,22 @@ export const tdes = {
   },
   apply: {
     applied: (n: number) => `Değişiklikler uygulandı (${n} ifade).`,
+    /** `applied.warnings` dolu: toast özeti. */
+    appliedWarnings: (n: number, w: number) => `Uygulandı, ${w} uyarı (${n} ifade).`,
+    /** Uygulama sonrası uyarı şeridinin başlığı (arka ucun iletileri olduğu gibi listelenir). */
+    warnings: "Uygulama sonrası uyarılar",
     committed: (n: number) => `Hata öncesi ${n} ifade kalıcı oldu; nesne kısmen değişmiş olabilir.`,
     failed: (index: number, text: string) => `${index + 1}. ifade başarısız: ${text}`,
     lockTimeout: "Kilit beklerken zaman aşımı (lock_timeout). Nesneyi kullanan oturumlar bitince yeniden deneyin.",
   },
   gate: {
     planChanged: "Nesne değişti; yeniden yükleyin.",
-    partial: "Nesne kısmen değişti; yeniden yükleyin.",
+    /** Kısmen kalıcı `Failed` (create dışı ya da `created` yok): temel bayat. */
+    partialChanged: "Nesne kısmen değişti; yeniden yükleyin.",
+    /** Kısmi create (`failed.created`; `ApplyGate.reason === "partial"`). */
+    partial: "Nesne oluşturuldu ancak sonraki ifadeler uygulanamadı; düzenleme olarak açın.",
+    openAsAlter: "Düzenle olarak aç",
+    openAsAlterTitle: "Oluşturulan nesneyi bu sekmede düzenleme olarak yükle",
     invalidDef: "Tanım geçersiz; önizleme yenilendi.",
     locked: "Sunucu salt okunur kilitli.",
     confirmationRequired: "Bu değişiklik onay gerektiriyor; önizlemeyi kontrol edip onaylayın.",

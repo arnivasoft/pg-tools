@@ -1,7 +1,7 @@
 // Designer sekmesinin gövdesi (tembel parça): üst çubuk (tür rozeti, sunucu/veritabanı, durum, Yeniden yükle), durum
 // şeritleri, türe göre form yuvası ve sağda SQL önizleme + uygulama çubuğu. Formlar türe göre ayrı tembel parçalardır.
 import { RefreshCw } from "lucide-solid";
-import { Show, Suspense, createMemo, createSignal, lazy } from "solid-js";
+import { For, Show, Suspense, createMemo, createSignal, lazy } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { tdes } from "../../app/strings-designer";
 import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
@@ -118,6 +118,15 @@ export default function DesignerView(props: {
                 <Button disabled={!canReload()} onClick={reload}>
                   <RefreshCw size={14} /> {v.reload}
                 </Button>
+              </div>
+            </Show>
+            <Show when={m().postApplyWarnings.length > 0}>
+              {/* Uygulama sonrası arka uç uyarıları (ör. PG 16+ etkisiz REVOKE); olduğu gibi gösterilir. */}
+              <div role="status" class="m-2 shrink-0 rounded border border-border px-3 py-2 text-[13px]">
+                <p class="font-medium">{tdes.apply.warnings}</p>
+                <ul class="list-disc pl-5 text-muted">
+                  <For each={m().postApplyWarnings}>{(w) => <li>{w}</li>}</For>
+                </ul>
               </div>
             </Show>
             <Show when={done()}>
