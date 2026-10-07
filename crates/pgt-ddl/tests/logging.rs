@@ -4,9 +4,9 @@
 mod common;
 
 use std::io::Write;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use common::{cleanup, cleanup_cluster, cluster_name, guarded, servers, setup};
+use common::{cleanup, cleanup_cluster, cleanup_in, cluster_name, guarded, servers, setup, setup_in};
 use pgt_core::config::ServerConfig;
 use pgt_core::registry::Registry;
 use pgt_core::testing::TestServer;
@@ -48,13 +48,23 @@ impl Write for Buf {
 }
 
 /// Süreç genelinde (global) abone: iş parçacığı yerel abone, paralel testlerin callsite önbelleğiyle yarışıp
-/// olayları kaçırabiliyor. Diğer testlerin olayları da tampona düşer; denetimler yalnızca bu testin işaretlerine bakar.
+/// olayları kaçırabiliyor. İkilideki testler aynı tamponu paylaşır (abone bir kez kurulur); diğer testlerin olayları
+/// da tampona düşer, denetimler yalnızca her testin kendi işaretlerine bakar.
+fn capture() -> Buf {
+    static BUF: OnceLock<Buf> = OnceLock::new();
+    BUF.get_or_init(|| {
+        let buf = Buf::default();
+        let w = buf.clone();
+        let subscriber = tracing_subscriber::fmt().with_writer(move || w.clone()).with_max_level(tracing::Level::TRACE).finish();
+        tracing::subscriber::set_global_default(subscriber).expect("bu test ikilisinde başka global abone yok");
+        buf
+    })
+    .clone()
+}
+
 #[tokio::test]
 async fn password_free_logging() {
-    let buf = Buf::default();
-    let w = buf.clone();
-    let subscriber = tracing_subscriber::fmt().with_writer(move || w.clone()).with_max_level(tracing::Level::TRACE).finish();
-    tracing::subscriber::set_global_default(subscriber).expect("bu test ikilisinde başka global abone yok");
+    let buf = capture();
     for ts in servers() {
         let t = ts.clone();
         let clean = async move {
@@ -193,3 +203,121 @@ async fn role_password_statement_failure_is_masked_end_to_end(ts: &TestServer, e
 
 /// G-11 senaryosunun parolası (günlükte de aranır).
 const MASKED_PASSWORD: &str = "maskeli-parola-K4";
+
+// ================================================================================================================
+// Veri düzenleyici: günlükte hücre değeri, anahtar, sürüm, kolon/tablo adı, SQL parçası ve PG iletisi yok
+// ================================================================================================================
+
+/// Benzersiz izleyici dizgeler: değerlerde, anahtarlarda, tablo/kolon adlarında.
+const SECRET_VALUE: &str = "zz_secret_value_zz";
+const SECRET_KEY: &str = "zz_secret_key_zz";
+const SECRET_TABLE: &str = "zz_secret_table_zz";
+const SECRET_COL: &str = "zz_secret_col_zz";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn data_editor_logging_is_value_free() {
+    let buf = capture();
+    for ts in servers() {
+        guarded(data_logging_body(ts.clone()), cleanup_in(&ts, "pgt_data", "log")).await;
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        for marker in ["data_apply", "data_preview", "data_load", "data_select", "conflict", "23505", "applied", "plan_changed", "invalid_def"] {
+            assert!(out.contains(marker), "günlükte {marker:?} yok: {out}");
+        }
+        for secret in [
+            SECRET_VALUE,
+            SECRET_KEY,
+            SECRET_TABLE,
+            SECRET_COL,
+            "zz_secret",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "RETURNING",
+            "xmin",
+            "txid_current",
+            "duplicate key",
+            "already exists",
+            "Key (",
+        ] {
+            assert!(!out.contains(secret), "günlükte {secret:?} var: {out}");
+        }
+        if let Some(p) = ts.password.as_deref().filter(|p| !p.is_empty()) {
+            assert!(!out.contains(p), "günlükte parola var");
+        }
+    }
+}
+
+async fn data_logging_body(ts: TestServer) {
+    use pgt_ddl::data::DataManager;
+    use pgt_ddl::data::model::{CellEdit, CellValue, DataApplyOptions, DataChangeSet, DataOutcome, RowChange, SelectRequest};
+
+    let env = setup_in(&ts, "pgt_data", "log").await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut registry = Registry::load(dir.path().join("servers.json")).unwrap().registry;
+    registry.upsert(ts.config.clone()).unwrap();
+    let dm = DataManager::new(env.mgr.clone(), Arc::new(RwLock::new(registry)));
+    env.admin
+        .batch_execute(&format!(
+            "CREATE TABLE {SECRET_TABLE} (k text PRIMARY KEY, {SECRET_COL} text UNIQUE);
+             INSERT INTO {SECRET_TABLE} VALUES ('{SECRET_KEY}_1', '{SECRET_VALUE}_1'), ('{SECRET_KEY}_2', '{SECRET_VALUE}_2');"
+        ))
+        .await
+        .unwrap();
+    let oid: u32 = env.admin.query_one(&format!("SELECT '{SECRET_TABLE}'::regclass::oid"), &[]).await.unwrap().get(0);
+    let object = ObjectRef { kind: ObjectKind::Table, oid };
+    let src = dm.load(env.server, env.db_oid, object).await.unwrap();
+    let req = SelectRequest { order: vec![], filter: Some(format!("{SECRET_COL} <> '{SECRET_VALUE}_x'")) };
+    let sel = dm.select(env.server, env.db_oid, object, &src.fingerprint, &req).await.unwrap().unwrap();
+    let rows = env.admin.query(&sel.sql, &[]).await.unwrap();
+    let version = |k: &str| -> String {
+        rows.iter().find(|r| r.get::<_, String>(0) == k).map(|r| r.get::<_, String>(sel.version_index as usize)).unwrap()
+    };
+    let (v1, v2) = (version(&format!("{SECRET_KEY}_1")), version(&format!("{SECRET_KEY}_2")));
+    let cell = |c: &str, v: String| CellEdit { column: c.into(), value: CellValue::Text { value: v } };
+    let set = |changes: Vec<RowChange>| DataChangeSet { object, fingerprint: src.fingerprint.clone(), changes };
+    let (server, db) = (env.server, env.db_oid);
+    let dm = &dm;
+    let apply = |s: DataChangeSet| async move {
+        let hash = dm.preview(server, db, &s).await.unwrap().hash;
+        let o = DataApplyOptions { apply_id: Uuid::new_v4(), lock_timeout_ms: 5000, expected_hash: hash, confirmed: true };
+        dm.apply(server, db, &s, &o).await.unwrap()
+    };
+
+    // Insert + Update + Delete uygulanır.
+    let ok = apply(set(vec![
+        RowChange::Insert { values: vec![cell("k", format!("{SECRET_KEY}_3")), cell(SECRET_COL, format!("{SECRET_VALUE}_3"))] },
+        RowChange::Update {
+            key: vec![format!("{SECRET_KEY}_1")],
+            version: v1.clone(),
+            set: vec![cell(SECRET_COL, format!("{SECRET_VALUE}_1b"))],
+        },
+        RowChange::Delete { key: vec![format!("{SECRET_KEY}_2")], version: v2 },
+    ]))
+    .await;
+    assert!(matches!(ok, DataOutcome::Applied { .. }), "{ok:?}");
+    // Bayat sürüm → çakışma.
+    let c = apply(set(vec![RowChange::Update {
+        key: vec![format!("{SECRET_KEY}_1")],
+        version: v1,
+        set: vec![cell(SECRET_COL, format!("{SECRET_VALUE}_z"))],
+    }]))
+    .await;
+    assert!(matches!(c, DataOutcome::Failed { conflict: true, .. }), "{c:?}");
+    // UNIQUE ihlali: PG iletisi/ayrıntısı değeri içerir — yalnızca sonuçta, günlükte ve `Debug`'ta değil.
+    let f = apply(set(vec![RowChange::Insert {
+        values: vec![cell("k", format!("{SECRET_KEY}_4")), cell(SECRET_COL, format!("{SECRET_VALUE}_3"))],
+    }]))
+    .await;
+    let DataOutcome::Failed { sqlstate, error, conflict: false, .. } = &f else { panic!("{f:?}") };
+    assert_eq!(sqlstate.as_deref(), Some("23505"));
+    assert!(format!("{}{:?}", error.message, error.detail).contains(SECRET_VALUE), "PG ayrıntısı kullanıcıya döner: {error:?}");
+    assert!(!format!("{f:?}").contains(SECRET_VALUE));
+    // Doğrulama hatası (bilinmeyen kolon adı) ve parmak izi farkı.
+    let bad = set(vec![RowChange::Insert { values: vec![cell(&format!("{SECRET_COL}_nope"), SECRET_VALUE.into())] }]);
+    let view = dm.preview(server, db, &bad).await.unwrap();
+    assert_eq!(view.errors.len(), 1);
+    let o = DataApplyOptions { apply_id: Uuid::new_v4(), lock_timeout_ms: 5000, expected_hash: view.hash, confirmed: true };
+    assert!(dm.apply(server, db, &bad, &o).await.is_err());
+    let stale = DataChangeSet { fingerprint: "0000000000000000".into(), ..bad };
+    assert!(dm.apply(server, db, &stale, &o).await.is_err());
+}

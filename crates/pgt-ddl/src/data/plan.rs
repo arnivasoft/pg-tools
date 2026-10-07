@@ -6,6 +6,8 @@
 //! - `DELETE FROM "s"."t" WHERE "k1" = '<a>' AND … AND xmin::pg_catalog.text = '<sürüm>'`
 //!
 //! `<dönüş>` = `returning_clause` (kaynak kolon sırası + `xmin::pg_catalog.text`; şema yolundan bağımsız tip adı).
+//! İstisna: bölümlü üst tabloya `INSERT` (`insert_returning_clause`) — PG 12+ yönlendirilen satırın sistem kolonunu
+//! `RETURNING`'de vermez ("cannot retrieve a system column in this context"); sürüm transaction kimliğinden okunur.
 //! Kolon listeleri/atamalar **kaynak kolon sırasıyla** yazılır; ifadeler istemcinin değişiklik sırasını korur.
 //! Hata iletileri değer, anahtar, sürüm ya da kolon adı içermez.
 
@@ -13,7 +15,7 @@ use std::collections::HashSet;
 
 use crate::build::{err, stmt};
 use crate::data::model::{
-    CellEdit, CellValue, DataChangeSet, DataColumn, DataKey, DataSource, Identity, ReadOnlyReason, RowChange,
+    CellEdit, CellValue, DataChangeSet, DataColumn, DataKey, DataSource, Identity, ReadOnlyReason, RelKind, RowChange,
 };
 use crate::model::FieldError;
 use crate::plan::{Plan, Risk};
@@ -27,6 +29,10 @@ pub const MAX_VERSION_DIGITS: usize = 20;
 
 /// Sürüm karşılaştırma ifadesi (tip adı nitelikli: `search_path`'ten bağımsız).
 const VERSION_EXPR: &str = "xmin::pg_catalog.text";
+/// Bölümlü üst tabloya eklenen satırın sürümü: satırı ekleyen (üst düzey) transaction'ın 32 bit kimliği = satırın
+/// `xmin`'i. Uygulama alt transaction (SAVEPOINT) açmaz; tetikleyicinin EXCEPTION bloğu satır yazılmadan kapanır.
+/// Yanlış olursa kapalı başarısız olur (sonraki UPDATE/DELETE 0 satır → `row_conflict`). PG 10–18'de `txid_current`.
+pub const INSERTED_VERSION_EXPR: &str = "(pg_catalog.txid_current() % 4294967296)::pg_catalog.text";
 
 pub const DELETE_NOTE: &str = "Satır silinir (geri alınamaz).";
 pub const KEY_CHANGE_WARNING: &str = "Anahtar kolonu değiştiriliyor; bu satırı gösteren yabancı anahtarlar etkilenebilir.";
@@ -53,6 +59,16 @@ pub fn plan_changes(source: &DataSource, set: &DataChangeSet) -> std::result::Re
 pub fn returning_clause(source: &DataSource) -> String {
     let mut items: Vec<String> = source.columns.iter().map(|c| quote_ident(&c.name)).collect();
     items.push(VERSION_EXPR.to_string());
+    items.join(", ")
+}
+
+/// `INSERT`'in `RETURNING` listesi: `returning_clause`; bölümlü üst tabloda sürüm `INSERTED_VERSION_EXPR`.
+pub fn insert_returning_clause(source: &DataSource) -> String {
+    if source.relkind != RelKind::Partitioned {
+        return returning_clause(source);
+    }
+    let mut items: Vec<String> = source.columns.iter().map(|c| quote_ident(&c.name)).collect();
+    items.push(INSERTED_VERSION_EXPR.to_string());
     items.join(", ")
 }
 
@@ -98,6 +114,7 @@ fn plan_with(source: &DataSource, changes: &[RowChange], lim: Limits) -> std::re
 
     let table = qualified(&source.schema, &source.name);
     let returning = returning_clause(source);
+    let insert_returning = insert_returning_clause(source);
     let mut statements = Vec::with_capacity(changes.len());
     let mut key_change = false;
     let mut same_row = false;
@@ -107,11 +124,11 @@ fn plan_with(source: &DataSource, changes: &[RowChange], lim: Limits) -> std::re
             RowChange::Insert { values } => {
                 let cells = ordered(source, values);
                 let sql = if cells.is_empty() {
-                    format!("INSERT INTO {table} DEFAULT VALUES RETURNING {returning}")
+                    format!("INSERT INTO {table} DEFAULT VALUES RETURNING {insert_returning}")
                 } else {
                     let names: Vec<String> = cells.iter().map(|(c, _)| quote_ident(&c.name)).collect();
                     let vals: Vec<String> = cells.iter().map(|(_, v)| value_sql(v)).collect();
-                    format!("INSERT INTO {table} ({}) VALUES ({}) RETURNING {returning}", names.join(", "), vals.join(", "))
+                    format!("INSERT INTO {table} ({}) VALUES ({}) RETURNING {insert_returning}", names.join(", "), vals.join(", "))
                 };
                 statements.push(stmt(sql, Risk::Safe, None));
             }
@@ -297,7 +314,7 @@ fn where_sql(key: &DataKey, kv: &[String], version: &str) -> String {
 mod tests {
     use super::*;
     use crate::build::{assert_single_statements, render, scan_semicolons};
-    use crate::data::model::{KeySource, RelKind};
+    use crate::data::model::KeySource;
     use crate::load::ObjectRef;
     use crate::model::ObjectKind;
     use crate::plan::plan_hash;
@@ -441,6 +458,29 @@ mod tests {
         assert!(scan_semicolons(&format!("SELECT {r} FROM x")).is_clean());
         let empty = source_with("public", "e", vec![], &[]);
         assert_eq!(returning_clause(&empty), "xmin::pg_catalog.text");
+    }
+
+    /// PG 12+ bölümlü üst tabloya `INSERT … RETURNING xmin` "cannot retrieve a system column in this context" verir:
+    /// yalnızca bu durumda sürüm transaction kimliğinden (satırın xmin'i) okunur; UPDATE/DELETE ve sıradan tablo `xmin`.
+    #[test]
+    fn partitioned_insert_reads_version_from_transaction_id() {
+        let mut s = table();
+        s.relkind = RelKind::Partitioned;
+        let p = ok(&s, vec![ins(vec![e("id", t("1"))]), ins(vec![]), upd(&["1"], "5", vec![e("name", t("x"))]), del(&["1"], "6")]);
+        let cols = "id, \"name\", status, note";
+        assert_eq!(
+            sqls(&p),
+            [
+                format!("INSERT INTO public.t (id) VALUES ('1') RETURNING {cols}, {INSERTED_VERSION_EXPR}"),
+                format!("INSERT INTO public.t DEFAULT VALUES RETURNING {cols}, {INSERTED_VERSION_EXPR}"),
+                format!("UPDATE public.t SET \"name\" = 'x' WHERE id = '1' AND xmin::pg_catalog.text = '5' RETURNING {cols}, xmin::pg_catalog.text"),
+                "DELETE FROM public.t WHERE id = '1' AND xmin::pg_catalog.text = '6'".to_string(),
+            ]
+        );
+        assert_eq!(INSERTED_VERSION_EXPR, "(pg_catalog.txid_current() % 4294967296)::pg_catalog.text");
+        assert_eq!(insert_returning_clause(&s), format!("{cols}, {INSERTED_VERSION_EXPR}"));
+        // Sıradan tablo (bölümün kendisi dahil) `xmin` kullanır.
+        assert_eq!(insert_returning_clause(&table()), returning_clause(&table()));
     }
 
     #[test]
