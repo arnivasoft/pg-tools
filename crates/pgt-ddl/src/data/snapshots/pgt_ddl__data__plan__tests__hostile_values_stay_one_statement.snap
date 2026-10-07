@@ -1,0 +1,97 @@
+---
+source: crates/pgt-ddl/src/data/plan.rs
+expression: render_cases(&labelled)
+---
+-- değer 0
+[Safe] INSERT INTO public.t (id, "name") VALUES ('it''s', 'it''s') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = 'it''s' WHERE id = 'it''s' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = 'it''s' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 1
+[Safe] INSERT INTO public.t (id, "name") VALUES (E'a\\b', E'a\\b') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = E'a\\b' WHERE id = E'a\\b' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = E'a\\b' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 2
+[Safe] INSERT INTO public.t (id, "name") VALUES ('x''; DROP TABLE t; --', 'x''; DROP TABLE t; --') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = 'x''; DROP TABLE t; --' WHERE id = 'x''; DROP TABLE t; --' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = 'x''; DROP TABLE t; --' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 3
+[Safe] INSERT INTO public.t (id, "name") VALUES ('--', '--') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = '--' WHERE id = '--' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = '--' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 4
+[Safe] INSERT INTO public.t (id, "name") VALUES (';', ';') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = ';' WHERE id = ';' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = ';' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 5
+[Safe] INSERT INTO public.t (id, "name") VALUES ('/*', '/*') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = '/*' WHERE id = '/*' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = '/*' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 6
+[Safe] INSERT INTO public.t (id, "name") VALUES ('çğüşöı', 'çğüşöı') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = 'çğüşöı' WHERE id = 'çğüşöı' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = 'çğüşöı' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 7
+[Safe] INSERT INTO public.t (id, "name") VALUES ('😀 emoji', '😀 emoji') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = '😀 emoji' WHERE id = '😀 emoji' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = '😀 emoji' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 8
+[Safe] INSERT INTO public.t (id, "name") VALUES ('‮bidi‬', '‮bidi‬') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = '‮bidi‬' WHERE id = '‮bidi‬' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = '‮bidi‬' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 9
+[Safe] INSERT INTO public.t (id, "name") VALUES ('satır1
+satır2
+	satır3', 'satır1
+satır2
+	satır3') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = 'satır1
+satır2
+	satır3' WHERE id = 'satır1
+satır2
+	satır3' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = 'satır1
+satır2
+	satır3' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 10
+[Safe] INSERT INTO public.t (id, "name") VALUES ('', '') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = '' WHERE id = '' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = '' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 11
+[Safe] INSERT INTO public.t (id, "name") VALUES ('NULL', 'NULL') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = 'NULL' WHERE id = 'NULL' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = 'NULL' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 12
+[Safe] INSERT INTO public.t (id, "name") VALUES ('DEFAULT', 'DEFAULT') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = 'DEFAULT' WHERE id = 'DEFAULT' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = 'DEFAULT' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).
+
+-- değer 13
+[Safe] INSERT INTO public.t (id, "name") VALUES (E'$$ $q$ \\'' '''' "', E'$$ $q$ \\'' '''' "') RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Safe] UPDATE public.t SET "name" = E'$$ $q$ \\'' '''' "' WHERE id = E'$$ $q$ \\'' '''' "' AND xmin::pg_catalog.text = '1' RETURNING id, "name", status, note, xmin::pg_catalog.text
+[Destructive] DELETE FROM public.t WHERE id = E'$$ $q$ \\'' '''' "' AND xmin::pg_catalog.text = '1'  -- Satır silinir (geri alınamaz).
+WARN: Aynı satır için birden çok değişiklik var; ikincisi çakışma verebilir (satır sürümü değişir).

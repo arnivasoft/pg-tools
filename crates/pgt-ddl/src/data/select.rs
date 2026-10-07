@@ -1,7 +1,8 @@
 //! Veri düzenleyici SELECT üreticisi (saf). Biçim:
-//! `SELECT "c1", …, xmin::text AS "__pgt_xmin" FROM "s"."t"[ WHERE (<filtre>\n)][ ORDER BY "k1" ASC, …]`.
+//! `SELECT "c1", …, xmin::pg_catalog.text AS "__pgt_xmin" FROM "s"."t"[ WHERE (<filtre>\n)][ ORDER BY "k1" ASC, …]`.
 //!
-//! Kolon listesi kaynağın **tüm** kolonlarıdır (`attnum` sırası); sürüm kolonu (`xmin::text`) yalnızca
+//! Kolon listesi kaynağın **tüm** kolonlarıdır (`attnum` sırası); sürüm kolonu (`xmin::pg_catalog.text`; tip adı
+//! `search_path`'ten bağımsız) yalnızca
 //! `Table`/`Partitioned`'da eklenir ve hep sondadır (`version_index = columns.len()`). Sıralama kolonları kaynak
 //! kolonlarından seçilir; istek sıralaması boşsa anahtar kolonları `ASC` (anahtarsızda `ORDER BY` yok).
 //!
@@ -30,7 +31,7 @@ pub fn select_sql(source: &DataSource, req: &SelectRequest) -> std::result::Resu
     let has_version = matches!(source.relkind, RelKind::Table | RelKind::Partitioned);
     let mut items: Vec<String> = source.columns.iter().map(|c| quote_ident(&c.name)).collect();
     if has_version {
-        items.push(format!("xmin::text AS {}", quote_ident(&version_alias(source))));
+        items.push(format!("xmin::pg_catalog.text AS {}", quote_ident(&version_alias(source))));
     }
     // Kolonsuz görünüm (`SELECT FROM v`) PG 9.4+'ta geçerlidir.
     let mut sql = if items.is_empty() { "SELECT".to_string() } else { format!("SELECT {}", items.join(", ")) };
@@ -168,6 +169,9 @@ mod tests {
         assert!(composed_is_clean(&out.sql), "{}", out.sql);
         assert_eq!(out.version_index as usize, s.columns.len());
         assert_eq!(out.has_version, matches!(s.relkind, RelKind::Table | RelKind::Partitioned));
+        // Sürüm ifadesi tip adını nitelikli yazar (`search_path`'ten bağımsız).
+        assert_eq!(out.sql.contains("xmin::pg_catalog.text AS "), out.has_version, "{}", out.sql);
+        assert!(!out.sql.contains("xmin::text"), "{}", out.sql);
         out
     }
 
