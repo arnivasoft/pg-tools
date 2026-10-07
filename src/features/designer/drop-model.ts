@@ -14,8 +14,8 @@ import { classifyError, designerErrorText, failedText, isConnectionCode } from "
  * `Drop` isteğinin TEK tanımı (designer `planRequest(m, "drop")` de bunu kullanır): `def` `ddl_load`'un döndürdüğü
  * tanımdır ve olduğu gibi (derin kopya) gider; `object` de kopyalanır (istek modelle nesne paylaşmaz).
  */
-export function dropRequest(object: ObjectRef, def: ObjectDef, cascade: boolean): Extract<PlanRequest, { op: "drop" }> {
-  return { op: "drop", object: { ...object }, def: cloneDef(def), cascade };
+export function dropRequest(object: ObjectRef, def: ObjectDef, cascade: boolean, force = false): Extract<PlanRequest, { op: "drop" }> {
+  return { op: "drop", object: { ...object }, def: cloneDef(def), cascade, force };
 }
 
 /** PostgreSQL `dependent_objects_still_exist`: CASCADE olmadan silinemeyen nesne. */

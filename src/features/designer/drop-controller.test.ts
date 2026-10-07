@@ -17,7 +17,7 @@ import type { DropInput } from "./drop-controller";
 const schema = (p: Partial<{ name: string; owner: string | null; comment: string | null }> = {}): ObjectDef =>
   ({ kind: "schema", name: "app", owner: "alice", comment: null, ...p });
 const view = (risk: Risk = "destructive", hash = "h1", p: Partial<PlanView> = {}): PlanView => ({
-  statements: [{ sql: risk === "data_loss" ? "DROP SCHEMA app CASCADE" : "DROP SCHEMA app", risk, transactional: true, note: null }],
+  statements: [{ sql: risk === "data_loss" ? "DROP SCHEMA app CASCADE" : "DROP SCHEMA app", risk, transactional: true, note: null, redacted: false }],
   warnings: [], errors: [], hash, risk, empty: false, ...p,
 });
 const applied = (): ApplyOutcome => ({ outcome: "applied", statements: 1, elapsedMs: 2, created: null });
@@ -80,7 +80,7 @@ describe("drop-controller açılış ve önizleme", () => {
     expect(s.api.ddlLoad).toHaveBeenCalledWith("S1", 5, OBJ);
     expect(st).toMatchObject({ phase: "ready", cascade: false, pending: false, def: loaded });
     expect(st.def).not.toBe(loaded);
-    expect(s.api.ddlPreview).toHaveBeenCalledExactlyOnceWith("S1", 5, { op: "drop", object: OBJ, def: loaded, cascade: false });
+    expect(s.api.ddlPreview).toHaveBeenCalledExactlyOnceWith("S1", 5, { op: "drop", object: OBJ, def: loaded, cascade: false, force: false });
     const sent = s.api.ddlPreview.mock.calls[0]![2];
     if (sent.op !== "drop") throw new Error("drop bekleniyordu");
     expect(sent.def).not.toBe(st.def);
@@ -166,8 +166,8 @@ describe("drop-controller kapı ve uygulama", () => {
     const first = s.drop.apply();
     void s.drop.apply(); // çift tıklama
     expect(s.api.ddlApply).toHaveBeenCalledOnce();
-    expect(s.api.ddlApply).toHaveBeenCalledWith("S1", 5, { op: "drop", object: OBJ, def: schema(), cascade: false },
-      { applyId: "A1", lockTimeoutMs: 5000, expectedHash: "h1", confirmed: true, confirmedProduction: false });
+    expect(s.api.ddlApply).toHaveBeenCalledWith("S1", 5, { op: "drop", object: OBJ, def: schema(), cascade: false, force: false },
+      { applyId: "A1", lockTimeoutMs: 5000, expectedHash: "h1", confirmed: true, confirmedProduction: false, password: null });
     expect(s.drop.state()!.phase).toBe("applying");
     s.drop.setCascade(true); // uçuşta etkisiz
     expect(s.drop.state()!.cascade).toBe(false);

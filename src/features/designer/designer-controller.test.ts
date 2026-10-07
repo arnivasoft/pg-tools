@@ -18,7 +18,7 @@ import { failedText } from "./errors";
 const schema = (p: Partial<{ name: string; owner: string | null; comment: string | null }> = {}): ObjectDef =>
   ({ kind: "schema", name: "app", owner: "alice", comment: null, ...p });
 const view = (p: Partial<PlanView> = {}): PlanView => ({
-  statements: [{ sql: "ALTER SCHEMA app RENAME TO x", risk: p.risk ?? "safe", transactional: true, note: null }],
+  statements: [{ sql: "ALTER SCHEMA app RENAME TO x", risk: p.risk ?? "safe", transactional: true, note: null, redacted: false }],
   warnings: [], errors: [], hash: "h1", risk: "safe", empty: false, ...p,
 });
 const risky = (risk: Risk, hash = "hr") => view({ risk, hash });
@@ -345,7 +345,7 @@ describe("designer-controller uygulama kapısı", () => {
     await s.ctl.apply(id);
     expect(s.api.ddlApply).toHaveBeenCalledTimes(1);
     expect(s.api.ddlApply.mock.calls[0]![3]).toEqual({
-      applyId: "A1", lockTimeoutMs: 2000, expectedHash: "hd", confirmed: true, confirmedProduction: false,
+      applyId: "A1", lockTimeoutMs: 2000, expectedHash: "hd", confirmed: true, confirmedProduction: false, password: null,
     });
   });
 
@@ -842,7 +842,7 @@ describe("designer-controller ayarlar ve istekler", () => {
     s.ctl.setCascade(id, true);
     const m = s.ctl.model(id)!;
     const req = planRequest(m, "drop");
-    expect(req).toEqual({ op: "drop", object: OBJ, def: schema(), cascade: true });
+    expect(req).toEqual({ op: "drop", object: OBJ, def: schema(), cascade: true, force: false });
     if (req?.op !== "drop") throw new Error("drop bekleniyordu");
     expect(req.def).not.toBe(m.original);
     s.ctl.setCascade(id, false);

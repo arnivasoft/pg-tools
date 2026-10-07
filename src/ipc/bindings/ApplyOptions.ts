@@ -20,4 +20,8 @@ confirmed: boolean,
 /**
  * Üretim sunucusunda veri kaybı olan plan için ek (ad yazarak) onay.
  */
-confirmedProduction: boolean, };
+confirmedProduction: boolean, 
+/**
+ * Rol parolası (`PasswordChange::Set`); yalnızca uygulamada gelir, `Debug`/`Serialize` değeri yazmaz.
+ */
+password: string | null, };

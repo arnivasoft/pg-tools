@@ -19,6 +19,16 @@ pub const INVALID_DEF: &str = "Nesne tanımı geçersiz.";
 pub const NO_CHANGES: &str = "Değişiklik yok";
 /// Aynı `apply_id` ile süren bir uygulama var; kodlu değildir (düz `invalid`).
 pub const APPLY_ID_IN_USE: &str = "Bu uygulama kimliği zaten kullanımda.";
+/// Plan gizlenmiş parola ifadesi içeriyor ama `ApplyOptions.password` gelmedi (pgt-core bağlantı `password_required`
+/// koduyla karışmasın diye ayrı ad).
+pub const ROLE_PASSWORD_MISSING: &str = "Bu plan rol parolası ayarlıyor; parola girilmedi.";
+/// Parola gönderildi ama planda gizlenmiş ifade yok; kodlu değildir (düz `invalid`).
+pub const PASSWORD_NOT_USED: &str = "Bu planda parola kullanılmıyor.";
+/// Bakım veritabanının kendisi hedeflendi; kodlu değildir (düz `invalid`).
+pub const MAINTENANCE_DATABASE: &str =
+    "Bakım veritabanı yeniden adlandırılamaz, silinemez ya da taşınamaz; sunucu ayarlarından başka bir bakım veritabanı seçin.";
+/// Veritabanı kapsamlı türde `database_oid` yok; kodlu değildir (düz `invalid`).
+pub const NEEDS_DATABASE: &str = "Bu nesne türü bir veritabanı gerektirir.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -29,11 +39,18 @@ pub enum DdlErrorCode {
     ProductionConfirmationRequired,
     PlanChanged,
     InvalidDef,
+    RolePasswordMissing,
 }
 
 /// Arayüzün eşleştirebileceği kodların tam listesi (`DdlErrorCode`'un serde adları).
-pub const DDL_ERROR_CODES: [&str; 5] =
-    ["locked", "confirmation_required", "production_confirmation_required", "plan_changed", "invalid_def"];
+pub const DDL_ERROR_CODES: [&str; 6] = [
+    "locked",
+    "confirmation_required",
+    "production_confirmation_required",
+    "plan_changed",
+    "invalid_def",
+    "role_password_missing",
+];
 
 impl DdlErrorCode {
     pub fn as_str(self) -> &'static str {
@@ -43,6 +60,7 @@ impl DdlErrorCode {
             DdlErrorCode::ProductionConfirmationRequired => DDL_ERROR_CODES[2],
             DdlErrorCode::PlanChanged => DDL_ERROR_CODES[3],
             DdlErrorCode::InvalidDef => DDL_ERROR_CODES[4],
+            DdlErrorCode::RolePasswordMissing => DDL_ERROR_CODES[5],
         }
     }
 
@@ -54,6 +72,7 @@ impl DdlErrorCode {
             m if m == PRODUCTION_CONFIRMATION_REQUIRED => (Self::ProductionConfirmationRequired, PRODUCTION_CONFIRMATION_REQUIRED),
             m if m == PLAN_CHANGED => (Self::PlanChanged, PLAN_CHANGED),
             m if m == INVALID_DEF => (Self::InvalidDef, INVALID_DEF),
+            m if m == ROLE_PASSWORD_MISSING => (Self::RolePasswordMissing, ROLE_PASSWORD_MISSING),
             _ => return None,
         })
     }
@@ -81,6 +100,7 @@ mod tests {
             (PRODUCTION_CONFIRMATION_REQUIRED, "production_confirmation_required"),
             (PLAN_CHANGED, "plan_changed"),
             (INVALID_DEF, "invalid_def"),
+            (ROLE_PASSWORD_MISSING, "role_password_missing"),
         ];
         for (marker, code) in cases {
             let p = ddl_payload(&Error::Invalid(marker.into()));
@@ -97,6 +117,10 @@ mod tests {
         assert_eq!(p.message, "Geçersiz ayar: başka bir şey");
         assert_eq!(ddl_payload(&Error::NotConnected).code, "not_connected");
         assert_eq!(ddl_payload(&Error::NotFound("sunucu".into())).code, "not_found");
+        // Kodsuz düz iletiler.
+        for m in [PASSWORD_NOT_USED, MAINTENANCE_DATABASE, NEEDS_DATABASE, NO_CHANGES, APPLY_ID_IN_USE] {
+            assert_eq!(ddl_payload(&Error::Invalid(m.into())).code, "invalid", "{m}");
+        }
     }
 
     #[test]
@@ -107,11 +131,15 @@ mod tests {
             DdlErrorCode::ProductionConfirmationRequired,
             DdlErrorCode::PlanChanged,
             DdlErrorCode::InvalidDef,
+            DdlErrorCode::RolePasswordMissing,
         ];
         for c in all {
             assert_eq!(serde_json::to_value(c).unwrap(), c.as_str());
             assert!(DDL_ERROR_CODES.contains(&c.as_str()));
         }
         assert_eq!(all.len(), DDL_ERROR_CODES.len());
+        assert_eq!(DDL_ERROR_CODES.len(), 6);
+        // pgt-core bağlantı kodu ile çakışmaz.
+        assert!(!DDL_ERROR_CODES.contains(&"password_required"));
     }
 }

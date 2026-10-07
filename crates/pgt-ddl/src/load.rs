@@ -84,6 +84,10 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: u32, obj:
         ObjectKind::Extension => load_extension(mgr, server, database_oid, obj.oid).await,
         ObjectKind::Index => load_index(mgr, server, database_oid, obj.oid).await,
         ObjectKind::Table => load_table(mgr, server, database_oid, obj.oid).await,
+        // Yer tutucu: yükleyiciler Plan 14 Task 6'da.
+        ObjectKind::View | ObjectKind::MaterializedView | ObjectKind::Database | ObjectKind::Role => {
+            Err(Error::Invalid("Bu tür henüz desteklenmiyor.".into()))
+        }
     }
 }
 

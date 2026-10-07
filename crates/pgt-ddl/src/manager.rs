@@ -28,6 +28,7 @@ use crate::load::{self, ObjectRef};
 use crate::lookup::{self, LookupItem, LookupRequest};
 use crate::model::*;
 use crate::plan::{PlanView, Risk, Statement};
+use crate::secret::Secret;
 
 /// Arayüzün istediği değişiklik; plan arka uçta bu istekten üretilir.
 // Tek seferlik IPC yükü (saklanmaz); varyant boyut farkı önemsiz, `Box` JSON'u değiştirmeden yalnızca kullanımı zorlaştırır.
@@ -41,7 +42,14 @@ pub enum PlanRequest {
     /// yüklenen tanıma eşit olduğunu doğrular (istemciye güvenilmez).
     Alter { object: ObjectRef, old: ObjectDef, new: ObjectDef },
     /// `object`: silinen nesne; `def` yüklenen tanıma eşit olmalıdır (bkz. `Alter`).
-    Drop { object: ObjectRef, def: ObjectDef, cascade: bool },
+    /// `force` yalnızca Database: `DROP DATABASE … WITH (FORCE)` (PG 13+).
+    Drop {
+        object: ObjectRef,
+        def: ObjectDef,
+        cascade: bool,
+        #[serde(default)]
+        force: bool,
+    },
 }
 
 impl PlanRequest {
@@ -76,6 +84,10 @@ pub struct ApplyOptions {
     pub confirmed: bool,
     /// Üretim sunucusunda veri kaybı olan plan için ek (ad yazarak) onay.
     pub confirmed_production: bool,
+    /// Rol parolası (`PasswordChange::Set`); yalnızca uygulamada gelir, `Debug`/`Serialize` değeri yazmaz.
+    #[serde(default)]
+    #[ts(type = "string | null")]
+    pub password: Option<Secret>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -371,6 +383,8 @@ impl DdlManager {
             ObjectDef::Sequence(d) => (ObjectKind::Sequence, FIND_SEQUENCE_SQL, Some(d.schema.clone()), d.name.clone()),
             ObjectDef::Index(d) => (ObjectKind::Index, FIND_INDEX_SQL, Some(d.schema.clone()), d.name.clone()),
             ObjectDef::Table(d) => (ObjectKind::Table, FIND_TABLE_SQL, Some(d.schema.clone()), d.name.clone()),
+            // Yer tutucu (Plan 14 Task 7): üreticiler henüz plan üretmediği için buraya ulaşılmaz.
+            ObjectDef::View(_) | ObjectDef::MaterializedView(_) | ObjectDef::Database(_) | ObjectDef::Role(_) => return None,
         };
         let row = self
             .mgr
@@ -473,6 +487,10 @@ impl DdlManager {
                     valid: true,
                 })
             }
+            // Yer tutucu (Plan 14 Task 7).
+            ObjectKind::View | ObjectKind::MaterializedView | ObjectKind::Database | ObjectKind::Role => {
+                return invalid("Bu tür henüz desteklenmiyor.");
+            }
         })
     }
 
@@ -508,7 +526,9 @@ pub(crate) fn plan_view(req: &PlanRequest, version_num: u32) -> PlanView {
     PlanView::from_build(match req {
         PlanRequest::Create { def, concurrently } => build::create(def, &ctx(*concurrently)),
         PlanRequest::Alter { old, new, .. } => build::alter(old, new, &ctx(false)),
-        PlanRequest::Drop { def, cascade, .. } => build::drop(def, *cascade, &ctx(false)),
+        PlanRequest::Drop { def, cascade, force, .. } => {
+            build::drop_with(def, build::DropOptions { cascade: *cascade, force: *force }, &ctx(false))
+        }
     })
 }
 
@@ -531,10 +551,15 @@ mod tests {
 
     #[test]
     fn request_and_outcome_json_shapes() {
-        let r = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid: 1 }, def: schema("a"), cascade: true };
+        let r = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid: 1 }, def: schema("a"), cascade: true, force: false };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["op"], "drop");
         assert_eq!(v["def"]["kind"], "schema");
+        assert_eq!(v["force"], false);
+        assert_eq!(serde_json::from_value::<PlanRequest>(v.clone()).unwrap(), r);
+        // `force` yokken `false`.
+        let mut v = v;
+        v.as_object_mut().unwrap().remove("force");
         assert_eq!(serde_json::from_value::<PlanRequest>(v).unwrap(), r);
         let o = ApplyOptions {
             apply_id: Uuid::nil(),
@@ -542,11 +567,17 @@ mod tests {
             expected_hash: "h".into(),
             confirmed: true,
             confirmed_production: false,
+            password: None,
         };
         let v = serde_json::to_value(&o).unwrap();
         assert_eq!(v["lockTimeoutMs"], 5000);
         assert_eq!(v["confirmedProduction"], false);
         assert_eq!(v["applyId"], Uuid::nil().to_string());
+        assert!(v["password"].is_null());
+        // `password` yokken `None`.
+        let mut v = v;
+        v.as_object_mut().unwrap().remove("password");
+        assert_eq!(serde_json::from_value::<ApplyOptions>(v).unwrap(), o);
         let a = serde_json::to_value(ApplyOutcome::Applied { statements: 2, elapsed_ms: 7, created: None }).unwrap();
         assert_eq!(a, json!({"outcome": "applied", "statements": 2, "elapsedMs": 7, "created": null}));
         let f = ApplyOutcome::Failed {
@@ -612,6 +643,34 @@ mod tests {
     }
 
     #[test]
+    fn secret_never_prints_or_serializes_its_value() {
+        let s: Secret = serde_json::from_value(serde_json::json!("p@ss'w\\rd")).unwrap();
+        assert_eq!(s.expose(), "p@ss'w\\rd");
+        assert!(!format!("{s:?}").contains("p@ss"));
+        assert_eq!(serde_json::to_value(&s).unwrap(), serde_json::json!("********"));
+        let o = ApplyOptions {
+            apply_id: Uuid::nil(),
+            lock_timeout_ms: 0,
+            expected_hash: "h".into(),
+            confirmed: false,
+            confirmed_production: false,
+            password: Some(s),
+        };
+        assert!(!format!("{o:?}").contains("p@ss"));
+        assert!(!serde_json::to_string(&o).unwrap().contains("p@ss"));
+    }
+
+    #[test]
+    fn plan_view_drop_passes_force() {
+        let object = ObjectRef { kind: ObjectKind::Schema, oid: 1 };
+        let v = plan_view(&PlanRequest::Drop { object, def: schema("a"), cascade: false, force: true }, 160000);
+        assert!(v.empty);
+        assert_eq!(v.errors[0].path, "force");
+        let v = plan_view(&PlanRequest::Drop { object, def: schema("a"), cascade: false, force: false }, 160000);
+        assert!(!v.empty && v.errors.is_empty());
+    }
+
+    #[test]
     fn lock_timeout_bound() {
         assert!(check_lock_timeout(MAX_STATEMENT_TIMEOUT_MS).is_ok());
         assert!(matches!(check_lock_timeout(MAX_STATEMENT_TIMEOUT_MS + 1), Err(Error::Invalid(_))));
@@ -626,7 +685,7 @@ mod tests {
         use pgt_core::testing::{TestServer, admin_client, drop_database, test_servers};
 
         fn st(sql: &str, transactional: bool) -> Statement {
-            Statement { sql: sql.into(), risk: Risk::Safe, transactional, note: None }
+            Statement { sql: sql.into(), risk: Risk::Safe, transactional, note: None, redacted: false }
         }
 
         async fn db_name(ts: &TestServer, tag: &str) -> String {

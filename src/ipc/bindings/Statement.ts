@@ -9,4 +9,9 @@ sql: string, risk: Risk,
 /**
  * Transaction içinde çalışabilir mi (`CREATE INDEX CONCURRENTLY` gibi ifadeler değildir).
  */
-transactional: boolean, note: string | null, };
+transactional: boolean, note: string | null, 
+/**
+ * Metin gizli değer yerine `REDACTED` taşır; gerçek ifade yalnızca uygulamada kurulur. Arayüz bu ifadeyi Query
+ * Tool'a aktarmaz.
+ */
+redacted: boolean, };

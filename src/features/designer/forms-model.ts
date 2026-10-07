@@ -32,10 +32,10 @@ export const INDEX_PATHS: ReadonlySet<string> = new Set([
 export const TABLE_PATHS: ReadonlySet<string> = new Set([
   "name", "schema", "owner", "tablespace", "persistence", "fillfactor", "comment", "columns", "constraints", "partitionBy",
 ]);
-/** Tür → bilinen yollar; HER ObjectKind için form vardır (Partial değil; testte denetlenir). */
-export const FORM_PATHS: Record<ObjectKind, ReadonlySet<string>> = {
+/** Tür → bilinen yollar (testte denetlenir). Geçici: view/MV/database/role yolları Plan 15 formlarıyla gelir. */
+export const FORM_PATHS = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
-};
+} satisfies Partial<Record<ObjectKind, ReadonlySet<string>>>;
 
 /**
  * İsteğe bağlı alan: boş ya da yalnızca boşluk → `null`; aksi halde metin OLDUĞU GİBİ (kırpılmaz — kullanıcının yazdığı

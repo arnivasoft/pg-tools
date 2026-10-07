@@ -204,6 +204,7 @@ fn create_statements(d: &IndexDef, concurrently: bool) -> Vec<Statement> {
             risk: Risk::Safe,
             transactional: false,
             note: Some(CONCURRENT_NOTE.to_string()),
+            redacted: false,
         }
     } else {
         stmt(sql, Risk::Safe, None)

@@ -27,7 +27,14 @@ pub struct Statement {
     /// Transaction içinde çalışabilir mi (`CREATE INDEX CONCURRENTLY` gibi ifadeler değildir).
     pub transactional: bool,
     pub note: Option<String>,
+    /// Metin gizli değer yerine `REDACTED` taşır; gerçek ifade yalnızca uygulamada kurulur. Arayüz bu ifadeyi Query
+    /// Tool'a aktarmaz.
+    #[serde(default)]
+    pub redacted: bool,
 }
+
+/// Gizlenmiş değerin yer tutucusu (bilerek tırnaksız: kopyalanan metin çalıştırılırsa sözdizimi hatası verir).
+pub const REDACTED: &str = "********";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Plan {
@@ -101,7 +108,19 @@ mod tests {
     }
 
     fn st(sql: &str, risk: Risk) -> Statement {
-        Statement { sql: sql.into(), risk, transactional: true, note: None }
+        Statement { sql: sql.into(), risk, transactional: true, note: None, redacted: false }
+    }
+
+    #[test]
+    fn redacted_enters_hash_and_defaults_false_in_json() {
+        let a = vec![st("ALTER ROLE r PASSWORD ********", Risk::Safe)];
+        let mut r = a.clone();
+        r[0].redacted = true;
+        assert_ne!(plan_hash(&a), plan_hash(&r));
+        let j = serde_json::json!({"sql": "x", "risk": "safe", "transactional": true, "note": null});
+        let s: Statement = serde_json::from_value(j).unwrap();
+        assert!(!s.redacted);
+        assert_eq!(serde_json::to_value(&r[0]).unwrap()["redacted"], true);
     }
 
     #[test]

@@ -87,7 +87,7 @@ mod tests {
     }
 
     fn opts(hash: &str) -> ApplyOptions {
-        ApplyOptions { apply_id: Uuid::new_v4(), lock_timeout_ms: 5000, expected_hash: hash.into(), confirmed: false, confirmed_production: false }
+        ApplyOptions { apply_id: Uuid::new_v4(), lock_timeout_ms: 5000, expected_hash: hash.into(), confirmed: false, confirmed_production: false, password: None }
     }
 
     #[test]
@@ -149,7 +149,7 @@ mod tests {
             // Sunucu istemcinin tanımına güvenmez: tahrifli `def` ile silme `plan_changed` olur, şema yerinde kalır.
             let ObjectDef::Schema(mut tampered) = loaded.clone() else { panic!() };
             tampered.comment = Some("sahte".into());
-            let drop = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid }, def: ObjectDef::Schema(tampered), cascade: false };
+            let drop = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid }, def: ObjectDef::Schema(tampered), cascade: false, force: false };
             let hash = Box::pin(ddl.preview(sid, db, &drop)).await.map_err(|e| ddl_payload(&e)).unwrap().hash;
             let mut o = opts(&hash);
             o.confirmed = true;

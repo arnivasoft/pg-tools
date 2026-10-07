@@ -142,6 +142,8 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
             // Bölüm tablosu üst tablonun `partitions` koleksiyonunda listelenir.
             ObjectKind::Table if matches!(prev, Some(Seg::Table(_))) => Coll::Partitions,
             ObjectKind::Table => Coll::Tables,
+            // Yer tutucu (Plan 14 Task 7 düğümlerini ekler): `target_of` bu türleri henüz üretmez.
+            ObjectKind::View | ObjectKind::MaterializedView | ObjectKind::Database | ObjectKind::Role => return Ok(t),
         };
         t.refresh_node_id = Some(id.parent().child(Seg::Coll(coll)).to_string());
     }

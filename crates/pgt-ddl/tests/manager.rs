@@ -41,7 +41,7 @@ fn fx(env: &Env, ts: &TestServer, locked: bool, label: Option<&str>) -> Fx {
 }
 
 fn opts(hash: &str) -> ApplyOptions {
-    ApplyOptions { apply_id: Uuid::new_v4(), lock_timeout_ms: 5000, expected_hash: hash.into(), confirmed: false, confirmed_production: false }
+    ApplyOptions { apply_id: Uuid::new_v4(), lock_timeout_ms: 5000, expected_hash: hash.into(), confirmed: false, confirmed_production: false, password: None }
 }
 
 impl Fx {
@@ -69,7 +69,7 @@ impl Fx {
 
     async fn drop_schema(&self, env: &Env, name: &str, cascade: bool) -> PlanRequest {
         let (object, d) = self.load_schema(env, name).await;
-        PlanRequest::Drop { object, def: ObjectDef::Schema(d), cascade }
+        PlanRequest::Drop { object, def: ObjectDef::Schema(d), cascade, force: false }
     }
 
     async fn alter_schema(&self, env: &Env, name: &str, edit: impl FnOnce(&mut SchemaDef)) -> PlanRequest {
@@ -771,13 +771,13 @@ async fn object_check_body(ts: TestServer) {
 
     // Silme: tahrifli `def` reddedilir, dürüst olan çalışır.
     env.sql("CREATE SCHEMA m_oc5").await;
-    let PlanRequest::Drop { object, def, cascade } = f.drop_schema(&env, "m_oc5", false).await else { unreachable!() };
+    let PlanRequest::Drop { object, def, cascade, .. } = f.drop_schema(&env, "m_oc5", false).await else { unreachable!() };
     let ObjectDef::Schema(mut sd) = def.clone() else { unreachable!() };
     sd.comment = Some("sahte".into());
-    let bad = PlanRequest::Drop { object, def: ObjectDef::Schema(sd), cascade };
+    let bad = PlanRequest::Drop { object, def: ObjectDef::Schema(sd), cascade, force: false };
     assert_eq!(code(&f.apply_with(&bad, |o| o.confirmed = true).await), "plan_changed");
     assert!(exists(&env, "m_oc5").await);
-    applied(f.apply_with(&PlanRequest::Drop { object, def, cascade }, |o| o.confirmed = true).await);
+    applied(f.apply_with(&PlanRequest::Drop { object, def, cascade, force: false }, |o| o.confirmed = true).await);
     assert!(!exists(&env, "m_oc5").await);
 }
 
@@ -794,7 +794,7 @@ async fn system_body(ts: TestServer) {
     // plpgsql eklentisi sistem nesnesidir: yükleme reddeder, istemci tanımı ne derse desin silinemez.
     let object = ObjectRef { kind: ObjectKind::Extension, oid: env.extension_oid("plpgsql").await };
     let def = ObjectDef::Extension(ExtensionDef { name: "plpgsql".into(), schema: None, version: None, cascade: false });
-    let req = PlanRequest::Drop { object, def, cascade: false };
+    let req = PlanRequest::Drop { object, def, cascade: false, force: false };
     let r = f.apply_with(&req, |o| o.confirmed = true).await;
     assert_eq!(code(&r), "invalid");
     let still: bool = env.admin.query_one("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'plpgsql')", &[]).await.unwrap().get(0);
@@ -807,10 +807,10 @@ async fn system_body(ts: TestServer) {
     let ObjectDef::Index(loaded) = f.dm.load(f.server, f.db, object).await.unwrap() else { panic!() };
     assert_eq!(loaded.constraint.as_deref(), Some("pk_t_pkey"));
     let liar = IndexDef { constraint: None, ..loaded.clone() };
-    let req = PlanRequest::Drop { object, def: ObjectDef::Index(liar), cascade: false };
+    let req = PlanRequest::Drop { object, def: ObjectDef::Index(liar), cascade: false, force: false };
     assert_eq!(code(&f.apply_with(&req, |o| o.confirmed = true).await), "plan_changed");
     // Dürüst tanım: üretici kısıt korumasıyla reddeder (invalid_def).
-    let req = PlanRequest::Drop { object, def: ObjectDef::Index(loaded), cascade: false };
+    let req = PlanRequest::Drop { object, def: ObjectDef::Index(loaded), cascade: false, force: false };
     assert_eq!(code(&f.apply_with(&req, |o| o.confirmed = true).await), "invalid_def");
     assert!(exists(&env, "public.pk_t_pkey").await);
 }
@@ -971,7 +971,7 @@ async fn table_create_body(ts: TestServer) {
     assert_eq!((committed, sqlstate.as_deref()), (0, Some("42P07")));
 
     // Drop: onaysız reddedilir; onaylı uygulanır, created yok.
-    let drop = PlanRequest::Drop { object, def: tbl(&loaded), cascade: false };
+    let drop = PlanRequest::Drop { object, def: tbl(&loaded), cascade: false, force: false };
     assert_eq!(f.preview(&drop).await.risk, Risk::DataLoss);
     assert_eq!(code(&f.apply(&drop).await), "confirmation_required");
     assert!(exists(&env, "public.Tb \"c\"").await);
@@ -983,10 +983,10 @@ async fn table_create_body(ts: TestServer) {
     // CASCADE: bağımlı FK düşer (DataLoss); CASCADE'siz silme sunucuda 2BP01.
     env.sql("CREATE TABLE public.par (id int PRIMARY KEY); CREATE TABLE public.chi (p int CONSTRAINT chi_fk REFERENCES public.par)").await;
     let (object, par) = f.load_table(&env, "public", "par").await;
-    let plain = PlanRequest::Drop { object, def: tbl(&par), cascade: false };
+    let plain = PlanRequest::Drop { object, def: tbl(&par), cascade: false, force: false };
     let (_, committed, sqlstate, _) = failed(f.apply_with(&plain, |o| o.confirmed = true).await);
     assert_eq!((committed, sqlstate.as_deref()), (0, Some("2BP01")));
-    let cascade = PlanRequest::Drop { object, def: tbl(&par), cascade: true };
+    let cascade = PlanRequest::Drop { object, def: tbl(&par), cascade: true, force: false };
     assert_eq!(f.preview(&cascade).await.risk, Risk::DataLoss);
     applied(f.apply_with(&cascade, |o| o.confirmed = true).await);
     assert!(!exists(&env, "public.par").await);
@@ -1213,7 +1213,7 @@ async fn table_protect_body(ts: TestServer) {
         inherits: false,
         unsupported: vec![],
     };
-    let r = f.apply_with(&PlanRequest::Drop { object, def: tbl(&fake), cascade: true }, |o| (o.confirmed, o.confirmed_production) = (true, true)).await;
+    let r = f.apply_with(&PlanRequest::Drop { object, def: tbl(&fake), cascade: true, force: false }, |o| (o.confirmed, o.confirmed_production) = (true, true)).await;
     assert_eq!(code(&r), "invalid");
     let alter = PlanRequest::Alter { object, old: tbl(&fake), new: tbl(&TableDef { comment: Some("x".into()), ..fake.clone() }) };
     assert_eq!(code(&f.apply(&alter).await), "invalid");

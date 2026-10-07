@@ -19,7 +19,7 @@ fn create(def: ObjectDef) -> PlanRequest {
 }
 
 fn opts(hash: &str) -> ApplyOptions {
-    ApplyOptions { apply_id: Uuid::new_v4(), lock_timeout_ms: 5000, expected_hash: hash.into(), confirmed: false, confirmed_production: false }
+    ApplyOptions { apply_id: Uuid::new_v4(), lock_timeout_ms: 5000, expected_hash: hash.into(), confirmed: false, confirmed_production: false, password: None }
 }
 
 fn manager(config: &ServerConfig, mgr: Arc<pgt_core::connection::ConnectionManager>) -> (DdlManager, tempfile::TempDir) {

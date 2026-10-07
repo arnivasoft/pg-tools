@@ -35,6 +35,7 @@ export const tdes = {
     retry: "Yeniden dene",
     reloadTitle: "Tanımı sunucudan yeniden yükle",
     loadError: "Tanım yüklenemedi",
+    formMissing: "Bu tür için form henüz yok.",
     needsReload: "Nesnenin sunucudaki tanımı değişmiş olabilir; devam etmeden önce yeniden yükleyin.",
     disconnected: "Sunucu bağlantısı kesildi; sekme salt okunur. Sunucuyu yeniden bağlayıp Yeniden yükle'ye basın.",
     done: "Nesne oluşturuldu, ancak ağaçta bulunamadı. Sekmeyi kapatabilirsiniz.",

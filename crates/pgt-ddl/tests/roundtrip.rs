@@ -74,6 +74,7 @@ async fn oid_of(env: &Env, def: &ObjectDef) -> u32 {
         ObjectDef::Extension(d) => env.extension_oid(&d.name).await,
         ObjectDef::Index(d) => env.class_oid(&d.schema, &d.name).await,
         ObjectDef::Table(d) => env.class_oid(&d.schema, &d.name).await,
+        other => unreachable!("bu dosya yeni türleri sınamaz: {:?}", other.kind()),
     }
 }
 

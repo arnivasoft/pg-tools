@@ -15,7 +15,7 @@ import {
 } from "./designer-model";
 
 const fe = (path: string, message = path + " hatası"): FieldError => ({ path, message });
-const stmt = (sql: string, risk: Risk = "safe"): Statement => ({ sql, risk, transactional: true, note: null });
+const stmt = (sql: string, risk: Risk = "safe"): Statement => ({ sql, risk, transactional: true, note: null, redacted: false });
 const view = (p: Partial<PlanView> = {}): PlanView => ({
   statements: [stmt("CREATE SCHEMA a")], warnings: [], errors: [], hash: "h1", risk: "safe", empty: false, ...p,
 });
@@ -48,6 +48,26 @@ describe("kindLabel / defName", () => {
       kind: "sequence", schema: "s", name: "q", owner: null, dataType: "bigint", increment: "1", minValue: null, maxValue: null,
       start: "1", cache: "1", cycle: false, ownedBy: null, comment: null,
     })).toBe("s.q");
+  });
+  it("Plan 14 türleri: etiketler; view/MV şema nitelikli, database/role düz ad", () => {
+    expect([kindLabel("view"), kindLabel("materialized_view"), kindLabel("database"), kindLabel("role")]).toEqual([
+      "View", "Materialized View", "Database", "Role",
+    ]);
+    const q = { owner: null, query: "SELECT 1", comment: null, columns: [], unsupported: [] };
+    expect(defName({
+      kind: "view", schema: "s", name: "v", checkOption: null, securityBarrier: false, securityInvoker: false, recreate: false, ...q,
+    })).toBe("s.v");
+    expect(defName({
+      kind: "materialized_view", schema: "s", name: "m", tablespace: null, fillfactor: null, withData: true, refresh: null, ...q,
+    })).toBe("s.m");
+    expect(defName({
+      kind: "database", name: "d", owner: null, template: null, encoding: null, localeProvider: null, lcCollate: null, lcCtype: null,
+      providerLocale: null, tablespace: null, connectionLimit: -1, isTemplate: false, allowConnections: true, settings: [], comment: null,
+    })).toBe("d");
+    expect(defName({
+      kind: "role", name: "r", login: false, superuser: false, createdb: false, createrole: false, inherit: true, replication: false,
+      bypassrls: false, connectionLimit: -1, validUntil: null, password: "keep", memberOf: [], settings: [], comment: null, unsupported: [],
+    })).toBe("r");
   });
 });
 
@@ -276,10 +296,10 @@ describe("applyOptionsFor", () => {
     const v = view({ hash: "abc", risk: "data_loss" });
     const g: ApplyGate = { kind: "needsProductionName", expected: "P" };
     expect(applyOptionsFor("id-1", 5000, v, g, { checked: true, typedName: "P" })).toEqual({
-      applyId: "id-1", lockTimeoutMs: 5000, expectedHash: "abc", confirmed: true, confirmedProduction: true,
+      applyId: "id-1", lockTimeoutMs: 5000, expectedHash: "abc", confirmed: true, confirmedProduction: true, password: null,
     });
     expect(applyOptionsFor("id-2", 0, view({ hash: "z" }), { kind: "ready" }, { checked: true, typedName: "P" })).toEqual({
-      applyId: "id-2", lockTimeoutMs: 0, expectedHash: "z", confirmed: false, confirmedProduction: false,
+      applyId: "id-2", lockTimeoutMs: 0, expectedHash: "z", confirmed: false, confirmedProduction: false, password: null,
     });
   });
 

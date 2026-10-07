@@ -30,6 +30,31 @@ fn defs() -> Vec<(ObjectKind, Value)> {
                    "include": ["a"], "whereClause": "id > 0", "tablespace": null, "fillfactor": 90, "comment": null, "constraint": null, "valid": true}),
         ),
         (ObjectKind::Table, table_json()),
+        (
+            ObjectKind::View,
+            json!({"kind": "view", "schema": "public", "name": "v", "owner": null, "query": "SELECT 1", "checkOption": "local",
+                   "securityBarrier": false, "securityInvoker": true, "comment": null, "recreate": false,
+                   "columns": [{"name": "?column?", "dataType": "integer"}], "unsupported": []}),
+        ),
+        (
+            ObjectKind::MaterializedView,
+            json!({"kind": "materialized_view", "schema": "public", "name": "m", "owner": "me", "query": "SELECT 1",
+                   "tablespace": null, "fillfactor": null, "withData": true, "comment": "c", "refresh": null,
+                   "columns": [], "unsupported": ["INDEX m_i"]}),
+        ),
+        (
+            ObjectKind::Database,
+            json!({"kind": "database", "name": "d", "owner": "me", "template": null, "encoding": "UTF8", "localeProvider": "libc",
+                   "lcCollate": "C", "lcCtype": "C", "providerLocale": null, "tablespace": "pg_default", "connectionLimit": -1,
+                   "isTemplate": false, "allowConnections": true, "settings": [{"name": "work_mem", "value": "4MB"}], "comment": null}),
+        ),
+        (
+            ObjectKind::Role,
+            json!({"kind": "role", "name": "r", "login": true, "superuser": false, "createdb": false, "createrole": false,
+                   "inherit": true, "replication": false, "bypassrls": false, "connectionLimit": 3, "validUntil": null,
+                   "password": "keep", "memberOf": [{"role": "g", "admin": false, "inheritOption": null, "setOption": null}],
+                   "settings": [], "comment": null, "unsupported": []}),
+        ),
     ]
 }
 
@@ -68,7 +93,7 @@ fn plan_requests_parse_for_every_kind() {
         assert!(matches!(&c, PlanRequest::Create { def, concurrently: false } if def.kind() == kind));
         let a: PlanRequest = roundtrip(json!({"op": "alter", "object": {"kind": kind, "oid": 16384}, "old": def, "new": def}));
         assert!(matches!(&a, PlanRequest::Alter { new, object, .. } if new.kind() == kind && object.kind == kind));
-        let d: PlanRequest = roundtrip(json!({"op": "drop", "object": {"kind": kind, "oid": 16384}, "def": def, "cascade": true}));
+        let d: PlanRequest = roundtrip(json!({"op": "drop", "object": {"kind": kind, "oid": 16384}, "def": def, "cascade": true, "force": false}));
         assert!(matches!(&d, PlanRequest::Drop { def, cascade: true, .. } if def.kind() == kind));
         // `object` zorunludur: eksik olan alter/drop reddedilir.
         assert!(serde_json::from_value::<PlanRequest>(json!({"op": "drop", "def": def, "cascade": true})).is_err());
@@ -86,9 +111,20 @@ fn unknown_op_or_kind_is_rejected() {
 fn apply_options_parse() {
     let o: ApplyOptions = roundtrip(json!({
         "applyId": "3f2a6d1e-8a4b-4c2e-9f00-0123456789ab", "lockTimeoutMs": 5000, "expectedHash": "abc123",
-        "confirmed": true, "confirmedProduction": false
+        "confirmed": true, "confirmedProduction": false, "password": null
     }));
     assert_eq!((o.lock_timeout_ms, o.confirmed, o.confirmed_production), (5000, true, false));
+    // Parola girdisi düz dizgedir; geri yazımda değer asla çıkmaz.
+    let o: ApplyOptions = serde_json::from_value(json!({
+        "applyId": "3f2a6d1e-8a4b-4c2e-9f00-0123456789ab", "lockTimeoutMs": 0, "expectedHash": "h",
+        "confirmed": false, "confirmedProduction": false, "password": "p@ss"
+    }))
+    .unwrap();
+    assert_eq!(o.password.as_ref().map(Secret::expose), Some("p@ss"));
+    assert_eq!(serde_json::to_value(&o).unwrap()["password"], "********");
+    // Drop isteği `force: true` taşır.
+    let d: PlanRequest = roundtrip(json!({"op": "drop", "object": {"kind": "database", "oid": 1}, "def": defs()[0].1, "cascade": false, "force": true}));
+    assert!(matches!(d, PlanRequest::Drop { force: true, .. }));
 }
 
 #[test]

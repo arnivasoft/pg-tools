@@ -5,4 +5,4 @@ import type { ObjectRef } from "./ObjectRef";
 /**
  * Arayüzün istediği değişiklik; plan arka uçta bu istekten üretilir.
  */
-export type PlanRequest = { "op": "create", def: ObjectDef, concurrently: boolean, } | { "op": "alter", object: ObjectRef, old: ObjectDef, new: ObjectDef, } | { "op": "drop", object: ObjectRef, def: ObjectDef, cascade: boolean, };
+export type PlanRequest = { "op": "create", def: ObjectDef, concurrently: boolean, } | { "op": "alter", object: ObjectRef, old: ObjectDef, new: ObjectDef, } | { "op": "drop", object: ObjectRef, def: ObjectDef, cascade: boolean, force: boolean, };
