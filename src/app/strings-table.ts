@@ -64,6 +64,7 @@ export const ttbl = {
     typesLoading: "Tipler yükleniyor…",
     notNull: "NOT NULL",
     notNullIdentity: "Kimlik kolonu her zaman NOT NULL'dır.",
+    notNullPrimaryKey: "PRIMARY KEY kolonu her zaman NOT NULL'dır.",
     source: "Değer kaynağı",
     sources: {
       none: "Yok",

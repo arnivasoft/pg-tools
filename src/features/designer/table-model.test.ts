@@ -5,7 +5,7 @@ import type { ConstraintDef } from "../../ipc/bindings/ConstraintDef";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import { defsEqual, groupIssues } from "./designer-model";
 import {
-  addPartitionKey, addTableColumn, partitionColumnChoices, partitionKeyLabel, allowedValueSources, asTable, columnRefs, newColumn, originalColumn, removePartitionKey, removeTableColumn,
+  addPartitionKey, addTableColumn, applySerialFix, columnDetailsHaveIssues, columnTypeWarning, primaryKeyMember, partitionColumnChoices, partitionKeyLabel, allowedValueSources, asTable, columnRefs, newColumn, originalColumn, removePartitionKey, removeTableColumn,
   removedColumns, renameTable, renameTableColumn, restoreColumn, rowOfFocus, sectionHasIssues, selfRefs, serialFix, storageGate, structureLocked,
   switchPartitionKeyKind, tableEditPatch, tableSections, typeQueryOf, typeTextWarning, updatePartitionKey, updateTableColumn, usingVisible,
   valueExpr, valueSourceOf, withCollation, withDataType, withPartitionStrategy, withValueExpr, withValueSource,
@@ -362,5 +362,47 @@ describe("storageGate (bölümlenmiş tablo depolama kuralları)", () => {
     expect([g.persistenceLocked, g.fillfactorLocked, g.pgDefaultBlocked]).toEqual([false, true, true]);
     expect(g.persistenceHint).toBe(ttbl.general.partitionedUnlogged);
     expect(storageGate("create", null, { ...d, fillfactor: 80 }).fillfactorLocked).toBe(false);
+  });
+});
+
+describe("kolon ızgarası yardımcıları (Task 6)", () => {
+  it("serial hızlı düzeltmesi: withDataType + withValueSource tek düzenlemede integer + BY DEFAULT IDENTITY + NOT NULL", () => {
+    const c = col("id", null, { dataType: "serial", notNull: false, default: "x" });
+    const fixed = applySerialFix(c, null);
+    expect(fixed).toMatchObject({ dataType: "integer", identity: "by_default", notNull: true, default: null, generated: null });
+    expect(withValueSource(withDataType(c, null, "integer"), "identity_by_default")).toEqual(fixed);
+    expect(applySerialFix(col("n", null, { dataType: "BIGSERIAL" }), null)).toMatchObject({ dataType: "bigint", identity: "by_default", notNull: true });
+    const plain = col("x", null, { dataType: "text" });
+    expect(applySerialFix(plain, null)).toBe(plain);
+  });
+  it("serial hızlı düzeltmesi yüklü kolonda: tip değişir (USING görünür kalır), kimlik + NOT NULL", () => {
+    const o = col("id", 1, { dataType: "text", notNull: false });
+    const fixed = applySerialFix({ ...o, dataType: "serial" }, o);
+    expect(fixed).toMatchObject({ dataType: "integer", identity: "by_default", notNull: true });
+    expect(usingVisible(o, fixed)).toBe(true);
+  });
+  it("columnTypeWarning: yüklü kolonun dokunulmamış tipi uyarmaz; değişince ve yeni kolonda typeTextWarning", () => {
+    const o = col("g", 1, { dataType: "geometry(Point,4326)" });
+    expect(typeTextWarning(o.dataType)).not.toBeNull();
+    expect(columnTypeWarning(o, o)).toBeNull();
+    expect(columnTypeWarning({ ...o, dataType: "GEOMETRY(Point, 4326)" }, o)).toBeNull();
+    expect(columnTypeWarning({ ...o, dataType: "geometry(Point,4327)" }, o)).toBe(ttbl.type.modifier);
+    expect(columnTypeWarning({ ...o, dataType: "" }, o)).toBe(ttbl.type.required);
+    expect(columnTypeWarning(col("n", null, { dataType: "serial" }), null)).toBe(ttbl.type.serial);
+    expect(columnTypeWarning(col("n", null, { dataType: "integer" }), null)).toBeNull();
+  });
+  it("primaryKeyMember: yalnızca PK kolon listesi; boş ad false", () => {
+    const d = T({ columns: [col("id", 1), col("u", 2)], constraints: [pk(["id"], 10), uq(["u"], 11)] });
+    expect(primaryKeyMember(d, "id")).toBe(true);
+    expect(primaryKeyMember(d, "u")).toBe(false);
+    expect(primaryKeyMember(d, "")).toBe(false);
+  });
+  it("columnDetailsHaveIssues: collation/comment/using yolları (alt yollar dahil); öteki alanlar ve satırlar hayır", () => {
+    const iss = (path: string) => groupIssues([{ path, message: "m" }]);
+    expect(columnDetailsHaveIssues(iss("columns[1].collation"), 1)).toBe(true);
+    expect(columnDetailsHaveIssues(iss("columns[1].comment"), 1)).toBe(true);
+    expect(columnDetailsHaveIssues(iss("columns[1].using"), 1)).toBe(true);
+    expect(columnDetailsHaveIssues(iss("columns[1].dataType"), 1)).toBe(false);
+    expect(columnDetailsHaveIssues(iss("columns[11].using"), 1)).toBe(false);
   });
 });

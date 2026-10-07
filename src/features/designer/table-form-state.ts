@@ -7,8 +7,8 @@ import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import type { DesignerController, DesignerModel } from "./designer-controller";
 import type { FormProps } from "./FormParts";
-import { createSnapTracker, type SelfSnap, type WithSnap } from "./table-constraints";
-import { asTable, rowOfFocus, type TableDraft, type TableSection } from "./table-model";
+import { createSnapTracker, withPrimaryKeyNotNull, type SelfSnap, type WithSnap } from "./table-constraints";
+import { asTable, columnRefs, renameTableColumn, rowOfFocus, type ColumnRef, type TableDraft, type TableSection } from "./table-model";
 
 /** Kolon/kısıt bölümüne odak: `index === null` → satır bulunamadı (şerit gösterilir). `seq` her istekte değişir. */
 export interface TableHighlight {
@@ -113,4 +113,24 @@ export function createTableFormState(props: StateProps): TableFormState {
   });
 
   return { section, setSection, highlight, editor: { edit, editSnap } };
+}
+
+/**
+ * Kolon adı düzenleme oturumu (ad girdisinin odak süresi): başvuru konumları (kısıt kolon listeleri, kendine-başvuran FK
+ * hedef kolonları, bölümleme anahtarları) oturumun İLK vuruşunda — ad henüz odaklanmadaki değerdeyken — formun
+ * SelfSnap'iyle alınır ve oturum boyunca sabit kalır: yazım sırasındaki ara ad (ör. başka bir kolonun adı) o kolonun
+ * başvurularını çalmaz. Her vuruştan sonra PK üyelerinin NOT NULL'ı korunur. `begin`/`end` odak/odak kaybında çağrılır.
+ */
+export function createColumnRenamer(editor: TableEditor, index: () => number) {
+  let refs: ColumnRef[] | null = null;
+  return {
+    begin: () => (refs = null),
+    end: () => (refs = null),
+    input: (next: string) =>
+      editor.editSnap((d, snap) => {
+        const i = index();
+        refs ??= columnRefs(d, d.columns[i]?.name ?? "", snap);
+        return { d: withPrimaryKeyNotNull(renameTableColumn(d, i, next, refs)), snap };
+      }),
+  };
 }

@@ -169,4 +169,36 @@ describe("createTableFormState", () => {
     expect(s.draft()).toBe(before);
     dispose();
   });
+
+  it("createColumnRenamer: başvurular odak oturumunun ilk vuruşunda alınır; ara ad başka kolonun başvurusunu çalmaz; PK NOT NULL", async () => {
+    const pkC = (columns: string[], oid: number): ConstraintDef => ({
+      oid, name: null, deferrable: false, initiallyDeferred: false, notValid: false, kind: { type: "primary_key", columns, include: [] },
+    });
+    const uqC = (columns: string[], oid: number): ConstraintDef => ({
+      oid, name: null, deferrable: false, initiallyDeferred: false, notValid: false, kind: { type: "unique", columns, include: [], nullsNotDistinct: false },
+    });
+    const self: ConstraintDef = {
+      ...fk("t", 3), kind: { type: "foreign_key", columns: ["i"], refSchema: "public", refTable: "t", refColumns: ["id"], matchType: "simple", onUpdate: "no_action", onDelete: "no_action" },
+    };
+    const s = await setup(T({ columns: [col("id", 1), col("i", 2)], constraints: [pkC(["id"], 1), uqC(["i"], 2), self] }));
+    const { createColumnRenamer } = await import("./table-form-state");
+    const [st, dispose] = s.solid.createRoot((d) => [s.createTableFormState(s.props), d] as const);
+    const r = createColumnRenamer(st.editor, () => 0);
+    r.begin();
+    r.input("i"); // ara ad = 2. kolonun adı
+    r.input("ix");
+    r.end();
+    let d = s.draft() as TableDef;
+    expect(d.columns.map((c) => c.name)).toEqual(["ix", "i"]);
+    expect(d.constraints.map((c) => (c.kind as { columns: string[] }).columns)).toEqual([["ix"], ["i"], ["i"]]);
+    expect((d.constraints[2]!.kind as { refColumns: string[] }).refColumns).toEqual(["ix"]); // kendine-başvuru hedefi
+    expect(d.columns[0]!.notNull).toBe(true); // PK üyesi
+    // Yeni oturum: ikinci kolonu yeniden adlandırmak yalnızca onun başvurularını taşır.
+    const r2 = createColumnRenamer(st.editor, () => 1);
+    r2.begin();
+    r2.input("j");
+    d = s.draft() as TableDef;
+    expect(d.constraints.map((c) => (c.kind as { columns: string[] }).columns)).toEqual([["ix"], ["j"], ["j"]]);
+    dispose();
+  });
 });

@@ -12,19 +12,20 @@ import { For, Show, Suspense, createUniqueId, mergeProps, type Component } from 
 import { tdes } from "../../app/strings-designer";
 import { ttbl } from "../../app/strings-table";
 import type { FormProps } from "./FormParts";
+import { TableColumns } from "./TableColumns";
 import { TableGeneral, TablePartitioning } from "./TableGeneral";
 import { createTableFormState, type TableSectionProps } from "./table-form-state";
 import { asTable, sectionHasIssues, tableSections, type TableSection } from "./table-model";
 
-/** Task 6–7 gövdeleri gelene dek yer tutucu (başlık). */
-const pending = (s: "columns" | "constraints"): Component<TableSectionProps> => () => (
+/** Task 7 gövdesi gelene dek yer tutucu (başlık). */
+const pending = (s: "constraints"): Component<TableSectionProps> => () => (
   <h2 class="text-[13px] font-medium">{ttbl.sections[s]}</h2>
 );
 
 /** Bölüm → gövde. Bölümün görünürlüğü `tableSections(mode)`'dan gelir (partitioning yalnızca create). */
 const PANELS: Record<TableSection, Component<TableSectionProps>> = {
   general: TableGeneral,
-  columns: pending("columns"),
+  columns: TableColumns,
   constraints: pending("constraints"),
   partitioning: TablePartitioning,
 };
