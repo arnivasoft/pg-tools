@@ -141,6 +141,8 @@ interface Entry {
   timer: unknown;
   session: string | null;
   applyId: string | null;
+  /** `loaded` satırlarını üreten seçim (`started`'ta güncellenir); başarısız yüklemede `select` buna döner. */
+  loadedSelect: SelectState;
 }
 
 type Step = "source" | "select" | "session" | "run";
@@ -167,7 +169,8 @@ function gateOf(m: DataModel, locked = m.locked, production = m.production): Dat
     pending: m.pending,
     applying: m.applying,
     connected: m.status !== "disconnected" && m.status !== "gone",
-    loading: m.status === "loading" || m.status === "error" || l === null,
+    // "Daha fazla" sürerken oturum meşgul ve satırlar büyüyor: uygulama kapalı.
+    loading: m.status === "loading" || m.status === "error" || l === null || m.loadingMore,
     needsReload: m.needsReload,
     outcomeUnknown: m.outcomeUnknown,
     dirty: l !== null && changeCount(l, m.edit) > 0,
@@ -222,10 +225,16 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
     e.previewSeq++;
   };
 
-  /** Bağlantı/yokluk: kuşak artar, önizleme durur, uçuştaki uygulama iptal; düzenlemeler KORUNUR. */
+  /**
+   * Bağlantı/yokluk: kuşak artar, önizleme durur; düzenlemeler KORUNUR, `select` satırları üreten seçime döner.
+   * Uçuşta uygulama varsa yanıtı artık okunmaz (kuşak): yazılmış olabilir → sonuç belirsiz (`outcomeUnknown`); kapı
+   * `unknown` olur ve yalnızca yeniden yükleme (düzenlemeleri atarak) açar — aksi halde yeniden kaydetmek INSERT'leri
+   * çoğaltabilirdi.
+   */
   const markDown = (e: Entry, status: "disconnected" | "gone", closeOld: boolean) => {
     e.gen++;
     stopPreview(e);
+    const inFlight = e.applyId !== null;
     if (e.applyId) {
       const id = e.applyId;
       quietly(() => api.dataCancel(id));
@@ -233,7 +242,10 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
     }
     if (closeOld) dropSession(e);
     else e.session = null;
-    patch(e, { status, pending: false, applying: false, loadingMore: false });
+    patch(e, {
+      status, pending: false, applying: false, loadingMore: false, select: e.loadedSelect,
+      ...(inFlight ? { outcomeUnknown: true, view: null, viewIsCurrent: false, outcome: { kind: "unknown" as const, text: tdata.outcome.unknown } } : {}),
+    });
   };
 
   const previewFailed = (e: Entry, p: ErrorPayload) => {
@@ -361,12 +373,14 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
           replaceLoaded(e, null, { status: "error", loadError: tdata.load.columnsMismatch, source });
           return;
         }
+        e.loadedSelect = e.model().select;
         replaceLoaded(e, { source, rows: [], versionIndex: sel.versionIndex, hasVersion: sel.hasVersion }, { selectErrors: NO_ERRORS() });
       } else if (ev.type === "rows") {
         appendRows(e, ev.rows, ev.more);
       } else if (ev.type === "failed") {
         failed = true;
-        patch(e, { status: "error", loadError: errorText(ev.error), more: false });
+        // Yarım sonuç yeni sorgunun sonucu gibi gösterilmez.
+        replaceLoaded(e, null, { status: "error", loadError: errorText(ev.error) });
       }
     };
     await step("run", api.qtRun(session, sel.sql, { type: "all" }, FIRST_LIMIT, false, onEvent));
@@ -378,9 +392,16 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
   const retriable = (p: ErrorPayload, s: Step) =>
     p.code === "not_connected" || ((s === "session" || s === "run") && (p.code === "session_reset" || p.code === "not_found"));
 
-  const loadFailed = (e: Entry, p: ErrorPayload, s: Step) => {
+  /**
+   * Yükleme hatası. Bağlantı/yokluk → `markDown` (satırlar + düzenlemeler korunur, `select` geri döner; yeniden
+   * bağlanınca devam). Diğer hata (`wipe`: yükleme/sıralama/filtre isteği) → eski satırlar yeni sorgunun sonucu gibi
+   * gösterilmez: `loaded = null`, düzenleme sıfır (kirliyse çağıran zaten onay almıştır), `status = "error"`.
+   * `wipe = false` (yeniden bağlanma): satır ve düzenlemeler korunur, yalnızca hata metni.
+   */
+  const loadFailed = (e: Entry, p: ErrorPayload, s: Step, wipe = true) => {
     if (p.code === "connection_lost" || p.code === "not_connected") markDown(e, "disconnected", true);
     else if (p.code === "unknown_server" || (p.code === "not_found" && s === "source")) markDown(e, "gone", true);
+    else if (wipe) replaceLoaded(e, null, { status: "error", loadError: errorText(p) });
     else patch(e, { status: e.model().loaded ? "ready" : "error", loadError: errorText(p) });
   };
 
@@ -421,7 +442,7 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
       outcomeUnknown: false, loadError: null, postApplyNote: null, locked: info?.locked ?? false, production: info?.production ?? false,
     };
     const [m, set] = createSignal<DataModel>({ ...initial, gate: gateOf(initial) });
-    const e: Entry = { model: m, set, gen: 0, previewSeq: 0, timer: null, session: null, applyId: null };
+    const e: Entry = { model: m, set, gen: 0, previewSeq: 0, timer: null, session: null, applyId: null, loadedSelect: EMPTY_SELECT };
     entries.set(input.tabId, e);
     bump();
     void load(input.tabId, e);
@@ -436,7 +457,8 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
   const reload = async (tabId: string, opts?: { discard: boolean }): Promise<boolean> => {
     const e = entries.get(tabId);
     const m = e?.model();
-    if (!e || !m || m.applying || m.status === "gone") return false;
+    // "Daha fazla" sürerken oturum meşgul: reddedilir (arayüz düğmeyi kapatır).
+    if (!e || !m || m.applying || m.loadingMore || m.status === "gone") return false;
     if (editDirty(m.edit) && !opts?.discard) return false;
     const info = deps.serverInfo(m.serverId);
     if (info) patch(e, { serverName: info.name, locked: info.locked, production: info.production });
@@ -445,7 +467,8 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
   };
 
   const reloadNow = (tabId: string): boolean => {
-    if (!model(tabId) || isDirty(tabId)) return false;
+    const m = model(tabId);
+    if (!m || m.applying || m.loadingMore || m.status === "gone" || isDirty(tabId)) return false;
     void reload(tabId);
     return true;
   };
@@ -459,8 +482,10 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
     // Kirli: kaynak aynıysa düzenlemeler korunur. İmleç oturumla gittiği için "daha fazla" kapanır.
     const gen = ++e.gen;
     patch(e, { status: "loading", loadError: null });
-    if (!(await connect(m.serverId))) {
-      if (alive(tabId, e, gen)) patch(e, { status: "disconnected" });
+    const ok = await connect(m.serverId);
+    if (!alive(tabId, e, gen)) return false;
+    if (!ok) {
+      patch(e, { status: "disconnected" });
       return false;
     }
     try {
@@ -471,7 +496,7 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
       if (same) schedulePreview(tabId, e, true);
       return true;
     } catch (err) {
-      if (alive(tabId, e, gen)) loadFailed(e, toPayload(err), "source");
+      if (alive(tabId, e, gen)) loadFailed(e, toPayload(err), "source", false);
       return false;
     }
   };
@@ -479,7 +504,8 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
   const loadMore = async (tabId: string): Promise<void> => {
     const e = entries.get(tabId);
     const m = e?.model();
-    if (!e || !m || !m.loaded || !m.more || m.loadingMore || m.status !== "ready" || !e.session) return;
+    // Uygulama sürerken yok: sonuç satırları ve sayfa aynı anda değişmesin (oturum da tektir).
+    if (!e || !m || !m.loaded || !m.more || m.loadingMore || m.applying || m.status !== "ready" || !e.session) return;
     if (m.loaded.rows.length >= ROW_CAP) {
       patch(e, { more: false, truncatedAtCap: true });
       return;
@@ -511,7 +537,7 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
   const setSelect = async (tabId: string, next: SelectState, opts?: { discard: boolean }): Promise<boolean> => {
     const e = entries.get(tabId);
     const m = e?.model();
-    if (!e || !m || m.applying || m.status === "gone") return false;
+    if (!e || !m || m.applying || m.loadingMore || m.status === "gone") return false;
     if (editDirty(m.edit) && !opts?.discard) return false;
     patch(e, { select: { order: [...next.order], filter: next.filter } });
     await load(tabId, e);
@@ -566,7 +592,7 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
   const apply = async (tabId: string): Promise<void> => {
     const e = entries.get(tabId);
     const m = e?.model();
-    if (!e || !m || m.applying || !m.loaded) return;
+    if (!e || !m || m.applying || m.loadingMore || !m.loaded) return;
     // Kapı çağrı anında: sunucu kaydı (kilit/üretim) modelden katı olanla birleşir.
     const info = deps.serverInfo(m.serverId);
     const gate = gateOf(m, m.locked || (info?.locked ?? false), m.production || (info?.production ?? false));
@@ -600,10 +626,15 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
     if (!alive(tabId, e, gen)) return;
     e.applyId = null;
     if (out.outcome === "applied") {
-      const issues = resultIssues(l, cs.origin, out.results);
+      // GÜNCEL satırlar üzerine işlenir: uygulama sırasında gelen sayfa satırları (yalnızca sona ekleme; indeksler
+      // kaymaz, `origin.rowIndex` geçerli) kaybolmaz. Not: INSERT'ler sona eklendiğinden satır sayısı `ROW_CAP`'i
+      // bilerek aşabilir (kullanıcının yazdığı satırlar atılmaz); sınırda `more` zaten kapalıdır.
+      const cur = e.model();
+      const base = cur.loaded ?? l;
+      const issues = resultIssues(base, cs.origin, out.results);
       const note = tdata.status.applied(out.statements);
-      replaceLoaded(e, applyResults(l, cs.origin, out.results), {
-        applying: false, status: "ready", more: m.more, truncatedAtCap: m.truncatedAtCap,
+      replaceLoaded(e, applyResults(base, cs.origin, out.results), {
+        applying: false, status: "ready", more: cur.more, truncatedAtCap: cur.truncatedAtCap,
         postApplyNote: issues.length > 0 ? `${note} ${tdata.status.refreshHint}` : note,
       });
       return;
@@ -659,8 +690,10 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
     for (const e of entries.values()) {
       const m = e.model();
       if (m.serverId !== serverId) continue;
-      if (m.serverName === info.name && m.locked === info.locked && m.production === info.production) continue;
-      patch(e, { serverName: info.name, locked: info.locked, production: info.production, confirm: { checked: false } });
+      // Kaynağın kilidi (yükleme anı) kayıttan bağımsız alt sınırdır.
+      const locked = info.locked || (m.source?.locked ?? false);
+      if (m.serverName === info.name && m.locked === locked && m.production === info.production) continue;
+      patch(e, { serverName: info.name, locked, production: info.production, confirm: { checked: false } });
     }
   };
 

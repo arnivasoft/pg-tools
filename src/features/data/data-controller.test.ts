@@ -653,4 +653,175 @@ describe("data-controller", () => {
     for (const v of Object.values(MARK)) expect(args).not.toContain(v);
     for (const s of spies) expect(s).not.toHaveBeenCalled();
   });
+
+  describe("yaşam döngüsü yarışları (inceleme düzeltmeleri)", () => {
+    /** 1000 satır yükler, imleçte daha fazlası var. */
+    const withMore = async () => {
+      const x = setup();
+      x.api.qtRun.mockImplementation(async (_s, _q, _sc, _l, _c, onEvent) => {
+        onEvent(started());
+        onEvent(rowsEv(rows(0, 1000), true));
+        return null;
+      });
+      await x.open();
+      return x;
+    };
+
+    it("uçuştaki apply sırasında oturumlar kapanırsa sonuç belirsiz: yeniden bağlanınca kapı unknown, ikinci dataApply yok; reload(discard) temizler", async () => {
+      const { api, ctl, open, fire, m } = setup();
+      await open();
+      ctl.edit("g1", (l, e) => addRow(l, e));
+      ctl.edit("g1", (l, e) => newRowSetCell(l, e, 1, "name", T("ins")));
+      await fire();
+      const d = deferred<DataOutcome>();
+      api.dataApply.mockReturnValueOnce(d.promise);
+      const p = ctl.apply("g1");
+      await flush();
+      ctl.serverSessionsClosed("S1");
+      expect(m().outcomeUnknown).toBe(true);
+      expect(m().outcome!.kind).toBe("unknown");
+      expect(m().view).toBeNull();
+      d.resolve({ outcome: "applied", statements: 1, elapsedMs: 1, results: [] });
+      await p;
+      expect(await ctl.reconnect("g1")).toBe(true);
+      await fire();
+      expect(m().status).toBe("ready");
+      expect(ctl.isDirty("g1")).toBe(true);
+      expect(m().gate).toEqual({ kind: "blocked", reason: "unknown" });
+      await ctl.apply("g1");
+      expect(api.dataApply).toHaveBeenCalledTimes(1);
+      expect(await ctl.reload("g1", { discard: true })).toBe(true);
+      expect(m().outcomeUnknown).toBe(false);
+      expect(m().gate).toEqual({ kind: "blocked", reason: "empty" });
+    });
+
+    it("apply sırasında eklenen satırlar korunur; apply sırasında loadMore, loadMore sırasında apply reddedilir", async () => {
+      const x = await withMore();
+      x.ctl.edit("g1", (l, e) => setCell(l, e, 0, "name", T("new")));
+      await x.fire();
+      // loadMore uçuşta → apply yok.
+      const more = deferred<null>();
+      let push: ((ev: QueryEvent) => void) | null = null;
+      x.api.qtMore.mockImplementationOnce(async (_s, _i, onEvent) => {
+        push = onEvent;
+        return more.promise;
+      });
+      const lm = x.ctl.loadMore("g1");
+      await flush();
+      expect(x.m().loadingMore).toBe(true);
+      expect(x.m().gate).toEqual({ kind: "blocked", reason: "loading" });
+      await x.ctl.apply("g1");
+      expect(x.api.dataApply).not.toHaveBeenCalled();
+      push!(rowsEv(rows(1000, 500), true));
+      more.resolve(null);
+      await lm;
+      expect(x.m().loaded!.rows).toHaveLength(1500);
+
+      // apply uçuşta → loadMore yok; uçuşta gelen satırlar (sona ekleme) sonuçla birlikte kalır.
+      const d = deferred<DataOutcome>();
+      x.api.dataApply.mockReturnValueOnce(d.promise);
+      const p = x.ctl.apply("g1");
+      await flush();
+      expect(x.m().applying).toBe(true);
+      const calls = x.api.qtMore.mock.calls.length;
+      await x.ctl.loadMore("g1");
+      expect(x.api.qtMore).toHaveBeenCalledTimes(calls);
+      // Gecikmiş sayfa olayı (aynı imleçten) uygulama sırasında gelir.
+      push!(rowsEv(rows(1500, 200), false));
+      d.resolve({ outcome: "applied", statements: 1, elapsedMs: 1, results: [{ index: 0, returned: ["K0", "new", null, "V0b"] }] });
+      await p;
+      expect(x.m().loaded!.rows).toHaveLength(1700);
+      expect(x.m().loaded!.rows[0]).toEqual(["K0", "new", null, "V0b"]);
+      expect(x.m().loaded!.rows[1699][0]).toBe(`${MARK.key}1699`);
+      expect(x.m().more).toBe(false);
+    });
+
+    it("setSelect/reload başarısız (Invalid değil): eski satırlar yeni sorgunun sonucu gibi gösterilmez, düzenleme sıfırlanır; bağlantı kaybında select geri döner", async () => {
+      const { api, ctl, open, m } = setup();
+      await open();
+      ctl.edit("g1", (l, e) => setCell(l, e, 0, "name", T("x")));
+      api.qtRun.mockImplementationOnce(async (_s, _q, _sc, _l, _c, onEvent) => {
+        onEvent({ type: "failed", stmtIndex: 0, error: { code: "query", message: "statement timeout", detail: null, hint: null }, position: null, charOffset: 0, notices: [] });
+        return null;
+      });
+      expect(await ctl.setSelect("g1", { order: [], filter: "slow()" }, { discard: true })).toBe(true);
+      expect(m().status).toBe("error");
+      expect(m().loadError).toBe("statement timeout");
+      expect(m().loaded).toBeNull();
+      expect(ctl.isDirty("g1")).toBe(false);
+
+      // Komut hatası (olay değil) da aynı.
+      const b = setup();
+      await b.open();
+      b.api.dataSelect.mockRejectedValueOnce(ipcErr("query", "select failed"));
+      await b.ctl.setSelect("g1", { order: [], filter: "a = 1" });
+      expect(b.m().loaded).toBeNull();
+      expect(b.m().status).toBe("error");
+      expect(b.m().loadError).toBe("select failed");
+
+      // Bağlantı kaybı: satırlar/düzenlemeler korunur, select satırları üreten seçime döner.
+      const c = setup();
+      await c.open();
+      c.ctl.edit("g1", (l, e) => setCell(l, e, 0, "name", T("x")));
+      c.api.dataSelect.mockRejectedValueOnce(ipcErr("connection_lost"));
+      await c.ctl.setSelect("g1", { order: [], filter: "a = 1" }, { discard: true });
+      expect(c.m().status).toBe("disconnected");
+      expect(c.m().select).toEqual({ order: [], filter: "" });
+      expect(c.m().loaded!.rows).toHaveLength(5);
+      expect(c.ctl.isDirty("g1")).toBe(true);
+    });
+
+    it("loadMore sürerken setSelect/reload/reloadNow reddedilir (oturum meşgul)", async () => {
+      const x = await withMore();
+      const more = deferred<null>();
+      x.api.qtMore.mockReturnValueOnce(more.promise);
+      const lm = x.ctl.loadMore("g1");
+      await flush();
+      const loads = x.api.dataLoad.mock.calls.length;
+      expect(await x.ctl.setSelect("g1", { order: [], filter: "a" })).toBe(false);
+      expect(await x.ctl.reload("g1", { discard: true })).toBe(false);
+      expect(x.ctl.reloadNow("g1")).toBe(false);
+      expect(x.api.dataLoad).toHaveBeenCalledTimes(loads);
+      more.resolve(null);
+      await lm;
+      expect(await x.ctl.reload("g1")).toBe(true);
+    });
+
+    it("önizlemeden sonra, uygulamadan önce düzenleme → dataApply çağrılmaz", async () => {
+      const { api, ctl, open, fire, m } = setup();
+      await open();
+      ctl.edit("g1", (l, e) => setCell(l, e, 0, "name", T("a")));
+      await fire();
+      expect(m().gate).toEqual({ kind: "ready" });
+      ctl.edit("g1", (l, e) => setCell(l, e, 0, "name", T("b")));
+      await ctl.apply("g1");
+      expect(api.dataApply).not.toHaveBeenCalled();
+      expect(m().gate).toEqual({ kind: "blocked", reason: "pending" });
+    });
+
+    it("serverChanged kilidi kaynağın kilidinin altına indirmez; reconnect bağlanma ile yükleme arasında kapanışı denetler", async () => {
+      const a = setup();
+      a.api.dataLoad.mockResolvedValue(source({ locked: true }));
+      await a.open();
+      expect(a.m().locked).toBe(true);
+      a.setServer({ name: "renamed" });
+      a.ctl.serverChanged("S1");
+      expect(a.m().serverName).toBe("renamed");
+      expect(a.m().locked).toBe(true);
+
+      const b = setup();
+      await b.open();
+      b.ctl.edit("g1", (l, e) => setCell(l, e, 0, "name", T("x")));
+      b.ctl.serverSessionsClosed("S1");
+      const c = deferred<boolean>();
+      b.api.connect.mockReturnValueOnce(c.promise);
+      const loads = b.api.dataLoad.mock.calls.length;
+      const r = b.ctl.reconnect("g1");
+      await flush();
+      b.ctl.close("g1");
+      c.resolve(true);
+      expect(await r).toBe(false);
+      expect(b.api.dataLoad).toHaveBeenCalledTimes(loads);
+    });
+  });
 });
