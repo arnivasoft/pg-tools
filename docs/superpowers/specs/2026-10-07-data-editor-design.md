@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 6: Veri Düzenleyici (View/Edit Data) Tasarımı
 
 - **Tarih:** 2026-10-07
-- **Durum:** Plan 16 arka ucu uygulandı; Plan 17 ön yüzü kalan
+- **Durum:** Plan 16 arka ucu uygulandı; Plan 17 ön yüzü yazıldı (`docs/superpowers/plans/2026-10-07-data-editor-p17-on-yuz.md`), uygulanmadı
 - **Kapsam:** Object Explorer'dan bir tablonun/görünümün verisini ızgarada açma; hücre düzenleme, satır ekleme ve silme; değişikliklerin **birincil anahtara (ya da benzersiz indekse)** göre `INSERT`/`UPDATE`/`DELETE` ifadelerine çevrilip **kaydetmeden önce gösterilmesi**; korumalı, tek transaction'lı, bayat-veri denetimli uygulama.
 - **Önceki alt projeler:** Object Explorer (Plan 1–4), Query Tool (5–6), Editör zekâsı (7), Dashboard (8–9), Nesne diyalogları (10–15) — hepsi `main`'de. Query Tool spec'i §1.4: "Sonuç ızgarasında hücre düzenleme (veri düzenleyici ayrı alt proje)".
 - **Teslim planları:** Plan 16 (arka uç: kaynak yükleme, SELECT üretici, değişiklik planlayıcı, kapılı uygulama, Tauri komutları) → Plan 17 (ön yüz: veri sekmesi, düzenlenebilir ızgara, değişiklik paneli, Explorer eylemi).
