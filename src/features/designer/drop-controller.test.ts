@@ -454,4 +454,18 @@ describe("drop-controller Plan 15: FORCE ve sunucu kapsamı", () => {
     s.drop.setForce(true);
     expect(s.drop.state()!.force).toBe(false);
   });
+
+  it("role: Failed 2BP01 şeridi CASCADE önermez (REASSIGN/DROP OWNED)", async () => {
+    const s = setup();
+    await ready(s, ROLE_INPUT);
+    s.drop.setConfirm({ checked: true });
+    s.api.ddlApply.mockResolvedValueOnce({
+      outcome: "failed", failedIndex: 0, committed: 0, sqlstate: "2BP01", position: null,
+      error: err("query", "role u cannot be dropped because some objects depend on it", "owner of table app.t"),
+    });
+    await s.drop.apply();
+    await flush();
+    expect(s.api.ddlApply).toHaveBeenCalledOnce();
+    expect(s.drop.state()!.status).toEqual({ kind: "dependents", text: tdes.drop.dependentsNoCascade, detail: "owner of table app.t" });
+  });
 });

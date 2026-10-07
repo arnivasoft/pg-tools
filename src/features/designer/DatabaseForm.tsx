@@ -214,54 +214,52 @@ export default function DatabaseForm(props: FormProps) {
                   </Show>
                 )}
               </FieldRow>
-              <Show when={true}>
-                <FieldRow label={tdb.createOptions.lcCollate} path="lcCollate" issues={props.issues}>
-                  {(a) => (
-                    <>
-                      <input
-                        id={a.id}
-                        class={inputClass + invalidClass(a.invalid)}
-                        list={locked() ? undefined : lcCollateList}
-                        autocomplete="off"
-                        spellcheck={false}
-                        readOnly={locked()}
-                        placeholder={locked() ? tdb.createOptions.unset : undefined}
-                        aria-describedby={a.describedBy}
-                        aria-invalid={a.invalid}
-                        disabled={off()}
-                        value={d().lcCollate ?? ""}
-                        onInput={(ev) => patch({ lcCollate: normalizeEmpty(ev.currentTarget.value) })}
-                      />
-                      <datalist id={lcCollateList}>
-                        <For each={libcLocales() ?? []}>{(i) => <option value={i.value} />}</For>
-                      </datalist>
-                    </>
-                  )}
-                </FieldRow>
-                <FieldRow label={tdb.createOptions.lcCtype} path="lcCtype" issues={props.issues}>
-                  {(a) => (
-                    <>
-                      <input
-                        id={a.id}
-                        class={inputClass + invalidClass(a.invalid)}
-                        list={locked() ? undefined : lcCtypeList}
-                        autocomplete="off"
-                        spellcheck={false}
-                        readOnly={locked()}
-                        placeholder={locked() ? tdb.createOptions.unset : undefined}
-                        aria-describedby={a.describedBy}
-                        aria-invalid={a.invalid}
-                        disabled={off()}
-                        value={d().lcCtype ?? ""}
-                        onInput={(ev) => patch({ lcCtype: normalizeEmpty(ev.currentTarget.value) })}
-                      />
-                      <datalist id={lcCtypeList}>
-                        <For each={libcLocales() ?? []}>{(i) => <option value={i.value} />}</For>
-                      </datalist>
-                    </>
-                  )}
-                </FieldRow>
-              </Show>
+              <FieldRow label={tdb.createOptions.lcCollate} path="lcCollate" issues={props.issues}>
+                {(a) => (
+                  <>
+                    <input
+                      id={a.id}
+                      class={inputClass + invalidClass(a.invalid)}
+                      list={locked() ? undefined : lcCollateList}
+                      autocomplete="off"
+                      spellcheck={false}
+                      readOnly={locked()}
+                      placeholder={locked() ? tdb.createOptions.unset : undefined}
+                      aria-describedby={a.describedBy}
+                      aria-invalid={a.invalid}
+                      disabled={off()}
+                      value={d().lcCollate ?? ""}
+                      onInput={(ev) => patch({ lcCollate: normalizeEmpty(ev.currentTarget.value) })}
+                    />
+                    <datalist id={lcCollateList}>
+                      <For each={libcLocales() ?? []}>{(i) => <option value={i.value} />}</For>
+                    </datalist>
+                  </>
+                )}
+              </FieldRow>
+              <FieldRow label={tdb.createOptions.lcCtype} path="lcCtype" issues={props.issues}>
+                {(a) => (
+                  <>
+                    <input
+                      id={a.id}
+                      class={inputClass + invalidClass(a.invalid)}
+                      list={locked() ? undefined : lcCtypeList}
+                      autocomplete="off"
+                      spellcheck={false}
+                      readOnly={locked()}
+                      placeholder={locked() ? tdb.createOptions.unset : undefined}
+                      aria-describedby={a.describedBy}
+                      aria-invalid={a.invalid}
+                      disabled={off()}
+                      value={d().lcCtype ?? ""}
+                      onInput={(ev) => patch({ lcCtype: normalizeEmpty(ev.currentTarget.value) })}
+                    />
+                    <datalist id={lcCtypeList}>
+                      <For each={libcLocales() ?? []}>{(i) => <option value={i.value} />}</For>
+                    </datalist>
+                  </>
+                )}
+              </FieldRow>
               <Show when={locked() ? d().localeProvider === "icu" || d().localeProvider === "builtin" || d().providerLocale !== null : lf().providerLocale !== null || d().providerLocale !== null || issuesFor(props.issues, "providerLocale").length > 0}>
                 <FieldRow
                   label={(locked() ? d().localeProvider : lf().providerLocale) === "builtin" ? tdb.createOptions.builtinLocale : tdb.createOptions.icuLocale}

@@ -897,6 +897,45 @@ describe("designer-controller lookup önbelleği", () => {
     expect(await s.ctl.lookup("yok", { kind: "roles" })).toEqual([]);
     expect(s.api.ddlLookup).toHaveBeenCalledTimes(7);
   });
+
+  it("sunucu kapsamlı (rol) uygulama/kısmi create/silme sunucunun tüm veritabanlarının lookup önbelleğini düşürür", async () => {
+    const s = setup();
+    await s.ctl.openAlter({ tabId: "D42", serverId: "S1", databaseOid: 42, object: OBJ, refreshNodeId: "N" });
+    const lookupRoles = async () => {
+      await s.ctl.lookup("D42", { kind: "roles" });
+      return s.api.ddlLookup.mock.calls.length;
+    };
+    expect(await lookupRoles()).toBe(1);
+    expect(await lookupRoles()).toBe(1); // önbellekten
+    // rol create uygulandı
+    const id = await openRoleCreate(s);
+    s.api.ddlPreview.mockResolvedValue(view({ hash: "hc" }));
+    s.ctl.edit(id, (d) => {
+      if (d.kind === "role") d.name = "yeni_rol";
+    });
+    await settle();
+    s.api.ddlApply.mockResolvedValueOnce(applied(ROLE));
+    s.api.ddlLoad.mockResolvedValueOnce(role({ name: "yeni_rol" }));
+    await s.ctl.apply(id);
+    await flush();
+    expect(await lookupRoles()).toBe(2);
+    // rol silindi
+    expect(await lookupRoles()).toBe(2);
+    s.ctl.objectDropped("S1", null, ROLE);
+    expect(await lookupRoles()).toBe(3);
+    // kısmi rol create
+    const p = await openRoleCreate(s, "R2");
+    s.ctl.edit(p, (d) => {
+      if (d.kind === "role") d.name = "baska_rol";
+    });
+    await settle();
+    s.api.ddlApply.mockResolvedValueOnce({
+      outcome: "failed", failedIndex: 1, committed: 1, sqlstate: "42501", position: null, error: err("query", "denied"), created: ROLE,
+    });
+    await s.ctl.apply(p);
+    await flush();
+    expect(await lookupRoles()).toBe(4);
+  });
 });
 
 describe("designer-controller yerel engel (sequence sayıları)", () => {
@@ -1479,9 +1518,14 @@ describe("designer-controller Plan 15: uygulama sonrası akışlar", () => {
     const id = await openRoleCreate(s);
     s.api.ddlPreview.mockResolvedValue(view({ hash: "hc" }));
     s.ctl.edit(id, (d) => {
-      if (d.kind === "role") d.name = "yeni_rol";
+      if (d.kind === "role") {
+        d.name = "yeni_rol";
+        d.password = "set";
+      }
     });
     await settle();
+    s.ctl.setSecret(id, SECRET);
+    expect(s.ctl.secretReady(id)).toBe(true);
     s.api.ddlApply.mockResolvedValueOnce({
       outcome: "failed", failedIndex: 1, committed: 1, sqlstate: "42501", position: null, error: err("query", "denied"), created: ROLE,
     });
@@ -1489,6 +1533,9 @@ describe("designer-controller Plan 15: uygulama sonrası akışlar", () => {
     await flush();
     expect(s.refreshNode).toHaveBeenCalledExactlyOnceWith("roles");
     expect(s.ctl.model(id)).toMatchObject({ mode: "create", partialCreated: ROLE });
+    // nesne oluştu: parola artık gönderilmez, silinir; bildirim "kısmi" metnini taşır
+    expect(s.ctl.secretReady(id)).toBe(false);
+    expect(s.notify).toHaveBeenCalledExactlyOnceWith(tdes.gate.partial, "error");
     expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "partial" });
     // düzenleme + taze önizleme sonrası bile kapı kapalı; apply gönderilmez
     s.ctl.edit(id, (d) => {

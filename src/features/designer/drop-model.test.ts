@@ -56,6 +56,13 @@ describe("dropStatusText", () => {
     expect(dropStatusText(null, bare)?.detail).toBe("cannot drop");
   });
 
+  it("Failed 2BP01, CASCADE sunulmayan tür (rol/veritabanı): CASCADE önermeyen metin", () => {
+    const out = failed({ sqlstate: "2BP01", error: err("query", "cannot drop role u", "owner of table app.t") });
+    expect(dropStatusText(null, out, false)).toEqual({ kind: "dependents", text: tdes.drop.dependentsNoCascade, detail: "owner of table app.t" });
+    expect(tdes.drop.dependentsNoCascade).not.toContain("CASCADE");
+    expect(dropStatusText(null, out, true)!.text).toBe(tdes.drop.dependents);
+  });
+
   it("metin üzerinden eşleşme yok: 'depends on' içeren başka sqlstate genel hata", () => {
     const out = failed({ sqlstate: "42501", error: err("query", "depends on", "other objects depend on it") });
     expect(dropStatusText(null, out)?.kind).toBe("other");

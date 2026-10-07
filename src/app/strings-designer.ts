@@ -145,6 +145,8 @@ export const tdes = {
     force: "Bağlı oturumları sonlandır (WITH (FORCE), PG 13+)",
     forceHint: "Query Tool sekmeleri dahil tüm oturumlar kesilir.",
     dependents: "Bağımlı nesneler var; CASCADE ile silin ya da bağımlıları kaldırın.",
+    /** CASCADE sunulmayan türler (rol, veritabanı) için 2BP01. */
+    dependentsNoCascade: "Bağımlı nesneler var; önce bağımlıları kaldırın (rol için REASSIGN OWNED / DROP OWNED).",
     dependentsDetail: "Bağımlı nesneler",
     stale: "Nesne değişti ya da artık yok; Gezgini yenileyin.",
     needsConfirm: "Silmek için 'Etkisini anladım'ı işaretleyin",

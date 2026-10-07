@@ -53,11 +53,11 @@ describe("role-model", () => {
 
   it("addMembership: boş/yinelenen/kendisi eklenmez; inheritOption/setOption null; removeMembership/toggleAdmin değişmez", () => {
     const d = role({ memberOf: [mem("a", { admin: true, inheritOption: true, setOption: false })] });
-    expect(addMembership(d, "")).toBe(d);
-    expect(addMembership(d, "   ")).toBe(d);
-    expect(addMembership(d, "a")).toBe(d);
-    expect(addMembership(d, "app")).toBe(d);
-    const n = addMembership(d, "b");
+    expect(addMembership(d, "", null)).toBe(d);
+    expect(addMembership(d, "   ", null)).toBe(d);
+    expect(addMembership(d, "a", null)).toBe(d);
+    expect(addMembership(d, "app", null)).toBe(d);
+    const n = addMembership(d, "b", null);
     expect(n.memberOf).toEqual([mem("a", { admin: true, inheritOption: true, setOption: false }), mem("b")]);
     expect(d.memberOf).toHaveLength(1);
     expect(removeMembership(n, 0).memberOf).toEqual([mem("b")]);
@@ -88,7 +88,7 @@ describe("role-model", () => {
     expect(restoreMembership(d, o, "a")).toBe(d); // zaten var
     expect(restoreMembership(d, o, "zzz")).toBe(d); // özgünde yok
     // yeni eklenmiş üyelik varken de özgün sıradaki yerine
-    let e = addMembership(removeMembership(o, 0), "z");
+    let e = addMembership(removeMembership(o, 0), "z", null);
     e = restoreMembership(e, o, "a");
     expect(e.memberOf.map((m) => m.role)).toEqual(["a", "b", "c", "z"]);
   });
@@ -97,7 +97,29 @@ describe("role-model", () => {
     const items = [
       { value: "a", detail: null }, { value: "app", detail: null }, { value: "b", detail: null }, { value: "pg_read_all_data", detail: "önceden tanımlı" },
     ];
-    expect(availableRoles(items, role({ memberOf: [mem("a")] })).map((i) => i.value)).toEqual(["b", "pg_read_all_data"]);
+    expect(availableRoles(items, role({ memberOf: [mem("a")] }), null).map((i) => i.value)).toEqual(["b", "pg_read_all_data"]);
+  });
+
+  it("availableRoles/addMembership: yeniden adlandırılan rolün özgün adı da hariç (kendine üyelik)", () => {
+    const items = [{ value: "eski", detail: null }, { value: "yeni", detail: null }, { value: "b", detail: null }];
+    const d = role({ name: "yeni" });
+    expect(availableRoles(items, d, "eski").map((i) => i.value)).toEqual(["b"]);
+    expect(addMembership(d, "eski", "eski")).toBe(d);
+    expect(addMembership(d, "eski", null).memberOf.map((m) => m.role)).toEqual(["eski"]);
+    expect(addMembership(d, "b", "eski").memberOf.map((m) => m.role)).toEqual(["b"]);
+  });
+
+  it("validUntilFromParts: yaz saati boşluğundaki (var olmayan) yerel saat → null", () => {
+    vi.stubEnv("TZ", "Europe/Berlin");
+    try {
+      // 2026-03-29 02:00–03:00 Berlin'de yok (CET → CEST)
+      expect(new Date(2026, 2, 29, 2, 30).getHours()).not.toBe(2); // dilim gerçekten uygulandı
+      expect(validUntilFromParts({ never: false, date: "2026-03-29", time: "02:30" })).toBeNull();
+      expect(validUntilFromParts({ never: false, date: "2026-03-29", time: "03:30" })).toBe("2026-03-29T01:30:00Z");
+      expect(validUntilFromParts({ never: false, date: "2026-03-29", time: "01:30" })).toBe("2026-03-29T00:30:00Z");
+    } finally {
+      vi.stubEnv("TZ", "UTC");
+    }
   });
 
   it("validUntil: 'infinity' ↔ never; '2030-01-01T10:00:00Z' ↔ parçalar (yerel saat dönüşümü test saat dilimi sabit UTC); geçersiz → null; validUntilClearValue", () => {
@@ -140,6 +162,8 @@ describe("role-model", () => {
     const bad = role({ login: false, connectionLimit: 0, validUntil: "2020-01-01T00:00:00Z", password: "set" });
     expect(selfLockoutWarnings("app", o, bad, now)).toEqual(["nologin", "connectionLimitZero", "validUntilPast", "ownPassword"]);
     expect(selfLockoutWarnings("app", o, role({ password: "clear" }), now)).toEqual(["ownPassword"]);
+    // süper kullanıcı bağlantı sınırından etkilenmez
+    expect(selfLockoutWarnings("app", o, role({ connectionLimit: 0, superuser: true }), now)).toEqual([]);
     expect(selfLockoutWarnings("app", o, role({ validUntil: "2030-01-01T00:00:00Z" }), now)).toEqual([]);
     expect(selfLockoutWarnings("app", o, role({ validUntil: "infinity" }), now)).toEqual([]);
     // yüklenen durum zaten aynıysa uyarı yok (değişmeyen)

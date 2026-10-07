@@ -65,19 +65,13 @@ export default function SqlPreview(props: { model: DesignerModel; general: strin
   let host!: HTMLDivElement;
   let editor: EditorView | undefined;
   const decos = new Compartment();
-  // Düzenleyicide seçili metnin Ctrl+C / Ctrl+X ile kopyalanması da gizlenmiş planda engellenir.
-  const blockCopy = EditorView.domEventHandlers({
-    copy: (ev) => {
-      if (canCopy()) return false;
-      ev.preventDefault();
-      return true;
-    },
-    cut: (ev) => {
-      if (canCopy()) return false;
-      ev.preventDefault();
-      return true;
-    },
-  });
+  // Düzenleyicide seçili metnin Ctrl+C / Ctrl+X ile kopyalanması ya da sürüklenmesi de gizlenmiş planda engellenir.
+  const block = (ev: Event) => {
+    if (canCopy()) return false;
+    ev.preventDefault();
+    return true;
+  };
+  const blockCopy = EditorView.domEventHandlers({ copy: block, cut: block, dragstart: block });
   onMount(() => {
     editor = createReadOnlyEditor(host, "", [failedTheme, decos.of([]), blockCopy]);
   });

@@ -46,12 +46,16 @@ export interface DropStatus { kind: DropStatusKind; text: string; detail: string
 
 type Failed = Extract<ApplyOutcome, { outcome: "failed" }>;
 
-/** `ddl_*` reddi (`error`) ya da `Ok(Failed)` (`outcome`) → diyalog şeridi. İkisi de yoksa null. */
-export function dropStatusText(error: ErrorPayload | null, outcome: Failed | null = null): DropStatus | null {
+/**
+ * `ddl_*` reddi (`error`) ya da `Ok(Failed)` (`outcome`) → diyalog şeridi. İkisi de yoksa null. `cascadable` =
+ * `dropOptionsFor(kind).cascade`: false ise (rol, veritabanı) bağımlı nesne metni CASCADE önermez.
+ */
+export function dropStatusText(error: ErrorPayload | null, outcome: Failed | null = null, cascadable = true): DropStatus | null {
   if (outcome) {
     if (outcome.sqlstate === DEPENDENT_OBJECTS_SQLSTATE) {
       // PG `detail` bağımlı nesneleri satır satır listeler; yoksa PG iletisi gösterilir.
-      return { kind: "dependents", text: tdes.drop.dependents, detail: outcome.error.detail ?? errorText(outcome.error) };
+      const text = cascadable ? tdes.drop.dependents : tdes.drop.dependentsNoCascade;
+      return { kind: "dependents", text, detail: outcome.error.detail ?? errorText(outcome.error) };
     }
     const partial = outcome.committed > 0 ? tdes.apply.committed(outcome.committed) : null;
     return { kind: partial ? "stale" : "other", text: failedText(outcome), detail: partial };

@@ -267,7 +267,7 @@ export function createDropController(deps: DropControllerDeps) {
     }
     if (g !== gen) return;
     applyId = null;
-    const st = dropStatusText(null, out)!;
+    const st = dropStatusText(null, out, dropOptionsFor(input.object.kind).cascade)!;
     // Kısmi silme (committed > 0): nesne değişmiş olabilir; Gezgin yenilenir.
     if (st.kind === "stale") refreshTree(input);
     patch({ phase: st.kind === "stale" ? "error" : "ready", status: st, view: null, viewFor: -1, confirm: emptyConfirm(), canReload: false });

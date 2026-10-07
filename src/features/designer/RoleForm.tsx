@@ -50,8 +50,8 @@ function PasswordInputs(props: FormProps & { mode: "create" | "alter"; intent: P
     setA("");
     setB("");
   };
-  // Tek bir girdi olayı eşleşen iki alandan birini değiştirince eşleşme bozulur; bu yüzden `ok` dalı yalnızca eşleşme
-  // durumu false→true geçtiğinde (yeni değerle) çalışır. Denetleyici aynı değeri yine de yok sayar (dürtme yok).
+  // `ok` dalı eşleşme veren her girdide çalışır (değer denetleyiciye yeniden verilir); denetleyici değişmeyen değeri
+  // yok sayar (dürtme yok). Eşleşme bozulunca, daha önce verilmişse parola silinir.
   const sync = () => {
     if (props.intent !== "set") return;
     const ok = passwordIssue(a(), b()) === null;
@@ -249,7 +249,9 @@ function ValidUntilField(props: { d: RoleDef; original: RoleDef | null; issues: 
               setInvalid(false);
               write(validUntilClearValue(props.original));
             } else {
+              // Görünen tarih (yüklü değerden kalan) ile taslak uyuşsun: tarih varsa hemen yazılır.
               setEditing(true);
+              if (date() !== "") commit();
             }
           }}
         />
@@ -327,13 +329,14 @@ function Memberships(props: FormProps & { d: RoleDef; original: RoleDef | null; 
     () => props.tabId,
     (tabId) => props.designer.lookup(tabId, { kind: "grantable_roles" }).catch(() => []),
   );
-  const choices = () => availableRoles(roles() ?? [], props.d);
+  const self = () => props.original?.name ?? null;
+  const choices = () => availableRoles(roles() ?? [], props.d, self());
   const removed = () => removedMemberships(props.original, props.d);
   const listErrors = () => [...exactIssues(props.issues, "memberOf"), ...orphanRowIssues(props.issues, "memberOf", props.d.memberOf.length)];
   const add = () => {
     const r = pick();
     if (r === "") return;
-    props.onChange(addMembership(props.d, r));
+    props.onChange(addMembership(props.d, r, self()));
     setPick("");
   };
   return (

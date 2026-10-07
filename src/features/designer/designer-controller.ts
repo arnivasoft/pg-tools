@@ -35,7 +35,7 @@ import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Api } from "../../ipc/commands";
 import { errorText, toPayload } from "../../ipc/errors";
 import {
-  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, localBlock, planHasRedacted, type ApplyGate, type ConfirmState,
+  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, isServerScoped, localBlock, planHasRedacted, type ApplyGate, type ConfirmState,
 } from "./designer-model";
 import { createDropController } from "./drop-controller";
 import { dropRequest, matchesObject } from "./drop-model";
@@ -510,7 +510,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     else notify(tdes.apply.applied(out.statements), "success");
     // Uyarılar sekmede kalıcı (yeniden yükleme `setBase` bunlara dokunmaz).
     patch(e, { postApplyWarnings: [...warnings] });
-    dropLookups(m.serverId, m.databaseOid);
+    // Sunucu kapsamlı nesne (rol/veritabanı) her veritabanının lookup'larını (ör. `roles`) etkiler.
+    dropLookups(m.serverId, isServerScoped(m.kind) ? undefined : m.databaseOid);
     refresh(e.refreshNodeId);
     if ((mode === "alter" || out.created) && m.draft) {
       try {
@@ -543,10 +544,14 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     if (out.created) {
       // Kısmi uygulama: nesne oluştu/yeniden adlandırıldı (ör. CREATE DATABASE kalıcı, sonraki SET/COMMENT başarısız).
       refresh(e.refreshNodeId);
+      const m = e.model();
+      dropLookups(m.serverId, isServerScoped(m.kind) ? undefined : m.databaseOid);
       const created = { ...out.created };
-      if (e.model().mode === "create") {
-        // Aynı create yeniden gönderilmez (42P04/42710): kapı `partial`, arayüz "Düzenle olarak aç" sunar.
-        notify(tdes.apply.committed(out.committed), "error");
+      if (m.mode === "create") {
+        // Aynı create yeniden gönderilmez (42P04/42710): kapı `partial`, arayüz "Düzenle olarak aç" sunar. Nesne
+        // oluştuğu için parola bir daha gönderilmez: silinir.
+        forgetSecret(m.id);
+        notify(tdes.gate.partial, "error");
         patch(e, { partialCreated: created });
         return;
       }
@@ -684,7 +689,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
 
   /** Silme diyaloğu başarıyla sildi: aynı nesnenin alter sekmeleri `gone`; Database ise o veritabanının sekmeleri de. */
   const objectDropped = (serverId: string, databaseOid: number | null, object: ObjectRef) => {
-    dropLookups(serverId, databaseOid);
+    dropLookups(serverId, isServerScoped(object.kind) ? undefined : databaseOid);
     for (const e of entries.values()) {
       const m = e.model();
       if (!matchesObject(m, { serverId, databaseOid, object }) || m.status === "gone") continue;

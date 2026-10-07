@@ -40,9 +40,12 @@ export function passwordIssue(a: string, b: string): "empty" | "mismatch" | null
 
 // ---- üyelikler (rol adıyla)
 
-/** Boş/yinelenen/rolün kendisi eklenmez (aynı nesne döner); admin false, PG 16 seçenekleri null (üretici yazmaz). */
-export function addMembership(d: RoleDef, role: string): RoleDef {
-  if (role.trim() === "" || role === d.name || d.memberOf.some((m) => m.role === role)) return d;
+/**
+ * Boş/yinelenen/rolün kendisi (taslak adı ya da yeniden adlandırmada özgün ad `self`) eklenmez (aynı nesne döner);
+ * admin false, PG 16 seçenekleri null (üretici yazmaz).
+ */
+export function addMembership(d: RoleDef, role: string, self: string | null): RoleDef {
+  if (role.trim() === "" || role === d.name || role === self || d.memberOf.some((m) => m.role === role)) return d;
   return { ...d, memberOf: [...d.memberOf, { role, admin: false, inheritOption: null, setOption: null }] };
 }
 
@@ -83,10 +86,10 @@ export function restoreMembership(d: RoleDef, original: RoleDef, role: string): 
   return { ...d, memberOf: next };
 }
 
-/** Seçilebilir roller: lookup (grantable_roles) − mevcut üyelikler − rolün kendisi. */
-export function availableRoles(items: readonly LookupItem[], d: RoleDef): LookupItem[] {
+/** Seçilebilir roller: lookup (grantable_roles) − mevcut üyelikler − rolün kendisi (taslak adı ve özgün ad `self`). */
+export function availableRoles(items: readonly LookupItem[], d: RoleDef, self: string | null): LookupItem[] {
   const taken = new Set(d.memberOf.map((m) => m.role));
-  return items.filter((i) => i.value !== d.name && !taken.has(i.value));
+  return items.filter((i) => i.value !== d.name && i.value !== self && !taken.has(i.value));
 }
 
 // ---- VALID UNTIL
@@ -119,7 +122,7 @@ export function validUntilParts(v: string | null): { never: boolean; date: strin
 
 /**
  * Girdi parçaları → saklanacak değer: `never` → `"infinity"`; yerel tarih (+ saat, boşsa 00:00) → UTC `YYYY-MM-DDTHH:MM:SSZ`.
- * Boş/geçersiz tarih ya da saat (ör. 31 Şubat, 25:00) → null.
+ * Boş/geçersiz tarih ya da saat (ör. 31 Şubat, 25:00) ya da yerel saatte var olmayan an (yaz saati boşluğu) → null.
  */
 export function validUntilFromParts(p: { never: boolean; date: string; time: string }): string | null {
   if (p.never) return "infinity";
@@ -131,6 +134,7 @@ export function validUntilFromParts(p: { never: boolean; date: string; time: str
   if (h > 23 || mi > 59) return null;
   const d = new Date(y, mo - 1, da, h, mi, 0, 0);
   if (Number.isNaN(d.getTime()) || d.getFullYear() !== y || d.getMonth() !== mo - 1 || d.getDate() !== da) return null;
+  if (d.getHours() !== h || d.getMinutes() !== mi) return null;
   return d.toISOString().replace(/\.[0-9]{3}Z$/, "Z");
 }
 
@@ -151,7 +155,8 @@ export function selfLockoutWarnings(connectedUser: string | null, original: Role
   if (!original || connectedUser === null || connectedUser !== original.name) return [];
   const out: SelfLockout[] = [];
   if (original.login && !d.login) out.push("nologin");
-  if (d.connectionLimit === 0 && original.connectionLimit !== 0) out.push("connectionLimitZero");
+  // Süper kullanıcılar bağlantı sınırından etkilenmez.
+  if (d.connectionLimit === 0 && original.connectionLimit !== 0 && !d.superuser) out.push("connectionLimitZero");
   const t = validUntilTime(d.validUntil);
   if (d.validUntil !== original.validUntil && t !== null && t < now.getTime()) out.push("validUntilPast");
   if (d.password === "set" || d.password === "clear") out.push("ownPassword");
