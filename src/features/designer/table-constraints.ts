@@ -350,5 +350,9 @@ export function createSnapTracker(read: () => TableDef | null) {
       own = draft;
       seen = draft;
     },
+    /** Bu taslak formun son düzenlemesinin sonucu mu (değilse yükleme/yeniden yükleme ile değiştirilmiştir). */
+    isOwn(draft: TableDef | null): boolean {
+      return draft !== null && draft === own;
+    },
   };
 }

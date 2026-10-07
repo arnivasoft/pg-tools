@@ -120,4 +120,53 @@ describe("createTableFormState", () => {
       dispose();
     }
   });
+
+  it("M-1: bekleyen ad isteği kullanıcıyı yalnızca bir kez Genel'e çeker (kilitli sekmede istek beklerken yeniden çalışmalar çekmez)", async () => {
+    const s = await setup(T({ columns: [col("a", 1)] }));
+    const [st, dispose] = s.solid.createRoot((d) => [s.createTableFormState(s.props), d] as const);
+    s.setFocus({ field: "name", seq: 1 });
+    expect(st.section()).toBe("general");
+    st.setSection("columns");
+    // Dağıtıcıyı yeniden çalıştıran değişimler: yeniden yükleme (status + taslak) ve kendi düzenlemesi.
+    s.setStatus("loading");
+    s.setStatus("ready");
+    s.setDraft(T({ columns: [col("a", 1)] }));
+    st.editor.edit((d) => ({ ...d, comment: "c" }));
+    expect([st.section(), s.consumed]).toEqual(["columns", []]);
+    // Yeni bir ad isteği yine Genel'e geçer.
+    s.setFocus({ field: "name", seq: 2 });
+    expect(st.section()).toBe("general");
+    dispose();
+  });
+
+  it("M-2: vurgu ve 'satır yok' şeridi taslak dışarıdan değişince temizlenir; formun kendi düzenlemesi temizlemez", async () => {
+    const s = await setup(T({ columns: [col("a", 1)], constraints: [fk("x", 7)] }));
+    const [st, dispose] = s.solid.createRoot((d) => [s.createTableFormState(s.props), d] as const);
+    s.setFocus({ field: "constraint:99", seq: 1 });
+    expect(st.highlight()).toEqual({ section: "constraints", index: null, seq: 1 });
+    st.editor.edit((d) => ({ ...d, comment: "c" }));
+    st.editor.editSnap((d, snap) => s.removeConstraintSnap(d, 0, snap));
+    expect(st.highlight()).toEqual({ section: "constraints", index: null, seq: 1 });
+    s.setDraft(T({ columns: [col("a", 1)] })); // yeniden yükleme
+    expect(st.highlight()).toBeNull();
+    // Yükleme ile aynı anda gelen yeni istek yine uygulanır.
+    s.setStatus("loading");
+    s.setFocus({ field: "column:1", seq: 2 });
+    s.solid.batch(() => {
+      s.setDraft(T({ columns: [col("a", 1)] }));
+      s.setStatus("ready");
+    });
+    expect(st.highlight()).toEqual({ section: "columns", index: 0, seq: 2 });
+    dispose();
+  });
+
+  it("C-2: editor.edit kısıt sayısını değiştirirse (DEV) atar; taslak değişmez", async () => {
+    const s = await setup(T({ constraints: [fk("x", 1)] }));
+    const { SNAP_GUARD } = await import("./table-form-state");
+    const [st, dispose] = s.solid.createRoot((d) => [s.createTableFormState(s.props), d] as const);
+    const before = s.draft();
+    expect(() => st.editor.edit((d) => ({ ...d, constraints: [] }))).toThrow(SNAP_GUARD);
+    expect(s.draft()).toBe(before);
+    dispose();
+  });
 });

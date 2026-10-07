@@ -23,7 +23,13 @@ export const ttbl = {
     partitionBadge: "Bölüm (partition)",
     inheritsBadge: "Kalıtımlı (INHERITS)",
     structureLocked:
-      "Bu tablo bir bölüm ya da kalıtımlı tablodur: kolon ve kısıtlar üst tablodan yönetilir. Burada yalnızca ad, şema, sahip, tablespace ve yorum değiştirilebilir.",
+      "Bu tablo bir bölüm ya da kalıtımlı tablodur: kolon ve kısıtlar üst tablodan yönetilir. Burada ad, şema, sahip, kalıcılık, tablespace, doldurma oranı (fillfactor) ve yorum değiştirilebilir.",
+    partitionedPersistence: "Bölümlenmiş tablonun kendi depolaması yoktur: kalıcılık değiştirilemez.",
+    partitionedUnlogged: "PG 18+ bölümlenmiş tablo UNLOGGED olamaz (bölümler ayrı ayrı UNLOGGED yapılabilir).",
+    partitionedFillfactor: "Bölümlenmiş tabloda fillfactor belirtilemez.",
+    partitionedTablespaceAlter: "Bölümlenmiş tabloda tablespace yalnızca yeni bölümlerin varsayılanını ayarlar (PG 12+).",
+    partitionedTablespaceCreate:
+      "Bölümlenmiş tabloda tablespace yalnızca yeni bölümlerin varsayılanıdır (PG 12+); pg_default açıkça seçilemez, boş bırakın.",
   },
   partitioning: {
     strategy: "Bölümleme yöntemi",

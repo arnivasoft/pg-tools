@@ -1,15 +1,33 @@
 // Table formu (tembel parça; Genel/Kolonlar/Kısıtlar/Bölümleme bölümleri bu parçaya statik içe aktarılır): bölüm
-// sekmeleri (hata rozeti), odak dağıtıcı (createTableFormState) ve bölüm gövdeleri. Kolonlar/Kısıtlar gövdeleri Task 6–7.
+// sekmeleri (hata rozeti), odak dağıtıcı (createTableFormState) ve bölüm gövdeleri.
 //
 // Sekme çubuğu burada elle kurulur (WAI-ARIA tabs: ok tuşları/Home/End ile otomatik etkinleştirme, gezici tabindex):
 // `@kobalte/core/tabs`'ı bu parçadan doğrudan içe aktarmak paketleyicinin ortak kodu ana paketten ayrı, açılışta yüklenen
 // bir parçaya bölmesine yol açıyor; `src/ui/Tabs` ise etikete rozet koyamıyor ve ana pakette olduğu için büyütülemez.
-import { For, Match, Show, Switch, createUniqueId } from "solid-js";
+//
+// Bölüm paneli kalıbı: TÜM bölümler bağlı kalır, seçili olmayanlar `hidden` (kaydırma ve iç durum korunur; sekme
+// değişimi bileşen kurmaz). Her panelin kendi `<Suspense>`'i vardır: paneldeki lookup kaynakları DesignerView'ın form
+// `<Suspense>`'ini (ve sekme çubuğunu) asla yeniden askıya almaz. Yeni bölüm = `PANELS`'e bir `Component<TableSectionProps>`.
+import { For, Show, Suspense, createUniqueId, mergeProps, type Component } from "solid-js";
+import { tdes } from "../../app/strings-designer";
 import { ttbl } from "../../app/strings-table";
 import type { FormProps } from "./FormParts";
 import { TableGeneral, TablePartitioning } from "./TableGeneral";
-import { createTableFormState } from "./table-form-state";
+import { createTableFormState, type TableSectionProps } from "./table-form-state";
 import { asTable, sectionHasIssues, tableSections, type TableSection } from "./table-model";
+
+/** Task 6–7 gövdeleri gelene dek yer tutucu (başlık). */
+const pending = (s: "columns" | "constraints"): Component<TableSectionProps> => () => (
+  <h2 class="text-[13px] font-medium">{ttbl.sections[s]}</h2>
+);
+
+/** Bölüm → gövde. Bölümün görünürlüğü `tableSections(mode)`'dan gelir (partitioning yalnızca create). */
+const PANELS: Record<TableSection, Component<TableSectionProps>> = {
+  general: TableGeneral,
+  columns: pending("columns"),
+  constraints: pending("constraints"),
+  partitioning: TablePartitioning,
+};
 
 export default function TableForm(props: FormProps) {
   const draft = () => asTable(props.model.draft);
@@ -20,7 +38,7 @@ export default function TableForm(props: FormProps) {
   const panelId = (s: TableSection) => `${base}-panel-${s}`;
   const tabEls = new Map<TableSection, HTMLButtonElement>();
   const sections = () => tableSections(props.model.mode);
-  // Bölüm listesi değişirse (ör. mod) seçili bölüm listede kalmalı.
+  // Bölüm listesi değişirse (create → alter sonrası partitioning kalkar) seçili bölüm listede kalmalı.
   const current = (): TableSection => (sections().includes(state.section()) ? state.section() : "general");
 
   const onKeyDown = (ev: KeyboardEvent) => {
@@ -38,67 +56,81 @@ export default function TableForm(props: FormProps) {
     tabEls.get(next)?.focus();
   };
 
+  /** "Satır bulunamadı" şeridi (kolon/kısıt odağı; vurgu yeniden yüklemede temizlenir). */
   const missing = (s: TableSection) => {
     const h = state.highlight();
-    return h && h.section === s && h.index === null ? (s === "columns" ? ttbl.focus.columnMissing : ttbl.focus.constraintMissing) : null;
+    if (!h || h.section !== s || h.index !== null) return null;
+    return s === "columns" ? ttbl.focus.columnMissing : ttbl.focus.constraintMissing;
   };
 
   return (
     <Show when={draft()}>
-      {(d) => (
-        <div class="flex min-h-0 flex-col gap-3">
-          <div role="tablist" aria-label={ttbl.sections.ariaLabel} class="flex shrink-0 gap-1 border-b border-border" onKeyDown={onKeyDown}>
+      {(d) => {
+        const sectionProps = mergeProps(props, {
+          get draft() {
+            return d();
+          },
+          get original() {
+            return original();
+          },
+          editor: state.editor,
+          get highlight() {
+            return state.highlight();
+          },
+        });
+        return (
+          <div class="flex min-h-0 flex-col gap-3">
+            <div role="tablist" aria-label={ttbl.sections.ariaLabel} class="flex shrink-0 gap-1 border-b border-border" onKeyDown={onKeyDown}>
+              <For each={sections()}>
+                {(s) => {
+                  const selected = () => current() === s;
+                  return (
+                    <button
+                      type="button"
+                      role="tab"
+                      id={tabId(s)}
+                      ref={(el) => tabEls.set(s, el)}
+                      aria-selected={selected()}
+                      aria-controls={panelId(s)}
+                      tabIndex={selected() ? 0 : -1}
+                      class="-mb-px inline-flex items-center gap-1.5 border-b-2 px-2 py-1.5 text-[13px]"
+                      classList={{ "border-accent text-fg": selected(), "border-transparent text-muted": !selected() }}
+                      onClick={() => state.setSection(s)}
+                    >
+                      {ttbl.sections[s]}
+                      <Show when={sectionHasIssues(props.issues, s)}>
+                        <span aria-hidden="true" class="h-1.5 w-1.5 rounded-full bg-danger" />
+                        <span class="sr-only">{` (${ttbl.sections.hasIssues})`}</span>
+                      </Show>
+                    </button>
+                  );
+                }}
+              </For>
+            </div>
             <For each={sections()}>
               {(s) => {
-                const selected = () => current() === s;
+                const Body = PANELS[s];
                 return (
-                  <button
-                    type="button"
-                    role="tab"
-                    id={tabId(s)}
-                    ref={(el) => tabEls.set(s, el)}
-                    aria-selected={selected()}
-                    aria-controls={panelId(s)}
-                    tabIndex={selected() ? 0 : -1}
-                    class="-mb-px inline-flex items-center gap-1.5 border-b-2 px-2 py-1.5 text-[13px]"
-                    classList={{ "border-accent text-fg": selected(), "border-transparent text-muted": !selected() }}
-                    onClick={() => state.setSection(s)}
-                  >
-                    {ttbl.sections[s]}
-                    <Show when={sectionHasIssues(props.issues, s)}>
-                      <span aria-hidden="true" class="h-1.5 w-1.5 rounded-full bg-danger" />
-                      <span class="sr-only">{` (${ttbl.sections.hasIssues})`}</span>
-                    </Show>
-                  </button>
+                  <div role="tabpanel" id={panelId(s)} aria-labelledby={tabId(s)} tabIndex={0} hidden={current() !== s}>
+                    <div class="flex flex-col gap-3">
+                      <Show when={missing(s)}>
+                        {(text) => (
+                          <div role="status" class="rounded border border-border px-3 py-2 text-[13px] text-warn-text">
+                            {text()}
+                          </div>
+                        )}
+                      </Show>
+                      <Suspense fallback={<p class="text-muted">{tdes.loading}</p>}>
+                        <Body {...sectionProps} active={current() === s} />
+                      </Suspense>
+                    </div>
+                  </div>
                 );
               }}
             </For>
           </div>
-          <div role="tabpanel" id={panelId(current())} aria-labelledby={tabId(current())}>
-            <Switch>
-              <Match when={current() === "general"}>
-                <TableGeneral {...props} draft={d()} original={original()} editor={state.editor} />
-              </Match>
-              <Match when={current() === "columns" || current() === "constraints"}>
-                {/* Task 6–7 gövdeleri; `state.highlight()` onlara geçer. */}
-                <section aria-label={ttbl.sections[current()]} class="flex flex-col gap-3">
-                  <Show when={missing(current())}>
-                    {(text) => (
-                      <div role="status" class="rounded border border-border px-3 py-2 text-[13px] text-warn-text">
-                        {text()}
-                      </div>
-                    )}
-                  </Show>
-                  <h2 class="text-[13px] font-medium">{ttbl.sections[current()]}</h2>
-                </section>
-              </Match>
-              <Match when={current() === "partitioning"}>
-                <TablePartitioning {...props} draft={d()} editor={state.editor} />
-              </Match>
-            </Switch>
-          </div>
-        </div>
-      )}
+        );
+      }}
     </Show>
   );
 }

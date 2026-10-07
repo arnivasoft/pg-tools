@@ -220,17 +220,19 @@ export type ColumnRef =
 const targetsSelf = (d: TableDef, k: ConstraintKind) => k.type === "foreign_key" && k.refSchema === d.schema && k.refTable === d.name;
 
 /**
- * `name`e başvuran konumlar: PK/UNIQUE `columns`+`include`, FK `columns` (ve FK tablonun kendisini hedefliyorsa
+ * `name`e başvuran konumlar: PK/UNIQUE `columns`+`include`, FK `columns` (ve FK kendine-başvuru anlık görüntüsündeyse
  * `refColumns`), bölümleme kolon anahtarları. CHECK ifadeleri SQL'dir, dokunulmaz. Boş ad → [].
+ * Kendine-başvuru ADLA belirlenmez (`selfSnap`, formun SelfSnap'i): tablo geçici olarak başka bir tablonun adını taşırken
+ * o tabloya giden FK'nin hedef kolonları yeniden adlandırılmamalı.
  */
-export function columnRefs(d: TableDef, name: string): ColumnRef[] {
+export function columnRefs(d: TableDef, name: string, selfSnap: readonly number[]): ColumnRef[] {
   const out: ColumnRef[] = [];
   if (name === "") return out;
   d.constraints.forEach((con, c) => {
     const k = con.kind;
     const lists: Array<"columns" | "include" | "refColumns"> = [];
     if (k.type === "primary_key" || k.type === "unique") lists.push("columns", "include");
-    else if (k.type === "foreign_key") { lists.push("columns"); if (targetsSelf(d, k)) lists.push("refColumns"); }
+    else if (k.type === "foreign_key") { lists.push("columns"); if (selfSnap.includes(c)) lists.push("refColumns"); }
     for (const list of lists) {
       const arr = (k as unknown as Record<string, string[]>)[list]!;
       arr.forEach((n, j) => { if (n === name) out.push({ at: "constraint", c, list, j }); });
@@ -341,10 +343,45 @@ export function tableSections(mode: "create" | "alter"): TableSection[] {
   return mode === "create" ? ["general", "columns", "constraints", "partitioning"] : ["general", "columns", "constraints"];
 }
 
-/** Bölüm sekmesinde hata rozeti: `columns[…`/`constraints[…`/`partitionBy…` yolları; general → öteki yollar ya da genel şerit. */
+/**
+ * Bölüm sekmesinde hata rozeti: `columns[…`, `constraints`/`constraints[…`, `partitionBy…` yolları; general → öteki
+ * yollar ya da genel şerit (üst-düzey `columns` hatası genel şeride düşer).
+ */
 export function sectionHasIssues(issues: FieldIssues, section: TableSection): boolean {
   const sec = (p: string): TableSection =>
-    p.startsWith("columns[") ? "columns" : p.startsWith("constraints[") ? "constraints" : p.startsWith("partitionBy") ? "partitioning" : "general";
+    p.startsWith("columns[") ? "columns" : p === "constraints" || p.startsWith("constraints[") ? "constraints" : p.startsWith("partitionBy") ? "partitioning" : "general";
   if (section === "general" && issues.general.length > 0) return true;
   return [...issues.byPath.keys()].some((p) => sec(p) === section);
+}
+
+/**
+ * Bölümlenmiş tablonun depolama kuralları (arka uç: bölümlenmiş tablonun kendi depolaması yoktur). Her zaman reddedilen
+ * denetimler kilitlenir — değer varsayılan/yüklenen değerdeyken (aksi halde temizlenebilsin diye açık kalır); sürüme bağlı
+ * kurallar yalnızca ipucudur (arayüz sunucu sürümünü bilmez).
+ * - alter, yüklenen tablo bölümlenmiş (`partitionText`): kalıcılık ve fillfactor değişimi her zaman hata; tablespace PG 12+.
+ * - create, `partitionBy` dolu: fillfactor her zaman hata; `pg_default` açıkça belirtilemez (PG 12+; PG < 12 hiç
+ *   tablespace yok); UNLOGGED PG 18+ hata (yalnızca ipucu).
+ */
+export interface StorageGate {
+  persistenceLocked: boolean;
+  fillfactorLocked: boolean;
+  /** `pg_default` seçeneği kapalı (seçili değilse). */
+  pgDefaultBlocked: boolean;
+  persistenceHint: string | null;
+  fillfactorHint: string | null;
+  tablespaceHint: string | null;
+}
+
+export function storageGate(mode: "create" | "alter", original: TableDef | null, d: TableDef): StorageGate {
+  const g = ttbl.general;
+  const loaded = mode === "alter" && original !== null && original.partitionText !== null ? original : null;
+  const createP = mode === "create" && d.partitionBy !== null;
+  return {
+    persistenceLocked: !!loaded && d.persistence === loaded.persistence,
+    fillfactorLocked: (!!loaded && d.fillfactor === loaded.fillfactor) || (createP && d.fillfactor === null),
+    pgDefaultBlocked: createP,
+    persistenceHint: loaded ? g.partitionedPersistence : createP ? g.partitionedUnlogged : null,
+    fillfactorHint: loaded || createP ? g.partitionedFillfactor : null,
+    tablespaceHint: loaded ? g.partitionedTablespaceAlter : createP ? g.partitionedTablespaceCreate : null,
+  };
 }

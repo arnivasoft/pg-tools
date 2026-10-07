@@ -13,10 +13,10 @@ import { Button } from "../../ui/Button";
 import { inputClass } from "../../ui/Field";
 import { CommentField, FieldRow, FreeSqlNote, OwnerSelect, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
 import { exactIssues, fillfactorFromInput, normalizeEmpty, normalizeTablespaceEdit, orphanRowIssues, tablespaceChoices } from "./forms-model";
-import type { TableEditor } from "./table-form-state";
+import type { TableSectionProps } from "./table-form-state";
 import {
-  addPartitionKey, partitionColumnChoices, partitionKeyLabel, removePartitionKey, renameTable, structureLocked, switchPartitionKeyKind,
-  updatePartitionKey, withPartitionStrategy, type TableDraft,
+  addPartitionKey, partitionColumnChoices, partitionKeyLabel, removePartitionKey, renameTable, storageGate, structureLocked,
+  switchPartitionKeyKind, updatePartitionKey, withPartitionStrategy, type TableDraft,
 } from "./table-model";
 
 /** Liste düzeyindeki hatalar (tam yol + artık var olmayan satırlar). */
@@ -28,14 +28,15 @@ function ListErrors(props: { messages: string[] }) {
   );
 }
 
-export function TableGeneral(props: FormProps & { draft: TableDraft; original: TableDraft | null; editor: TableEditor }) {
+export function TableGeneral(props: TableSectionProps) {
   const g = ttbl.general;
   const alter = () => props.model.mode === "alter";
   const patch = (p: Partial<TableDef>) => props.editor.edit((d) => ({ ...d, ...p }));
   const renamePatch = (p: { name?: string; schema?: string }) => props.editor.editSnap((d, snap) => ({ d: renameTable(d, p, snap), snap }));
   const schemaList = createUniqueId();
   let nameEl: HTMLInputElement | undefined;
-  createFocusOnRequest(props, "name", () => nameEl);
+  // Gizli panelde odaklanılamaz: istek bölüm etkinleşince uygulanır (dağıtıcı Genel'i seçer).
+  createFocusOnRequest(props, "name", () => (props.active ? nameEl : undefined));
 
   // Lookup hataları listeyi boş bırakır; serbest yazım sürer.
   const [schemas] = createResource(
@@ -49,6 +50,8 @@ export function TableGeneral(props: FormProps & { draft: TableDraft; original: T
   const d = () => props.draft;
   const originalTablespace = () => props.original?.tablespace ?? null;
   const persistenceChanged = () => alter() && props.original !== null && props.original.persistence !== d().persistence;
+  // Bölümlenmiş tablo: her zaman reddedilen depolama denetimleri kilitli, sürüme bağlı olanlar ipucu.
+  const gate = createMemo(() => storageGate(props.model.mode, props.original, d()));
 
   return (
     <form class="flex max-w-2xl flex-col gap-3" onSubmit={(ev) => ev.preventDefault()}>
@@ -123,6 +126,7 @@ export function TableGeneral(props: FormProps & { draft: TableDraft; original: T
         label={g.persistence}
         path="persistence"
         issues={props.issues}
+        hint={gate().persistenceHint ?? undefined}
         warning={persistenceChanged() ? g.persistenceAlterNote : null}
       >
         {(a) => (
@@ -131,7 +135,7 @@ export function TableGeneral(props: FormProps & { draft: TableDraft; original: T
             class={inputClass + invalidClass(a.invalid)}
             aria-describedby={a.describedBy}
             aria-invalid={a.invalid}
-            disabled={props.readOnly}
+            disabled={props.readOnly || gate().persistenceLocked}
             value={d().persistence}
             onChange={(ev) => patch({ persistence: ev.currentTarget.value as Persistence })}
           >
@@ -141,7 +145,7 @@ export function TableGeneral(props: FormProps & { draft: TableDraft; original: T
         )}
       </FieldRow>
       <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <FieldRow label={g.tablespace} path="tablespace" issues={props.issues} hint={g.tablespaceHint}>
+        <FieldRow label={g.tablespace} path="tablespace" issues={props.issues} hint={gate().tablespaceHint ?? g.tablespaceHint}>
           {(a) => (
             <select
               id={a.id}
@@ -159,12 +163,14 @@ export function TableGeneral(props: FormProps & { draft: TableDraft; original: T
               <Show when={originalTablespace() === null}>
                 <option value="">{g.tablespaceUnset}</option>
               </Show>
-              <option value="pg_default">{g.tablespaceDefault}</option>
+              <option value="pg_default" disabled={gate().pgDefaultBlocked && d().tablespace !== "pg_default"}>
+                {g.tablespaceDefault}
+              </option>
               <For each={tablespaceChoices(tablespaces() ?? [], d().tablespace)}>{(t) => <option value={t}>{t}</option>}</For>
             </select>
           )}
         </FieldRow>
-        <FieldRow label={g.fillfactor} path="fillfactor" issues={props.issues} hint={g.fillfactorHint}>
+        <FieldRow label={g.fillfactor} path="fillfactor" issues={props.issues} hint={gate().fillfactorHint ?? g.fillfactorHint}>
           {(a) => (
             <input
               id={a.id}
@@ -175,7 +181,7 @@ export function TableGeneral(props: FormProps & { draft: TableDraft; original: T
               class={inputClass + invalidClass(a.invalid)}
               aria-describedby={a.describedBy}
               aria-invalid={a.invalid}
-              disabled={props.readOnly}
+              disabled={props.readOnly || gate().fillfactorLocked}
               value={d().fillfactor ?? ""}
               onInput={(ev) => {
                 // Çözümlenemeyen/uzun girdi yok sayılır: son geçerli değer kalır, yazılan metin silinmez.
@@ -206,7 +212,7 @@ export function TableGeneral(props: FormProps & { draft: TableDraft; original: T
 }
 
 /** Bölümleme (yalnızca create): strateji + anahtar listesi. Satırlar sıra numarası listesiyle çizilir (odak korunur). */
-export function TablePartitioning(props: FormProps & { draft: TableDraft; editor: TableEditor }) {
+export function TablePartitioning(props: TableSectionProps) {
   const p = ttbl.partitioning;
   const d = () => props.draft;
   const keys = () => d().partitionBy?.keys ?? [];

@@ -2,12 +2,13 @@
 // kolon/kısıt/ad odak isteği → bölüm + satır vurgusu) ve kendine-başvuran FK anlık görüntüsünü (SelfSnap) koruyan
 // düzenleme sarmalayıcıları. Tüm Table düzenlemeleri buradan geçer; aksi halde anlık görüntü dış değişiklik sanılıp
 // yeniden alınırdı.
-import { createEffect, createSignal, type Accessor } from "solid-js";
+import { batch, createEffect, createSignal, type Accessor } from "solid-js";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import type { DesignerController, DesignerModel } from "./designer-controller";
+import type { FormProps } from "./FormParts";
 import { createSnapTracker, type SelfSnap, type WithSnap } from "./table-constraints";
-import { asTable, rowOfFocus, type TableSection } from "./table-model";
+import { asTable, rowOfFocus, type TableDraft, type TableSection } from "./table-model";
 
 /** Kolon/kısıt bölümüne odak: `index === null` → satır bulunamadı (şerit gösterilir). `seq` her istekte değişir. */
 export interface TableHighlight {
@@ -22,6 +23,21 @@ export interface TableEditor {
   /** Anlık görüntülü düzenleme: tablo adı/şeması, kısıt ekle/sil/geri al, FK hedefi (`*Snap` sarmalayıcıları). */
   editSnap: (fn: (d: TableDef, snap: SelfSnap) => WithSnap) => void;
 }
+
+/**
+ * Her bölüm gövdesinin aldığı prop'lar (TableForm `PANELS` tablosu). Bölümler hep bağlı kalır (gizli = `hidden`);
+ * `active` yalnızca seçili bölümde true — odak/kaydırma etkileri `active` iken çalışmalı (gizli öğe odaklanamaz).
+ */
+export interface TableSectionProps extends FormProps {
+  draft: TableDraft;
+  original: TableDraft | null;
+  editor: TableEditor;
+  highlight: TableHighlight | null;
+  active: boolean;
+}
+
+/** Geliştirme koruması metni (yalnızca DEV yapısında atılır). */
+export const SNAP_GUARD = "Table editor.edit: kısıt sayısı değişti; editSnap ve *Snap sarmalayıcılarını kullanın.";
 
 export interface TableFormState {
   section: Accessor<TableSection>;
@@ -46,25 +62,47 @@ export function createTableFormState(props: StateProps): TableFormState {
 
   const editSnap = (fn: (d: TableDef, snap: SelfSnap) => WithSnap) => {
     let next: SelfSnap | null = null;
-    props.designer.edit(props.tabId, (d: ObjectDef) => {
-      if (d.kind !== "table") return d;
-      const r = fn(d, tracker.snap());
-      next = r.snap;
-      return { ...r.d, kind: "table" };
+    // Toplu: taslak ve anlık görüntü birlikte kaydedilmeden etkiler (odak dağıtıcının "dış değişim" denetimi) çalışmasın.
+    batch(() => {
+      props.designer.edit(props.tabId, (d: ObjectDef) => {
+        if (d.kind !== "table") return d;
+        const r = fn(d, tracker.snap());
+        next = r.snap;
+        return { ...r.d, kind: "table" };
+      });
+      // Düzenleme reddedildiyse (salt okunur) geri çağrı çalışmaz: anlık görüntü değişmez.
+      if (next !== null) tracker.commit(next, current());
     });
-    // Düzenleme reddedildiyse (salt okunur) geri çağrı çalışmaz: anlık görüntü değişmez.
-    if (next !== null) tracker.commit(next, current());
   };
-  const edit = (fn: (d: TableDef) => TableDef) => editSnap((d, snap) => ({ d: fn(d), snap }));
+  const edit = (fn: (d: TableDef) => TableDef) =>
+    editSnap((d, snap) => {
+      const out = fn(d);
+      // Geliştirme koruması (üretimde silinir): kısıt sayısını değiştiren işlem anlık görüntüyü kaydırır; `editSnap` ve
+      // `*Snap` sarmalayıcıları kullanılmalı (çıplak add/remove/restoreConstraint anlık görüntüyü bayatlatır).
+      if (import.meta.env.DEV && out.constraints.length !== d.constraints.length) throw new Error(SNAP_GUARD);
+      return { d: out, snap };
+    });
 
-  // Odak dağıtıcı (tek yer): ad → Genel (alanı TableGeneral'daki createFocusOnRequest odaklar ve tüketir; salt okunurda
-  // bekler); kolon/kısıt → bölüm + satır vurgusu, istek hemen tüketilir (salt okunurda da: bölüm/kalıtımlı tablo).
+  // Odak dağıtıcı (tek yer):
+  // - taslak dışarıdan değiştiyse (yükleme/yeniden yükleme) eski satır vurgusu ve "satır yok" şeridi temizlenir;
+  // - ad → Genel, istek başına BİR kez (alanı TableGeneral'daki createFocusOnRequest odaklar ve tüketir; salt okunur/kilitli
+  //   sekmede istek bekler ama kullanıcıyı her yeniden çalışmada Genel'e çekmez);
+  // - kolon/kısıt → bölüm + satır vurgusu, istek hemen tüketilir (salt okunurda da: bölüm/kalıtımlı tablo).
+  let lastDraft: TableDef | null = null;
+  let nameSeq: number | null = null;
   createEffect(() => {
-    const req = props.designer.focusRequest(props.tabId);
     const d = asTable(props.model.draft);
+    if (d !== lastDraft) {
+      if (lastDraft !== null && !tracker.isOwn(d)) setHighlight(null);
+      lastDraft = d;
+    }
+    const req = props.designer.focusRequest(props.tabId);
     if (!req || !d || props.model.status !== "ready") return;
     if (req.field === "name") {
-      setSection("general");
+      if (nameSeq !== req.seq) {
+        nameSeq = req.seq;
+        setSection("general");
+      }
       return;
     }
     const row = rowOfFocus(d, req.field);

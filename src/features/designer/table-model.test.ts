@@ -6,7 +6,7 @@ import type { TableDef } from "../../ipc/bindings/TableDef";
 import { defsEqual, groupIssues } from "./designer-model";
 import {
   addPartitionKey, addTableColumn, partitionColumnChoices, partitionKeyLabel, allowedValueSources, asTable, columnRefs, newColumn, originalColumn, removePartitionKey, removeTableColumn,
-  removedColumns, renameTable, renameTableColumn, restoreColumn, rowOfFocus, sectionHasIssues, selfRefs, serialFix, structureLocked,
+  removedColumns, renameTable, renameTableColumn, restoreColumn, rowOfFocus, sectionHasIssues, selfRefs, serialFix, storageGate, structureLocked,
   switchPartitionKeyKind, tableEditPatch, tableSections, typeQueryOf, typeTextWarning, updatePartitionKey, updateTableColumn, usingVisible,
   valueExpr, valueSourceOf, withCollation, withDataType, withPartitionStrategy, withValueExpr, withValueSource,
 } from "./table-model";
@@ -159,7 +159,7 @@ describe("yeniden adlandırma yayılımı", () => {
       constraints: [pk(["a"], 1), uq(["x"], 2, ["a"]), fk(["a"], "public", "t", ["a"], 3), fk(["a"], "public", "other", ["a"], 4), chk("a > 0", 5)],
       partitionBy: { strategy: "range", keys: [{ kind: "column", name: "a" }, { kind: "expression", sql: "a" }] },
     });
-    expect(columnRefs(d, "a")).toEqual([
+    expect(columnRefs(d, "a", selfRefs(d))).toEqual([
       { at: "constraint", c: 0, list: "columns", j: 0 },
       { at: "constraint", c: 1, list: "include", j: 0 },
       { at: "constraint", c: 2, list: "columns", j: 0 },
@@ -167,11 +167,13 @@ describe("yeniden adlandırma yayılımı", () => {
       { at: "constraint", c: 3, list: "columns", j: 0 },
       { at: "partitionKey", j: 0 },
     ]);
-    expect(columnRefs(d, "")).toEqual([]);
+    expect(columnRefs(d, "", selfRefs(d))).toEqual([]);
+    // Ad hedefle eşleşse de anlık görüntüde olmayan FK'nin refColumns'u dahil edilmez.
+    expect(columnRefs(d, "a", []).some((r) => r.at === "constraint" && r.list === "refColumns")).toBe(false);
   });
   it("renameTableColumn: konum anlık görüntüsü — ara ad başka kolonun adıyla çakışsa da yalnızca anlık görüntüdeki konumlar güncellenir", () => {
     const d0 = T({ columns: [col("a", 1), col("ab", 2)], constraints: [uq(["a"], 10), uq(["ab"], 11)] });
-    const refs = columnRefs(d0, "a");
+    const refs = columnRefs(d0, "a", []);
     const d1 = renameTableColumn(d0, 0, "ab", refs);
     const d2 = renameTableColumn(d1, 0, "abc", refs);
     expect(d2.constraints.map((k) => (k.kind as { columns: string[] }).columns)).toEqual([["abc"], ["ab"]]);
@@ -180,7 +182,7 @@ describe("yeniden adlandırma yayılımı", () => {
   });
   it("renameTableColumn: bölümleme anahtarı ve sınır dışı indeks", () => {
     const d = T({ columns: [col("a", 1)], partitionBy: { strategy: "list", keys: [{ kind: "column", name: "a" }] } });
-    const r = renameTableColumn(d, 0, "z", columnRefs(d, "a"));
+    const r = renameTableColumn(d, 0, "z", columnRefs(d, "a", []));
     expect(r.partitionBy!.keys[0]).toEqual({ kind: "column", name: "z" });
     expect(renameTableColumn(d, 5, "z", [])).toBe(d);
   });
@@ -244,6 +246,9 @@ describe("odak / bölümler / genel", () => {
     expect(sectionHasIssues(g(["name"]), "general")).toBe(true);
     expect(sectionHasIssues(g(["name"]), "columns")).toBe(false);
     expect(sectionHasIssues(g([]), "general")).toBe(false);
+    // Üst-düzey `constraints` (ör. bölüm/kalıtımlı tablo kısıt farkı) Kısıtlar sekmesini işaretler, Genel'i değil.
+    const top = groupIssues([{ path: "constraints", message: "m" }], new Set(["name", "constraints"]));
+    expect([sectionHasIssues(top, "constraints"), sectionHasIssues(top, "general")]).toEqual([true, false]);
   });
   it("structureLocked: isPartition ya da inherits → true; create (original null) → false", () => {
     expect(structureLocked(T({ isPartition: true }))).toBe(true);
@@ -319,5 +324,43 @@ describe("bölümleme anahtarı etiketi ve kolon seçenekleri", () => {
     expect(partitionColumnChoices(d, "a")).toEqual(["a", "b"]);
     expect(partitionColumnChoices(d, "")).toEqual(["", "a", "b"]);
     expect(partitionColumnChoices(d, "gone")).toEqual(["gone", "a", "b"]);
+  });
+});
+
+describe("C-1: kolon yeniden adlandırma kendine-başvuruyu adla değil anlık görüntüyle belirler", () => {
+  it("tablo t→other yapılınca public.other'a giden FK'nin refColumns'u kolon yeniden adlandırmada değişmez", () => {
+    const d0 = T({ columns: [col("id", 1)], constraints: [fk(["id"], "public", "t", ["id"], 1), fk(["id"], "public", "other", ["id"], 2)] });
+    const snap = selfRefs(d0); // [0]
+    const d1 = renameTable(d0, { name: "other" }, snap);
+    const d2 = renameTableColumn(d1, 0, "id2", columnRefs(d1, "id", snap));
+    expect((d2.constraints[0]!.kind as { refColumns: string[] }).refColumns).toEqual(["id2"]);
+    expect((d2.constraints[1]!.kind as { refColumns: string[] }).refColumns).toEqual(["id"]);
+    expect((d2.constraints[1]!.kind as { columns: string[] }).columns).toEqual(["id2"]);
+  });
+});
+
+describe("storageGate (bölümlenmiş tablo depolama kuralları)", () => {
+  it("bölümlenmemiş: kilit/ipucu yok", () => {
+    expect(storageGate("create", null, T())).toEqual({
+      persistenceLocked: false, fillfactorLocked: false, pgDefaultBlocked: false, persistenceHint: null, fillfactorHint: null, tablespaceHint: null,
+    });
+    expect(storageGate("alter", T(), T()).persistenceLocked).toBe(false);
+  });
+  it("alter, yüklenen bölümlenmiş tablo: kalıcılık/fillfactor yüklenen değerdeyken kilitli; değişmişse açık (geri alınabilsin)", () => {
+    const o = T({ partitionText: "RANGE (a)" });
+    const g = storageGate("alter", o, o);
+    expect([g.persistenceLocked, g.fillfactorLocked, g.pgDefaultBlocked]).toEqual([true, true, false]);
+    expect([g.persistenceHint, g.fillfactorHint, g.tablespaceHint]).toEqual([
+      ttbl.general.partitionedPersistence, ttbl.general.partitionedFillfactor, ttbl.general.partitionedTablespaceAlter,
+    ]);
+    const changed = storageGate("alter", o, { ...o, persistence: "unlogged", fillfactor: 70 });
+    expect([changed.persistenceLocked, changed.fillfactorLocked]).toEqual([false, false]);
+  });
+  it("create + partitionBy: fillfactor boşken kilitli, pg_default kapalı, UNLOGGED yalnızca ipucu (sürüme bağlı)", () => {
+    const d = T({ partitionBy: { strategy: "range", keys: [] } });
+    const g = storageGate("create", null, d);
+    expect([g.persistenceLocked, g.fillfactorLocked, g.pgDefaultBlocked]).toEqual([false, true, true]);
+    expect(g.persistenceHint).toBe(ttbl.general.partitionedUnlogged);
+    expect(storageGate("create", null, { ...d, fillfactor: 80 }).fillfactorLocked).toBe(false);
   });
 });
