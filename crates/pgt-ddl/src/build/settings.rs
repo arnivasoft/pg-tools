@@ -22,6 +22,7 @@ pub const LIST_QUOTE_GUCS: [&str; 6] = [
 
 /// GUC adı üst sınırı (karakter; dilbilgisi yalnızca ASCII kabul eder).
 pub const MAX_GUC_NAME: usize = 128;
+const DUPLICATE_MSG: &str = "Bu ayar birden çok kez tanımlanmış.";
 /// GUC değeri üst sınırı (bayt).
 pub const MAX_GUC_VALUE_BYTES: usize = 4096;
 
@@ -48,10 +49,29 @@ fn valid_guc_name(name: &str) -> bool {
 ///
 /// `settings[i].name|value` doğrulaması; yinelenen ad → `settings[i].name`.
 pub fn validate_settings(list: &[ConfigSetting], errs: &mut Vec<FieldError>) {
+    validate_settings_where(list, |_| true, errs);
+}
+
+/// Alter: yalnızca YAZILACAK (eklenen ya da değişen; eskiyle birebir aynı olmayan) girdilerin adı/değeri doğrulanır —
+/// yüklü bir değer kurala takılsa bile dokunulmayan ayar düzenlemeyi engellemez. Yinelenen ad denetimi ise **her
+/// zaman** tüm yeni listede çalışır (inceleme M-1): `[a=2, a=1]` gibi bir listede ikinci girdi yüklü değerle aynı olsa
+/// bile hata verir; aksi halde `diff_settings` son girdiyi seçer ve kullanıcının `a=2`'si sessizce kaybolurdu.
+pub fn validate_written_settings(old: &[ConfigSetting], new: &[ConfigSetting], errs: &mut Vec<FieldError>) {
+    validate_settings_where(new, |s| !old.contains(s), errs);
+}
+
+/// `check(s)` false ise girdinin ad dilbilgisi ve değeri atlanır; yinelenen ad denetimi yine yapılır.
+fn validate_settings_where(list: &[ConfigSetting], check: impl Fn(&ConfigSetting) -> bool, errs: &mut Vec<FieldError>) {
     let mut seen = HashSet::new();
     for (i, s) in list.iter().enumerate() {
         let np = format!("settings[{i}].name");
         let vp = format!("settings[{i}].value");
+        if !check(s) {
+            if !seen.insert(s.name.as_str()) {
+                errs.push(err(&np, DUPLICATE_MSG));
+            }
+            continue;
+        }
         let name_ok = if s.name.chars().count() > MAX_GUC_NAME {
             errs.push(err(&np, format!("Ayar adı en çok {MAX_GUC_NAME} karakter olabilir.")));
             false
@@ -71,7 +91,7 @@ pub fn validate_settings(list: &[ConfigSetting], errs: &mut Vec<FieldError>) {
             ));
             false
         } else if !seen.insert(s.name.as_str()) {
-            errs.push(err(&np, "Bu ayar birden çok kez tanımlanmış."));
+            errs.push(err(&np, DUPLICATE_MSG));
             false
         } else {
             true
@@ -314,6 +334,28 @@ mod tests {
         validate_old_setting_names("old.", &[s("", ""), s("a\0", ""), s("a\nb", ""), s("ok", "")], &mut e);
         let p: Vec<_> = e.into_iter().map(|e| e.path).collect();
         assert_eq!(p, ["old.settings[0].name", "old.settings[1].name", "old.settings[2].name"]);
+    }
+
+    #[test]
+    fn written_settings_keep_duplicate_errors() {
+        let w = |old: &[ConfigSetting], new: &[ConfigSetting]| {
+            let mut e = vec![];
+            validate_written_settings(old, new, &mut e);
+            e.into_iter().map(|e| (e.path, e.message)).collect::<Vec<_>>()
+        };
+        let dup = |i: usize| vec![(format!("settings[{i}].name"), DUPLICATE_MSG.to_string())];
+        // İnceleme M-1: yinelenen girdi yüklü değerle aynı olsa da hata (her iki sıra).
+        let old = [s("a", "1")];
+        assert_eq!(w(&old, &[s("a", "2"), s("a", "1")]), dup(1));
+        assert_eq!(w(&old, &[s("a", "1"), s("a", "2")]), dup(1));
+        assert_eq!(w(&old, &[s("a", "1"), s("a", "1")]), dup(1));
+        // Değişmeyen yüklü girdi (büyük harfli ad, denetim karakterli değer) doğrulanmaz; yazılan girdi katı.
+        let old = [s("TimeZone", "UTC"), s("work_mem", "a\nb")];
+        assert!(w(&old, &old).is_empty());
+        assert_eq!(w(&old, &[s("TimeZone", "UTC"), s("work_mem", "b\nc")])[0].0, "settings[1].value");
+        // Yinelenen değişmeyen girdi de yakalanır; tam doğrulamayla aynı yol.
+        assert_eq!(w(&old, &[s("TimeZone", "UTC"), s("TimeZone", "UTC")]), dup(1));
+        assert_eq!(paths(&[s("a", "2"), s("a", "1")]), ["settings[1].name"]);
     }
 
     #[test]

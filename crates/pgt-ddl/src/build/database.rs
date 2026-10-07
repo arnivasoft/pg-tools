@@ -9,11 +9,11 @@
 //! eski ≠ yeni ise alan hatasıdır (PG bunları sonradan değiştiremez). Bağlı veritabanı / bakım veritabanı korumaları
 //! (yeniden adlandırma, silme, taşıma) bu saf üreticide DEĞİL, yöneticidedir (Task 8, Karar 8).
 
-use std::collections::HashSet;
-
-use super::settings::{diff_settings, guc_assignment_sql, guc_name_sql, validate_old_setting_names, validate_settings};
+use super::settings::{diff_settings, guc_assignment_sql, guc_name_sql, validate_old_setting_names, validate_settings,
+    validate_written_settings};
 use super::table::version_err;
 use super::table_alter::TABLESPACE_CLEAR_MSG;
+use super::type_syntax::is_spoofing_format;
 use super::{BuildCtx, check_ident, check_old_ident, check_text, err, stmt_nt};
 use crate::model::{ConfigSetting, DatabaseDef, FieldError, LocaleProvider};
 use crate::plan::{Plan, Risk, Statement};
@@ -89,7 +89,9 @@ fn bool_sql(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
 
-/// Yerel ayar değeri (lcCollate/lcCtype/providerLocale): boş değil, NUL/denetim karakteri yok, ≤ 255 bayt.
+/// Yerel ayar değeri (lcCollate/lcCtype/providerLocale): boş değil, NUL/denetim karakteri ve görünmez biçim/yön
+/// denetimi karakteri yok (önizleme satırını aldatmasın; ASCII'ye kısıtlanmaz: Windows yerel ayar adları ASCII dışı
+/// olabilir), ≤ 255 bayt.
 fn check_locale(path: &str, value: &str, e: &mut Vec<FieldError>) {
     if value.is_empty() {
         e.push(err(path, "Yerel ayar boş olamaz."));
@@ -97,14 +99,33 @@ fn check_locale(path: &str, value: &str, e: &mut Vec<FieldError>) {
         e.push(err(path, "Yerel ayar NUL karakteri içeremez."));
     } else if value.chars().any(char::is_control) {
         e.push(err(path, "Yerel ayar denetim karakteri (satır sonu, sekme vb.) içeremez."));
+    } else if let Some(c) = value.chars().find(|&c| is_spoofing_format(c)) {
+        e.push(err(
+            path,
+            format!("Yerel ayar görünmez biçim ya da yön denetimi karakteri içeremez (U+{:04X}).", c as u32),
+        ));
     } else if value.len() > MAX_LOCALE_BYTES {
         e.push(err(path, format!("Yerel ayar en çok {MAX_LOCALE_BYTES} bayt olabilir.")));
     }
 }
 
+/// Kümedeki kanonik yazım (büyük/küçük harf duyarsız eşleme: `utf8` → `UTF8`); küme dışı → `None`.
+pub fn canonical_encoding(value: &str) -> Option<&'static str> {
+    SERVER_ENCODINGS.iter().copied().find(|s| s.eq_ignore_ascii_case(value))
+}
+
+/// İki kodlama değeri aynı mı (harfe duyarsız; yükleyici kanonik adı döndürür, istemci `utf8` yazmış olabilir).
+fn same_encoding(a: &Option<String>, b: &Option<String>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// Kodlama: sabit sunucu kodlaması kümesi, büyük/küçük harf duyarsız (`utf8` geçerli; `utf-8` değil).
 fn check_encoding(value: &str, e: &mut Vec<FieldError>) {
-    if !SERVER_ENCODINGS.iter().any(|s| s.eq_ignore_ascii_case(value)) {
+    if canonical_encoding(value).is_none() {
         e.push(err("encoding", ENCODING_MSG));
     }
 }
@@ -184,7 +205,9 @@ pub fn create(d: &DatabaseDef) -> Plan {
         sql.push_str(&format!(" TEMPLATE = {}", quote_ident(t)));
     }
     if let Some(enc) = &d.encoding {
-        // Yazıldığı gibi (küme denetimi harfe duyarsız; PG de duyarsız eşler).
+        // Kanonik yazım (inceleme M-3): yükleyici `pg_encoding_to_char` ile aynı adı döndürür → create → load eşit.
+        // Doğrulama küme dışını eledi; yine de bulunamazsa yazıldığı gibi (quote_literal).
+        let enc = canonical_encoding(enc).unwrap_or(enc);
         sql.push_str(&format!(" ENCODING = {}", quote_literal(enc)));
     }
     if let Some(p) = d.locale_provider {
@@ -221,17 +244,18 @@ pub fn create(d: &DatabaseDef) -> Plan {
         || d.lc_collate.is_some()
         || d.lc_ctype.is_some()
         || d.provider_locale.is_some();
-    let warnings = if locale_given && d.template.as_deref() != Some("template0") {
-        vec![TEMPLATE0_WARNING.to_string()]
-    } else {
-        vec![]
-    };
+    let mut warnings = vec![];
+    if locale_given && d.template.as_deref() != Some("template0") {
+        warnings.push(TEMPLATE0_WARNING.to_string());
+    }
+    // ALTER ile aynı uyarılar (inceleme N-2).
+    if !d.allow_connections {
+        warnings.push(NO_CONNECTIONS_WARNING.to_string());
+    }
+    if d.is_template {
+        warnings.push(IS_TEMPLATE_WARNING.to_string());
+    }
     Plan { statements, warnings }
-}
-
-/// `settings[i].…` yolundaki `i`.
-fn setting_index(path: &str) -> Option<usize> {
-    path.strip_prefix("settings[")?.split(']').next()?.parse().ok()
 }
 
 /// Alter doğrulaması: eskinin yalnızca SQL'e giren alanları (ad, RESET hedefi ayar adları; gevşek), yeninin yalnızca
@@ -253,7 +277,8 @@ fn validate_alter(old: &DatabaseDef, new: &DatabaseDef) -> Vec<FieldError> {
     }
     let create_only: [(&str, bool); 6] = [
         ("template", old.template != new.template),
-        ("encoding", old.encoding != new.encoding),
+        // Harfe duyarsız: `utf8` ile yüklü `UTF8` aynı kodlamadır.
+        ("encoding", !same_encoding(&old.encoding, &new.encoding)),
         ("localeProvider", old.locale_provider != new.locale_provider),
         ("lcCollate", old.lc_collate != new.lc_collate),
         ("lcCtype", old.lc_ctype != new.lc_ctype),
@@ -273,13 +298,8 @@ fn validate_alter(old: &DatabaseDef, new: &DatabaseDef) -> Vec<FieldError> {
     if new.connection_limit != old.connection_limit {
         check_connection_limit(new, &mut e);
     }
-    // Ayarlar: yalnızca yazılacak (eklenen/değişen) girdilerin hataları; yinelenen ad hatası da yazılan girdiye düşer.
-    // Eskiyle birebir aynı (ad, değer) girdiler SQL'e girmez → yüklü değer kurala takılsa bile düzenlemeyi engellemez.
-    let mut se = vec![];
-    validate_settings(&new.settings, &mut se);
-    let written: HashSet<usize> =
-        new.settings.iter().enumerate().filter(|(_, s)| !old.settings.contains(s)).map(|(i, _)| i).collect();
-    e.extend(se.into_iter().filter(|x| setting_index(&x.path).is_none_or(|i| written.contains(&i))));
+    // Ayarlar: yalnızca yazılacak (eklenen/değişen) girdiler doğrulanır; yinelenen ad her zaman hata (M-1).
+    validate_written_settings(&old.settings, &new.settings, &mut e);
     if let Some(c) = &new.comment
         && new.comment != old.comment
     {
@@ -288,8 +308,12 @@ fn validate_alter(old: &DatabaseDef, new: &DatabaseDef) -> Vec<FieldError> {
     e
 }
 
-/// Sıra (sonrakiler YENİ adı kullanır): rename, owner, WITH (yalnız değişenler: ALLOW_CONNECTIONS, CONNECTION LIMIT,
-/// IS_TEMPLATE), set tablespace, ayarlar (RESET sonra SET, ad sırasıyla), comment.
+/// Sıra (sonrakiler YENİ adı kullanır): rename, WITH (yalnız değişenler: ALLOW_CONNECTIONS, CONNECTION LIMIT,
+/// IS_TEMPLATE), set tablespace, ayarlar (RESET sonra SET, ad sırasıyla), comment, owner.
+///
+/// `OWNER TO` bilerek EN SONDADIR (inceleme M-2): ifadeler transaction dışında tek tek çalışır ve sonraki her
+/// `ALTER DATABASE`/`COMMENT` sahiplik ister. Süper kullanıcı olmayan sahip veritabanını INHERIT'siz bir role
+/// devrederse, sahiplik önce değişseydi kalan ifadeler 42501 ile başarısız olur ve plan yarım kalırdı.
 pub fn alter(old: &DatabaseDef, new: &DatabaseDef, _ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     let errs = validate_alter(old, new);
     if !errs.is_empty() {
@@ -306,11 +330,6 @@ pub fn alter(old: &DatabaseDef, new: &DatabaseDef, _ctx: &BuildCtx) -> Result<Pl
             Risk::Safe,
             Some(RENAME_NOTE),
         ));
-    }
-    if let Some(o) = &new.owner
-        && new.owner != old.owner
-    {
-        statements.push(stmt_nt(format!("ALTER DATABASE {q} OWNER TO {}", quote_ident(o)), Risk::Safe, None));
     }
     let mut with = vec![];
     if new.allow_connections != old.allow_connections {
@@ -347,6 +366,11 @@ pub fn alter(old: &DatabaseDef, new: &DatabaseDef, _ctx: &BuildCtx) -> Result<Pl
     statements.extend(set.into_iter().map(|s| set_stmt(&q, s)));
     if old.comment != new.comment {
         statements.push(comment_stmt(&q, &new.comment));
+    }
+    if let Some(o) = &new.owner
+        && new.owner != old.owner
+    {
+        statements.push(stmt_nt(format!("ALTER DATABASE {q} OWNER TO {}", quote_ident(o)), Risk::Safe, None));
     }
     Ok(Plan { statements, warnings })
 }
@@ -485,17 +509,18 @@ mod tests {
         let p = create_ok(all.clone(), 150000);
         assert_eq!(
             sqls(&p),
-            ["CREATE DATABASE \"Sales DB\" OWNER = \"Bob\" TEMPLATE = template0 ENCODING = 'utf8' LOCALE_PROVIDER = libc \
+            ["CREATE DATABASE \"Sales DB\" OWNER = \"Bob\" TEMPLATE = template0 ENCODING = 'UTF8' LOCALE_PROVIDER = libc \
               LC_COLLATE = 'tr_TR.UTF-8' LC_CTYPE = 'tr_TR.UTF-8' TABLESPACE = \"Fast Disk\" ALLOW_CONNECTIONS = false \
               CONNECTION LIMIT = 25 IS_TEMPLATE = true"]
         );
-        assert!(p.warnings.is_empty());
+        // ALTER ile aynı uyarılar (inceleme N-2): bağlantı kapalı, şablon.
+        assert_eq!(p.warnings, [NO_CONNECTIONS_WARNING, IS_TEMPLATE_WARNING]);
         out.push_str(&render(&p));
         out.push('\n');
         // libc, sağlayıcısız (PG 10) ve şablon template0 değil → uyarı.
         let p = create_ok(DatabaseDef { locale_provider: None, template: Some("template1".into()), ..all.clone() }, 100000);
         assert!(!p.statements[0].sql.contains("LOCALE_PROVIDER"));
-        assert_eq!(p.warnings, [TEMPLATE0_WARNING]);
+        assert_eq!(p.warnings, [TEMPLATE0_WARNING, NO_CONNECTIONS_WARNING, IS_TEMPLATE_WARNING]);
         out.push_str(&render(&p));
         out.push('\n');
         // Yalnızca kodlama ve şablonsuz → uyarı.
@@ -767,13 +792,14 @@ mod tests {
             sqls(&p),
             [
                 "ALTER DATABASE d RENAME TO \"Select\"",
-                "ALTER DATABASE \"Select\" OWNER TO p",
                 "ALTER DATABASE \"Select\" WITH CONNECTION LIMIT 5 IS_TEMPLATE true",
                 "ALTER DATABASE \"Select\" SET TABLESPACE fast",
                 "ALTER DATABASE \"Select\" RESET timezone",
                 "ALTER DATABASE \"Select\" SET app.\"user\" = 'x'",
                 "ALTER DATABASE \"Select\" SET work_mem = '2MB'",
                 "COMMENT ON DATABASE \"Select\" IS 'yeni'",
+                // M-2: sahip en sonda (transaction yok; önce devretmek sonrakileri 42501'e düşürebilirdi).
+                "ALTER DATABASE \"Select\" OWNER TO p",
             ]
         );
         assert_eq!(p.warnings, [IS_TEMPLATE_WARNING]);
@@ -819,6 +845,12 @@ mod tests {
         assert!(e[0].message.contains("'datestyle'"), "{e:?}");
         let e = alter_err(&loaded(), &DatabaseDef { settings: vec![s("a", "1"), s("a", "2")], ..loaded() });
         assert_eq!(paths(e), ["settings[1].name"]);
+        // M-1: yinelenen girdi yüklü değerle aynı olsa da hata (iki sıra; aksi halde `a=2` sessizce kaybolurdu).
+        let a1 = DatabaseDef { settings: vec![s("a", "1")], ..loaded() };
+        for list in [vec![s("a", "2"), s("a", "1")], vec![s("a", "1"), s("a", "2")], vec![s("a", "1"), s("a", "1")]] {
+            let e = alter_err(&a1, &DatabaseDef { settings: list.clone(), ..loaded() });
+            assert_eq!(paths(e), ["settings[1].name"], "{list:?}");
+        }
         // Değişen sahip/yorum katı.
         assert_eq!(paths(alter_err(&old, &DatabaseDef { owner: Some("x\u{202e}".into()), ..old.clone() })), ["owner"]);
         assert_eq!(paths(alter_err(&old, &DatabaseDef { comment: Some("b\0".into()), ..old.clone() })), ["comment"]);
@@ -849,11 +881,30 @@ mod tests {
             assert_eq!(paths(e.clone()), ["encoding"], "{bad:?}");
             assert_eq!(e[0].message, ENCODING_MSG);
         }
-        for ok in ["utf8", "UTF8", "Latin5", "win1254", "SQL_ASCII", "euc_jis_2004"] {
+        // Kanonik yazım (inceleme M-3): kümedeki karşılık yazılır.
+        for (ok, canon) in [
+            ("utf8", "UTF8"),
+            ("UTF8", "UTF8"),
+            ("Latin5", "LATIN5"),
+            ("win1254", "WIN1254"),
+            ("sql_ascii", "SQL_ASCII"),
+            ("euc_jis_2004", "EUC_JIS_2004"),
+        ] {
             let p = create_ok(DatabaseDef { encoding: Some(ok.into()), ..d() }, 170000);
-            // Yazıldığı gibi.
-            assert!(p.statements[0].sql.contains(&format!("ENCODING = '{ok}'")), "{ok:?}");
+            assert!(p.statements[0].sql.contains(&format!("ENCODING = '{canon}' ")), "{ok:?}");
+            assert_eq!(canonical_encoding(ok), Some(canon));
         }
+        assert_eq!(canonical_encoding("utf-8"), None);
+        // Alter: create-only karşılaştırması harfe duyarsız (yüklü `UTF8` ile istemcinin `utf8`'i aynı).
+        let up = DatabaseDef { encoding: Some("UTF8".into()), ..d() };
+        let low = DatabaseDef { encoding: Some("utf8".into()), ..d() };
+        assert!(alter_ok(&up, &low).statements.is_empty());
+        assert!(alter_ok(&low, &up).statements.is_empty());
+        for other in [Some("LATIN5"), Some("utf-8"), None] {
+            let e = alter_err(&up, &DatabaseDef { encoding: other.map(Into::into), ..d() });
+            assert_eq!(paths(e), ["encoding"], "{other:?}");
+        }
+        assert_eq!(paths(alter_err(&d(), &low)), ["encoding"]);
         assert_eq!(SERVER_ENCODINGS.len(), 35);
         for client_only in ["BIG5", "GB18030", "GBK", "JOHAB", "SJIS", "SHIFT_JIS_2004", "UHC"] {
             assert!(!SERVER_ENCODINGS.contains(&client_only), "{client_only}");
@@ -877,6 +928,15 @@ mod tests {
             }
         }
         assert!(create_ok(DatabaseDef { lc_collate: Some("a".repeat(255)), ..d() }, 170000).statements.len() == 1);
+        // N-1: görünmez biçim/yön denetimi karakterleri reddedilir; ASCII dışı meşru adlar serbest.
+        for c in ['\u{202e}', '\u{2067}', '\u{200b}', '\u{061c}', '\u{feff}'] {
+            let e = bcreate(&o(DatabaseDef { lc_ctype: Some(format!("C{c}x")), ..d() }), &ctx()).unwrap_err();
+            assert_eq!(paths(e.clone()), ["lcCtype"], "{c:?}");
+            assert!(e[0].message.contains(&format!("U+{:04X}", c as u32)), "{e:?}");
+        }
+        for ok in ["Turkish_Türkiye.1254", "Norwegian Bokmål_Norway.1252", "tr_TR.UTF-8", "und-u-ks-level2"] {
+            create_ok(DatabaseDef { lc_collate: Some(ok.into()), lc_ctype: Some(ok.into()), ..d() }, 170000);
+        }
     }
 
     #[test]

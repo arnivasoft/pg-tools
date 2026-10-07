@@ -622,7 +622,7 @@ mod tests {
         let ObjectDef::Database(mut d) = database() else { unreachable!() };
         d.name = "a".repeat(64);
         assert!(paths(&ObjectDef::Database(d.clone())).is_empty());
-        d.name = "a ".into();
+        d.name = "a\0".into();
         assert_eq!(paths(&ObjectDef::Database(d)), ["name"]);
         // Kimlik hatası drop'ta yer tutucudan önce döner.
         assert_eq!(drop(&role("x\n"), false, &ctx()).unwrap_err()[0].path, "name");
