@@ -75,6 +75,7 @@ export const tdata = {
     rows: (n: number, more: boolean) => (more ? `${n} satır yüklendi (daha fazlası var)` : `${n} satır`),
     changes: (n: number) => (n === 0 ? "Değişiklik yok" : `${n} kaydedilmemiş değişiklik`),
     applied: (n: number) => `Değişiklikler kaydedildi (${n} ifade).`,
+    refreshHint: "Bazı satırlar tazelenemedi; güncel veriyi görmek için yeniden yükleyin.",
     loading: "Satırlar yükleniyor…",
     previewing: "Önizleme hazırlanıyor…",
     readOnly: "Salt okunur",
@@ -105,7 +106,8 @@ export const tdata = {
     risk: "Risk",
   },
   preview: {
-    truncated: (n: number) => `…(+${n} karakter)`,
+    /** Nötr etiket: `n` UTF-16 kod birimi sayısıdır (karakter değil). */
+    truncated: (n: number) => `…(+${n})`,
   },
   risk: {
     safe: "Güvenli",
@@ -152,6 +154,9 @@ export const tdata = {
     invalidDef: "Değişiklikler geçersiz; önizleme yenilendi.",
     locked: "Sunucu salt okunur kilitli.",
     confirmationRequired: "Bu değişiklik onay gerektiriyor; önizlemeyi kontrol edip onaylayın.",
+  },
+  load: {
+    columnsMismatch: "Sonuç kolonları kaynak tanımıyla uyuşmuyor; yeniden yükleyin.",
   },
   more: {
     expired: "İmleç kapandı (5 dk boşta); daha fazla satır için yeniden yükleyin.",

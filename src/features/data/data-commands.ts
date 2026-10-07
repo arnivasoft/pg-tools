@@ -12,8 +12,24 @@ import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { SelectRequest } from "../../ipc/bindings/SelectRequest";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { SessionOptions } from "../../ipc/bindings/SessionOptions";
-import { call } from "../../ipc/commands";
+import { invoke } from "@tauri-apps/api/core";
 import type { Api } from "../../ipc/commands";
+import { toPayload } from "../../ipc/errors";
+
+/**
+ * commands.ts'teki `call`'ın yerel karşılığı (Plan 17 R1): `call` ya da `IpcError` içe aktarılsaydı ana paketin dışa
+ * aktarma listesi büyürdü (ölçüldü: IpcError +1 B tavan aşımı). Hata, yükün alanlarını taşıyan bir `Error`'dır;
+ * `toPayload` onu aynı `ErrorPayload`'a çevirir (davranış yalnızca `code`'a bakar). `invoke` ana pakette zaten dışa
+ * aktarılır.
+ */
+async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  try {
+    return await invoke<T>(cmd, args);
+  } catch (e) {
+    const p = toPayload(e);
+    throw Object.assign(new Error(p.message), p);
+  }
+}
 
 export const dataLoad = (serverId: string, databaseOid: number, object: ObjectRef) =>
   call<DataSource>("data_load", { serverId, databaseOid, object });

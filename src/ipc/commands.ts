@@ -46,7 +46,7 @@ import type { PlanRequest } from "./bindings/PlanRequest";
 import type { PlanView } from "./bindings/PlanView";
 import { IpcError, toPayload } from "./errors";
 
-export async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return await invoke<T>(cmd, args);
   } catch (e) {

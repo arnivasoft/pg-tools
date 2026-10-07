@@ -8,7 +8,7 @@ describe("strings-data", () => {
     expect(tdata.status.rows(1000, true)).not.toBe(tdata.status.rows(1000, false));
     expect(tdata.status.changes(3)).toContain("3");
     expect(tdata.status.applied(2)).toContain("2");
-    expect(tdata.preview.truncated(120)).toBe("…(+120 karakter)");
+    expect(tdata.preview.truncated(120)).toBe("…(+120)");
   });
 
   it("boyut denetiminde aranan sabit metinler", () => {

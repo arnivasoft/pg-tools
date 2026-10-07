@@ -59,6 +59,7 @@ export default function App() {
     refreshServers: query.refreshServers,
     connect: connectServer,
     notify: toast.show,
+    query,
   });
   // Dashboard tembel parçadadır: ilk "Dashboard'u aç"ta yüklenir (ana paket büyümez).
   const [dash, setDash] = createSignal<Dashboard | null>(null);
@@ -67,7 +68,7 @@ export default function App() {
   const [designer, setDesigner] = createSignal<Designer | null>(null);
   const loadDesigner = once(() =>
     import("../features/designer/designer-open").then((m) =>
-      setDesigner(m.createDesigner({ ...lazyDeps(), query, explorer: explorer.controller })),
+      setDesigner(m.createDesigner({ ...lazyDeps(), explorer: explorer.controller })),
     ),
   );
   // Veri düzenleyici de tembel: ilk "Verileri Görüntüle/Düzenle"de yüklenir.

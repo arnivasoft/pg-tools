@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import type { DataChangeSet } from "../../ipc/bindings/DataChangeSet";
 import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { SessionOptions } from "../../ipc/bindings/SessionOptions";
-import { IpcError } from "../../ipc/errors";
+import { IpcError, toPayload } from "../../ipc/errors";
 import { createDataApi, dataApply, dataCancel, dataLoad, dataPreview, dataSelect, qtOpenReadonly } from "./data-commands";
 import type { DataApi } from "./data-commands";
 
@@ -42,11 +42,15 @@ describe("data-commands", () => {
     ]);
   });
 
-  it("hatalar IpcError olarak döner (commands.ts call kalıbı)", async () => {
+  it("hatalar Error olarak döner ve toPayload ile aynı yükü verir (IpcError ana paketten içe aktarılmaz, R1)", async () => {
     invoke.mockRejectedValue({ code: "locked", message: "kilitli" });
     const err = await dataLoad("s", 1, obj).then(() => null, (e: unknown) => e);
-    expect(err instanceof IpcError).toBe(true);
-    expect((err as IpcError).payload.code).toBe("locked");
+    expect(err instanceof Error).toBe(true);
+    expect(err instanceof IpcError).toBe(false);
+    expect(toPayload(err)).toEqual({ code: "locked", message: "kilitli", detail: null, hint: null });
+    invoke.mockRejectedValue("düz metin");
+    const err2 = await dataCancel("a").then(() => null, (e: unknown) => e);
+    expect(toPayload(err2)).toEqual({ code: "unknown", message: "düz metin", detail: null, hint: null });
   });
 
   it("DataApi sahte olarak kurulabilir; createDataApi tüm üyeleri bağlar", () => {

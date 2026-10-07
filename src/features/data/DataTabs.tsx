@@ -5,6 +5,9 @@ import { t } from "../../app/strings";
 import type { DataTab } from "../query/tabs-store";
 import type { DataController } from "./data-open";
 
+// Denetleyici ve açıcı bu parçayla iner (data-open.ts bağımlılıksız kalır; ana paket bütçesi, Plan 17 R1).
+export { startData } from "./data-opener";
+
 export type TabHeadComponent = Component<{ id: string; title: string; serverId: string | null; children: JSX.Element }>;
 
 export function DataTabHeads(props: { data: DataController; tabs: DataTab[]; Head: TabHeadComponent }) {
