@@ -7,6 +7,7 @@
 //! kapanmamış tırnak/yorum) REDDEDİLİR; ayrıca alanlar birleştirildikten sonra **nihai ifade** de taranmalıdır
 //! (alan sınırlarında kapanma/açılma kaymasını yakalamak için). Tarayıcı `standard_conforming_strings = on` varsayar.
 
+pub mod database;
 pub mod extension;
 pub mod freesql;
 pub mod index;
@@ -153,9 +154,7 @@ pub(crate) fn stmt(sql: String, risk: Risk, note: Option<&str>) -> Statement {
     }
 }
 
-/// Transaction dışında çalışması gereken ifade (`stmt` gibi, `transactional: false`).
-// Task 3 (Database üreticisi) tüketir.
-#[allow(dead_code)]
+/// Transaction dışında çalışması gereken ifade (`stmt` gibi, `transactional: false`; Database üreticisi).
 pub(crate) fn stmt_nt(sql: String, risk: Risk, note: Option<&str>) -> Statement {
     Statement {
         transactional: false,
@@ -192,7 +191,8 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Table(d) => table::validate_table(d, ctx),
         ObjectDef::View(d) => view::validate(d, ctx),
         ObjectDef::MaterializedView(d) => matview::validate(d, ctx),
-        ObjectDef::Database(_) | ObjectDef::Role(_) => unsupported_kind(),
+        ObjectDef::Database(d) => database::validate(d, ctx),
+        ObjectDef::Role(_) => unsupported_kind(),
     }
 }
 
@@ -228,7 +228,8 @@ pub(crate) fn validate_identity(def: &ObjectDef) -> Vec<FieldError> {
             check_old_schema_ident("schema", &d.schema, &mut e);
             check_old_ident("name", &d.name, &mut e);
         }
-        ObjectDef::Database(d) => check_ident("name", &d.name, &mut e),
+        // Veritabanı: görünümle aynı gerekçe (yüklü ad yalnızca `quote_ident` ile yerleşir; gevşek eski taraf).
+        ObjectDef::Database(d) => check_old_ident("name", &d.name, &mut e),
         ObjectDef::Role(d) => check_ident("name", &d.name, &mut e),
     }
     e
@@ -256,7 +257,8 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Table(d) => Ok(table::create(d)),
         ObjectDef::View(d) => Ok(view::create(d)),
         ObjectDef::MaterializedView(d) => Ok(matview::create(d)),
-        ObjectDef::Database(_) | ObjectDef::Role(_) => Err(unsupported_kind()),
+        ObjectDef::Database(d) => Ok(database::create(d)),
+        ObjectDef::Role(_) => Err(unsupported_kind()),
     }
 }
 
@@ -280,6 +282,11 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         // MV de kendi doğrulamasını yapar (sorgu yalnızca değiştiyse; yerinde düzenleme yalnızca değişen alanları).
         return matview::alter(o, n, ctx);
     }
+    if let (ObjectDef::Database(o), ObjectDef::Database(n)) = (old, new) {
+        // Veritabanı kendi doğrulamasını yapar: create-only alanlar eşit olmalı, yalnızca değişen alanlar doğrulanır,
+        // eski taraf ayar adları (RESET hedefi) gevşek.
+        return database::alter(o, n, ctx);
+    }
     checked(new, ctx)?;
     // Eski tanımdaki ad/şema da SQL'e girer (RENAME/ALTER hedefi); yalnızca kimlik alanları doğrulanır.
     let mut old_errs = validate_identity(old);
@@ -294,8 +301,7 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         (ObjectDef::Sequence(o), ObjectDef::Sequence(n)) => Ok(sequence::alter(o, n)),
         (ObjectDef::Extension(o), ObjectDef::Extension(n)) => extension::alter(o, n),
         (ObjectDef::Index(o), ObjectDef::Index(n)) => index::alter(o, n),
-        (ObjectDef::Database(_), ObjectDef::Database(_))
-        | (ObjectDef::Role(_), ObjectDef::Role(_)) => Err(unsupported_kind()),
+        (ObjectDef::Role(_), ObjectDef::Role(_)) => Err(unsupported_kind()),
         _ => Err(mismatch(old, new)),
     }
 }
@@ -305,7 +311,7 @@ pub fn drop(def: &ObjectDef, cascade: bool, ctx: &BuildCtx) -> Result<Plan, Vec<
 }
 
 /// Silme; ortak kurallar: `force` yalnızca Database, `cascade` Database/Role'de yok.
-pub fn drop_with(def: &ObjectDef, o: DropOptions, _ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
+pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     let mut errs = validate_identity(def);
     let kind = def.kind();
     if o.force && kind != ObjectKind::Database {
@@ -326,7 +332,9 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, _ctx: &BuildCtx) -> Result<Pla
         ObjectDef::Table(d) => Ok(table::drop(d, cascade)),
         ObjectDef::View(d) => Ok(view::drop(d, cascade)),
         ObjectDef::MaterializedView(d) => Ok(matview::drop(d, cascade)),
-        ObjectDef::Database(_) | ObjectDef::Role(_) => Err(unsupported_kind()),
+        // Bağlı/bakım veritabanı koruması yöneticide (Task 8); şablon ve FORCE sürüm kapısı üreticide.
+        ObjectDef::Database(d) => database::drop(d, o.force, ctx),
+        ObjectDef::Role(_) => Err(unsupported_kind()),
     }
 }
 
@@ -537,17 +545,14 @@ mod tests {
     }
 
     #[test]
-    fn new_kinds_are_placeholders_for_now() {
-        for d in [database(), role("r")] {
-            let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
-            assert_eq!(validate(&d, &ctx())[0].path, "kind", "{d:?}");
-            assert_eq!(kind(create(&d, &ctx())), "kind");
-            assert_eq!(kind(alter(&d, &d, &ctx())), "kind");
-            assert_eq!(kind(drop(&d, false, &ctx())), "kind");
-            assert!(validate_identity(&d).is_empty(), "{d:?}");
-        }
-        // FORCE + Database: ortak kuraldan geçer, yer tutucuya ulaşır.
-        assert_eq!(drop_with(&database(), DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "kind");
+    fn role_is_placeholder_for_now() {
+        let d = role("r");
+        let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
+        assert_eq!(validate(&d, &ctx())[0].path, "kind", "{d:?}");
+        assert_eq!(kind(create(&d, &ctx())), "kind");
+        assert_eq!(kind(alter(&d, &d, &ctx())), "kind");
+        assert_eq!(kind(drop(&d, false, &ctx())), "kind");
+        assert!(validate_identity(&d).is_empty(), "{d:?}");
         // Yeni tür ile mevcut tür arasındaki alter yine tür uyuşmazlığıdır.
         let e = alter(&view("public"), &matview(), &ctx()).unwrap_err();
         assert!(e[0].message.contains("uyuşmazlığı"), "{e:?}");
@@ -568,6 +573,26 @@ mod tests {
         assert_eq!(drop(&sys, false, &ctx()).unwrap_err()[0].path, "schema");
         assert_eq!(drop_with(&mv, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
         assert_eq!(alter(&mv, &view("public"), &ctx()).unwrap_err()[0].path, "kind");
+    }
+
+    #[test]
+    fn database_is_wired() {
+        let d = database();
+        assert!(validate(&d, &ctx()).is_empty());
+        let p = create(&d, &ctx()).unwrap();
+        assert_eq!(p.statements[0].sql, "CREATE DATABASE d ALLOW_CONNECTIONS = true CONNECTION LIMIT = -1 IS_TEMPLATE = false");
+        assert!(!p.statements[0].transactional);
+        assert!(alter(&d, &d, &ctx()).unwrap().statements.is_empty());
+        assert_eq!(drop(&d, false, &ctx()).unwrap().statements[0].sql, "DROP DATABASE d");
+        let p = drop_with(&d, DropOptions { cascade: false, force: true }, &ctx()).unwrap();
+        assert_eq!(p.statements[0].sql, "DROP DATABASE d WITH (FORCE)");
+        assert_eq!(p.risk(), Risk::DataLoss);
+        let ObjectDef::Database(mut empty) = d.clone() else { unreachable!() };
+        empty.name = String::new();
+        let empty = ObjectDef::Database(empty);
+        assert_eq!(alter(&empty, &d, &ctx()).unwrap_err()[0].path, "old.name");
+        assert_eq!(drop(&empty, false, &ctx()).unwrap_err()[0].path, "name");
+        assert_eq!(alter(&d, &role("d"), &ctx()).unwrap_err()[0].path, "kind");
     }
 
     #[test]
@@ -593,8 +618,11 @@ mod tests {
         m.name = String::new();
         assert_eq!(paths(&ObjectDef::MaterializedView(m)), ["schema", "name"]);
         assert_eq!(paths(&role("x\n")), ["name"]);
+        // Veritabanı eski tarafı gevşek (görünüm gibi): yalnızca boş/NUL reddedilir.
         let ObjectDef::Database(mut d) = database() else { unreachable!() };
         d.name = "a".repeat(64);
+        assert!(paths(&ObjectDef::Database(d.clone())).is_empty());
+        d.name = "a ".into();
         assert_eq!(paths(&ObjectDef::Database(d)), ["name"]);
         // Kimlik hatası drop'ta yer tutucudan önce döner.
         assert_eq!(drop(&role("x\n"), false, &ctx()).unwrap_err()[0].path, "name");
@@ -643,9 +671,11 @@ mod tests {
             let ce = validate(&ObjectDef::Table(t), &ctx());
             assert_eq!(ce.iter().any(|e| e.path.starts_with("columns[0]")), bad, "column {h:?}: {ce:?}");
             assert_eq!(paths(&role(h)), want, "role {h:?}");
+            // Veritabanı: eski taraf (kimlik/drop) gevşek, YENİ ad (create) katı.
             let ObjectDef::Database(mut d) = database() else { unreachable!() };
             d.name = h.into();
-            assert_eq!(paths(&ObjectDef::Database(d)), want, "database {h:?}");
+            assert!(paths(&ObjectDef::Database(d.clone())).is_empty(), "database identity {h:?}");
+            assert_eq!(validate(&ObjectDef::Database(d), &ctx()).is_empty(), !bad, "database {h:?}");
         }
     }
 

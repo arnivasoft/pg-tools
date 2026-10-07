@@ -1,0 +1,32 @@
+---
+source: crates/pgt-ddl/src/build/database.rs
+expression: out
+---
+[Safe non-tx] ALTER DATABASE d RENAME TO e  -- Veritabanına bağlı oturum olmamalı (bu uygulamanın Gezgin bağlantıları kapatılır)
+
+[Safe non-tx] ALTER DATABASE d OWNER TO p
+
+
+[Safe non-tx] ALTER DATABASE d WITH ALLOW_CONNECTIONS false
+WARN: Yeni bağlantılar reddedilir (Gezgin dahil)
+
+[Safe non-tx] ALTER DATABASE d WITH CONNECTION LIMIT 10
+
+[Safe non-tx] ALTER DATABASE d WITH IS_TEMPLATE true
+WARN: Herkes (CREATEDB yetkili) bu veritabanını şablon olarak kopyalayabilir
+
+[Safe non-tx] ALTER DATABASE d WITH ALLOW_CONNECTIONS false CONNECTION LIMIT 0 IS_TEMPLATE true
+WARN: Yeni bağlantılar reddedilir (Gezgin dahil)
+WARN: Herkes (CREATEDB yetkili) bu veritabanını şablon olarak kopyalayabilir
+
+[Safe non-tx] ALTER DATABASE d SET TABLESPACE "Fast"  -- Veritabanı dosyaları taşınır; bağlı oturum olmamalı; uzun sürebilir
+
+[Safe non-tx] ALTER DATABASE d RESET work_mem
+[Safe non-tx] ALTER DATABASE d SET aa = '2'
+[Safe non-tx] ALTER DATABASE d SET zz.b = '1'
+
+[Safe non-tx] ALTER DATABASE d SET work_mem = '2MB'
+
+[Safe non-tx] COMMENT ON DATABASE d IS NULL
+
+[Safe non-tx] COMMENT ON DATABASE d IS E'x\\y'
