@@ -305,6 +305,19 @@ export function switchPartitionKeyKind(k: PartitionKey, kind: PartitionKey["kind
   return k.kind === "column" ? { kind: "expression", sql: k.name } : { kind: "column", name: k.sql };
 }
 
+/** Anahtarın kısa etiketi (sil düğmesinin erişilebilir adı): kolon adı ya da ifade (uzunsa kısaltılır); boş → "boş". */
+export function partitionKeyLabel(k: PartitionKey): string {
+  const text = (k.kind === "column" ? k.name : k.sql).replace(/\s+/g, " ").trim();
+  if (text === "") return ttbl.partitioning.emptyKey;
+  return text.length > 40 ? `${text.slice(0, 39)}…` : text;
+}
+
+/** Kolon anahtarı seçenekleri: taslak kolon adları (boşlar hariç, yinelenmeden); seçili değer listede yoksa başa. */
+export function partitionColumnChoices(d: TableDef, current: string): string[] {
+  const names = [...new Set(d.columns.map((c) => c.name).filter((n) => n !== ""))];
+  return names.includes(current) ? names : [current, ...names];
+}
+
 // ---- odak
 
 /** Odak alanından bölüm + satır: column → columns ve attnum'u eşleşen satır; constraint → oid; bulunamazsa index null. */

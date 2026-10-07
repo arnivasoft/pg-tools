@@ -8,6 +8,7 @@ import type { ConstraintKind } from "../../ipc/bindings/ConstraintKind";
 import type { FkAction } from "../../ipc/bindings/FkAction";
 import type { FkMatch } from "../../ipc/bindings/FkMatch";
 import type { TableDef } from "../../ipc/bindings/TableDef";
+import { selfRefs } from "./table-model";
 
 export type ConstraintType = ConstraintKind["type"];
 export type ColumnListName = "columns" | "include";
@@ -320,4 +321,34 @@ export function pointFkAtSelf(d: TableDef, i: number, snap: SelfSnap): WithSnap 
 export function pointFkAtOther(d: TableDef, i: number, target: { refSchema?: string; refTable?: string }, snap: SelfSnap): WithSnap {
   const next = updateConstraint(d, i, (c) => withFkTarget(c, target));
   return { d: next, snap: snap.filter((k) => k !== i) };
+}
+
+/**
+ * Formun tek SelfSnap durumu. Taslak formun kendi düzenlemeleri dışında değişirse (ilk yükleme, yeniden yükleme,
+ * uygulama sonrası yükleme) anlık görüntü o taslaktan `selfRefs` ile yeniden alınır ("düzenleme başlangıcı"); formun
+ * düzenlemeleri `commit` ile yeni taslağı ve anlık görüntüyü birlikte kaydeder. Sinyal değildir: yalnızca düzenleme
+ * anında okunur (görüntülenen bir değer değildir).
+ */
+export function createSnapTracker(read: () => TableDef | null) {
+  let snap: SelfSnap = [];
+  let own: TableDef | null = null;
+  let seen: TableDef | null | undefined;
+  const sync = () => {
+    const d = read();
+    if (d === seen) return;
+    seen = d;
+    if (d && d !== own) snap = selfRefs(d);
+  };
+  return {
+    snap(): SelfSnap {
+      sync();
+      return snap;
+    },
+    /** Formun düzenlemesinden sonra: yeni taslak (denetleyicideki nesne) ve anlık görüntü. */
+    commit(next: SelfSnap, draft: TableDef | null) {
+      snap = next;
+      own = draft;
+      seen = draft;
+    },
+  };
 }

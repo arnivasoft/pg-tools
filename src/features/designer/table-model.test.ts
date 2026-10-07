@@ -5,7 +5,7 @@ import type { ConstraintDef } from "../../ipc/bindings/ConstraintDef";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import { defsEqual, groupIssues } from "./designer-model";
 import {
-  addPartitionKey, addTableColumn, allowedValueSources, asTable, columnRefs, newColumn, originalColumn, removePartitionKey, removeTableColumn,
+  addPartitionKey, addTableColumn, partitionColumnChoices, partitionKeyLabel, allowedValueSources, asTable, columnRefs, newColumn, originalColumn, removePartitionKey, removeTableColumn,
   removedColumns, renameTable, renameTableColumn, restoreColumn, rowOfFocus, sectionHasIssues, selfRefs, serialFix, structureLocked,
   switchPartitionKeyKind, tableEditPatch, tableSections, typeQueryOf, typeTextWarning, updatePartitionKey, updateTableColumn, usingVisible,
   valueExpr, valueSourceOf, withCollation, withDataType, withPartitionStrategy, withValueExpr, withValueSource,
@@ -304,5 +304,20 @@ describe("düzeltme turu", () => {
     expect(withDataType({ ...o, using: "x" }, o, "NUMERIC(10,2)").using).toBeNull();
     const q = col("a", 1, { dataType: "\"My Type\"" });
     expect(usingVisible(q, { ...q, dataType: "\"my type\"" })).toBe(true);
+  });
+});
+
+describe("bölümleme anahtarı etiketi ve kolon seçenekleri", () => {
+  it("etiket: ad/ifade, boşluk sadeleşir, boş → 'boş', uzun kısaltılır", () => {
+    expect(partitionKeyLabel({ kind: "column", name: "created_at" })).toBe("created_at");
+    expect(partitionKeyLabel({ kind: "expression", sql: "  date_trunc('month',\n  x) " })).toBe("date_trunc('month', x)");
+    expect(partitionKeyLabel({ kind: "column", name: "" })).toBe(ttbl.partitioning.emptyKey);
+    expect(partitionKeyLabel({ kind: "expression", sql: "a".repeat(50) })).toBe(`${"a".repeat(39)}…`);
+  });
+  it("seçenekler: boş ve yinelenen adlar elenir; seçili değer listede yoksa başa eklenir", () => {
+    const d = T({ columns: [col("a", null), col("", null), col("b", null), col("a", null)] });
+    expect(partitionColumnChoices(d, "a")).toEqual(["a", "b"]);
+    expect(partitionColumnChoices(d, "")).toEqual(["", "a", "b"]);
+    expect(partitionColumnChoices(d, "gone")).toEqual(["gone", "a", "b"]);
   });
 });

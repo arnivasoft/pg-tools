@@ -3,7 +3,7 @@ import type { ConstraintDef } from "../../ipc/bindings/ConstraintDef";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import { defsEqual } from "./designer-model";
 import {
-  addConstraint, addConstraintColumn, addConstraintSnap, canRestoreConstraint, pointFkAtOther, pointFkAtSelf, removeConstraintSnap, restoreConstraintSnap, addFkPair, availableColumns, canAddPrimaryKey, constraintColumns, constraintLabel, danglingColumns,
+  addConstraint, addConstraintColumn, addConstraintSnap, createSnapTracker, canRestoreConstraint, pointFkAtOther, pointFkAtSelf, removeConstraintSnap, restoreConstraintSnap, addFkPair, availableColumns, canAddPrimaryKey, constraintColumns, constraintLabel, danglingColumns,
   newConstraint, notValidMode, originalConstraint, primaryKeyNullable, removeConstraint, removeConstraintColumn, removeFkPair,
   removedConstraints, restoreConstraint, supportsDeferrable, supportsNotValid, switchConstraintType, unsupportedKind, updateConstraint,
   updateFkPair, withDeferrable, withFkActions, withFkTarget, withInitiallyDeferred, withPrimaryKeyNotNull,
@@ -280,5 +280,39 @@ describe("tur-guvenli duzeltmeler (D2-D7)", () => {
     expect(switchConstraintType(d.constraints[1]!, "primary_key", d)).toBe(d.constraints[1]);
     const solo = T({ constraints: [uq(["b"])] });
     expect(switchConstraintType(solo.constraints[0]!, "primary_key", solo).kind.type).toBe("primary_key");
+  });
+});
+
+describe("createSnapTracker (formun tek SelfSnap durumu)", () => {
+  const self = () => T({ columns: [col("id")], constraints: [pk(["id"], 1), fk(["id"], "t", ["id"], 2), fk(["id"], "other", ["id"], 3)] });
+  it("ilk okumada ve dış taslak değişiminde (yükleme) selfRefs ile alınır", () => {
+    let cur: TableDef | null = null;
+    const tr = createSnapTracker(() => cur);
+    expect(tr.snap()).toEqual([]);
+    cur = self();
+    expect(tr.snap()).toEqual([1]);
+    cur = T({ constraints: [fk(["id"], "t", ["id"], 9), fk(["id"], "t", ["id"], 10)] });
+    expect(tr.snap()).toEqual([0, 1]);
+  });
+  it("formun kendi düzenlemesi (commit) yeniden hesaplatmaz: ara ad başka FK'yi çalmaz", () => {
+    let cur: TableDef | null = self();
+    const tr = createSnapTracker(() => cur);
+    // Ad "other" yapılır: yeniden tespit 3. FK'yi de sayardı; anlık görüntü yalnızca [1] kalmalı.
+    const snap = tr.snap();
+    cur = structuredClone(renameTable(cur, { name: "other" }, snap));
+    tr.commit(snap, cur);
+    expect(selfRefs(cur)).toEqual([1, 2]);
+    expect(tr.snap()).toEqual([1]);
+    const back = renameTable(cur, { name: "t2" }, tr.snap());
+    expect(back.constraints[1]!.kind).toMatchObject({ refTable: "t2" });
+    expect(back.constraints[2]!.kind).toMatchObject({ refTable: "other" });
+  });
+  it("commit edilen anlık görüntü (sarmalayıcı sonucu) korunur", () => {
+    let cur: TableDef | null = self();
+    const tr = createSnapTracker(() => cur);
+    const r = removeConstraintSnap(cur, 0, tr.snap());
+    cur = r.d;
+    tr.commit(r.snap, cur);
+    expect(tr.snap()).toEqual([0]);
   });
 });

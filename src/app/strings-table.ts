@@ -1,7 +1,7 @@
 // Table diyaloğu metinleri. Yalnızca Table formu parçası (TableForm*.tsx, table-model.ts, table-constraints.ts) içe
 // aktarır; strings-designer.ts'e eklenmez (diğer formların parçası büyümesin). PostgreSQL terimleri İngilizce kalır.
 export const ttbl = {
-  sections: { general: "Genel", columns: "Kolonlar", constraints: "Kısıtlar", partitioning: "Bölümleme", ariaLabel: "Tablo bölümleri" },
+  sections: { general: "Genel", columns: "Kolonlar", constraints: "Kısıtlar", partitioning: "Bölümleme", ariaLabel: "Tablo bölümleri", hasIssues: "hata var" },
   general: {
     schema: "Şema",
     schemaCreateHint: "Tablo bu şemada oluşturulur.",
@@ -39,6 +39,9 @@ export const ttbl = {
     expressionPlaceholder: "ör. date_trunc('month', created_at)",
     addKey: "Anahtar ekle",
     removeKey: (j: number, label: string) => `${j + 1}. anahtarı sil (${label})`,
+    emptyKey: "boş",
+    chooseColumn: "Kolon seçin",
+    noColumns: "Önce Kolonlar bölümünde kolon ekleyin.",
   },
   columns: {
     listLabel: "Kolonlar",
