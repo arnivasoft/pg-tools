@@ -24,6 +24,8 @@ export interface TableEditor {
   editSnap: (fn: (d: TableDef, snap: SelfSnap) => WithSnap) => void;
   /** Taslağın dışarıdan (yükleme/yeniden yükleme) kaç kez değiştiği; formun kendi düzenlemeleri artırmaz. */
   epoch: () => number;
+  /** Güncel SelfSnap (taslağa bağlı okunur: dış değişimde yeniden alınır). Yalnızca gösterim (ör. sarkan referans). */
+  snap: () => SelfSnap;
 }
 
 /**
@@ -36,6 +38,8 @@ export interface TableSectionProps extends FormProps {
   editor: TableEditor;
   highlight: TableHighlight | null;
   active: boolean;
+  /** Kısıtlar bölümündeki "Düzenlenmeyenler" listesinin id'si (TableForm'un "kısıt bulunamadı" şeridi buna bağlanır). */
+  unsupportedId?: string;
 }
 
 /** Geliştirme koruması metni (yalnızca DEV yapısında atılır). */
@@ -127,7 +131,7 @@ export function createTableFormState(props: StateProps): TableFormState {
     props.designer.consumeFocus(props.tabId, req.seq);
   });
 
-  return { section, setSection, highlight, editor: { edit, editSnap, epoch } };
+  return { section, setSection, highlight, editor: { edit, editSnap, epoch, snap: () => tracker.snap() } };
 }
 
 /**

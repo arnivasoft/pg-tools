@@ -7,6 +7,7 @@ import {
   newConstraint, notValidMode, originalConstraint, primaryKeyNullable, removeConstraint, removeConstraintColumn, removeFkPair,
   removedConstraints, restoreConstraint, supportsDeferrable, supportsNotValid, switchConstraintType, unsupportedKind, updateConstraint,
   updateFkPair, withDeferrable, withFkActions, withFkTarget, withInitiallyDeferred, withPrimaryKeyNotNull,
+  columnChoices, constraintStructureChanged, fkRefColumnSource, switchConstraintTypeSnap, withFkTargetSnap,
 } from "./table-constraints";
 import type { SelfSnap } from "./table-constraints";
 import { newColumn, renameTable, selfRefs } from "./table-model";
@@ -314,5 +315,82 @@ describe("createSnapTracker (formun tek SelfSnap durumu)", () => {
     cur = r.d;
     tr.commit(r.snap, cur);
     expect(tr.snap()).toEqual([0]);
+  });
+});
+
+describe("Task 7 yardımcıları", () => {
+  it("fkRefColumnSource: hedef tablo boş → none; taslağın şema/adı → draft; başka tablo → lookup; FK değil → none", () => {
+    const d = T({ schema: "app", name: "orders" });
+    expect(fkRefColumnSource(d, fk(["a"], "", [""], null, "app"))).toBe("none");
+    expect(fkRefColumnSource(d, fk(["a"], "orders", [""], null, "app"))).toBe("draft");
+    expect(fkRefColumnSource(d, fk(["a"], "orders", [""], null, "public"))).toBe("lookup");
+    expect(fkRefColumnSource(d, fk(["a"], "customers", [""], null, "app"))).toBe("lookup");
+    expect(fkRefColumnSource(d, uq(["a"]))).toBe("none");
+  });
+  it("withFkTargetSnap: taslağın adına yazılınca kendine (snap'e eklenir), başka hedefte snap'ten çıkar; boş ad kendine sayılmaz", () => {
+    const d = T({ name: "t", constraints: [uq(["a"]), fk(["a"], "", [""])] });
+    const a = withFkTargetSnap(d, 1, { refTable: "t" }, []);
+    expect(a.snap).toEqual([1]);
+    expect(a.d.constraints[1]!.kind).toMatchObject({ refSchema: "public", refTable: "t", refColumns: [""] });
+    const b = withFkTargetSnap(a.d, 1, { refTable: "tx" }, a.snap);
+    expect(b.snap).toEqual([]);
+    expect(b.d.constraints[1]!.kind).toMatchObject({ refTable: "tx" });
+    // Değişmeyen hedef: aynı nesneler.
+    const same = withFkTargetSnap(b.d, 1, { refTable: "tx" }, b.snap);
+    expect(same.d).toBe(b.d);
+    expect(same.snap).toBe(b.snap);
+    // Adsız tabloda (create) şema eşleşmesi + boş hedef "kendine" sayılmaz.
+    const unnamed = T({ name: "", constraints: [fk(["a"], "x", [""])] });
+    expect(withFkTargetSnap(unnamed, 0, { refTable: "" }, []).snap).toEqual([]);
+    // FK değil / sınır dışı → aynen.
+    expect(withFkTargetSnap(d, 0, { refTable: "t" }, [5]).snap).toEqual([5]);
+    expect(withFkTargetSnap(d, 9, { refTable: "t" }, []).d).toBe(d);
+  });
+  it("withFkTargetSnap sonrası tablo adı değişimi yalnızca kendine yöneltilen FK'yi taşır", () => {
+    const d = T({ name: "t", constraints: [fk(["a"], "", [""]), fk(["a"], "other", ["a"])] });
+    const r = withFkTargetSnap(d, 0, { refTable: "t" }, []);
+    const renamed = renameTable(r.d, { name: "t2" }, r.snap);
+    expect(renamed.constraints[0]!.kind).toMatchObject({ refTable: "t2" });
+    expect(renamed.constraints[1]!.kind).toMatchObject({ refTable: "other" });
+  });
+  it("switchConstraintTypeSnap: yeni kısıtın türü değişir ve indeks snap'ten çıkar; yüklüde/PK varken aynen", () => {
+    const d = T({ name: "t", constraints: [pk(["a"], 1), fk(["a"], "t", ["a"])] });
+    const r = switchConstraintTypeSnap(d, 1, "check", [1]);
+    expect(r.d.constraints[1]!.kind.type).toBe("check");
+    expect(r.snap).toEqual([]);
+    // Tekrar FK'ye çevrilip tablo adı değişse bile hedefe dokunulmaz (snap'te yok).
+    const back = switchConstraintTypeSnap(r.d, 1, "foreign_key", r.snap);
+    expect(renameTable(back.d, { name: "n" }, back.snap).constraints[1]!.kind).toMatchObject({ refTable: "" });
+    expect(switchConstraintTypeSnap(d, 0, "unique", [1])).toEqual({ d, snap: [1] });
+    expect(switchConstraintTypeSnap(d, 1, "primary_key", [1]).d).toBe(d);
+  });
+  it("columnChoices: boşlar/yinelenenler hariç taslak sırası; güncel değer listede yoksa başa", () => {
+    const d = T({ columns: [col("a"), col(""), col("b"), col("a")] });
+    expect(columnChoices(d, "a")).toEqual(["a", "b"]);
+    expect(columnChoices(d, "")).toEqual(["", "a", "b"]);
+    expect(columnChoices(d, "gone")).toEqual(["gone", "a", "b"]);
+  });
+  it("constraintStructureChanged: ad/notValid değişimi ve kolon yeniden adlandırma yapısal değil; kolon/ifade/bayrak değişimi yapısal", () => {
+    const fkSelf = { ...fk(["a"], "t", ["b"], 3), notValid: true };
+    const o = T({ name: "t", columns: [col("a", 1), col("b", 2)], constraints: [{ ...chk(1), notValid: true }, uq(["a"], 2), fkSelf] });
+    const d0 = structuredClone(o);
+    expect(o.constraints.map((c) => constraintStructureChanged(o, d0, c))).toEqual([false, false, false]);
+    // Ad + notValid değişimi.
+    const named = { ...d0.constraints[0]!, name: "x", notValid: false };
+    expect(constraintStructureChanged(o, d0, named)).toBe(false);
+    // Kolon ve tablo yeniden adlandırma (kısıtlar yayılımla güncel adları taşır).
+    const ren = T({ name: "t2", columns: [col("a2", 1), col("b", 2)], constraints: [] });
+    expect(constraintStructureChanged(o, ren, uq(["a2"], 2))).toBe(false);
+    expect(constraintStructureChanged(o, ren, { ...fk(["a2"], "t2", ["b"], 3), notValid: true })).toBe(false);
+    // Yapısal değişimler.
+    expect(constraintStructureChanged(o, d0, { ...chk(1), kind: { type: "check", expr: "a>1", noInherit: false } })).toBe(true);
+    expect(constraintStructureChanged(o, d0, uq(["a", "b"], 2))).toBe(true);
+    expect(constraintStructureChanged(o, d0, { ...uq(["a"], 2), deferrable: true })).toBe(true);
+    // Silinen kolona başvuran özgün kısıt: eşlenemez → değişmiş.
+    const dropped = T({ name: "t", columns: [col("b", 2)] });
+    expect(constraintStructureChanged(o, dropped, uq(["a"], 2))).toBe(true);
+    // Yeni kısıt / özgün yok.
+    expect(constraintStructureChanged(o, d0, uq(["a"]))).toBe(false);
+    expect(constraintStructureChanged(null, d0, uq(["a"], 2))).toBe(false);
   });
 });

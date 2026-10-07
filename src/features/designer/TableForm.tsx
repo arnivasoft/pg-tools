@@ -13,20 +13,16 @@ import { tdes } from "../../app/strings-designer";
 import { ttbl } from "../../app/strings-table";
 import type { FormProps } from "./FormParts";
 import { TableColumns } from "./TableColumns";
+import { TableConstraints } from "./TableConstraints";
 import { TableGeneral, TablePartitioning } from "./TableGeneral";
 import { createTableFormState, type TableSectionProps } from "./table-form-state";
 import { asTable, sectionHasIssues, tableSections, type TableSection } from "./table-model";
-
-/** Task 7 gövdesi gelene dek yer tutucu (başlık). */
-const pending = (s: "constraints"): Component<TableSectionProps> => () => (
-  <h2 class="text-[13px] font-medium">{ttbl.sections[s]}</h2>
-);
 
 /** Bölüm → gövde. Bölümün görünürlüğü `tableSections(mode)`'dan gelir (partitioning yalnızca create). */
 const PANELS: Record<TableSection, Component<TableSectionProps>> = {
   general: TableGeneral,
   columns: TableColumns,
-  constraints: pending("constraints"),
+  constraints: TableConstraints,
   partitioning: TablePartitioning,
 };
 
@@ -37,6 +33,7 @@ export default function TableForm(props: FormProps) {
   const base = createUniqueId();
   const tabId = (s: TableSection) => `${base}-tab-${s}`;
   const panelId = (s: TableSection) => `${base}-panel-${s}`;
+  const unsupportedId = `${base}-unsupported`;
   const tabEls = new Map<TableSection, HTMLButtonElement>();
   const sections = () => tableSections(props.model.mode);
   // Bölüm listesi değişirse (create → alter sonrası partitioning kalkar) seçili bölüm listede kalmalı.
@@ -75,6 +72,7 @@ export default function TableForm(props: FormProps) {
             return original();
           },
           editor: state.editor,
+          unsupportedId,
           get highlight() {
             return state.highlight();
           },
@@ -116,7 +114,11 @@ export default function TableForm(props: FormProps) {
                     <div class="flex flex-col gap-3">
                       <Show when={missing(s)}>
                         {(text) => (
-                          <div role="status" class="rounded border border-border px-3 py-2 text-[13px] text-warn-text">
+                          <div
+                            role="status"
+                            aria-describedby={s === "constraints" && d().unsupported.length > 0 ? unsupportedId : undefined}
+                            class="rounded border border-border px-3 py-2 text-[13px] text-warn-text"
+                          >
                             {text()}
                           </div>
                         )}

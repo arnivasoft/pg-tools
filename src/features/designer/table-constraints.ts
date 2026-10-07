@@ -324,6 +324,72 @@ export function pointFkAtOther(d: TableDef, i: number, target: { refSchema?: str
 }
 
 /**
+ * Yeni kısıtın türünü değiştirir (`switchConstraintType`) ve indeksi anlık görüntüden çıkarır: yeni FK'nin hedefi boştur
+ * (kendine-başvuru değildir); aksi halde tablo adı yazılırken eski kayıt yeni FK'yi tabloya yöneltirdi.
+ */
+export function switchConstraintTypeSnap(d: TableDef, i: number, type: ConstraintType, snap: SelfSnap): WithSnap {
+  const next = updateConstraint(d, i, (c) => switchConstraintType(c, type, d));
+  if (next === d) return { d, snap };
+  return { d: next, snap: snap.filter((k) => k !== i) };
+}
+
+/**
+ * FK hedef şema/tablo yazımı: hedef taslağın kendi şema/adıysa (ad boş değilken) `pointFkAtSelf`, aksi halde
+ * `pointFkAtOther`. Hedef değişmediyse taslak ve anlık görüntü aynen döner.
+ */
+export function withFkTargetSnap(d: TableDef, i: number, p: { refSchema?: string; refTable?: string }, snap: SelfSnap): WithSnap {
+  const c = d.constraints[i];
+  if (!c || c.kind.type !== "foreign_key") return { d, snap };
+  const refSchema = p.refSchema ?? c.kind.refSchema;
+  const refTable = p.refTable ?? c.kind.refTable;
+  if (refSchema === c.kind.refSchema && refTable === c.kind.refTable) return { d, snap };
+  if (refTable !== "" && refSchema === d.schema && refTable === d.name) return pointFkAtSelf(d, i, snap);
+  return pointFkAtOther(d, i, { refSchema, refTable }, snap);
+}
+
+/**
+ * FK hedef kolon önerilerinin kaynağı: hedef tablo boş → "none"; hedef taslağın kendi şema/adı → "draft" (taslak kolon
+ * adları; henüz kaydedilmemiş kolonlar da seçilebilsin); aksi halde "lookup" (`table_columns`). FK değilse "none".
+ */
+export function fkRefColumnSource(d: TableDef, c: ConstraintDef): "draft" | "lookup" | "none" {
+  if (c.kind.type !== "foreign_key" || c.kind.refTable === "") return "none";
+  return c.kind.refSchema === d.schema && c.kind.refTable === d.name ? "draft" : "lookup";
+}
+
+/** Taslağın boş olmayan kolon adları (yinelenmeden, taslak sırasıyla); `current` listede yoksa başa eklenir. */
+export function columnChoices(d: TableDef, current: string): string[] {
+  const names = [...new Set(d.columns.map((c) => c.name).filter((n) => n !== ""))];
+  return names.includes(current) ? names : [current, ...names];
+}
+
+/**
+ * Yüklü kısıt yapısal olarak değişti mi (ad ve `notValid` hariç; arka ucun `same_structure` kuralının istemci
+ * yaklaşımı). Özgün kolon adları `attnum` ile taslaktaki adlara eşlenir (kolon yeniden adlandırma yapısal değişim
+ * sayılmaz); kendine-başvuran FK'nin hedef şema/ad/kolonları da taslağa eşlenir. Yeni kısıt / özgünü yok → false.
+ */
+export function constraintStructureChanged(original: TableDef | null, d: TableDef, c: ConstraintDef): boolean {
+  const o = originalConstraint(original, c);
+  if (!original || !o) return false;
+  const names = new Map<string, string>();
+  for (const oc of original.columns) {
+    const now = oc.attnum === null ? undefined : d.columns.find((x) => x.attnum === oc.attnum);
+    if (now) names.set(oc.name, now.name);
+  }
+  const map = (a: readonly string[]) => a.map((n) => names.get(n) ?? `\u0000${n}`);
+  const k = o.kind;
+  let kind: ConstraintKind = k;
+  if (k.type === "primary_key" || k.type === "unique") kind = { ...k, columns: map(k.columns), include: map(k.include) };
+  else if (k.type === "foreign_key") {
+    const self = k.refSchema === original.schema && k.refTable === original.name;
+    kind = self
+      ? { ...k, columns: map(k.columns), refSchema: d.schema, refTable: d.name, refColumns: map(k.refColumns) }
+      : { ...k, columns: map(k.columns) };
+  }
+  const shape = (x: ConstraintDef, kd: ConstraintKind) => JSON.stringify([kd, x.deferrable, x.initiallyDeferred]);
+  return shape(o, kind) !== shape(c, c.kind);
+}
+
+/**
  * Formun tek SelfSnap durumu. Taslak formun kendi düzenlemeleri dışında değişirse (ilk yükleme, yeniden yükleme,
  * uygulama sonrası yükleme) anlık görüntü o taslaktan `selfRefs` ile yeniden alınır ("düzenleme başlangıcı"); formun
  * düzenlemeleri `commit` ile yeni taslağı ve anlık görüntüyü birlikte kaydeder. Sinyal değildir: yalnızca düzenleme

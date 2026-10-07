@@ -170,6 +170,28 @@ describe("createTableFormState", () => {
     dispose();
   });
 
+  it("Task 7: editor.snap() güncel anlık görüntüyü verir ve taslağa bağlı memo onu düzenleme/yeniden yükleme sonrası yeniden okur", async () => {
+    const s = await setup(T({ constraints: [fk("x", 1), fk("t", 2)] }));
+    const { withFkTargetSnap } = await import("./table-constraints");
+    const [res, dispose] = s.solid.createRoot((d) => {
+      const st = s.createTableFormState(s.props);
+      const seen = s.solid.createMemo(() => (s.draft(), [...st.editor.snap()]));
+      return [{ st, seen }, d] as const;
+    });
+    const { st, seen } = res;
+    expect(seen()).toEqual([1]);
+    // FK 0 tablonun kendisine yöneltilir (taslak adı "t"): her iki FK kendine.
+    st.editor.editSnap((d, snap) => withFkTargetSnap(d, 0, { refTable: "t" }, snap));
+    expect(seen()).toEqual([0, 1]);
+    // Ara ad: yalnızca kayıttakiler taşınır; snap yeniden tespit edilmez.
+    st.editor.editSnap((d, snap) => ({ d: s.renameTable(d, { name: "x" }, snap), snap }));
+    expect(seen()).toEqual([0, 1]);
+    // Yeniden yükleme: snap yeni taslaktan alınır.
+    s.setDraft(T({ name: "n", constraints: [fk("other", 5)] }));
+    expect(seen()).toEqual([]);
+    dispose();
+  });
+
   const pkC = (columns: string[], oid: number): ConstraintDef => ({
     oid, name: null, deferrable: false, initiallyDeferred: false, notValid: false, kind: { type: "primary_key", columns, include: [] },
   });

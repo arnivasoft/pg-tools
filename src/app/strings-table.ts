@@ -158,6 +158,14 @@ export const ttbl = {
     removedNote: "Uygulanınca bu kısıtlar kaldırılır (DROP CONSTRAINT); bağımlı yabancı anahtar varsa uygulama başarısız olur.",
     restore: (label: string) => `Geri al (${label})`,
     kindFixed: "Mevcut kısıtın türü değiştirilemez; silip yeni kısıt ekleyin.",
+    kind: "Tür",
+    selectedBadge: "seçili",
+    revalidateHint:
+      "Kısıt yapısı değiştiği için silinip yeniden eklenir: işaretliyse doğrulanmış olarak eklenir (tablo taranır), işaretsizse NOT VALID eklenir.",
+    refColumnPlaceholder: "hedef kolon",
+    noRefTable: "Hedef kolon önerileri için önce hedef tabloyu girin.",
+    selfRefHint: "Tablo kendine başvuruyor: öneriler bu formdaki kolonlardır.",
+    restoreBlocked: "Tabloda başka bir PRIMARY KEY var; önce onu silin.",
   },
   unsupported: {
     title: "Düzenlenmeyen kısıt ve özellikler",
