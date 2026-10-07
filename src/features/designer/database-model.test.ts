@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DatabaseDef } from "../../ipc/bindings/DatabaseDef";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import {
-  asDatabase, connectionLimitFromInput, createOnlyLocked, databaseEditPatch, localeFields, needsNoSessions, template0Hint, withProvider,
+  asDatabase, connectionLimitFromInput, createOnlyLocked, databaseEditPatch, localeFields, needsNoSessions, template0Hint, unlimitedToggle, withProvider,
 } from "./database-model";
 
 const db = (p: Partial<DatabaseDef> = {}): DatabaseDef => ({
@@ -63,5 +63,17 @@ describe("database-model", () => {
     expect(needsNoSessions(o, db({ tablespace: "ts1" }))).toBe(true);
     expect(needsNoSessions(o, db({ owner: "bob", tablespace: "pg_default" }))).toBe(false);
     expect(needsNoSessions(null, db({ name: "x" }))).toBe(false);
+  });
+
+  it("withProvider lcCollate/lcCtype'a dokunmaz (arka uç icu/builtin ile kabul eder)", () => {
+    expect(withProvider(db({ lcCollate: "C", lcCtype: "C" }), "icu")).toMatchObject({ lcCollate: "C", lcCtype: "C" });
+  });
+
+  it("unlimitedToggle: kutu -1; kaldırınca yüklü >=0 (0 dahil) ya da 100", () => {
+    expect(unlimitedToggle(null, true)).toBe(-1);
+    expect(unlimitedToggle(db({ connectionLimit: 7 }), false)).toBe(7);
+    expect(unlimitedToggle(db({ connectionLimit: 0 }), false)).toBe(0);
+    expect(unlimitedToggle(db({ connectionLimit: -1 }), false)).toBe(100);
+    expect(unlimitedToggle(null, false)).toBe(100);
   });
 });

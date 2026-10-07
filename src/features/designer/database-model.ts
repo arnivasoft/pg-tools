@@ -51,3 +51,9 @@ export function connectionLimitFromInput(s: string, badInput = false): number | 
 export function needsNoSessions(original: DatabaseDef | null, d: DatabaseDef): boolean {
   return original !== null && (original.name !== d.name || original.tablespace !== d.tablespace);
 }
+
+/** "Sınırsız" kutusu: işaretli → -1; kaldırılınca yüklü sınır >= 0 ise o (0 dahil), yoksa 100. */
+export function unlimitedToggle(original: DatabaseDef | null, unlimited: boolean): number {
+  if (unlimited) return -1;
+  return original !== null && original.connectionLimit >= 0 ? original.connectionLimit : 100;
+}

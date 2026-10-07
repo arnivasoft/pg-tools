@@ -5,9 +5,9 @@ import { tdb } from "../../app/strings-database";
 import type { LocaleProvider } from "../../ipc/bindings/LocaleProvider";
 import { inputClass } from "../../ui/Field";
 import {
-  asDatabase, connectionLimitFromInput, createOnlyLocked, databaseEditPatch, localeFields, needsNoSessions, template0Hint, withProvider,
+  asDatabase, connectionLimitFromInput, createOnlyLocked, unlimitedToggle, databaseEditPatch, localeFields, needsNoSessions, template0Hint, withProvider,
 } from "./database-model";
-import type { FieldIssues } from "./designer-model";
+import { issuesFor, type FieldIssues } from "./designer-model";
 import { CheckRow, CommentField, FieldRow, OwnerSelect, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
 import { normalizeEmpty, normalizeTablespaceEdit, tablespaceChoices } from "./forms-model";
 import { SettingsEditor } from "./SettingsEditor";
@@ -214,7 +214,7 @@ export default function DatabaseForm(props: FormProps) {
                   </Show>
                 )}
               </FieldRow>
-              <Show when={locked() || lf().libc}>
+              <Show when={true}>
                 <FieldRow label={tdb.createOptions.lcCollate} path="lcCollate" issues={props.issues}>
                   {(a) => (
                     <>
@@ -262,7 +262,7 @@ export default function DatabaseForm(props: FormProps) {
                   )}
                 </FieldRow>
               </Show>
-              <Show when={locked() ? d().localeProvider === "icu" || d().localeProvider === "builtin" || d().providerLocale !== null : lf().providerLocale !== null}>
+              <Show when={locked() ? d().localeProvider === "icu" || d().localeProvider === "builtin" || d().providerLocale !== null : lf().providerLocale !== null || d().providerLocale !== null || issuesFor(props.issues, "providerLocale").length > 0}>
                 <FieldRow
                   label={(locked() ? d().localeProvider : lf().providerLocale) === "builtin" ? tdb.createOptions.builtinLocale : tdb.createOptions.icuLocale}
                   path="providerLocale"
@@ -352,7 +352,7 @@ export default function DatabaseForm(props: FormProps) {
                 issues={NO_ISSUES}
                 disabled={off()}
                 checked={unlimited()}
-                onChange={(c) => patch({ connectionLimit: c ? -1 : (original()?.connectionLimit ?? -1) > 0 ? original()!.connectionLimit : 100 })}
+                onChange={(c) => patch({ connectionLimit: unlimitedToggle(original(), c) })}
               />
               <CheckRow
                 label={tdb.storage.allowConnections}
