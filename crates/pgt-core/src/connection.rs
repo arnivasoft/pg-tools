@@ -380,6 +380,25 @@ impl ConnectionManager {
         result
     }
 
+    /// Bağlı oturumun GERÇEKTEN kullandığı bakım veritabanı adı (oturum açılışındaki yapılandırma; kayıt sonradan
+    /// değişmiş olabilir). Bağlı değilse `None`.
+    pub async fn session_maintenance_db(&self, server: Uuid) -> Option<String> {
+        let session = self.session(server).ok()?;
+        let s = session.state.lock().await;
+        Some(s.config.maintenance_db.clone())
+    }
+
+    /// Havuzdaki `Target::Database(oid)` bağlantısını kapatır ve ad önbelleğinden siler (oturum bağlı kalır).
+    /// Veritabanı yeniden adlandırma/silme/taşıma öncesi ve sonrası çağrılır (kendi bağlantımız 55006'ya yol
+    /// açmasın; sonra eski ad önbellekte kalmasın); bağlı değilse sessizce döner. O an `run` içinde kullanılan
+    /// bağlantı, son `Arc` düşünce kapanır.
+    pub async fn release_database(&self, server: Uuid, oid: u32) {
+        let Ok(session) = self.session(server) else { return };
+        let mut s = session.state.lock().await;
+        s.conns.remove(&Target::Database(oid));
+        s.db_names.remove(&oid);
+    }
+
     /// Test yardımcısı: oturumun havuzundaki bağlantı sayısı (bağlı değilse 0).
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
@@ -879,6 +898,28 @@ mod tests {
         let _held = entry.state.lock().await; // yavaş bir yeniden bağlanmayı temsil eder
         assert_eq!(mgr.info(id), Some(info));
         assert!(mgr.is_connected(id));
+    }
+
+    #[tokio::test]
+    async fn release_database_forgets_the_cached_name_and_ignores_unknown_servers() {
+        let mgr = ConnectionManager::new();
+        // Bağlı olmayan sunucu: panik yok.
+        mgr.release_database(Uuid::new_v4(), 5).await;
+        let id = Uuid::new_v4();
+        let session = Session {
+            config: ServerConfig::new("s", "127.0.0.1", 1, "u"),
+            password: None,
+            conns: HashMap::new(),
+            db_names: HashMap::from([(5, "a".to_string()), (6, "b".to_string())]),
+        };
+        let entry = Arc::new(SessionEntry { info: ServerInfo { version_num: 180000, version: "18.0".into() }, state: Mutex::new(session) });
+        mgr.sessions.lock().unwrap().insert(id, entry.clone());
+        mgr.release_database(id, 5).await;
+        let s = entry.state.lock().await;
+        assert!(!s.db_names.contains_key(&5));
+        assert_eq!(s.db_names.get(&6).map(String::as_str), Some("b"), "başka veritabanı etkilenmemeli");
+        drop(s);
+        assert!(mgr.is_connected(id), "oturum bağlı kalmalı");
     }
 
     #[test]

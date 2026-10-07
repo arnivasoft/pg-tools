@@ -1,0 +1,18 @@
+---
+source: crates/pgt-ddl/src/build/matview.rs
+expression: out
+---
+false -> true None
+[Destructive] REFRESH MATERIALIZED VIEW public.mv  -- ACCESS EXCLUSIVE kilit: yenileme süresince okunamaz
+
+false -> true Some(Normal)
+[Destructive] REFRESH MATERIALIZED VIEW public.mv  -- ACCESS EXCLUSIVE kilit: yenileme süresince okunamaz
+
+true -> false None
+[Destructive] REFRESH MATERIALIZED VIEW public.mv WITH NO DATA  -- Veri boşaltılır; sorgulanamaz hale gelir
+
+true -> true Some(Normal)
+[Destructive] REFRESH MATERIALIZED VIEW public.mv  -- ACCESS EXCLUSIVE kilit: yenileme süresince okunamaz
+
+true -> true Some(Concurrently)
+[Destructive] REFRESH MATERIALIZED VIEW CONCURRENTLY public.mv  -- Benzersiz (UNIQUE) bir indeks gerekir; okumalar sürer

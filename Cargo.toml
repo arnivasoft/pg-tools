@@ -15,6 +15,8 @@ pgt-dash = { path = "crates/pgt-dash" }
 pgt-ddl = { path = "crates/pgt-ddl" }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-postgres = "0.7.18"
+# İstemci tarafı parola özeti (SCRAM-SHA-256, psql \password gibi); tokio-postgres zaten çeker.
+postgres-protocol = "0.6.12"
 # Yalnızca `stream::poll_fn` + `StreamExt::next` (sorgu bağlantısı sürücüsü); tokio-postgres zaten çeker.
 futures-util = { version = "0.3", default-features = false }
 tokio-postgres-rustls = "0.14"

@@ -1,0 +1,13 @@
+---
+source: crates/pgt-ddl/src/build/database.rs
+expression: render(&p)
+---
+[Safe non-tx] ALTER DATABASE d RENAME TO "Select"  -- Veritabanına bağlı oturum olmamalı (bu uygulamanın Gezgin bağlantıları kapatılır)
+[Safe non-tx] ALTER DATABASE "Select" WITH CONNECTION LIMIT 5 IS_TEMPLATE true
+[Safe non-tx] ALTER DATABASE "Select" SET TABLESPACE fast  -- Veritabanı dosyaları taşınır; bağlı oturum olmamalı; uzun sürebilir
+[Safe non-tx] ALTER DATABASE "Select" RESET timezone
+[Safe non-tx] ALTER DATABASE "Select" SET app."user" = 'x'
+[Safe non-tx] ALTER DATABASE "Select" SET work_mem = '2MB'
+[Safe non-tx] COMMENT ON DATABASE "Select" IS 'yeni'
+[Safe non-tx] ALTER DATABASE "Select" OWNER TO p
+WARN: Herkes (CREATEDB yetkili) bu veritabanını şablon olarak kopyalayabilir

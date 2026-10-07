@@ -26,6 +26,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Geçici, her çalıştırmada rastgele parola; hiçbir yere yazılmaz.
+# `max_connections=300`: test ikilileri çok çekirdekte tüm testleri paralel koşar (her test birkaç bağlantı açar);
+# varsayılan 100 sınırı aşılınca alakasız testler 53300 ile düşer.
 $password = [guid]::NewGuid().ToString("N")
 $urls = @()
 $names = @()
@@ -39,7 +41,7 @@ try {
             -e POSTGRES_PASSWORD=$password `
             -e POSTGRES_INITDB_ARGS="--auth-host=scram-sha-256" `
             -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 `
-            -p "127.0.0.1:${port}:5432" "postgres:$v" | Out-Null
+            -p "127.0.0.1:${port}:5432" "postgres:$v" -c max_connections=300 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "postgres:$v başlatılamadı" }
         $names += $name
         $urls += "postgres://postgres:$password@127.0.0.1:$port/postgres"

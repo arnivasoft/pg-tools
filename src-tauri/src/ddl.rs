@@ -5,6 +5,10 @@
 //! Hata eşlemesi tek yerden: `ddl_payload` (kapı hataları kodlu: locked, confirmation_required,
 //! production_confirmation_required, plan_changed, invalid_def). Yürütme hataları `Ok(ApplyOutcome::Failed{..})` döner.
 //! Tauri'de argüman adları arayüzde camelCase görünür (`server_id` -> `serverId`, `database_oid` -> `databaseOid`).
+//! `databaseOid` `null` olabilir: sunucu kapsamlı türler (Database/Role) ve sunucu genelindeki açılır listeler bakım
+//! veritabanında çalışır; veritabanı kapsamlı türde `null` → `invalid`.
+//! Parola yalnızca `ddl_apply`'ın `options.password` alanında gelir (`Secret`: `Debug`/`Serialize` maskeli); komut
+//! katmanı argümanları günlüğe yazmaz (`tauri::command` argüman kaydı yapmaz, burada `tracing` çağrısı yok).
 
 use pgt_core::ErrorPayload;
 use pgt_ddl::{
@@ -28,7 +32,7 @@ pub async fn ddl_target_of(_state: State<'_, AppState>, node_id: String) -> CmdR
 pub async fn ddl_defaults(
     state: State<'_, AppState>,
     server_id: Uuid,
-    database_oid: u32,
+    database_oid: Option<u32>,
     kind: ObjectKind,
     ctx: CreateContext,
 ) -> CmdResult<ObjectDef> {
@@ -36,7 +40,7 @@ pub async fn ddl_defaults(
 }
 
 #[tauri::command]
-pub async fn ddl_load(state: State<'_, AppState>, server_id: Uuid, database_oid: u32, object: ObjectRef) -> CmdResult<ObjectDef> {
+pub async fn ddl_load(state: State<'_, AppState>, server_id: Uuid, database_oid: Option<u32>, object: ObjectRef) -> CmdResult<ObjectDef> {
     Box::pin(state.ddl.load(server_id, database_oid, object)).await.map_err(|e| ddl_payload(&e))
 }
 
@@ -44,14 +48,14 @@ pub async fn ddl_load(state: State<'_, AppState>, server_id: Uuid, database_oid:
 pub async fn ddl_lookup(
     state: State<'_, AppState>,
     server_id: Uuid,
-    database_oid: u32,
+    database_oid: Option<u32>,
     request: LookupRequest,
 ) -> CmdResult<Vec<LookupItem>> {
     Box::pin(state.ddl.lookup(server_id, database_oid, request)).await.map_err(|e| ddl_payload(&e))
 }
 
 #[tauri::command]
-pub async fn ddl_preview(state: State<'_, AppState>, server_id: Uuid, database_oid: u32, request: PlanRequest) -> CmdResult<PlanView> {
+pub async fn ddl_preview(state: State<'_, AppState>, server_id: Uuid, database_oid: Option<u32>, request: PlanRequest) -> CmdResult<PlanView> {
     Box::pin(state.ddl.preview(server_id, database_oid, &request)).await.map_err(|e| ddl_payload(&e))
 }
 
@@ -59,7 +63,7 @@ pub async fn ddl_preview(state: State<'_, AppState>, server_id: Uuid, database_o
 pub async fn ddl_apply(
     state: State<'_, AppState>,
     server_id: Uuid,
-    database_oid: u32,
+    database_oid: Option<u32>,
     request: PlanRequest,
     options: ApplyOptions,
 ) -> CmdResult<ApplyOutcome> {
@@ -87,7 +91,7 @@ mod tests {
     }
 
     fn opts(hash: &str) -> ApplyOptions {
-        ApplyOptions { apply_id: Uuid::new_v4(), lock_timeout_ms: 5000, expected_hash: hash.into(), confirmed: false, confirmed_production: false }
+        ApplyOptions { apply_id: Uuid::new_v4(), lock_timeout_ms: 5000, expected_hash: hash.into(), confirmed: false, confirmed_production: false, password: None }
     }
 
     #[test]
@@ -108,52 +112,52 @@ mod tests {
 
         let body = async {
             let req = PlanRequest::Create { def: def(), concurrently: false };
-            let view = Box::pin(ddl.preview(sid, db, &req)).await.map_err(|e| ddl_payload(&e)).unwrap();
+            let view = Box::pin(ddl.preview(sid, Some(db), &req)).await.map_err(|e| ddl_payload(&e)).unwrap();
             assert!(!view.empty && view.errors.is_empty());
 
             // Kilitli kayıt: apply `locked` koduyla reddedilir, preview serbest.
             let mut locked = fx.ts.config.clone();
             locked.read_only_lock = true;
             fx.registry.write().unwrap().upsert(locked).unwrap();
-            let err = Box::pin(ddl.apply(sid, db, &req, opts(&view.hash))).await.map_err(|e| ddl_payload(&e)).unwrap_err();
+            let err = Box::pin(ddl.apply(sid, Some(db), &req, opts(&view.hash))).await.map_err(|e| ddl_payload(&e)).unwrap_err();
             assert_eq!(err.code, "locked");
-            Box::pin(ddl.preview(sid, db, &req)).await.unwrap();
+            Box::pin(ddl.preview(sid, Some(db), &req)).await.unwrap();
             fx.registry.write().unwrap().upsert(fx.ts.config.clone()).unwrap();
 
-            let out = Box::pin(ddl.apply(sid, db, &req, opts(&view.hash))).await.map_err(|e| ddl_payload(&e)).unwrap();
+            let out = Box::pin(ddl.apply(sid, Some(db), &req, opts(&view.hash))).await.map_err(|e| ddl_payload(&e)).unwrap();
             let ApplyOutcome::Applied { created, .. } = out else { panic!("{out:?}") };
             assert_eq!(created.map(|c| c.kind), Some(ObjectKind::Schema));
 
             let oid: u32 = admin.query_one("SELECT oid FROM pg_namespace WHERE nspname = $1", &[&SCHEMA]).await.unwrap().get(0);
-            let loaded = Box::pin(ddl.load(sid, db, ObjectRef { kind: ObjectKind::Schema, oid })).await.map_err(|e| ddl_payload(&e)).unwrap();
+            let loaded = Box::pin(ddl.load(sid, Some(db), ObjectRef { kind: ObjectKind::Schema, oid })).await.map_err(|e| ddl_payload(&e)).unwrap();
             let (ObjectDef::Schema(l), ObjectDef::Schema(d)) = (&loaded, &def()) else { panic!() };
             assert_eq!((&l.name, &l.comment), (&d.name, &d.comment));
 
-            let roles = Box::pin(ddl.lookup(sid, db, LookupRequest::Roles)).await.map_err(|e| ddl_payload(&e)).unwrap();
+            let roles = Box::pin(ddl.lookup(sid, Some(db), LookupRequest::Roles)).await.map_err(|e| ddl_payload(&e)).unwrap();
             assert!(!roles.is_empty());
 
             // Bağlı olmayan sunucu: `not_connected`.
             let idle = DdlManager::new(Arc::new(ConnectionManager::new()), fx.registry.clone());
-            let err = Box::pin(idle.apply(sid, db, &req, opts(&view.hash))).await.map_err(|e| ddl_payload(&e)).unwrap_err();
+            let err = Box::pin(idle.apply(sid, Some(db), &req, opts(&view.hash))).await.map_err(|e| ddl_payload(&e)).unwrap_err();
             assert_eq!(err.code, "not_connected");
 
             // Yürütme hatası `Ok(Failed)`, kapı reddi `Err(kod)`: aynı şemayı yeniden oluşturmak sunucuda 42P06 ile
             // düşer; yanlış hash ise bağlantı açılmadan `plan_changed` olur.
-            let hash = Box::pin(ddl.preview(sid, db, &req)).await.map_err(|e| ddl_payload(&e)).unwrap().hash;
-            let out = Box::pin(ddl.apply(sid, db, &req, opts(&hash))).await.map_err(|e| ddl_payload(&e)).unwrap();
+            let hash = Box::pin(ddl.preview(sid, Some(db), &req)).await.map_err(|e| ddl_payload(&e)).unwrap().hash;
+            let out = Box::pin(ddl.apply(sid, Some(db), &req, opts(&hash))).await.map_err(|e| ddl_payload(&e)).unwrap();
             let ApplyOutcome::Failed { sqlstate, committed, .. } = out else { panic!("{out:?}") };
             assert_eq!((sqlstate.as_deref(), committed), (Some("42P06"), 0));
-            let err = Box::pin(ddl.apply(sid, db, &req, opts("yanlis"))).await.map_err(|e| ddl_payload(&e)).unwrap_err();
+            let err = Box::pin(ddl.apply(sid, Some(db), &req, opts("yanlis"))).await.map_err(|e| ddl_payload(&e)).unwrap_err();
             assert_eq!(err.code, "plan_changed");
 
             // Sunucu istemcinin tanımına güvenmez: tahrifli `def` ile silme `plan_changed` olur, şema yerinde kalır.
             let ObjectDef::Schema(mut tampered) = loaded.clone() else { panic!() };
             tampered.comment = Some("sahte".into());
-            let drop = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid }, def: ObjectDef::Schema(tampered), cascade: false };
-            let hash = Box::pin(ddl.preview(sid, db, &drop)).await.map_err(|e| ddl_payload(&e)).unwrap().hash;
+            let drop = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid }, def: ObjectDef::Schema(tampered), cascade: false, force: false };
+            let hash = Box::pin(ddl.preview(sid, Some(db), &drop)).await.map_err(|e| ddl_payload(&e)).unwrap().hash;
             let mut o = opts(&hash);
             o.confirmed = true;
-            let err = Box::pin(ddl.apply(sid, db, &drop, o)).await.map_err(|e| ddl_payload(&e)).unwrap_err();
+            let err = Box::pin(ddl.apply(sid, Some(db), &drop, o)).await.map_err(|e| ddl_payload(&e)).unwrap_err();
             assert_eq!(err.code, "plan_changed");
         };
         body.await;

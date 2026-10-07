@@ -443,3 +443,15 @@ Not: serbest SQL alanlarında (CHECK, DEFAULT, indeks koşulu vb.) sıradan `'�
 ### Erişilebilirlik ve yerleşim
 - [ ] Kolonlar ızgarasında Tab sırası (ad → tip → NOT NULL → kaynak → ifade → Ayrıntılar → Sil); Ayrıntılar `aria-expanded`; çip çıkar düğmeleri etiketli; ekran okuyucu satır/kart adlarını okur. **[—]**
 - [ ] Açık/koyu tema okunur; uzun tip/ifade metinleri yatay sayfa kaydırması yaratmaz; dar pencerede (≈1100 px) kolon satırı sarılır, taşmaz. **[—]**
+
+## Nesne diyalogları: View/MatView/Database/Role arka ucu (Plan 14)
+
+Plan 14 yalnızca arka uçtur; GUI maddeleri Plan 15 bölümündedir (menüde bu türler henüz yok). Docker doğrulaması: `scripts/test-matrix.ps1 -SkipPerf` (varsayılan: PG 10–18 tümü; view/MV ve küme gidiş-dönüşleri, yönetici kapıları, parola gizlilik testi dahil; kapsayıcılar `max_connections=300` ile başlar ve sonda silinir).
+
+Bilinen sınırlar:
+- Görünüm sorgusunda `\` içeren sıradan `'…'` dize: `pg_get_viewdef` bunu `E` öneki olmadan yazar; böyle bir görünümün **sorgusu** düzenlenmek istenirse kapı reddeder (ad/sahip/yorum düzenlemeleri serbest; kaçış için `E'…'`).
+- MatView tanım değişikliği yeniden kurmadır (DataLoss): MV indeksleri, yetkiler ve modellenmeyen ekler kaybolur (uyarıda listelenir; indeksler otomatik yeniden oluşturulmaz).
+- PG 16+'da süper kullanıcı olmayan bağlantıyla sahipliği INHERIT'siz role devretme sırası (OWNER TO en sonda) Docker'da yalnızca süper kullanıcıyla sınandı.
+- Parola istemcide SCRAM-SHA-256 ile özetlenir: sunucu günlüğüne (`log_statement`, `pg_stat_statements`) düz metin **düşmez**, yalnızca doğrulayıcı düşebilir; tur sayısı 4096 sabit (PG 16+ `scram_iterations` dikkate alınmaz).
+- Bakım veritabanı yeniden adlandırılamaz/taşınamaz/silinemez, bağlantıya kapatılamaz (ALLOW_CONNECTIONS false, CONNECTION LIMIT 0) ve şablon olarak kopyalanamaz.
+- Veritabanı yeniden adlandırma/silmede uygulamanın kendi Gezgin bağlantısı arada yeniden bağlanırsa 55006 alınabilir; birkaç saniye sonra yeniden denemek yeterlidir.

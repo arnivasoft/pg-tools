@@ -87,7 +87,7 @@ const PARTITION_BY_MSG: &str =
     "Bölümleme anahtarı sonradan değiştirilemez; yalnızca tablo oluşturulurken belirlenir.";
 const PARTITIONED_ADD_IDENTITY_MSG: &str = "Bölümlü/kalıtımlı tabloya mevcut alt tablolar varken kimlik kolonu eklenemez (PG <17). Bölüm olup olmadığı burada bilinmediği için bölümlenmiş tabloda her zaman reddedilir; kolonu kimliksiz ekleyip ardından kimlik ekleyin (ADD GENERATED … AS IDENTITY) ya da PG 17+ kullanın.";
 const PARTITIONED_PERSISTENCE_MSG: &str = "Bölümlenmiş tablonun kalıcılığı (LOGGED/UNLOGGED) değiştirilemez; bölümleri ayrı ayrı değiştirin.";
-const TABLESPACE_CLEAR_MSG: &str =
+pub(crate) const TABLESPACE_CLEAR_MSG: &str =
     "Tablespace kaldırılamaz; varsayılana dönmek için pg_default'u açıkça seçin.";
 
 /// Yeni tanımdaki her kolon: konumu, eski karşılığı (korunan) ya da `None` (eklenen).

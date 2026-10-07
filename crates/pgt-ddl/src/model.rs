@@ -71,6 +71,17 @@ pub enum ObjectKind {
     Extension,
     Index,
     Table,
+    View,
+    MaterializedView,
+    Database,
+    Role,
+}
+
+impl ObjectKind {
+    /// Sunucu kapsamlı (küme düzeyi) nesne: yükleme/uygulama bakım veritabanında; `database_oid` yok sayılır.
+    pub fn server_scoped(self) -> bool {
+        matches!(self, ObjectKind::Database | ObjectKind::Role)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -363,6 +374,200 @@ pub struct TableDef {
     pub unsupported: Vec<String>,
 }
 
+/// `WITH [LOCAL | CASCADED] CHECK OPTION`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CheckOption {
+    Local,
+    Cascaded,
+}
+
+/// Görünüm/MV kolonu: yalnızca yüklemede dolar (salt okunur gösterim; üretici okumaz).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ViewColumn {
+    pub name: String,
+    pub data_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ViewDef {
+    pub schema: String,
+    pub name: String,
+    pub owner: Option<String>,
+    /// Serbest SQL (SELECT/VALUES/WITH … sorgusu); `(…\n)` sarmalıyla yerleşir.
+    pub query: String,
+    pub check_option: Option<CheckOption>,
+    pub security_barrier: bool,
+    /// PG 15+.
+    pub security_invoker: bool,
+    pub comment: Option<String>,
+    /// Yalnızca alter, kalıcı değil: sorgu değişince DROP + CREATE (Karar 1). Yüklemede `false`.
+    #[serde(default)]
+    pub recreate: bool,
+    /// Yalnızca yükleme.
+    #[serde(default)]
+    pub columns: Vec<ViewColumn>,
+    /// Yalnızca yükleme: yeniden kurmada kaybolacak modellenmeyen ekler ("TRIGGER t", "RULE r", "DEFAULT c", "COMMENT c").
+    #[serde(default)]
+    pub unsupported: Vec<String>,
+}
+
+/// `REFRESH MATERIALIZED VIEW [CONCURRENTLY]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum MatViewRefresh {
+    Normal,
+    Concurrently,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct MatViewDef {
+    pub schema: String,
+    pub name: String,
+    pub owner: Option<String>,
+    /// Serbest SQL.
+    pub query: String,
+    pub tablespace: Option<String>,
+    #[ts(type = "number | null")]
+    pub fillfactor: Option<u32>,
+    /// Create: WITH [NO] DATA; yükleme: `relispopulated`; alter: değişimi REFRESH üretir.
+    pub with_data: bool,
+    pub comment: Option<String>,
+    /// Yalnızca alter, kalıcı değil (Karar 10). Yüklemede `None`.
+    #[serde(default)]
+    pub refresh: Option<MatViewRefresh>,
+    /// Yalnızca yükleme.
+    #[serde(default)]
+    pub columns: Vec<ViewColumn>,
+    /// Yalnızca yükleme: "INDEX ad", "WITH (k=v)" (fillfactor dışı), "COMMENT c".
+    #[serde(default)]
+    pub unsupported: Vec<String>,
+}
+
+/// `LOCALE_PROVIDER` (PG 15+; `builtin` PG 17+).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum LocaleProvider {
+    Libc,
+    Icu,
+    Builtin,
+}
+
+/// `ALTER DATABASE|ROLE … SET name = value` girdisi (rol/veritabanından bağımsız ayar).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ConfigSetting {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DatabaseDef {
+    pub name: String,
+    pub owner: Option<String>,
+    // --- yalnızca create (alter'da değişirse alan hatası); yükleme: template None, diğerleri Some
+    pub template: Option<String>,
+    pub encoding: Option<String>,
+    /// PG 15+.
+    pub locale_provider: Option<LocaleProvider>,
+    pub lc_collate: Option<String>,
+    pub lc_ctype: Option<String>,
+    /// `ICU_LOCALE` (icu, PG 15+) ya da `BUILTIN_LOCALE` (builtin, PG 17+); libc'de None olmalı.
+    pub provider_locale: Option<String>,
+    // --- düzenlenebilir
+    pub tablespace: Option<String>,
+    /// -1 = sınırsız.
+    #[ts(type = "number")]
+    pub connection_limit: i32,
+    pub is_template: bool,
+    pub allow_connections: bool,
+    pub settings: Vec<ConfigSetting>,
+    pub comment: Option<String>,
+}
+
+/// Parola niyeti; değer asla tanımda değildir (Karar 6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PasswordChange {
+    #[default]
+    Keep,
+    Set,
+    Clear,
+}
+
+/// Elle yazılmış girdi: serde'nin "unknown variant `…`" iletisi gelen değeri yankılardı; yanlış bağlanmış bir arayüz
+/// parolayı bu alana koyarsa IPC hata metnine düşerdi (inceleme G-10). İleti sabittir.
+impl<'de> Deserialize<'de> for PasswordChange {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = String::deserialize(d).map_err(|_| serde::de::Error::custom(PASSWORD_INTENT_MSG))?;
+        match v.as_str() {
+            "keep" => Ok(PasswordChange::Keep),
+            "set" => Ok(PasswordChange::Set),
+            "clear" => Ok(PasswordChange::Clear),
+            _ => Err(serde::de::Error::custom(PASSWORD_INTENT_MSG)),
+        }
+    }
+}
+
+/// Geçersiz parola niyeti iletisi (değer içermez).
+pub const PASSWORD_INTENT_MSG: &str = "Geçersiz parola niyeti: keep, set ya da clear bekleniyor.";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RoleMembership {
+    /// Üye olunan rol (önceden tanımlı `pg_*` roller dahil).
+    pub role: String,
+    pub admin: bool,
+    /// Yalnızca yükleme, PG 16+ (salt okunur; üretici yazmaz).
+    #[serde(default)]
+    pub inherit_option: Option<bool>,
+    #[serde(default)]
+    pub set_option: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RoleDef {
+    pub name: String,
+    pub login: bool,
+    pub superuser: bool,
+    pub createdb: bool,
+    pub createrole: bool,
+    pub inherit: bool,
+    pub replication: bool,
+    pub bypassrls: bool,
+    /// -1 = sınırsız.
+    #[ts(type = "number")]
+    pub connection_limit: i32,
+    /// `infinity` ya da ISO zaman damgası; yükleme UTC biçimi `YYYY-MM-DDTHH:MM:SS[.ffffff]Z`.
+    pub valid_until: Option<String>,
+    /// Yalnızca yazılır; yükleme her zaman `keep`.
+    #[serde(default)]
+    pub password: PasswordChange,
+    pub member_of: Vec<RoleMembership>,
+    pub settings: Vec<ConfigSetting>,
+    pub comment: Option<String>,
+    /// Yalnızca yükleme: "IN DATABASE d: k=v", "MEMBER r (birden çok grantor)", "MEMBER r (grantor g)" (PG 16+;
+    /// önyükleme süper kullanıcısından başkasının verdiği üyelik, salt okunur).
+    #[serde(default)]
+    pub unsupported: Vec<String>,
+}
+
 /// Arayüz ile arka uç arasındaki nesne tanımı (`kind` etiketi nesne türüdür).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -373,6 +578,10 @@ pub enum ObjectDef {
     Extension(ExtensionDef),
     Index(IndexDef),
     Table(TableDef),
+    View(ViewDef),
+    MaterializedView(MatViewDef),
+    Database(DatabaseDef),
+    Role(RoleDef),
 }
 
 impl ObjectDef {
@@ -383,6 +592,10 @@ impl ObjectDef {
             ObjectDef::Extension(_) => ObjectKind::Extension,
             ObjectDef::Index(_) => ObjectKind::Index,
             ObjectDef::Table(_) => ObjectKind::Table,
+            ObjectDef::View(_) => ObjectKind::View,
+            ObjectDef::MaterializedView(_) => ObjectKind::MaterializedView,
+            ObjectDef::Database(_) => ObjectKind::Database,
+            ObjectDef::Role(_) => ObjectKind::Role,
         }
     }
 
@@ -394,6 +607,10 @@ impl ObjectDef {
             ObjectDef::Extension(d) => &d.name,
             ObjectDef::Index(d) => &d.name,
             ObjectDef::Table(d) => &d.name,
+            ObjectDef::View(d) => &d.name,
+            ObjectDef::MaterializedView(d) => &d.name,
+            ObjectDef::Database(d) => &d.name,
+            ObjectDef::Role(d) => &d.name,
         }
     }
 }
@@ -640,5 +857,136 @@ mod tests {
         let x = k.remove("nullsNotDistinct").unwrap();
         k.insert("nulls_not_distinct".into(), x);
         assert!(serde_json::from_value::<ObjectDef>(v).is_err());
+    }
+
+    fn view_json() -> serde_json::Value {
+        json!({
+            "kind": "view", "schema": "public", "name": "v", "owner": "o", "query": "SELECT 1 AS a",
+            "checkOption": "cascaded", "securityBarrier": true, "securityInvoker": false, "comment": "c",
+            "recreate": true, "columns": [{"name": "a", "dataType": "integer"}], "unsupported": ["RULE r"]
+        })
+    }
+
+    fn matview_json() -> serde_json::Value {
+        json!({
+            "kind": "materialized_view", "schema": "s", "name": "mv", "owner": null, "query": "SELECT 1",
+            "tablespace": "pg_default", "fillfactor": 80, "withData": false, "comment": null,
+            "refresh": "concurrently", "columns": [{"name": "x", "dataType": "text"}], "unsupported": ["INDEX i"]
+        })
+    }
+
+    fn database_json() -> serde_json::Value {
+        json!({
+            "kind": "database", "name": "d", "owner": "o", "template": "template0", "encoding": "UTF8",
+            "localeProvider": "icu", "lcCollate": "C", "lcCtype": "C", "providerLocale": "und",
+            "tablespace": "pg_default", "connectionLimit": -1, "isTemplate": false, "allowConnections": true,
+            "settings": [{"name": "work_mem", "value": "8MB"}], "comment": null
+        })
+    }
+
+    fn role_json() -> serde_json::Value {
+        json!({
+            "kind": "role", "name": "r", "login": true, "superuser": false, "createdb": true, "createrole": false,
+            "inherit": true, "replication": false, "bypassrls": false, "connectionLimit": -1,
+            "validUntil": "infinity", "password": "set",
+            "memberOf": [{"role": "pg_read_all_data", "admin": true, "inheritOption": true, "setOption": false}],
+            "settings": [{"name": "search_path", "value": "a, b"}], "comment": "c", "unsupported": ["IN DATABASE d: k=v"]
+        })
+    }
+
+    #[test]
+    fn new_kinds_round_trip_tagged_camel_case() {
+        for (v, kind, name) in [
+            (view_json(), ObjectKind::View, "v"),
+            (matview_json(), ObjectKind::MaterializedView, "mv"),
+            (database_json(), ObjectKind::Database, "d"),
+            (role_json(), ObjectKind::Role, "r"),
+        ] {
+            let d: ObjectDef = serde_json::from_value(v.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&d).unwrap(), v);
+            assert_eq!((d.kind(), d.name()), (kind, name));
+        }
+        let ObjectDef::View(v) = serde_json::from_value(view_json()).unwrap() else { panic!() };
+        assert_eq!((v.check_option, v.recreate), (Some(CheckOption::Cascaded), true));
+        let ObjectDef::MaterializedView(m) = serde_json::from_value(matview_json()).unwrap() else { panic!() };
+        assert_eq!((m.refresh, m.fillfactor, m.with_data), (Some(MatViewRefresh::Concurrently), Some(80), false));
+        let ObjectDef::Database(d) = serde_json::from_value(database_json()).unwrap() else { panic!() };
+        assert_eq!((d.locale_provider, d.connection_limit), (Some(LocaleProvider::Icu), -1));
+        let ObjectDef::Role(r) = serde_json::from_value(role_json()).unwrap() else { panic!() };
+        assert_eq!((r.password, r.connection_limit, r.member_of[0].set_option), (PasswordChange::Set, -1, Some(false)));
+        for (k, j) in [
+            (ObjectKind::View, "view"),
+            (ObjectKind::MaterializedView, "materialized_view"),
+            (ObjectKind::Database, "database"),
+            (ObjectKind::Role, "role"),
+        ] {
+            assert_eq!(serde_json::to_value(k).unwrap(), j);
+        }
+        assert_eq!(serde_json::to_value(CheckOption::Local).unwrap(), "local");
+        assert_eq!(serde_json::to_value(MatViewRefresh::Normal).unwrap(), "normal");
+        assert_eq!(serde_json::to_value(LocaleProvider::Builtin).unwrap(), "builtin");
+        assert_eq!(serde_json::to_value(LocaleProvider::Libc).unwrap(), "libc");
+        assert_eq!(serde_json::to_value(PasswordChange::Clear).unwrap(), "clear");
+        assert_eq!(serde_json::to_value(PasswordChange::Keep).unwrap(), "keep");
+    }
+
+    #[test]
+    fn new_kinds_load_and_alter_only_fields_default_when_absent() {
+        let strip = |mut v: serde_json::Value, keys: &[&str]| {
+            for k in keys {
+                v.as_object_mut().unwrap().remove(*k);
+            }
+            v
+        };
+        let ObjectDef::View(v) = serde_json::from_value(strip(view_json(), &["recreate", "columns", "unsupported"])).unwrap() else {
+            panic!()
+        };
+        assert_eq!((v.recreate, v.columns.len(), v.unsupported.len()), (false, 0, 0));
+        let ObjectDef::MaterializedView(m) =
+            serde_json::from_value(strip(matview_json(), &["refresh", "columns", "unsupported"])).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((m.refresh, m.columns.len(), m.unsupported.len()), (None, 0, 0));
+        let mut rj = strip(role_json(), &["password", "unsupported"]);
+        for k in ["inheritOption", "setOption"] {
+            rj["memberOf"][0].as_object_mut().unwrap().remove(k);
+        }
+        let ObjectDef::Role(r) = serde_json::from_value(rj).unwrap() else { panic!() };
+        assert_eq!((r.password, r.unsupported.len()), (PasswordChange::Keep, 0));
+        assert_eq!((r.member_of[0].inherit_option, r.member_of[0].set_option), (None, None));
+        assert_eq!(serde_json::to_value(PasswordChange::default()).unwrap(), "keep");
+    }
+
+    #[test]
+    fn new_kinds_reject_invalid_enums() {
+        let bad = |mut v: serde_json::Value, key: &str, val: serde_json::Value| {
+            v[key] = val;
+            assert!(serde_json::from_value::<ObjectDef>(v).is_err(), "{key}");
+        };
+        bad(role_json(), "password", json!("Set"));
+        bad(role_json(), "password", json!("p@ss"));
+        bad(view_json(), "checkOption", json!("LOCAL"));
+        bad(database_json(), "localeProvider", json!("ICU"));
+        bad(matview_json(), "refresh", json!("Concurrently"));
+        bad(database_json(), "connectionLimit", json!("-1"));
+        bad(role_json(), "connectionLimit", json!(1.5));
+    }
+
+    #[test]
+    fn only_database_and_role_are_server_scoped() {
+        for (k, scoped) in [
+            (ObjectKind::Schema, false),
+            (ObjectKind::Sequence, false),
+            (ObjectKind::Extension, false),
+            (ObjectKind::Index, false),
+            (ObjectKind::Table, false),
+            (ObjectKind::View, false),
+            (ObjectKind::MaterializedView, false),
+            (ObjectKind::Database, true),
+            (ObjectKind::Role, true),
+        ] {
+            assert_eq!(k.server_scoped(), scoped, "{k:?}");
+        }
     }
 }

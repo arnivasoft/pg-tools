@@ -1,0 +1,13 @@
+---
+source: crates/pgt-ddl/src/build/matview.rs
+expression: render(&p)
+---
+[DataLoss] DROP MATERIALIZED VIEW public.mv  -- Veri, indeksler ve yetkiler silinir; bağımlı görünüm varsa başarısız olur
+[Safe] CREATE MATERIALIZED VIEW app.w WITH (fillfactor = 80) TABLESPACE slow AS (SELECT 1, 2
+) WITH NO DATA
+[Safe] COMMENT ON MATERIALIZED VIEW app.w IS 'c'
+[Safe] ALTER MATERIALIZED VIEW app.w OWNER TO a
+WARN: İndeksler yeniden oluşturulmaz: mv_a_idx, "Mv Uniq"
+WARN: Yetkiler (GRANT) yeniden verilmelidir
+WARN: Kaybolacaklar: WITH (autovacuum_enabled=false); ayrıca varsa toast.* depolama seçenekleri, genişletilmiş istatistikler (CREATE STATISTICS), kolon STATISTICS/STORAGE ayarları, CLUSTER ON ve güvenlik etiketleri (SECURITY LABEL)
+WARN: Tanım değişti, görünüm yeniden kuruluyor; yenileme seçimi yok sayıldı

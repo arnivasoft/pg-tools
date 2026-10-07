@@ -215,4 +215,47 @@ mod tests {
             }
         }
     }
+
+    /// G-12: görünüm/MV bağlamları — `CREATE OR REPLACE VIEW … WITH (…) AS` öneki ve ` WITH [NO] DATA` soneki ile de
+    /// kabul edilen her sorgu tek, temiz ifade kalır (üreticiler zaten tam yayımlanan metni denetler; bu test bağlam
+    /// denkliğini sabitler).
+    #[test]
+    fn freesql_wrap_context_parity_with_mv_suffix_and_cor_prefix() {
+        let queries = [
+            "SELECT 1",
+            "SELECT ';' AS s",
+            "SELECT E'\'; x' AS s",
+            "SELECT $$;)$$ AS s",
+            "SELECT 1 -- yorum",
+            "SELECT 1 /* ; ) */",
+            "WITH c AS (SELECT 1) SELECT * FROM c",
+            "VALUES (1), (2)",
+            "SELECT 1; DROP TABLE t",
+            "SELECT 1)",
+            "SELECT (1",
+            "SELECT 'x",
+            "SELECT 1 --",
+        ];
+        let prefixes = [
+            "CREATE VIEW public.v AS ",
+            "CREATE OR REPLACE VIEW public.v AS ",
+            "CREATE OR REPLACE VIEW \"App\".\"select\" WITH (security_barrier = true, check_option = local) AS ",
+            "CREATE MATERIALIZED VIEW public.m WITH (fillfactor = 70) TABLESPACE ts AS ",
+        ];
+        for q in queries {
+            let ok = check(q).is_empty();
+            for p in prefixes {
+                for suffix in ["", " WITH DATA", " WITH NO DATA"] {
+                    let composed = format!("{p}{}{suffix}", wrap(q));
+                    if ok {
+                        assert!(composed_is_clean(&composed), "{composed:?}");
+                    }
+                }
+            }
+        }
+        // Reddedilen örnekler gerçekten reddedilir.
+        for bad in ["SELECT 1; DROP TABLE t", "SELECT 1)", "SELECT 'x"] {
+            assert!(!check(bad).is_empty(), "{bad:?}");
+        }
+    }
 }

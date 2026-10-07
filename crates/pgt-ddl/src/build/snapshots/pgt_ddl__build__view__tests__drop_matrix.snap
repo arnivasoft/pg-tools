@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/build/view.rs
+expression: out
+---
+[Destructive] DROP VIEW public.v
+
+[DataLoss] DROP VIEW public.v CASCADE  -- Bağımlı görünümler de silinir
+WARN: Bağımlı görünümler de silinir
+
+[Destructive] DROP VIEW public."My ""V"""

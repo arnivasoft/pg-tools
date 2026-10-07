@@ -1,0 +1,22 @@
+---
+source: crates/pgt-ddl/src/build/matview.rs
+expression: out
+---
+[Safe] ALTER MATERIALIZED VIEW public.mv RENAME TO w
+
+[Safe] ALTER MATERIALIZED VIEW public.mv SET SCHEMA app
+
+[Safe] ALTER MATERIALIZED VIEW public.mv SET TABLESPACE slow  -- Veri yeniden yazılır; ACCESS EXCLUSIVE kilidi alır
+
+[Safe] ALTER MATERIALIZED VIEW public.mv SET TABLESPACE pg_default  -- Veri yeniden yazılır; ACCESS EXCLUSIVE kilidi alır
+
+[Safe] ALTER MATERIALIZED VIEW public.mv SET (fillfactor = 90)
+
+[Safe] ALTER MATERIALIZED VIEW public.mv RESET (fillfactor)
+
+[Safe] ALTER MATERIALIZED VIEW public.mv OWNER TO b
+
+
+[Safe] COMMENT ON MATERIALIZED VIEW public.mv IS NULL
+
+[Safe] COMMENT ON MATERIALIZED VIEW public.mv IS 'd'

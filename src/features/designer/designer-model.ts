@@ -14,15 +14,34 @@ import type { Statement } from "../../ipc/bindings/Statement";
 
 export type DesignerKind = ObjectKind;
 
-const KIND_LABELS: Record<ObjectKind, string> = { schema: "Schema", sequence: "Sequence", extension: "Extension", index: "Index", table: "Table" };
+const KIND_LABELS: Record<ObjectKind, string> = {
+  schema: "Schema",
+  sequence: "Sequence",
+  extension: "Extension",
+  index: "Index",
+  table: "Table",
+  view: "View",
+  materialized_view: "Materialized View",
+  database: "Database",
+  role: "Role",
+};
 export function kindLabel(kind: ObjectKind): string {
   return KIND_LABELS[kind];
 }
 
-/** Başlıkta/mesajlarda görünen ad; sequence ve indeks şema nitelikli, ad boşsa boş. */
+/** Başlıkta/mesajlarda görünen ad; şema altındaki türler (sequence, indeks, tablo, view, MV) şema nitelikli, ad boşsa boş. */
 export function defName(def: ObjectDef): string {
   if (!def.name) return "";
-  return def.kind === "sequence" || def.kind === "index" || def.kind === "table" ? `${def.schema}.${def.name}` : def.name;
+  switch (def.kind) {
+    case "sequence":
+    case "index":
+    case "table":
+    case "view":
+    case "materialized_view":
+      return `${def.schema}.${def.name}`;
+    default:
+      return def.name;
+  }
 }
 
 export function cloneDef<T extends ObjectDef>(def: T): T {
@@ -146,7 +165,7 @@ export function confirmFlags(g: ApplyGate, c: ConfirmState): { confirmed: boolea
 /** Gönderim seçenekleri; `!canSubmit(gate, c)` ise null (çağıran hiçbir şey göndermez — kapı UI'ya güvenmez). */
 export function applyOptionsFor(applyId: string, lockTimeoutMs: number, view: PlanView, gate: ApplyGate, c: ConfirmState): ApplyOptions | null {
   if (!canSubmit(gate, c)) return null;
-  return { applyId, lockTimeoutMs, expectedHash: view.hash, ...confirmFlags(gate, c) };
+  return { applyId, lockTimeoutMs, expectedHash: view.hash, ...confirmFlags(gate, c), password: null };
 }
 
 // ---- Betik ----

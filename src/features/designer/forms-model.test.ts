@@ -4,7 +4,6 @@ import type { ExtensionDef } from "../../ipc/bindings/ExtensionDef";
 import type { IndexColumn } from "../../ipc/bindings/IndexColumn";
 import type { IndexDef } from "../../ipc/bindings/IndexDef";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
-import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
 import type { SchemaDef } from "../../ipc/bindings/SchemaDef";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
 import { addColumn, groupIssues, issuesFor, moveColumn, removeColumn, updateColumn } from "./designer-model";
@@ -382,7 +381,7 @@ describe("alan yolu sözleşmesi (sequence/index)", () => {
 
 describe("FORM_PATHS (tür → form eşlemesi)", () => {
   it("her ObjectKind için yol kümesi var", () => {
-    expect((["schema", "sequence", "extension", "index", "table"] as ObjectKind[]).every((k) => FORM_PATHS[k].size > 0)).toBe(true);
+    expect((["schema", "sequence", "extension", "index", "table"] as const).every((k) => FORM_PATHS[k].size > 0)).toBe(true);
     expect(FORM_PATHS.index).toBe(INDEX_PATHS);
     expect(FORM_PATHS.sequence).toBe(SEQUENCE_PATHS);
     expect(FORM_PATHS.table).toBe(TABLE_PATHS);

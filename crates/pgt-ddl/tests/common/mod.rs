@@ -19,11 +19,35 @@ pub fn servers() -> Vec<TestServer> {
 }
 
 /// Gövdeyi ayrı görevde çalıştırır; bir doğrulama başarısız olsa bile `cleanup` çalışır, sonra panik yeniden fırlatılır.
+/// Temizlik de paniklerse gövdenin paniği öncelikli (asıl hata gizlenmez); temizlik paniği yalnızca yazdırılır.
 pub async fn guarded(body: impl Future<Output = ()> + Send + 'static, cleanup: impl Future<Output = ()>) {
     let result = tokio::spawn(body).await;
-    cleanup.await;
-    if let Err(e) = result {
-        std::panic::resume_unwind(e.into_panic());
+    let cleaned = CatchUnwind(Box::pin(cleanup)).await;
+    match (result, cleaned) {
+        (Err(e), cleaned) => {
+            if cleaned.is_err() {
+                eprintln!("temizlik de başarısız oldu (gövde hatası öncelikli)");
+            }
+            std::panic::resume_unwind(e.into_panic());
+        }
+        (Ok(()), Err(c)) => std::panic::resume_unwind(c),
+        (Ok(()), Ok(())) => {}
+    }
+}
+
+/// Ödünç alan (spawn edilemeyen) geleceğin paniğini yakalar (ek bağımlılık olmadan `FutureExt::catch_unwind`).
+struct CatchUnwind<F>(std::pin::Pin<Box<F>>);
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        let inner = &mut self.0;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.as_mut().poll(cx))) {
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Ok(std::task::Poll::Ready(v)) => std::task::Poll::Ready(Ok(v)),
+            Err(e) => std::task::Poll::Ready(Err(e)),
+        }
     }
 }
 
@@ -68,6 +92,101 @@ pub async fn cleanup_in(ts: &TestServer, prefix: &str, tag: &str) {
     let admin = admin_client(ts, &ts.config.maintenance_db).await;
     drop_database(&admin, &db_name_in(ts, prefix, tag).await).await;
     admin.batch_execute(&format!("DROP ROLE IF EXISTS {}", role_name_in(prefix, tag))).await.unwrap();
+}
+
+// ---- küme (sunucu kapsamlı) nesneleri: veritabanı ve rol ----
+
+/// Küme nesnesi adı: veritabanı `pgt_ddl_dbk_<ana sürüm>_<etiket>`, rol `pgt_ddl_rk_<etiket>` (her sürüm ayrı
+/// kapsayıcıdır). Testler paralel koşar: etiketler benzersizdir; temizlik bu adı ve `<ad>_…` türevlerini siler.
+pub async fn cluster_name(ts: &TestServer, kind: pgt_ddl::ObjectKind, tag: &str) -> String {
+    // `_` içeren etiket başka etiketin `<ad>_…` türevi gibi görünür ve onun temizliğine girer.
+    assert!(!tag.contains('_'), "küme etiketi '_' içeremez: {tag}");
+    match kind {
+        pgt_ddl::ObjectKind::Database => db_name_in(ts, "pgt_ddl_dbk", tag).await,
+        pgt_ddl::ObjectKind::Role => format!("pgt_ddl_rk_{tag}"),
+        other => panic!("küme nesnesi değil: {other:?}"),
+    }
+}
+
+/// `base` ya da `base_…` adlı nesneler (LIKE değil: `_` joker sayılmasın).
+const BY_PREFIX: &str = "$1 = $2 OR left($1, length($2) + 1) = $2 || '_'";
+
+/// Veritabanını (varsa) siler: şablonsa önce şablonluktan çıkarır, oturumlarını sonlandırıp bekler, 55006'da yeniden
+/// dener. Ad `quote_ident` ile yazılır (test adları tırnak gerektirebilir).
+pub async fn drop_test_database(admin: &Client, name: &str) {
+    let q = pgt_ddl::quote_ident(name);
+    let exists = !admin.query("SELECT 1 FROM pg_database WHERE datname = $1::text", &[&name]).await.unwrap().is_empty();
+    if !exists {
+        return;
+    }
+    admin.batch_execute(&format!("ALTER DATABASE {q} IS_TEMPLATE false")).await.unwrap();
+    const TERMINATE: &str =
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1::text AND pid <> pg_backend_pid()";
+    const REMAINING: &str = "SELECT count(*) FROM pg_stat_activity WHERE datname = $1::text AND pid <> pg_backend_pid()";
+    for attempt in 0..5 {
+        admin.execute(TERMINATE, &[&name]).await.unwrap();
+        for _ in 0..50 {
+            let left: i64 = admin.query_one(REMAINING, &[&name]).await.unwrap().get(0);
+            if left == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        match admin.batch_execute(&format!("DROP DATABASE IF EXISTS {q}")).await {
+            Ok(()) => return,
+            Err(e) if attempt < 4 && e.code() == Some(&tokio_postgres::error::SqlState::OBJECT_IN_USE) => {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Err(e) => panic!("{name} silinemedi: {}", db_message(&e)),
+        }
+    }
+}
+
+/// Rolü (varsa) siler: önce bakım veritabanındaki sahiplik/yetkilerini (`DROP OWNED BY`) kaldırır. Rolün başka
+/// veritabanlarındaki nesneleri o veritabanlarıyla birlikte silinmiş olmalıdır (temizlik önce veritabanlarını siler).
+pub async fn drop_test_role(admin: &Client, name: &str) {
+    if let Err(e) = try_drop_test_role(admin, name).await {
+        panic!("{name} silinemedi: {e}");
+    }
+}
+
+async fn try_drop_test_role(admin: &Client, name: &str) -> Result<(), String> {
+    let exists = !admin.query("SELECT 1 FROM pg_roles WHERE rolname = $1::text", &[&name]).await.unwrap().is_empty();
+    if !exists {
+        return Ok(());
+    }
+    let q = pgt_ddl::quote_ident(name);
+    admin.batch_execute(&format!("DROP OWNED BY {q}")).await.map_err(|e| db_message(&e))?;
+    admin.batch_execute(&format!("DROP ROLE {q}")).await.map_err(|e| db_message(&e))
+}
+
+/// Etiketin tüm küme nesnelerini siler: önce veritabanları (roller nesne sahibi olabilir), sonra roller.
+pub async fn cleanup_cluster(ts: &TestServer, tag: &str) {
+    let admin = admin_client(ts, &ts.config.maintenance_db).await;
+    let db = cluster_name(ts, pgt_ddl::ObjectKind::Database, tag).await;
+    let sql = format!("SELECT datname::text FROM pg_database WHERE {}", BY_PREFIX.replace("$1", "datname::text").replace("$2", "$1::text"));
+    for r in admin.query(&sql, &[&db]).await.unwrap() {
+        drop_test_database(&admin, r.get(0)).await;
+    }
+    let role = cluster_name(ts, pgt_ddl::ObjectKind::Role, tag).await;
+    let sql = format!("SELECT rolname::text FROM pg_roles WHERE {}", BY_PREFIX.replace("$1", "rolname::text").replace("$2", "$1::text"));
+    let mut left: Vec<String> = admin.query(&sql, &[&role]).await.unwrap().iter().map(|r| r.get(0)).collect();
+    // PG 16+: başka üyelikleri vermiş (grantor) rol, o üyelikler durdukça silinemeyebilir → birkaç tur.
+    for _ in 0..3 {
+        let mut failed = vec![];
+        for name in left {
+            if try_drop_test_role(&admin, &name).await.is_err() {
+                failed.push(name);
+            }
+        }
+        if failed.is_empty() {
+            return;
+        }
+        left = failed;
+    }
+    for name in &left {
+        drop_test_role(&admin, name).await;
+    }
 }
 
 pub struct Env {

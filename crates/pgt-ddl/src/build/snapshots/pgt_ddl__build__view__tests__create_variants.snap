@@ -1,0 +1,23 @@
+---
+source: crates/pgt-ddl/src/build/view.rs
+expression: out
+---
+[Safe] CREATE VIEW public.v AS (SELECT 1
+)
+
+[Safe] CREATE VIEW public.v WITH (check_option = local) AS (SELECT 1
+)
+
+[Safe] CREATE VIEW public.v WITH (check_option = cascaded) AS (SELECT 1
+)
+
+[Safe] CREATE VIEW public.v WITH (security_barrier = true) AS (SELECT 1
+)
+
+[Safe] CREATE VIEW public.v WITH (security_invoker = true) AS (SELECT 1
+)
+
+[Safe] CREATE VIEW public."My View" WITH (check_option = local, security_barrier = true, security_invoker = true) AS (SELECT 1
+)
+[Safe] ALTER VIEW public."My View" OWNER TO "Bob"
+[Safe] COMMENT ON VIEW public."My View" IS E'it''s \\ ok'

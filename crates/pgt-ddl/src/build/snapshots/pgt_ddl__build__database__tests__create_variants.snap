@@ -1,0 +1,24 @@
+---
+source: crates/pgt-ddl/src/build/database.rs
+expression: out
+---
+[Safe non-tx] CREATE DATABASE d ALLOW_CONNECTIONS = true CONNECTION LIMIT = -1 IS_TEMPLATE = false  -- Transaction dışında çalışır
+
+[Safe non-tx] CREATE DATABASE "Sales DB" OWNER = "Bob" TEMPLATE = template0 ENCODING = 'UTF8' LOCALE_PROVIDER = libc LC_COLLATE = 'tr_TR.UTF-8' LC_CTYPE = 'tr_TR.UTF-8' TABLESPACE = "Fast Disk" ALLOW_CONNECTIONS = false CONNECTION LIMIT = 25 IS_TEMPLATE = true  -- Transaction dışında çalışır
+WARN: Yeni bağlantılar reddedilir (Gezgin dahil)
+WARN: Herkes (CREATEDB yetkili) bu veritabanını şablon olarak kopyalayabilir
+
+[Safe non-tx] CREATE DATABASE "Sales DB" OWNER = "Bob" TEMPLATE = template1 ENCODING = 'UTF8' LC_COLLATE = 'tr_TR.UTF-8' LC_CTYPE = 'tr_TR.UTF-8' TABLESPACE = "Fast Disk" ALLOW_CONNECTIONS = false CONNECTION LIMIT = 25 IS_TEMPLATE = true  -- Transaction dışında çalışır
+WARN: Kodlama ya da yerel ayar şablondan farklıysa TEMPLATE = template0 seçin.
+WARN: Yeni bağlantılar reddedilir (Gezgin dahil)
+WARN: Herkes (CREATEDB yetkili) bu veritabanını şablon olarak kopyalayabilir
+
+[Safe non-tx] CREATE DATABASE d TEMPLATE = template0 LOCALE_PROVIDER = icu ICU_LOCALE = 'tr-TR' ALLOW_CONNECTIONS = true CONNECTION LIMIT = -1 IS_TEMPLATE = false  -- Transaction dışında çalışır
+
+[Safe non-tx] CREATE DATABASE d TEMPLATE = template0 LOCALE_PROVIDER = builtin BUILTIN_LOCALE = 'C.UTF-8' ALLOW_CONNECTIONS = true CONNECTION LIMIT = -1 IS_TEMPLATE = false  -- Transaction dışında çalışır
+
+[Safe non-tx] CREATE DATABASE d ALLOW_CONNECTIONS = true CONNECTION LIMIT = -1 IS_TEMPLATE = false  -- Transaction dışında çalışır
+[Safe non-tx] ALTER DATABASE d SET app."mode" = 'x'
+[Safe non-tx] ALTER DATABASE d SET search_path = '$user', 'public'
+[Safe non-tx] ALTER DATABASE d SET work_mem = '64MB'
+[Safe non-tx] COMMENT ON DATABASE d IS 'it''s'

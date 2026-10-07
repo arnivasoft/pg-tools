@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/build/view.rs
+expression: render(&p)
+---
+[Safe] ALTER VIEW public.v RENAME TO "select"
+[Safe] ALTER VIEW public."select" SET SCHEMA "App"
+[Safe] CREATE OR REPLACE VIEW "App"."select" WITH (security_barrier = true) AS (SELECT 2
+)  -- Mevcut kolonlar aynı ad, tip ve sırada kalmalı; yeni kolonlar yalnız sona eklenebilir. Uyumsuzsa uygulama geri alınır; 'Yeniden oluştur' seçeneğini kullanın.
+[Safe] COMMENT ON VIEW "App"."select" IS NULL
+[Safe] ALTER VIEW "App"."select" OWNER TO b

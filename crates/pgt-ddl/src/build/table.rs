@@ -1976,7 +1976,7 @@ mod tests {
                             K::Name => assert!(
                                 !h.is_empty()
                                     && h.len() <= 63
-                                    && !h.chars().any(|c| c.is_ascii_control() || is_spoofing_format(c)),
+                                    && !h.chars().any(|c| c.is_control() || is_spoofing_format(c)),
                                 "{label}"
                             ),
                             K::AlterOnly => panic!("create'te kabul edildi: {label}"),

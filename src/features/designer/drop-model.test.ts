@@ -16,7 +16,7 @@ describe("dropRequest", () => {
     const d = def();
     const object = { kind: "schema" as const, oid: 7 };
     const r = dropRequest(object, d, true);
-    expect(r).toEqual({ op: "drop", object, def: d, cascade: true });
+    expect(r).toEqual({ op: "drop", object, def: d, cascade: true, force: false });
     expect(r.def).not.toBe(d);
     expect(r.object).not.toBe(object);
   });

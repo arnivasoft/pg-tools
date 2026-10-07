@@ -454,3 +454,48 @@ async fn dedicated_session_on_dropped_database_re_resolves_name() {
         assert!(mgr.is_connected(ts.config.id));
     }
 }
+
+async fn current_db(mgr: &ConnectionManager, server: uuid::Uuid, oid: u32) -> String {
+    mgr.run(server, Target::Database(oid), |c| async move {
+        c.client.query_one("SELECT current_database()::text", &[]).await.map(|r| r.get::<_, String>(0))
+    })
+    .await
+    .unwrap()
+}
+
+/// `release_database` havuzdaki veritabanı bağlantısını kapatır ve ad önbelleğini siler: sunucu oturumu kalmaz,
+/// yeniden adlandırma 55006 vermez, sonraki `run` yeni adı çözer. Bağlı değilken çağrı sessizdir.
+#[tokio::test]
+async fn release_database_closes_the_pooled_connection_and_forgets_the_name() {
+    for ts in servers() {
+        let db = format!("pgt_qrel_{}", std::process::id());
+        let renamed = format!("{db}_yeni");
+        let admin = admin_client(&ts, &ts.config.maintenance_db).await;
+        drop_database(&admin, &db).await;
+        drop_database(&admin, &renamed).await;
+        admin.batch_execute(&format!("CREATE DATABASE {db} TEMPLATE template0 ENCODING 'UTF8'")).await.unwrap();
+        let oid: u32 = admin.query_one("SELECT oid FROM pg_database WHERE datname = $1", &[&db]).await.unwrap().get(0);
+        let mgr = ConnectionManager::new();
+        mgr.release_database(ts.config.id, oid).await;
+        mgr.connect(ts.config.clone(), ts.password.clone()).await.unwrap();
+        assert_eq!(current_db(&mgr, ts.config.id, oid).await, db);
+        assert_eq!(mgr.pooled_connections(ts.config.id).await, 2);
+        mgr.release_database(ts.config.id, oid).await;
+        assert_eq!(mgr.pooled_connections(ts.config.id).await, 1, "bakım bağlantısı kalmalı");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let left: i64 = admin.query_one("SELECT count(*) FROM pg_stat_activity WHERE datname = $1", &[&db]).await.unwrap().get(0);
+            if left == 0 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "havuz bağlantısı sunucuda kapanmadı");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        admin.batch_execute(&format!("ALTER DATABASE {db} RENAME TO {renamed}")).await.unwrap();
+        assert_eq!(current_db(&mgr, ts.config.id, oid).await, renamed, "ad önbelleği yeniden çözülmeli");
+        assert!(mgr.is_connected(ts.config.id));
+        mgr.release_database(ts.config.id, oid).await;
+        drop(mgr);
+        drop_database(&admin, &renamed).await;
+    }
+}

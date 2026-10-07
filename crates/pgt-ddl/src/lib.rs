@@ -10,6 +10,7 @@ pub mod manager;
 pub mod model;
 pub mod plan;
 pub mod quote;
+pub mod secret;
 pub mod target;
 
 pub use build::{BuildCtx, ScanResult, scan_semicolons};
@@ -18,6 +19,7 @@ pub use load::{ObjectRef, load, server_version};
 pub use lookup::{LookupItem, LookupRequest, lookup};
 pub use manager::{ApplyOptions, ApplyOutcome, CreateContext, DdlManager, PlanRequest};
 pub use model::*;
-pub use plan::{Plan, PlanView, Risk, Statement, plan_hash};
+pub use plan::{Plan, PlanView, REDACTED, Risk, Statement, plan_hash};
+pub use secret::Secret;
 pub use target::{DdlCreate, DdlFocus, DdlTarget, target_of};
 pub use quote::{qualified, quote_ident, quote_literal};

@@ -25,7 +25,8 @@
 //! Ek kısıtlar: en çok 128 karakter; tırnaksız adda `$$` ve rakamdan hemen sonra `$` yok (dolar tırnak/parametreye
 //! benzemesin; nihai ifade tarayıcısı da reddederdi); NUL ve tüm denetim karakterleri (Unicode Cc, ör. `\u{85}`) her
 //! yerde yasak; tırnaklı adda sıfır genişlikli/yön denetimi biçim karakterleri (`U+200B–U+200F`, `U+2028–U+202E`,
-//! `U+2060–U+2064`, `U+FEFF`) yasak. Tipin varlığı sunucuda denetlenir (uygulamada hata; transaction geri alınır).
+//! `U+2060–U+2064`, `U+2066–U+2069`, `U+061C`, `U+FEFF`) yasak. Tipin varlığı sunucuda denetlenir (uygulamada hata;
+//! transaction geri alınır).
 //!
 //! `serial` ailesi (`serial`, `serial2/4/8`, `smallserial`, `bigserial`; tırnaksız, niteliksiz ya da `pg_catalog.`)
 //! reddedilir: kimlik kolonu kullanılmalı.
@@ -77,9 +78,18 @@ struct Parser {
     i: usize,
 }
 
-/// Sıfır genişlikli ve yön denetimi biçim karakterleri (görsel aldatma). Ad doğrulayıcısı (`check_ident`) da kullanır.
+/// Sıfır genişlikli ve yön denetimi biçim karakterleri (görsel aldatma): ALM (`U+061C`), `U+200B–U+200F`, `U+2028–U+202E`,
+/// `U+2060–U+2064`, yön yalıtımı LRI/RLI/FSI/PDI (`U+2066–U+2069`), `U+FEFF`. Ad doğrulayıcısı (`check_ident`) da kullanır.
 pub(crate) fn is_spoofing_format(c: char) -> bool {
-    matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{feff}')
+    matches!(
+        c,
+        '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}'
+    )
 }
 
 fn is_bare_start(c: char) -> bool {
@@ -700,6 +710,14 @@ mod tests {
             "\"a\u{2060}b\"",
             "\"a\u{2064}b\"",
             "\"\u{feff}a\"",
+            // Yön yalıtımı (LRI/RLI/FSI/PDI) ve ALM; C1 denetim karakteri.
+            "\"a\u{2066}b\"",
+            "\"a\u{2067}b\"",
+            "\"a\u{2068}b\"",
+            "\"a\u{2069}b\"",
+            "\"a\u{061c}b\"",
+            "\"a\u{80}b\"",
+            "\"a\u{9f}b\"",
         ] {
             let r = validate_type(t);
             assert!(r.is_err(), "kabul edilmemeli: {t:?}");

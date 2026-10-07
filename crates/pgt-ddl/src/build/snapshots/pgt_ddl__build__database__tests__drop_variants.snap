@@ -1,0 +1,9 @@
+---
+source: crates/pgt-ddl/src/build/database.rs
+expression: out
+---
+[DataLoss non-tx] DROP DATABASE d  -- Tüm veriler kalıcı silinir
+
+[DataLoss non-tx] DROP DATABASE d  -- Tüm veriler kalıcı silinir
+
+[DataLoss non-tx] DROP DATABASE d WITH (FORCE)  -- Tüm veriler kalıcı silinir. Bağlı tüm oturumlar sonlandırılır (bu uygulamanın Query Tool sekmeleri dahil)

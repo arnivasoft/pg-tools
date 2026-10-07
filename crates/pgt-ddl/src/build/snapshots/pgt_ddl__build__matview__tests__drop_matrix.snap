@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/build/matview.rs
+expression: out
+---
+[Destructive] DROP MATERIALIZED VIEW public.mv
+
+[DataLoss] DROP MATERIALIZED VIEW public.mv CASCADE  -- Bağımlı görünümler de silinir
+WARN: Bağımlı görünümler de silinir
+
+[Destructive] DROP MATERIALIZED VIEW public."My ""V"""
