@@ -357,7 +357,7 @@ async fn db_create_body(ts: TestServer, tag: &str) {
             assert_eq!(l.provider_locale, None);
         }
     }
-    // 'POSIX' yerel ayarı bazı sürümlerde sunucuda kanonik 'C' olarak saklanır (setlocale'in döndürdüğü ad): create →
+    // 'POSIX' yerel ayarı tüm gözlenen sürümlerde (PG 10–18, glibc) sunucuda kanonik 'C' olarak saklanır (setlocale'in döndürdüğü ad): create →
     // load eşitliği bu değerle kurulamaz, ama yüklü değerle alter boş kalır (sabit nokta).
     let posix = DatabaseDef {
         template: Some("template0".into()),
@@ -814,23 +814,44 @@ async fn role_pg16_body(ts: TestServer, tag: &str) {
         n.member_of[0].admin = false;
         let l3 = role_alter_and_check(&cx, &l2, &n).await;
         assert_eq!(l3.member_of, l.member_of);
+        // Önyükleme süper kullanıcısının verdiği üyelik düzenlenebilir: REVOKE gerçekten kaldırır.
+        let l4 = role_alter_and_check(&cx, &l3, &RoleDef { member_of: vec![], ..l3.clone() }).await;
+        assert!(l4.member_of.is_empty() && l4.unsupported.is_empty(), "{l4:?}");
+        assert_eq!(membership_rows(&cx, &m).await, 0, "REVOKE üyeliği kaldırmalı");
     }
-    // Başka grantor'ın verdiği üyeliği süper kullanıcı REVOKE ederse (GRANTED BY'sız):
+    // Başka grantor'ın verdiği üyelik:
     cx.sql_as(&gr, &format!("GRANT {g} TO {m2}")).await;
     let l = cx.load_role(&m2).await;
-    assert_eq!(l.member_of.len(), 1, "{l:?}");
-    let plan = build::alter(&or(&l), &or(&RoleDef { member_of: vec![], ..l.clone() }), &cx.ctx()).unwrap();
-    cx.run_tx(&plan).await;
-    let after = cx.load_role(&m2).await;
     if cx.version >= 160000 {
-        // PG 16+: REVOKE yalnızca bağlı rolün (süper kullanıcıda önyükleme süper kullanıcısının) verdiği satırı kaldırır;
-        // başka grantor'ın satırı kalır — sunucu WARNING verir, hata yok (plan "başarılı" görünür).
-        assert_eq!(after.member_of.len(), 1, "PG 16+: başka grantor'ın üyeliği kalmalı: {after:?}");
-        eprintln!("PG {}: başka grantor'ın üyeliğinde REVOKE = WARNING + etkisiz (üyelik duruyor)", cx.major());
+        // PG 16+: GRANTED BY'sız REVOKE bu satırı kaldıramaz (WARNING + etkisiz) → salt okunur yüklenir (inceleme M-1).
+        assert!(l.member_of.is_empty(), "{l:?}");
+        assert_eq!(l.unsupported, [format!("MEMBER {g} (grantor {gr})")]);
+        assert_role_noop(&cx, &l);
+        // Başka düzenleme üyeliğe dokunmaz.
+        let l2 = role_alter_and_check(&cx, &l, &RoleDef { comment: Some("c".into()), ..l.clone() }).await;
+        assert_eq!(l2.unsupported, l.unsupported);
+        assert_eq!(membership_rows(&cx, &m2).await, 1);
+        eprintln!("PG {}: başka grantor'ın üyeliği salt okunur (unsupported) yüklendi", cx.major());
     } else {
-        assert!(after.member_of.is_empty(), "PG < 16: REVOKE grantor'dan bağımsız kaldırır: {after:?}");
+        assert_eq!(l.member_of.len(), 1, "{l:?}");
+        let plan = build::alter(&or(&l), &or(&RoleDef { member_of: vec![], ..l.clone() }), &cx.ctx()).unwrap();
+        cx.run_tx(&plan).await;
+        assert!(cx.load_role(&m2).await.member_of.is_empty(), "PG < 16: REVOKE grantor'dan bağımsız kaldırır");
+        assert_eq!(membership_rows(&cx, &m2).await, 0);
         eprintln!("PG {}: başka grantor'ın üyeliğinde REVOKE üyeliği kaldırdı", cx.major());
     }
+}
+
+/// Rolün `pg_auth_members` satır sayısı (üye olarak).
+async fn membership_rows(cx: &Cx, member: &str) -> i64 {
+    cx.admin
+        .query_one(
+            "SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member WHERE r.rolname = $1::text",
+            &[&member],
+        )
+        .await
+        .unwrap()
+        .get(0)
 }
 
 docker_test!(role_unsupported_settings_and_multi_grantor, role_unsupported_body, "runsup");
@@ -993,6 +1014,14 @@ async fn lookups_body(ts: TestServer, tag: &str) {
     let roles = get(LookupRequest::GrantableRoles).await.unwrap();
     assert_eq!(detail(&roles, "pg_monitor"), Some(Some("önceden tanımlı".into())));
     assert_eq!(detail(&roles, &cx.me), Some(Some("superuser".into())));
+    // PG 14+: pg_database_owner'a açık üye eklenemez → listelenmez (inceleme m-1).
+    assert!(detail(&roles, "pg_database_owner").is_none());
+    if cx.version >= 140000 {
+        let probe = cx.role("dbowner");
+        cx.sql(&format!("CREATE ROLE {probe}")).await;
+        let e = cx.admin.batch_execute(&format!("GRANT pg_database_owner TO {probe}")).await;
+        assert!(e.is_err(), "PG 14+: pg_database_owner üyeliği reddedilmeli");
+    }
 
     let enc = get(LookupRequest::Encodings).await.unwrap();
     assert!(detail(&enc, "UTF8").is_some() && detail(&enc, "SJIS").is_none());

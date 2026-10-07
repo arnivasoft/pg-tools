@@ -19,11 +19,35 @@ pub fn servers() -> Vec<TestServer> {
 }
 
 /// Gövdeyi ayrı görevde çalıştırır; bir doğrulama başarısız olsa bile `cleanup` çalışır, sonra panik yeniden fırlatılır.
+/// Temizlik de paniklerse gövdenin paniği öncelikli (asıl hata gizlenmez); temizlik paniği yalnızca yazdırılır.
 pub async fn guarded(body: impl Future<Output = ()> + Send + 'static, cleanup: impl Future<Output = ()>) {
     let result = tokio::spawn(body).await;
-    cleanup.await;
-    if let Err(e) = result {
-        std::panic::resume_unwind(e.into_panic());
+    let cleaned = CatchUnwind(Box::pin(cleanup)).await;
+    match (result, cleaned) {
+        (Err(e), cleaned) => {
+            if cleaned.is_err() {
+                eprintln!("temizlik de başarısız oldu (gövde hatası öncelikli)");
+            }
+            std::panic::resume_unwind(e.into_panic());
+        }
+        (Ok(()), Err(c)) => std::panic::resume_unwind(c),
+        (Ok(()), Ok(())) => {}
+    }
+}
+
+/// Ödünç alan (spawn edilemeyen) geleceğin paniğini yakalar (ek bağımlılık olmadan `FutureExt::catch_unwind`).
+struct CatchUnwind<F>(std::pin::Pin<Box<F>>);
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        let inner = &mut self.0;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.as_mut().poll(cx))) {
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Ok(std::task::Poll::Ready(v)) => std::task::Poll::Ready(Ok(v)),
+            Err(e) => std::task::Poll::Ready(Err(e)),
+        }
     }
 }
 
@@ -75,6 +99,8 @@ pub async fn cleanup_in(ts: &TestServer, prefix: &str, tag: &str) {
 /// Küme nesnesi adı: veritabanı `pgt_ddl_dbk_<ana sürüm>_<etiket>`, rol `pgt_ddl_rk_<etiket>` (her sürüm ayrı
 /// kapsayıcıdır). Testler paralel koşar: etiketler benzersizdir; temizlik bu adı ve `<ad>_…` türevlerini siler.
 pub async fn cluster_name(ts: &TestServer, kind: pgt_ddl::ObjectKind, tag: &str) -> String {
+    // `_` içeren etiket başka etiketin `<ad>_…` türevi gibi görünür ve onun temizliğine girer.
+    assert!(!tag.contains('_'), "küme etiketi '_' içeremez: {tag}");
     match kind {
         pgt_ddl::ObjectKind::Database => db_name_in(ts, "pgt_ddl_dbk", tag).await,
         pgt_ddl::ObjectKind::Role => format!("pgt_ddl_rk_{tag}"),

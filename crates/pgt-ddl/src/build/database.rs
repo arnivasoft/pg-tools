@@ -6,7 +6,9 @@
 //! ifadenin kalıcı olduğunu yönetici `committed` ile bildirir.
 //!
 //! Create-only alanlar (`template`, `encoding`, `localeProvider`, `lcCollate`, `lcCtype`, `providerLocale`) alter'da
-//! eski ≠ yeni ise alan hatasıdır (PG bunları sonradan değiştiremez). Bağlı veritabanı / bakım veritabanı korumaları
+//! eski ≠ yeni ise alan hatasıdır (PG bunları sonradan değiştiremez). Yerel ayar değerlerini sunucu normalleştirir
+//! (glibc'de `POSIX` → `C`, ICU'da `en_US` → `en-US`); üretici ve yükleyici bunları kanonikleştirmez — create sonrası
+//! yeniden yüklenen tanımla gönderilen tanımı karşılaştıracak bir kapı bu alanları dışarıda bırakmalıdır. Bağlı veritabanı / bakım veritabanı korumaları
 //! (yeniden adlandırma, silme, taşıma) bu saf üreticide DEĞİL, yöneticidedir (Task 8, Karar 8).
 
 use super::settings::{diff_settings, guc_assignment_sql, guc_name_sql, validate_old_setting_names, validate_settings,

@@ -662,6 +662,11 @@ fn locale_provider(c: &str) -> Option<LocaleProvider> {
 /// yok); `encoding` = `SERVER_ENCODINGS` kanonik yazımı (`pg_encoding_to_char`); `localeProvider` PG 15+ `Some`, öncesi
 /// `None`; `providerLocale` yalnızca icu/builtin'de (PG 15–16 `daticulocale`, 17+ `datlocale`), libc'de `None`;
 /// `tablespace` her zaman `Some`; ayarlar `config_settings` ile; boş yorum `None`.
+///
+/// Create-only yerel ayar alanları (`lcCollate`, `lcCtype`, `providerLocale`) SUNUCUNUN normalleştirdiği biçimde
+/// döner ve istemcide kanonikleştirilmez: glibc'de `POSIX` → `C` (PG 10–18'de gözlendi), ICU'da `en_US` → `en-US`
+/// (PG 16+ BCP 47). Bu yüzden "yeniden yüklenen ≠ gönderilen tanım" türünden olası bir karşılaştırma bu alanları
+/// dışarıda bırakmalıdır; `alter(load, load)` boş kalır (yüklü değer sabit noktadır).
 async fn load_database(mgr: &ConnectionManager, server: Uuid, target: Target, oid: u32) -> Result<ObjectDef> {
     let rows = mgr
         .run(server, target, move |c| async move {
@@ -697,13 +702,21 @@ async fn load_database(mgr: &ConnectionManager, server: Uuid, target: Target, oi
 }
 
 /// Üyelik satırları → (üyelikler, desteklenmeyen). PG 16+'da aynı rol için birden çok grantor satırı → `MEMBER r
-/// (birden çok grantor)` (düzenlenmez); tek satırda `inheritOption`/`setOption` dolu (PG < 16 SQL'i NULL döndürür).
+/// (birden çok grantor)`; tek satırlı üyeliği önyükleme süper kullanıcısından (oid 10) başkası vermişse → `MEMBER r
+/// (grantor g)` (inceleme M-1: GRANTED BY'sız REVOKE PG 16+'da WARNING ile etkisizdir, sessizce "başarılı" görünürdü).
+/// İkisi de salt okunurdur (üretici görmez). Tek satırda `inheritOption`/`setOption` dolu (PG < 16 SQL'i NULL ve
+/// `grantor_is_bootstrap = true` döndürür: grantor REVOKE'u etkilemez).
 fn memberships(rows: &[Row]) -> (Vec<RoleMembership>, Vec<String>) {
     let (mut list, mut unsupported) = (vec![], vec![]);
     for r in rows {
         let role: String = r.get("role");
         if r.get::<_, i32>("grants") > 1 {
             unsupported.push(format!("MEMBER {role} (birden çok grantor)"));
+            continue;
+        }
+        if !r.get::<_, bool>("grantor_is_bootstrap") {
+            let grantor: Option<String> = r.get("grantor");
+            unsupported.push(format!("MEMBER {role} (grantor {})", grantor.unwrap_or_default()));
             continue;
         }
         list.push(RoleMembership {
