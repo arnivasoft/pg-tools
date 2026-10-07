@@ -1,0 +1,47 @@
+// View / Materialized View formu metinleri. Yalnızca ViewForm.tsx ve view-model.ts içe aktarır (tembel parça);
+// strings-designer.ts'e eklenmez. PostgreSQL terimleri İngilizce kalır.
+export const tview = {
+  sections: { general: "Genel", query: "Sorgu", columns: "Kolonlar (salt okunur)", options: "Seçenekler", storage: "Depolama" },
+  general: {
+    schema: "Şema",
+    schemaCreateHint: "Nesne bu şemada oluşturulur.",
+    schemaAlterHint: "Şema değişirse ALTER … SET SCHEMA çalışır; bağımlı nesneler etkilenebilir.",
+    name: "Ad",
+    rename: "Ad (değişirse yeniden adlandırılır)",
+    namePlaceholder: "görünüm_adı",
+  },
+  query: {
+    label: "Sorgu",
+    hint: "SELECT … sorgusu; sonda ; olmadan.",
+    escapeHint: "Metin sabitinde ters eğik çizgi için E'…' biçimini kullanın.",
+    corNote: "Mevcut kolonlar aynı ad, tip ve sırada kalmalı; yeni kolonlar yalnızca sona eklenebilir.",
+    rebuildWarning: "Tanım değişti: MV silinip yeniden kurulur; indeksler ve yetkiler kaybolur.",
+  },
+  columns: { name: "Ad", type: "Tip", empty: "Kolon yok." },
+  view: {
+    checkOption: "Check option",
+    checkNone: "Yok",
+    checkLocal: "LOCAL",
+    checkCascaded: "CASCADED",
+    securityBarrier: "security_barrier",
+    securityInvoker: "security_invoker (PG 15+)",
+    recreate: "Yeniden oluştur (DROP + CREATE)",
+    recreateNote: "Görünüm silinip yeniden oluşturulur; aşağıdakiler kaybolur ve veri kaybı onayı gerekir.",
+  },
+  mv: {
+    tablespace: "Tablespace",
+    tablespaceUnset: "Belirtilmemiş (veritabanı varsayılanı)",
+    tablespaceDefault: "varsayılan (pg_default)",
+    tablespaceHint: "Tablespace kaldırılamaz; varsayılana dönmek için pg_default'u seçin.",
+    fillfactor: "Doldurma oranı (fillfactor)",
+    fillfactorHint: "10–100; boş = varsayılan (100).",
+    withData: "Veriyle doldur (WITH DATA)",
+    withNoDataNote: "İşaretli değilse WITH NO DATA: MV boş oluşur ve yenilenene kadar okunamaz.",
+    refresh: "Yenileme",
+    refreshNone: "Yenileme yok",
+    refreshNormal: "Şimdi yenile (REFRESH)",
+    refreshConcurrently: "Okumaları kesmeden yenile (CONCURRENTLY — benzersiz indeks gerekir)",
+  },
+  lossTitle: "Kaybolacaklar",
+  grants: "GRANT yetkileri",
+} as const;

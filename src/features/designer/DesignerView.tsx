@@ -17,12 +17,16 @@ import SqlPreview from "./SqlPreview";
 // Tür → form (tembel bileşen + bilinen alan yolları; kök yol alt yolları da kapsar: `columns` ⊃ `columns[1].key`).
 // Table formu kendi parçasıdır (TableForm-*.js). Geçici `Partial`: view/MV/database/role formları Plan 15'te gelir;
 // o zamana dek formu olmayan tür tek satır şerit gösterir (Plan 15 kaldırır).
+// View ve MV aynı parçayı paylaşır (`model.kind`'e göre); tek `lazy` (aynı bileşen, tek parça).
+const viewForm = lazy(() => import("./ViewForm"));
 const FORMS: Partial<Record<ObjectKind, FormEntry>> = {
   schema: { view: lazy(() => import("./SchemaForm")), paths: FORM_PATHS.schema },
   extension: { view: lazy(() => import("./ExtensionForm")), paths: FORM_PATHS.extension },
   sequence: { view: lazy(() => import("./SequenceForm")), paths: FORM_PATHS.sequence },
   index: { view: lazy(() => import("./IndexForm")), paths: FORM_PATHS.index },
   table: { view: lazy(() => import("./TableForm")), paths: FORM_PATHS.table },
+  view: { view: viewForm, paths: FORM_PATHS.view },
+  materialized_view: { view: viewForm, paths: FORM_PATHS.materialized_view },
 };
 
 const NO_PATHS: ReadonlySet<string> = new Set();

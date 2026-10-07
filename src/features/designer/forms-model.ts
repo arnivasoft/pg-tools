@@ -32,9 +32,16 @@ export const INDEX_PATHS: ReadonlySet<string> = new Set([
 export const TABLE_PATHS: ReadonlySet<string> = new Set([
   "name", "schema", "owner", "tablespace", "persistence", "fillfactor", "comment", "columns", "constraints", "partitionBy",
 ]);
-/** Tür → bilinen yollar (testte denetlenir). Geçici: view/MV/database/role yolları Plan 15 formlarıyla gelir. */
+export const VIEW_PATHS: ReadonlySet<string> = new Set([
+  "schema", "name", "owner", "query", "checkOption", "securityBarrier", "securityInvoker", "comment", "recreate",
+]);
+export const MATVIEW_PATHS: ReadonlySet<string> = new Set([
+  "schema", "name", "owner", "query", "tablespace", "fillfactor", "withData", "refresh", "comment",
+]);
+/** Tür → bilinen yollar (testte denetlenir). Geçici: database/role yolları Plan 15 formlarıyla gelir. */
 export const FORM_PATHS = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
+  view: VIEW_PATHS, materialized_view: MATVIEW_PATHS,
 } satisfies Partial<Record<ObjectKind, ReadonlySet<string>>>;
 
 /**
