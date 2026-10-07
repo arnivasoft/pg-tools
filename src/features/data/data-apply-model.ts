@@ -71,11 +71,15 @@ export function riskNeedsConfirm(view: PlanView, production: boolean): boolean {
   return destructiveRisk(view) || (production && !view.empty);
 }
 
-/** Bidi biçimlendirme, sıfır genişlik, satır/paragraf ayırıcı ve C0/C1 denetimleri (\t \n \r hariç). */
+/**
+ * Bidi biçimlendirme, sıfır genişlik/görünmez biçim (U+2060–206F, SHY, CGJ, MVS), satır/paragraf ayırıcı ve
+ * C0/C1 denetimleri (\t \n \r hariç). Varyasyon seçicileri ve etiket karakterleri (emoji parçaları) kaçışlanmaz.
+ */
 function isControl(c: number): boolean {
   return (
-    (c >= 0x202a && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069) || (c >= 0x200b && c <= 0x200f) ||
+    (c >= 0x202a && c <= 0x202e) || (c >= 0x2060 && c <= 0x206f) || (c >= 0x200b && c <= 0x200f) ||
     c === 0x2028 || c === 0x2029 || c === 0x061c || c === 0xfeff ||
+    c === 0x00ad || c === 0x034f || c === 0x180e ||
     (c <= 0x1f && c !== 0x09 && c !== 0x0a && c !== 0x0d) || (c >= 0x7f && c <= 0x9f) ||
     (c >= 0xd800 && c <= 0xdfff)
   );
@@ -118,7 +122,7 @@ export function shortenStatement(sql: string, max = 4000): { text: string; omitt
 
 /**
  * Kaçışlar uygulanmış gösterim; kaçışlı metin uzunluğu `max`'ı aşmaz ve kaçış ortadan bölünmez.
- * `omitted` = gösterilmeyen ÖZGÜN karakter sayısı.
+ * `omitted` = gösterilmeyen özgün UTF-16 kod birimi sayısı.
  */
 export function statementDisplay(sql: string, max = 4000): { text: string; omitted: number } {
   let out = "";

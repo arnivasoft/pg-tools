@@ -431,6 +431,29 @@ describe("data-controller", () => {
     expect(m().outcome!.text).toBe(tdata.conflict.insert);
   });
 
+  it("apply Failed (çakışma/belirsiz değil): metin hangi değişikliğin başarısız olduğunu 1 tabanlı söyler; 55P03 ipucu korunur", async () => {
+    const { api, ctl, open, fire, m } = setup();
+    await open();
+    ctl.edit("g1", (l, e) => setCell(l, e, 0, "name", T("x")));
+    ctl.edit("g1", (l, e) => setCell(l, e, 2, "name", T("y")));
+    await fire();
+    api.dataApply.mockResolvedValueOnce(failed({ sqlstate: "23505", failedIndex: 1, error: { code: "query", message: "duplicate key", detail: null, hint: null } }));
+    await ctl.apply("g1");
+    await flush();
+    expect(m().outcome!.kind).toBe("failed");
+    expect(m().outcome!.text).toBe(tdata.outcome.failed(1, "duplicate key"));
+    expect(m().outcome!.text.startsWith("2.")).toBe(true);
+    expect(m().failedChange).toEqual({ kind: "update", rowIndex: 2 });
+    expect(ctl.isDirty("g1")).toBe(true);
+
+    await fire();
+    api.dataApply.mockResolvedValueOnce(failed({ sqlstate: "55P03", failedIndex: 0, error: { code: "query", message: "lock timeout", detail: null, hint: null } }));
+    await ctl.apply("g1");
+    await flush();
+    expect(m().outcome!.text).toBe(tdata.outcome.failed(0, "lock timeout"));
+    expect(m().outcome!.hint).toBe(tdata.outcome.rowLocked);
+  });
+
   it("apply outcomeUnknown: kapı kapanır, yeniden yükleme zorunlu, ikinci dataApply çağrılmaz", async () => {
     const { api, ctl, open, fire, m } = setup();
     await open();
@@ -816,6 +839,31 @@ describe("data-controller", () => {
       more.resolve(null);
       await lm;
       expect(await x.ctl.reload("g1")).toBe(true);
+    });
+
+    it("yükleme sürerken setSelect/reload/reloadNow reddedilir: ikinci qtRun yok, satırlar değişmez", async () => {
+      const { api, ctl, open, m } = setup();
+      await open();
+      const before = m().loaded!.rows;
+      const run = deferred<null>();
+      api.qtRun.mockImplementationOnce(async () => run.promise);
+      const p = ctl.reload("g1");
+      await flush();
+      expect(m().status).toBe("loading");
+      const runs = api.qtRun.mock.calls.length;
+      const loads = api.dataLoad.mock.calls.length;
+      expect(await ctl.setSelect("g1", { order: [{ column: "name", desc: true }], filter: "" })).toBe(false);
+      expect(await ctl.reload("g1", { discard: true })).toBe(false);
+      expect(ctl.reloadNow("g1")).toBe(false);
+      expect(api.qtRun).toHaveBeenCalledTimes(runs);
+      expect(api.dataLoad).toHaveBeenCalledTimes(loads);
+      expect(m().select).toEqual({ order: [], filter: "" });
+      expect(m().loaded!.rows).toBe(before);
+      expect(m().askReload).toBe(false);
+      run.resolve(null);
+      await p;
+      await flush();
+      expect(await ctl.setSelect("g1", { order: [{ column: "name", desc: true }], filter: "" })).toBe(true);
     });
 
     it("önizlemeden sonra, uygulamadan önce düzenleme → dataApply çağrılmaz", async () => {

@@ -519,7 +519,7 @@ Pencere süresi yeni anlamıyla (temalı ilk çizimle görünür) 349 ms; 1 sn h
 
 ## Plan 17 sonu: veri düzenleyici (elle ölçüm bekliyor)
 
-Paket (ölçüldü, `bun run build`): ana `index-*.js` = 232.343 B (Plan 16 sonundan 462 B küçük; `t.query.history/messages/check/format/confirm` tembel dosyalara taşındı), `index.html` yalnızca solid/web/Icon önyükler, mapDeps 21 girdi. Veri sekmesi kodu ve metinleri `DataTabs-*.js` (68.672 B) ve `data-open-*.js` (1.281 B) tembel parçalarındadır; veri sekmesi açılana kadar yüklenmez, boşta bellek/açılış değişmez.
+Paket (ölçüldü, `bun run build`): ana `index-*.js` = 232.343 B (Plan 16 sonundan 462 B küçük; `t.query.history/messages/check/format/confirm` tembel dosyalara taşındı), `index.html` yalnızca solid/web/Icon önyükler, mapDeps 21 girdi. Veri sekmesi kodu ve metinleri `DataTabs-*.js` (68.991 B) ve `data-open-*.js` (1.281 B) tembel parçalarındadır; veri sekmesi açılana kadar yüklenmez, boşta bellek/açılış değişmez.
 
 Aşağıdaki ölçümler **elle** yapılır (ajan çalıştırmaz); sonuçlar buraya işlenir. Hepsi `[—]`:
 

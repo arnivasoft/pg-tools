@@ -462,8 +462,9 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
   const reload = async (tabId: string, opts?: { discard: boolean }): Promise<boolean> => {
     const e = entries.get(tabId);
     const m = e?.model();
-    // "Daha fazla" sürerken oturum meşgul: reddedilir (arayüz düğmeyi kapatır).
-    if (!e || !m || m.applying || m.loadingMore || m.status === "gone") return false;
+    // "Daha fazla" ya da yükleme sürerken oturum meşgul: reddedilir (ikinci yükleme aynı okuma oturumunda `busy`
+    // alır ve ızgarayı silerdi; arayüz düğmeleri kapatır).
+    if (!e || !m || m.applying || m.loadingMore || m.status === "loading" || m.status === "gone") return false;
     if (editDirty(m.edit) && !opts?.discard) return false;
     const info = deps.serverInfo(m.serverId);
     patch(e, { askReload: false, ...(info ? { serverName: info.name, locked: info.locked, production: info.production } : {}) });
@@ -473,7 +474,7 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
 
   const reloadNow = (tabId: string): boolean => {
     const m = model(tabId);
-    if (!m || m.applying || m.loadingMore || m.status === "gone") return false;
+    if (!m || m.applying || m.loadingMore || m.status === "loading" || m.status === "gone") return false;
     if (isDirty(tabId)) {
       const e = entries.get(tabId);
       if (e) patch(e, { askReload: true });
@@ -554,7 +555,7 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
   const setSelect = async (tabId: string, next: SelectState, opts?: { discard: boolean }): Promise<boolean> => {
     const e = entries.get(tabId);
     const m = e?.model();
-    if (!e || !m || m.applying || m.loadingMore || m.status === "gone") return false;
+    if (!e || !m || m.applying || m.loadingMore || m.status === "loading" || m.status === "gone") return false;
     if (editDirty(m.edit) && !opts?.discard) return false;
     patch(e, { select: { order: [...next.order], filter: next.filter } });
     await load(tabId, e);
@@ -667,7 +668,8 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
     if (out.conflict) {
       patch(e, { ...base, conflictRow: origin && origin.kind !== "insert" ? origin.rowIndex : null });
     } else {
-      patch(e, base);
+      // Kısıt/tür hatası, iptal…: hangi değişikliğin başarısız olduğu metne eklenir (1 tabanlı).
+      patch(e, { ...base, outcome: { ...outcome, text: tdata.outcome.failed(out.failedIndex, outcome.text) } });
     }
     // Düzenlemeler korunur; görünüm yenilenir (yeniden göndermek kullanıcının işi).
     schedulePreview(tabId, e, true);

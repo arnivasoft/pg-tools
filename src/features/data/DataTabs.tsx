@@ -60,8 +60,9 @@ interface AskView {
 }
 
 /**
- * Küçük erişilebilir onay: `role="alertdialog"`, `aria-modal`, başlık/ileti bağlı; odak açılışta Vazgeç'te, Esc vazgeçer,
- * Tab iki düğme arasında döner; kapanınca odak önceki öğeye döner.
+ * Küçük erişilebilir onay: `role="dialog"` (QueryTabs'in F5 bekçisi `[role="dialog"]` açıkken yeniden yüklemez),
+ * `aria-modal`, başlık/ileti bağlı; odak açılışta Vazgeç'te, Esc vazgeçer, Tab iki düğme arasında döner; kapanınca
+ * odak önceki öğeye döner.
  */
 function AskDialog(props: { view: AskView }) {
   const uid = createUniqueId();
@@ -94,7 +95,7 @@ function AskDialog(props: { view: AskView }) {
       }}
     >
       <div
-        role="alertdialog"
+        role="dialog"
         aria-modal="true"
         aria-labelledby={`${uid}-t`}
         aria-describedby={`${uid}-m`}
@@ -181,7 +182,8 @@ function DataView(props: { data: DataController; m: DataModel; onAsk: (a: Ask) =
       if (box.at) setActive(box.at);
     },
     sort: (column, additive) => {
-      if (props.m.applying || props.m.loadingMore || props.m.status === "gone") return;
+      // Denetleyicinin reddedeceği istek için onay diyaloğu açılmaz.
+      if (props.m.applying || props.m.loadingMore || props.m.status === "loading" || props.m.status === "gone") return;
       requestSelect({ order: cycleOrder(props.m.select.order, column, additive), filter: props.m.select.filter });
     },
   };

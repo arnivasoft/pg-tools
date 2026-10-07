@@ -163,7 +163,6 @@ export const tdata = {
     unknown: "Sonuç belirsiz; kalıcılaşmış olabilir. Yeniden denemeden önce yeniden yükleyin.",
     rowLocked: "Satır başka bir oturumca kilitli; sonra yeniden deneyin.",
     failed: (index: number, text: string) => `${index + 1}. değişiklik başarısız: ${text}`,
-    canceled: "Kaydetme iptal edildi; hiçbir değişiklik yazılmadı.",
   },
   gate: {
     planChanged: "Tablo tanımı değişti; yeniden yükleyin.",

@@ -93,6 +93,18 @@ describe("visibleControls", () => {
   it("C0", () => expect(visibleControls("a\u0001b\u007F")).toBe("a⟦U+0001⟧b⟦U+007F⟧"));
   it("U+2028/2029/061C/2066/2069", () =>
     expect(visibleControls("\u2028\u2029\u061C\u2066\u2069")).toBe("⟦U+2028⟧⟦U+2029⟧⟦U+061C⟧⟦U+2066⟧⟦U+2069⟧"));
+  it("U+2060 (WJ), U+206A, U+206F, U+00AD (SHY), U+034F, U+180E kaçışlanır", () =>
+    expect(visibleControls("a⁠b⁪c⁯d­e͏f᠎g")).toBe(
+      "a⟦U+2060⟧b⟦U+206A⟧c⟦U+206F⟧d⟦U+00AD⟧e⟦U+034F⟧f⟦U+180E⟧g",
+    ));
+  it("NBSP (U+00A0), varyasyon seçicisi ve etiket karakterleri korunur", () => {
+    expect(visibleControls("a b")).toBe("a b");
+    expect(visibleControls("❤️")).toBe("❤️");
+    expect(visibleControls("🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}")).toBe(
+      "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}",
+    );
+    expect(visibleControls("a😀\u{1F3FD}b")).toBe("a😀\u{1F3FD}b");
+  });
   it("\t \n \r korunur", () => expect(visibleControls("a\tb\nc\rd")).toBe("a\tb\nc\rd"));
   it("emoji korunur", () => expect(visibleControls("a😀b")).toBe("a😀b"));
   it("yalnız vekil", () => {

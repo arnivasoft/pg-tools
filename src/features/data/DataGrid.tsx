@@ -157,7 +157,9 @@ export function DataGrid(props: {
     get paddingStart() {
       return rowNumWidth();
     },
-    scrollPaddingStart: rowNumWidth(),
+    get scrollPaddingStart() {
+      return rowNumWidth();
+    },
   });
   createEffect(() => {
     widths();
@@ -503,12 +505,20 @@ export function DataGrid(props: {
                 if (s.kind === "row") return props.m.conflictRow === s.rowIndex;
                 return props.m.outcome?.kind === "conflict" && f?.kind === "insert" && f.newId === s.newId;
               };
+              /** Başarısız kaydetmenin (çakışma değil) değişikliği: satır numarası hata renginde, sr metni "hata". */
+              const failedHere = () => {
+                const s = slot();
+                const f = props.m.failedChange;
+                if (!s || !f || props.m.outcome?.kind !== "failed") return false;
+                if (s.kind === "row") return f.kind !== "insert" && f.rowIndex === s.rowIndex;
+                return f.kind === "insert" && f.newId === s.newId;
+              };
               const rowErr = () => {
                 const s = slot();
                 return s ? props.errors.row.get(slotKey(s)) ?? null : null;
               };
               const rowState = () =>
-                [deleted() ? tdata.sr.deleted : "", isNew() ? tdata.sr.new : "", rowErr() ? tdata.sr.error : "", conflict() ? tdata.sr.conflict : ""].filter(Boolean).join(", ");
+                [deleted() ? tdata.sr.deleted : "", isNew() ? tdata.sr.new : "", rowErr() || failedHere() ? tdata.sr.error : "", conflict() ? tdata.sr.conflict : ""].filter(Boolean).join(", ");
               return (
                 <Show when={slot()}>
                   {(s) => (
@@ -526,7 +536,7 @@ export function DataGrid(props: {
                       <div
                         role="rowheader"
                         class="sticky left-0 z-10 flex items-center justify-end gap-1 border-r border-border bg-panel px-2 text-muted"
-                        classList={{ "text-danger": rowErr() !== null }}
+                        classList={{ "text-danger": rowErr() !== null || failedHere() }}
                         title={rowErr()?.join("\n")}
                         style={{ width: `${rowNumWidth()}px`, height: `${ROW_HEIGHT}px` }}
                       >

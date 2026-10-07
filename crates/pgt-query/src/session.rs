@@ -944,6 +944,8 @@ impl QueryManager {
     /// (`default_transaction_read_only = on`); yeniden açılışta ve `set_options` sonrasında da korunur. Veri
     /// düzenleyicinin okuma yolu içindir (yazma `data_*` komutlarıyla ayrı oturumda yapılır). Kilitli sunucuda
     /// `open` ile aynı davranır. Not: `read_only` bir korumadır, güvenlik sınırı değildir (`SessionProfile`).
+    /// Kilitsiz sunucuda yalnızca oturum varsayılanıdır; `set_config('default_transaction_read_only', …)` onu
+    /// çevirebilir (kullanıcının kendi gücü; veri sekmesi yalnızca `data_select` SQL'i çalıştırır).
     pub async fn open_read_only(&self, server: Uuid, db: Target, opts: SessionOptions) -> Result<SessionId> {
         self.open_with(server, db, opts, true).await
     }
