@@ -1,0 +1,11 @@
+---
+source: crates/pgt-ddl/src/build/view.rs
+expression: render(&p)
+---
+[DataLoss] DROP VIEW public.v  -- Görünüm silinip yeniden oluşturulur: GRANT yetkileri, tetikleyiciler/kurallar ve kolon varsayılanları/yorumları kaybolur; bağımlı nesne varsa uygulama başarısız olur
+[Safe] CREATE VIEW app.w WITH (check_option = local) AS (SELECT 1, 2
+)
+[Safe] ALTER VIEW app.w OWNER TO a
+[Safe] COMMENT ON VIEW app.w IS 'c'
+WARN: Yeniden oluşturma: yetkiler (GRANT) yeniden verilmelidir
+WARN: Kaybolacaklar: TRIGGER t, RULE r

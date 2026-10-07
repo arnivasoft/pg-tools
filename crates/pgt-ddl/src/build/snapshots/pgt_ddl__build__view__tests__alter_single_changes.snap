@@ -1,0 +1,19 @@
+---
+source: crates/pgt-ddl/src/build/view.rs
+expression: out
+---
+[Safe] ALTER VIEW public.v RENAME TO w
+
+[Safe] ALTER VIEW public.v SET SCHEMA app
+
+[Safe] CREATE OR REPLACE VIEW public.v AS (SELECT 2
+)  -- Mevcut kolonlar aynı ad, tip ve sırada kalmalı; yeni kolonlar yalnız sona eklenebilir. Uyumsuzsa uygulama geri alınır; 'Yeniden oluştur' seçeneğini kullanın.
+
+[Safe] ALTER VIEW public.v SET (check_option = cascaded, security_barrier = true)
+
+[Safe] ALTER VIEW public.v OWNER TO b
+
+
+[Safe] COMMENT ON VIEW public.v IS NULL
+
+[Safe] COMMENT ON VIEW public.v IS 'd'
