@@ -99,7 +99,7 @@ export const DEFAULT_LOCK_TIMEOUT_MS = 5000;
 /** Kısa ömürlü lookup türlerinin önbellek süresi. */
 export const LOOKUP_TTL_MS = 30_000;
 /** Oturum süresince tutulan lookup türleri (diğerleri `LOOKUP_TTL_MS`). */
-const SESSION_LOOKUPS = new Set<LookupRequest["kind"]>(["roles", "schemas", "tablespaces", "available_extensions", "index_methods"]);
+const SESSION_LOOKUPS = new Set<LookupRequest["kind"]>(["roles", "schemas", "tablespaces", "available_extensions", "index_methods", "collations"]);
 
 const emptyConfirm = (): ConfirmState => ({ checked: false, typedName: "" });
 
@@ -145,7 +145,21 @@ interface Entry {
   setFocus: Setter<FocusRequest | null>;
 }
 
-interface LookupSlot { promise: Promise<LookupItem[]>; at: number | null }
+interface LookupSlot { promise: Promise<LookupItem[]>; at: number | null; session: boolean }
+
+/** Başarılı uygulama sonrası (create'te yalnızca `created` doluysa): açıcı başlığı ve ek ağaç yenilemelerini yapar. */
+export interface AppliedInfo {
+  tabId: string;
+  kind: ObjectKind;
+  /** Uygulama anındaki kip. */
+  mode: DesignerMode;
+  /** alter: yüklenen tanım; create: null. */
+  before: ObjectDef | null;
+  /** Uygulanan taslak. */
+  after: ObjectDef;
+  /** Uygulama sonrası nesne kimliği (create/rename: `created`; aksi halde eski `object`). */
+  object: ObjectRef | null;
+}
 
 export interface DesignerControllerDeps {
   api: Pick<Api, "ddlDefaults" | "ddlLoad" | "ddlLookup" | "ddlPreview" | "ddlApply" | "ddlCancel">;
@@ -153,6 +167,8 @@ export interface DesignerControllerDeps {
   serverInfo(serverId: string): ServerInfo | null;
   /** Explorer düğüm yenilemesi (hatası yutulur). */
   refreshNode(nodeId: string): Promise<void> | void;
+  /** Başarılı uygulama sonrası (hatası yutulur; uygulama sonucunu etkilemez). */
+  onApplied?(info: AppliedInfo): void;
   previewDelay?: number;
   previewDeps?: Partial<PreviewDeps>;
   newId?: () => string;
@@ -456,6 +472,15 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     notify(tdes.apply.applied(out.statements), "success");
     dropLookups(m.serverId, m.databaseOid);
     refresh(e.refreshNodeId);
+    if ((mode === "alter" || out.created) && m.draft) {
+      try {
+        deps.onApplied?.({
+          tabId, kind: m.kind, mode, before: m.original ? cloneDef(m.original) : null, after: cloneDef(m.draft), object: out.created ?? m.object,
+        });
+      } catch {
+        /* başlık/ek yenileme hatası uygulama sonucunu etkilemez */
+      }
+    }
     if (mode === "create") {
       if (!out.created) {
         // Yeni nesne bulunamadı: sekme "tamam" durumunda (arayüz kapat düğmesi sunar).
@@ -466,8 +491,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       patch(e, { mode: "alter", object: { ...out.created }, kind: out.created.kind, dirty: false, needsReload: true });
     } else {
       // Kimliği değişen alter (indeks yapısal yeniden kurma: DROP+CREATE → yeni oid; yeniden adlandırma) `created`
-      // döndürür: yeniden yükleme yeni nesneyle yapılır (eski oid `not_found` verirdi). Sekme anahtarı eski oid'de
-      // kalır (Plan 12'ye bırakıldı).
+      // döndürür: yeniden yükleme yeni nesneyle yapılır (eski oid `not_found` verirdi). Sekme anahtarı değişmez;
+      // eşleme `findAlter` ile yapılır.
       patch(e, { object: out.created ? { ...out.created } : m.object, dirty: false, needsReload: true });
     }
     await loadObject(tabId, e);
@@ -609,7 +634,10 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const key = lookupKey(m.serverId, m.databaseOid, request);
     const hit = lookups.get(key);
     if (hit && (hit.at === null || SESSION_LOOKUPS.has(request.kind) || now() - hit.at < LOOKUP_TTL_MS)) return hit.promise;
-    const slot: LookupSlot = { promise: Promise.resolve([]), at: null };
+    // Süresi dolmuş kısa ömürlü girdiler (ör. her yazılan tip öneki, hedef tablo/kolon) eklemede atılır: harita büyümez.
+    const t = now();
+    for (const [k, v] of lookups) if (!v.session && v.at !== null && t - v.at >= LOOKUP_TTL_MS) lookups.delete(k);
+    const slot: LookupSlot = { promise: Promise.resolve([]), at: null, session: SESSION_LOOKUPS.has(request.kind) };
     slot.promise = api.ddlLookup(m.serverId, m.databaseOid, request).then(
       (items) => {
         slot.at = now();
@@ -630,8 +658,18 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     entries.get(tabId)?.setFocus({ field, seq: ++focusSeq });
   };
 
+  /** Aynı nesnenin (`gone` olmayan) alter sekmesi — create'ten dönüşen ya da kimliği `created` ile güncellenen dahil. Tepkisel değil. */
+  const findAlter = (serverId: string, databaseOid: number, object: ObjectRef): string | null => {
+    for (const [id, e] of entries) {
+      const m = e.model();
+      if (m.status !== "gone" && matchesObject(m, { serverId, databaseOid, object })) return id;
+    }
+    return null;
+  };
+
   return {
     model,
+    findAlter,
     ids: () => (registry(), [...entries.keys()]),
     openCreate,
     openAlter,
@@ -645,6 +683,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     cancelApply,
     reload,
     lookup,
+    /** Önbellekteki lookup girdisi sayısı (test/teşhis). */
+    lookupCacheSize: () => lookups.size,
     serverChanged,
     serverSessionsClosed,
     objectDropped,

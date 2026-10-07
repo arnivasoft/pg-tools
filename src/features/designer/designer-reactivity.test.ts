@@ -75,4 +75,19 @@ describe("designer-controller tepkisellik (tarayıcı yapısı)", () => {
       dispose();
     });
   });
+
+  it("kolon/kısıt odağı girdiden önce istenir; memo görür; consumeFocus sonrası null", async () => {
+    const { solid, ctl } = await setup();
+    await solid.createRoot(async (dispose) => {
+      const focus = solid.createMemo(() => ctl.focusRequest("T1")?.field ?? null);
+      const p = ctl.openAlter({ tabId: "T1", serverId: "S1", databaseOid: 5, object: { kind: "schema", oid: 1 }, refreshNodeId: null });
+      ctl.requestFocus("T1", "column:3");
+      expect(focus()).toBe("column:3");
+      await p;
+      expect(focus()).toBe("column:3");
+      ctl.consumeFocus("T1", ctl.focusRequest("T1")!.seq);
+      expect(focus()).toBeNull();
+      dispose();
+    });
+  });
 });

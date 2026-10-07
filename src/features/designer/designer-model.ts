@@ -2,6 +2,7 @@
 // İstemci SQL üretmez; yalnızca arka ucun döndürdüğü PlanView'i yorumlar.
 import type { ApplyOptions } from "../../ipc/bindings/ApplyOptions";
 import type { DdlCreate } from "../../ipc/bindings/DdlCreate";
+import type { DdlFocus } from "../../ipc/bindings/DdlFocus";
 import type { FieldError } from "../../ipc/bindings/FieldError";
 import type { IndexColumn } from "../../ipc/bindings/IndexColumn";
 import type { IndexDef } from "../../ipc/bindings/IndexDef";
@@ -44,7 +45,8 @@ export function defsEqual(a: ObjectDef, b: ObjectDef): boolean {
 
 // ---- Hata eşleme ----
 
-export interface FieldIssues { byPath: Map<string, string[]>; general: string[] }
+/** `generalPaths[i]`: `general[i]` iletisinin özgün yolu (ör. üst düzey `columns`; bölüm rozeti için). */
+export interface FieldIssues { byPath: Map<string, string[]>; general: string[]; generalPaths: string[] }
 
 /** `path` bu kökün kendisi ya da altı mı (`columns` ⊃ `columns[1].key`; `name` ⊅ `nameX`). */
 function under(path: string, root: string): boolean {
@@ -55,16 +57,18 @@ function under(path: string, root: string): boolean {
 export function groupIssues(errors: readonly FieldError[], knownPaths?: ReadonlySet<string>): FieldIssues {
   const byPath = new Map<string, string[]>();
   const general: string[] = [];
+  const generalPaths: string[] = [];
   for (const e of errors) {
     const known = !knownPaths || [...knownPaths].some((k) => under(e.path, k));
     if (e.path.startsWith("old.") || e.path === "columns" || !known) {
       general.push(e.message);
+      generalPaths.push(e.path);
       continue;
     }
     const list = byPath.get(e.path);
     if (list) list.push(e.message); else byPath.set(e.path, [e.message]);
   }
-  return { byPath, general };
+  return { byPath, general, generalPaths };
 }
 
 /** Tam yol + `path.`/`path[` altı (ör. `columns` → `columns[1].key` dahil); girdi sırası korunur. */
@@ -295,4 +299,13 @@ export function designerTabKey(open: ReadonlyArray<{ key: string }>, t: Designer
     if (Number.isInteger(k) && k >= n) n = k + 1;
   }
   return `${prefix}${n}`;
+}
+
+/** Tablo diyaloğu odak alanı: `column:<attnum>` / `constraint:<oid>` (`requestFocus` alanı; `name` gibi düz alanlarla çakışmaz). */
+export function focusFieldOf(f: DdlFocus): string {
+  return `${f.kind}:${f.id}`;
+}
+export function parseFocusField(field: string): DdlFocus | null {
+  const m = /^(column|constraint):([0-9]+)$/.exec(field);
+  return m ? ({ kind: m[1] as DdlFocus["kind"], id: Number(m[2]) }) : null;
 }

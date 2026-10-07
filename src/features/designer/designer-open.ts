@@ -20,14 +20,15 @@ import type { QueryController } from "../query/query-controller";
 import type { TabsStore } from "../query/tabs-store";
 import { isProductionLabel } from "../servers/server-form";
 import { createDesignerController, type DesignerController, type DesignerControllerDeps } from "./designer-controller";
-import { designerTabKey, kindLabel } from "./designer-model";
+import { designerTabKey, focusFieldOf, kindLabel } from "./designer-model";
 import type { DropInput } from "./drop-controller";
+import { extraRefreshIds, titleAfterApply, type OpenContext } from "./refresh-model";
 
 export type { DropInput };
 
 export interface DesignerOpenDeps {
-  designer: DesignerController;
-  tabs: Pick<TabsStore, "state" | "openDesigner">;
+  designer: Pick<DesignerController, "openCreate" | "openAlter" | "requestFocus" | "findAlter" | "ids">;
+  tabs: Pick<TabsStore, "state" | "openDesigner" | "activate" | "rename">;
   api: Pick<Api, "ddlTargetOf">;
   tree: () => TreeState;
   /** Güncel sunucu kayıtları (kilit, ad). */
@@ -44,6 +45,13 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
   let opening = false;
   /** "<sunucu>|<oid>" → veritabanı adı (betiği Query Tool'da açarken sekme başlığı için). */
   const dbNames = new Map<string, string>();
+  /** Sekme → açılış bağlamı (uygulama sonrası ek yenilemeler); kapanan sekmelerin girdileri her açılışta budanır. */
+  const contexts = new Map<string, OpenContext>();
+  const remember = (tabId: string, ctx: OpenContext) => {
+    const live = new Set(designer.ids());
+    for (const k of contexts.keys()) if (!live.has(k)) contexts.delete(k);
+    contexts.set(tabId, ctx);
+  };
 
   const open = async (nodeId: string, mode: DesignerOpenMode): Promise<void> => {
     if (opening) return;
@@ -57,7 +65,7 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
       const object = mode === "create" ? null : target.object;
       // Kolon/kısıt odağı olan hedef (tablo diyaloğu) hiçbir zaman DROP TABLE/yeniden adlandırma diyaloğu açmaz.
       if (target.focus && (mode === "drop" || mode === "rename")) {
-        notify(tdes.open.none, "info");
+        notify(tdes.open.rowInTable, "info");
         return;
       }
       if ((!create && !object) || databaseOid === null) {
@@ -87,14 +95,34 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
         const title = tdes.tab.create(kindLabel(create.kind), config.name, database);
         const r = tabs.openDesigner({ serverId, databaseOid, title, key, where });
         if (r.created) void designer.openCreate({ tabId: r.id, serverId, databaseOid, create, refreshNodeId });
+        remember(r.id, {
+          databaseNodeId: ancestorOfKind(deps.tree(), nodeId, ["database"])?.id ?? null, tableNodeId: null, collectionNodeId: refreshNodeId,
+        });
         return;
       }
       if (!object) return;
+      const focus = (id: string) => {
+        if (mode === "rename") designer.requestFocus(id, "name");
+        else if (target.focus) designer.requestFocus(id, focusFieldOf(target.focus));
+      };
+      const tableNode = object.kind === "table" ? (node.kind === "table" ? node : ancestorOfKind(deps.tree(), nodeId, ["table"])) : null;
+      const ctx: OpenContext = { databaseNodeId: ancestorOfKind(deps.tree(), nodeId, ["database"])?.id ?? null, tableNodeId: tableNode?.id ?? null };
+      // Create'ten dönüşen ya da kimliği değişen sekme de eşlenir (sekme anahtarı değişmez).
+      const existing = designer.findAlter(serverId, databaseOid, object);
+      if (existing !== null) {
+        tabs.activate(existing);
+        remember(existing, ctx);
+        focus(existing);
+        return;
+      }
       const key = designerTabKey(tabs.state.designers, { serverId, databaseOid, object });
-      const title = tdes.tab.edit(kindLabel(object.kind), node.label);
+      const title = tdes.tab.edit(kindLabel(object.kind), (tableNode ?? node).label);
+      // Not: oid'i değişen alter'dan (indeks yeniden kurma) sonra sekme anahtarı eski oid'de kalır; PostgreSQL aynı oid'i
+      // oturum içinde başka nesneye verirse `openDesigner` eski sekmeyi etkinleştirir. Kuramsal; bilerek düzeltilmedi.
       const r = tabs.openDesigner({ serverId, databaseOid, title, key, where });
       if (r.created) void designer.openAlter({ tabId: r.id, serverId, databaseOid, object, refreshNodeId });
-      if (mode === "rename") designer.requestFocus(r.id, "name");
+      remember(r.id, ctx);
+      focus(r.id);
     } catch (err) {
       notify(errorText(toPayload(err)), "error");
     } finally {
@@ -102,7 +130,7 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
     }
   };
 
-  return { open, databaseName: (serverId: string, databaseOid: number) => dbNames.get(`${serverId}|${databaseOid}`) ?? null };
+  return { open, context: (tabId: string): OpenContext | null => contexts.get(tabId) ?? null, databaseName: (serverId: string, databaseOid: number) => dbNames.get(`${serverId}|${databaseOid}`) ?? null };
 }
 
 export interface DesignerDeps extends Omit<DesignerOpenDeps, "designer" | "openDrop"> {
@@ -130,10 +158,15 @@ export function createDesigner(deps: DesignerDeps) {
       return c ? { name: c.name, locked: c.readOnlyLock, production: isProductionLabel(c.label) } : null;
     },
     refreshNode: (id) => deps.explorer.refresh(id),
+    onApplied: (info) => {
+      const title = titleAfterApply(info);
+      if (title) deps.tabs.rename(info.tabId, title);
+      for (const id of extraRefreshIds(deps.tree(), opener.context(info.tabId), info, null)) void Promise.resolve(deps.explorer.refresh(id)).catch(() => {});
+    },
   });
   // Sunucu kaydı değişince (ad/kilit/etiket) açık sekmeler güncellenir; kök uygulama ömrü boyunca yaşar.
   createRoot(() => createEffect(on(deps.query.servers, (list) => list.forEach((s) => ctl.serverChanged(s.id)), { defer: true })));
-  const opener = createDesignerOpener({
+  const opener: ReturnType<typeof createDesignerOpener> = createDesignerOpener({
     ...deps,
     designer: ctl,
     openDrop: deps.openDrop ?? ctl.drop.open,

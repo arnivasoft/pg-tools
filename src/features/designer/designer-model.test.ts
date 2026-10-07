@@ -8,7 +8,7 @@ import type { Risk } from "../../ipc/bindings/Risk";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
 import type { Statement } from "../../ipc/bindings/Statement";
 import {
-  addColumn, addInclude, applyGate, applyOptionsFor, canSubmit, cloneDef, confirmFlags, defName, defsEqual, groupIssues,
+  addColumn, addInclude, focusFieldOf, parseFocusField, applyGate, applyOptionsFor, canSubmit, cloneDef, confirmFlags, defName, defsEqual, groupIssues,
   isSafeIntegerString, issuesFor, kindLabel, localBlock, moveColumn, previewEmptyState, removeColumn, removeInclude, scriptWithRanges,
   statementRangesToLineRanges, updateColumn,
   type ApplyGate, type ConfirmState, type GateInput,
@@ -123,7 +123,7 @@ describe("groupIssues / issuesFor", () => {
     expect(g.general).toEqual(["c"]);
   });
   it("groupIssues: boş giriş; girdiyi değiştirmez", () => {
-    expect(groupIssues([])).toEqual({ byPath: new Map(), general: [] });
+    expect(groupIssues([])).toEqual({ byPath: new Map(), general: [], generalPaths: [] });
     const input = [fe("name")];
     groupIssues(input, new Set());
     expect(input).toEqual([fe("name")]);
@@ -456,5 +456,13 @@ describe("localBlock (yerel engel)", () => {
     expect(localBlock(seqDef({ maxValue: "" }))).toBe("sequenceNumbers");
     expect(localBlock(seqDef({ maxValue: "-" }))).toBe("sequenceNumbers");
     expect(localBlock(seqDef({ minValue: "-9223372036854775809" }))).toBe("sequenceNumbers");
+  });
+});
+
+describe("focusFieldOf / parseFocusField", () => {
+  it("biçim ve gidiş-dönüş; bozuk alanlar null", () => {
+    expect(focusFieldOf({ kind: "column", id: 3 })).toBe("column:3");
+    expect(parseFocusField(focusFieldOf({ kind: "constraint", id: 40 }))).toEqual({ kind: "constraint", id: 40 });
+    for (const bad of ["name", "column:", "column:-1", "index:3"]) expect(parseFocusField(bad)).toBeNull();
   });
 });

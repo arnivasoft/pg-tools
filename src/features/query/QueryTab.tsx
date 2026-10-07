@@ -5,6 +5,7 @@ import type { EditorState } from "@codemirror/state";
 import { Download, PanelRight } from "lucide-solid";
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
 import { t } from "../../app/strings";
+import { texp } from "./strings-export";
 import { readStorage, writeStorage } from "../../app/storage";
 import { toast } from "../../app/toast";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
@@ -452,7 +453,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
       const preferred = m.last && m.last.text === snap.text && sameScope(m.last.scope, snap.scope) ? m.selectedStmt : null;
       const target = exportTarget(plans, true, preferred);
       if (!target) {
-        notify(t.query.export.disabledHint, "info");
+        notify(texp.disabledHint, "info");
         return;
       }
       const outcome = await exportUi.start({ session, sql: exportSql(snap.text, target), relation: m.relation, stmtIndex: target.index });
@@ -616,8 +617,8 @@ export default function QueryTab(props: { ctl: QueryController }) {
           >
             <PanelRight size={13} />
           </Button>
-          <Button variant="ghost" class="h-6 text-[12px]" disabled={!canExportNow()} title={t.query.export.disabledHint} onClick={() => void exportCsv()}>
-            <Download size={13} /> {t.query.export.button}
+          <Button variant="ghost" class="h-6 text-[12px]" disabled={!canExportNow()} title={texp.disabledHint} onClick={() => void exportCsv()}>
+            <Download size={13} /> {texp.button}
           </Button>
         </div>
         <div class="min-h-0 flex-1" role="tabpanel" id="qt-pane-panel" aria-labelledby={`qt-pane-tab-${pane()}`}>

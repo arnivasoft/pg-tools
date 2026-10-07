@@ -29,12 +29,12 @@ export const SEQUENCE_PATHS: ReadonlySet<string> = new Set([
 export const INDEX_PATHS: ReadonlySet<string> = new Set([
   "name", "method", "unique", "columns", "include", "tablespace", "fillfactor", "whereClause", "comment", "constraint",
 ]);
-/** Tür → bilinen yollar (`FORMS` tablosu bunu kullanır; her `ObjectKind` için bir form olmalı — testte denetlenir). */
-export const FORM_PATHS: Partial<Record<ObjectKind, ReadonlySet<string>>> = {
-  schema: SCHEMA_PATHS,
-  extension: EXTENSION_PATHS,
-  sequence: SEQUENCE_PATHS,
-  index: INDEX_PATHS,
+export const TABLE_PATHS: ReadonlySet<string> = new Set([
+  "name", "schema", "owner", "tablespace", "persistence", "fillfactor", "comment", "columns", "constraints", "partitionBy",
+]);
+/** Tür → bilinen yollar; HER ObjectKind için form vardır (Partial değil; testte denetlenir). */
+export const FORM_PATHS: Record<ObjectKind, ReadonlySet<string>> = {
+  schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
 };
 
 /**

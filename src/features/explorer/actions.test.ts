@@ -78,10 +78,10 @@ describe("qualifiedParts / actionsFor", () => {
   it("menu per node kind", () => {
     expect(actionsFor(s, node(s, "srv-down"))).toEqual(["openQueryTool", "connect", "editServer", "deleteServer", "copyName"]);
     expect(actionsFor(s, node(s, "srv-up"))).toEqual(["openQueryTool", "openDashboard", "refresh", "disconnect", "editServer", "deleteServer", "copyName"]);
-    expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["refresh", "copyName"]);
-    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
-    expect(actionsFor(s, node(s, "col-id"))).toEqual(["copyName", "copyQualifiedName", "copyDdl"]);
-    expect(actionsFor(s, node(s, "con-1"))).toEqual(["copyName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["createObject", "refresh", "copyName"]);
+    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "editObject", "renameObject", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "col-id"))).toEqual(["editObject", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "con-1"))).toEqual(["editObject", "copyName", "copyDdl"]);
   });
   it("Dashboard: bağlı sunucuda ve veritabanında var, bağlı olmayan sunucuda ve diğer düğümlerde yok", () => {
     expect(actionsFor(s, node(s, "srv-up"))).toContain("openDashboard");
@@ -222,6 +222,8 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
     add("coll-roles", "srv-up", "roleCollection", "Roles", { hasChildren: true });
     add("role-1", "coll-roles", "role", "app_user");
     add("coll-dbs", "srv-up", "databaseCollection", "Databases", { hasChildren: true });
+    add("coll-vcols", "view-1", "columnCollection", "Columns", { hasChildren: true });
+    add("vcol-1", "coll-vcols", "column", "id");
     return s;
   }
   const s = ddlTree();
@@ -242,10 +244,26 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
       expect(a.filter((x) => DES.includes(x))).toEqual(["editObject", "renameObject", "dropObject"]);
     }
   });
+  it("tablo: Tables koleksiyonunda createObject; tablo ve bölüm düğümünde edit/rename/drop", () => {
+    expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["createObject", "refresh", "copyName"]);
+    for (const id of ["tbl-orders", "tbl-partition"]) {
+      expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual(["editObject", "renameObject", "dropObject"]);
+    }
+  });
+  it("tablo kolonu/kısıtı (bölüm kolonu dahil): yalnızca editObject", () => {
+    for (const id of ["col-id", "con-1", "col-part"]) {
+      expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual(["editObject"]);
+    }
+  });
+  it("görünüm kolonu ve koleksiyon düğümleri (Columns/Constraints/Partitions) designer eylemi almaz", () => {
+    for (const id of ["vcol-1", "coll-cols", "coll-con", "coll-part"]) {
+      expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual([]);
+    }
+  });
   it("diğer düğümlerde designer eylemi yok", () => {
     for (const id of [
-      "srv-up", "srv-down", "db-app", "tbl-orders", "col-id", "con-1", "trg-1", "fn-fmt-int", "view-1", "role-1",
-      "coll-tables", "coll-cols", "coll-views", "coll-roles", "coll-dbs", "coll-fn", "coll-con",
+      "srv-up", "srv-down", "db-app", "trg-1", "fn-fmt-int", "view-1", "role-1",
+      "coll-cols", "coll-views", "coll-roles", "coll-dbs", "coll-fn", "coll-con",
     ]) {
       expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual([]);
     }
@@ -274,6 +292,7 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
       expect(disabledReason(a, open, "sch-app")).toBeNull();
       expect(disabledReason(a, none, "sch-app")).toBeNull();
     }
+    expect(disabledReason("editObject", viaTree, "col-id")).toBe(t.query.hint.locked);
     expect(locked.serverLocked).toHaveBeenCalledWith("sch-app");
     for (const a of ["refresh", "copyName", "copyDdl", "openQueryTool", "disconnect"] as ActionId[]) {
       expect(disabledReason(a, locked, "sch-app")).toBeNull();

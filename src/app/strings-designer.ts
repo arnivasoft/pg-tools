@@ -21,8 +21,6 @@ export const tdes = {
   },
   /** Üst çubuk ve şeritler. */
   view: {
-    /** Geçici koruma (Plan 13 kaldırır): formu henüz olmayan tür. */
-    formMissing: "Bu tür için form henüz yok.",
     statusLabel: "Durum",
     status: {
       loading: "Yükleniyor",
@@ -116,6 +114,7 @@ export const tdes = {
   /** Gezgin menüsünden açma (designer-open). */
   open: {
     none: "Bu düğüm için düzenleme yok.",
+    rowInTable: "Kolon ve kısıtlar tablo diyaloğunun içinden silinir ya da yeniden adlandırılır.",
     locked: "Sunucu salt okunur kilitli; nesne değiştirilemez.",
   },
   /** Silme diyaloğu (sekme açmaz). */

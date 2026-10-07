@@ -9,7 +9,7 @@ import type { SchemaDef } from "../../ipc/bindings/SchemaDef";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
 import { addColumn, groupIssues, issuesFor, moveColumn, removeColumn, updateColumn } from "./designer-model";
 import {
-  EXTENSION_PATHS, FORM_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
+  EXTENSION_PATHS, FORM_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
   columnKeyLabel, exactIssues, extensionEditPatch, extensionOptionLabel, extensionVersionNote, fillfactorEnabled,
   fillfactorFromInput, findExtension, incrementEditPatch, incrementSign, indexEditPatch, indexMethodPatch, indexReadOnlyReason,
   newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect, orphanRowIssues, ownedByHint, restrictedControlDisabled, schemaEditPatch, sequenceSchemaPatch, tablespaceChoices,
@@ -382,10 +382,17 @@ describe("alan yolu sözleşmesi (sequence/index)", () => {
 
 describe("FORM_PATHS (tür → form eşlemesi)", () => {
   it("her ObjectKind için yol kümesi var", () => {
-    // `table` formu Plan 13'te; o zamana dek yuva yok (DesignerView `formMissing` gösterir).
-    const kinds: Partial<Record<ObjectKind, true>> = { schema: true, extension: true, sequence: true, index: true };
-    expect(Object.keys(FORM_PATHS).sort()).toEqual(Object.keys(kinds).sort());
+    expect((["schema", "sequence", "extension", "index", "table"] as ObjectKind[]).every((k) => FORM_PATHS[k].size > 0)).toBe(true);
     expect(FORM_PATHS.index).toBe(INDEX_PATHS);
     expect(FORM_PATHS.sequence).toBe(SEQUENCE_PATHS);
+    expect(FORM_PATHS.table).toBe(TABLE_PATHS);
+  });
+  it("TABLE_PATHS: satır yolları kendi kökünde, old.* ve üst-düzey columns genel şeritte", () => {
+    const g = groupIssues(
+      [{ path: "columns[1].dataType", message: "a" }, { path: "columns", message: "b" }, { path: "old.columns[0].attnum", message: "c" }, { path: "partitionBy.keys[0]", message: "d" }],
+      TABLE_PATHS,
+    );
+    expect([...g.byPath.keys()]).toEqual(["columns[1].dataType", "partitionBy.keys[0]"]);
+    expect(g.general).toEqual(["b", "c"]);
   });
 });
