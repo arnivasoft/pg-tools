@@ -117,15 +117,46 @@ export function removedConstraints(original: TableDef | null, d: TableDef): Cons
   return original.constraints.filter((o) => o.oid !== null && !d.constraints.some((c) => c.oid === o.oid));
 }
 
-/** Yüklü kısıtı (özgün kopyası) özgün sıradaki yerine (önündeki yüklü kısıt sayısı) geri koyar. */
+/**
+ * Özgün kolon adı → taslaktaki güncel adı (`attnum` eşlemesiyle; yeniden adlandırılmış yüklü kolonlar). Taslakta
+ * olmayan (silinmiş) kolonlar haritada yoktur.
+ */
+export function currentColumnNames(original: TableDef, d: TableDef): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const oc of original.columns) {
+    const now = oc.attnum === null ? undefined : d.columns.find((x) => x.attnum === oc.attnum);
+    if (now) names.set(oc.name, now.name);
+  }
+  return names;
+}
+
+const isSelfIn = (t: TableDef, k: ConstraintKind) => k.type === "foreign_key" && k.refSchema === t.schema && k.refTable === t.name;
+
+/**
+ * Yüklü kısıtı (özgün kopyası) özgün sıradaki yerine (önündeki yüklü kısıt sayısı) geri koyar. Kolon adları `attnum`
+ * ile taslağın GÜNCEL adlarına eşlenir (yeniden adlandırılmış kolona başvuru sarkmasın; kendine başvuran FK'nin hedef
+ * kolonları da); silinmiş kolonun adı aynen kalır (sarkan referans uyarısı). Yeniden adlandırma yoksa birebir kopya.
+ */
 export function restoreConstraint(d: TableDef, original: TableDef, oid: number): TableDef {
   if (d.constraints.some((c) => c.oid === oid)) return d;
   const pos = original.constraints.findIndex((c) => c.oid === oid);
   if (pos < 0) return d;
   const before = new Set(original.constraints.slice(0, pos).map((c) => c.oid));
   const at = d.constraints.filter((c) => c.oid !== null && before.has(c.oid)).length;
+  const restored = structuredClone(original.constraints[pos]!);
+  const names = currentColumnNames(original, d);
+  const map = (a: string[]) => a.map((n) => names.get(n) ?? n);
+  const k = restored.kind;
+  if (k.type === "primary_key" || k.type === "unique") {
+    k.columns = map(k.columns);
+    k.include = map(k.include);
+  } else if (k.type === "foreign_key") {
+    const self = isSelfIn(original, k);
+    k.columns = map(k.columns);
+    if (self) k.refColumns = map(k.refColumns);
+  }
   const constraints = [...d.constraints];
-  constraints.splice(at, 0, structuredClone(original.constraints[pos]!));
+  constraints.splice(at, 0, restored);
   return { ...d, constraints };
 }
 
@@ -303,7 +334,7 @@ export function restoreConstraintSnap(d: TableDef, original: TableDef, oid: numb
   const at = next.constraints.findIndex((c) => c.oid === oid);
   const o = original.constraints.find((c) => c.oid === oid)!;
   const shifted = snap.map((k) => (k >= at ? k + 1 : k));
-  const wasSelf = o.kind.type === "foreign_key" && o.kind.refSchema === original.schema && o.kind.refTable === original.name;
+  const wasSelf = isSelfIn(original, o.kind);
   if (!wasSelf) return { d: next, snap: shifted };
   // Geri alınan FK yüklenen tanımdaki (özgün ad/şema) hedefi taşır; taslağın güncel adına hizalanır.
   const fixed = updateConstraint(next, at, (c) => (c.kind.type === "foreign_key" ? { ...c, kind: { ...c.kind, refSchema: next.schema, refTable: next.name } } : c));
@@ -348,12 +379,24 @@ export function withFkTargetSnap(d: TableDef, i: number, p: { refSchema?: string
 }
 
 /**
- * FK hedef kolon önerilerinin kaynağı: hedef tablo boş → "none"; hedef taslağın kendi şema/adı → "draft" (taslak kolon
- * adları; henüz kaydedilmemiş kolonlar da seçilebilsin); aksi halde "lookup" (`table_columns`). FK değilse "none".
+ * FK hedef kolon önerilerinin kaynağı: hedef tablo boş → "none"; kendine başvuran FK → "draft" (taslak kolon adları;
+ * henüz kaydedilmemiş kolonlar da seçilebilsin); aksi halde "lookup" (`table_columns`). FK değilse "none".
+ * `selfRef`: kendine-başvuru kararı çağıranın SelfSnap'inden (`snap.includes(i)`; ad yayılımı ve sarkan referansla aynı
+ * kaynak). Ad eşleşmesi kayıtsız FK'yi "kendine" yapmaz (önceden yazılmış hedefle aynı ada konan tablo gibi). Verilmezse
+ * mevcut ad/şemaya bakılır.
  */
-export function fkRefColumnSource(d: TableDef, c: ConstraintDef): "draft" | "lookup" | "none" {
+export function fkRefColumnSource(d: TableDef, c: ConstraintDef, selfRef?: boolean): "draft" | "lookup" | "none" {
   if (c.kind.type !== "foreign_key" || c.kind.refTable === "") return "none";
-  return c.kind.refSchema === d.schema && c.kind.refTable === d.name ? "draft" : "lookup";
+  const self = selfRef ?? (c.kind.refSchema === d.schema && c.kind.refTable === d.name);
+  return self ? "draft" : "lookup";
+}
+
+/**
+ * Hedef adı taslağın şema/adıyla aynı ama FK kendine-başvuru olarak kayıtlı değil (SelfSnap'te yok): arayüz, hedefin
+ * bu adlı mevcut (sunucudaki) tablo olduğunu ve kendine-başvuru için hedefin yeniden yazılması gerektiğini söyler.
+ */
+export function fkSelfNameOnly(d: TableDef, c: ConstraintDef, selfRef: boolean): boolean {
+  return !selfRef && c.kind.type === "foreign_key" && c.kind.refTable !== "" && c.kind.refSchema === d.schema && c.kind.refTable === d.name;
 }
 
 /** Taslağın boş olmayan kolon adları (yinelenmeden, taslak sırasıyla); `current` listede yoksa başa eklenir. */
@@ -362,31 +405,63 @@ export function columnChoices(d: TableDef, current: string): string[] {
   return names.includes(current) ? names : [current, ...names];
 }
 
-/**
- * Yüklü kısıt yapısal olarak değişti mi (ad ve `notValid` hariç; arka ucun `same_structure` kuralının istemci
- * yaklaşımı). Özgün kolon adları `attnum` ile taslaktaki adlara eşlenir (kolon yeniden adlandırma yapısal değişim
- * sayılmaz); kendine-başvuran FK'nin hedef şema/ad/kolonları da taslağa eşlenir. Yeni kısıt / özgünü yok → false.
- */
-export function constraintStructureChanged(original: TableDef | null, d: TableDef, c: ConstraintDef): boolean {
-  const o = originalConstraint(original, c);
-  if (!original || !o) return false;
-  const names = new Map<string, string>();
-  for (const oc of original.columns) {
-    const now = oc.attnum === null ? undefined : d.columns.find((x) => x.attnum === oc.attnum);
-    if (now) names.set(oc.name, now.name);
-  }
+/** Özgün kısıtın taslağa eşlenmiş yapısı (ad/notValid hariç) taslaktakinden farklı mı. */
+function shapeChanged(original: TableDef, d: TableDef, names: Map<string, string>, o: ConstraintDef, c: ConstraintDef): boolean {
   const map = (a: readonly string[]) => a.map((n) => names.get(n) ?? `\u0000${n}`);
   const k = o.kind;
   let kind: ConstraintKind = k;
   if (k.type === "primary_key" || k.type === "unique") kind = { ...k, columns: map(k.columns), include: map(k.include) };
   else if (k.type === "foreign_key") {
-    const self = k.refSchema === original.schema && k.refTable === original.name;
-    kind = self
+    kind = isSelfIn(original, k)
       ? { ...k, columns: map(k.columns), refSchema: d.schema, refTable: d.name, refColumns: map(k.refColumns) }
       : { ...k, columns: map(k.columns) };
   }
   const shape = (x: ConstraintDef, kd: ConstraintKind) => JSON.stringify([kd, x.deferrable, x.initiallyDeferred]);
   return shape(o, kind) !== shape(c, c.kind);
+}
+
+const colSet = (a: readonly string[]) => JSON.stringify([...new Set(a)].sort());
+
+/**
+ * Yüklü kısıt yapısal olarak değişti mi / yeniden kurulacak mı (ad ve `notValid` hariç; arka ucun `same_structure` +
+ * `diff` kurallarının istemci yaklaşımı). Özgün kolon adları `attnum` ile taslaktaki adlara eşlenir (kolon yeniden
+ * adlandırma yapısal değişim sayılmaz); kendine-başvuran FK'nin hedef şema/ad/kolonları da taslağa eşlenir. Yapısı
+ * aynı kalan kendine-başvuran FK, hedef kolon kümesi silinen ya da yeniden kurulan bir PK/UNIQUE'in kolon kümesiyse
+ * arka uçta yeniden kurulur: o da değişmiş sayılır. Yeni kısıt / özgünü yok → false.
+ */
+export function constraintStructureChanged(original: TableDef | null, d: TableDef, c: ConstraintDef): boolean {
+  const o = originalConstraint(original, c);
+  if (!original || !o) return false;
+  const names = currentColumnNames(original, d);
+  if (shapeChanged(original, d, names, o, c)) return true;
+  if (o.kind.type !== "foreign_key" || !isSelfIn(original, o.kind)) return false;
+  const target = colSet(o.kind.refColumns);
+  return original.constraints.some((ok) => {
+    if (ok.oid === null || (ok.kind.type !== "primary_key" && ok.kind.type !== "unique") || colSet(ok.kind.columns) !== target) return false;
+    const now = d.constraints.find((x) => x.oid === ok.oid);
+    return !now || shapeChanged(original, d, names, ok, now);
+  });
+}
+
+/** Geri alma + PRIMARY KEY üyelerinin NOT NULL'ı (geri alınan PK, NOT NULL'ı kaldırılmış kolonu yeniden zorunlu yapar). */
+export function restoreConstraintWithPk(d: TableDef, original: TableDef, oid: number, snap: SelfSnap): WithSnap {
+  const r = restoreConstraintSnap(d, original, oid, snap);
+  return r.d === d ? r : { d: withPrimaryKeyNotNull(r.d), snap: r.snap };
+}
+
+/** Bölümlenmiş tablo oluştururken CHECK NO INHERIT reddedilir: kutu kapalı (işaretliyse kaldırılabilsin diye açık kalır). */
+export function noInheritBlocked(mode: "create" | "alter", d: TableDef, c: ConstraintDef): boolean {
+  return mode === "create" && d.partitionBy !== null && c.kind.type === "check" && !c.kind.noInherit;
+}
+
+/** "Tabloyu tarar" notu: alter'da yeni kısıt; NOT VALID işaretli FK/CHECK taramaz (not çelişmesin diye gizlenir). */
+export function scanNoteVisible(mode: "create" | "alter", c: ConstraintDef): boolean {
+  return mode === "alter" && c.oid === null && !(supportsNotValid(c.kind.type) && c.notValid);
+}
+
+/** Ekle çubuğunun tür seçimi: PRIMARY KEY eklenemiyorsa UNIQUE'e kalıcı olarak geçer (PK silinince geri sıçramaz). */
+export function stableAddType(choice: ConstraintType, pkAllowed: boolean): ConstraintType {
+  return choice === "primary_key" && !pkAllowed ? "unique" : choice;
 }
 
 /**

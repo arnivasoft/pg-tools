@@ -18,9 +18,9 @@ import { exactIssues, normalizeEmpty, orphanRowIssues } from "./forms-model";
 import {
   addConstraintColumn, addConstraintSnap, addFkPair, availableColumns, canAddPrimaryKey, canRestoreConstraint, columnChoices, constraintColumns,
   constraintLabel, constraintStructureChanged, danglingColumns, fkRefColumnSource, newConstraint, notValidMode, originalConstraint,
-  removeConstraintColumn, removeConstraintSnap, removeFkPair, removedConstraints, restoreConstraintSnap, supportsDeferrable,
-  switchConstraintTypeSnap, unsupportedKind, updateConstraint, updateFkPair, withDeferrable, withFkActions, withFkTargetSnap,
-  withInitiallyDeferred, withPrimaryKeyNotNull, type ColumnListName, type ConstraintType,
+  fkSelfNameOnly, noInheritBlocked, removeConstraintColumn, removeConstraintSnap, removeFkPair, removedConstraints, restoreConstraintWithPk,
+  scanNoteVisible, stableAddType, supportsDeferrable, switchConstraintTypeSnap, unsupportedKind, updateConstraint, updateFkPair,
+  withDeferrable, withFkActions, withFkTargetSnap, withInitiallyDeferred, withPrimaryKeyNotNull, type ColumnListName, type ConstraintType,
 } from "./table-constraints";
 import type { TableSectionProps } from "./table-form-state";
 import { structureLocked } from "./table-model";
@@ -51,8 +51,12 @@ export function TableConstraints(props: TableSectionProps) {
   const removed = createMemo(() => removedConstraints(props.original, d()));
   const pkAllowed = () => canAddPrimaryKey(d());
   const [choice, setChoice] = createSignal<ConstraintType>("primary_key");
-  // PRIMARY KEY seçili kalmış ama artık eklenemiyorsa UNIQUE önerilir.
-  const addType = (): ConstraintType => (choice() === "primary_key" && !pkAllowed() ? "unique" : choice());
+  // PRIMARY KEY artık eklenemiyorsa seçim kalıcı olarak UNIQUE'e geçer (PK silinince PRIMARY KEY'e geri sıçramaz).
+  const addType = (): ConstraintType => stableAddType(choice(), pkAllowed());
+  createEffect(() => {
+    const next = addType();
+    if (next !== choice()) setChoice(next);
+  });
 
   const cardEls: Array<HTMLElement | undefined> = [];
   const nameEls: Array<HTMLInputElement | undefined> = [];
@@ -178,10 +182,7 @@ export function TableConstraints(props: TableSectionProps) {
                             disabled={!allowed()}
                             onClick={() => {
                               if (oid === null || !allowed()) return;
-                              props.editor.editSnap((x, snap) => {
-                                const r = restoreConstraintSnap(x, o(), oid, snap);
-                                return { d: withPrimaryKeyNotNull(r.d), snap: r.snap };
-                              });
+                              props.editor.editSnap((x, snap) => restoreConstraintWithPk(x, o(), oid, snap));
                               focusLater(() => nameEls[d().constraints.findIndex((k) => k.oid === oid)] ?? addEl);
                             }}
                           >
@@ -469,7 +470,7 @@ function ConstraintCard(props: CardProps) {
             {restructured() ? t.revalidateHint : t.validateHint}
           </span>
         </Show>
-        <Show when={isNew() && props.model.mode === "alter"}>
+        <Show when={scanNoteVisible(props.model.mode, c())}>
           <span id={scanId} class="text-xs text-muted">
             {t.scanNote}
           </span>
@@ -584,6 +585,8 @@ function CheckBody(props: CardProps & { c: ConstraintDef; onEdit: (f: (k: Constr
   const escape = createUniqueId();
   const k = () => (props.c.kind.type === "check" ? props.c.kind : { expr: "", noInherit: false });
   const ro = () => !props.editable;
+  const blocked = () => noInheritBlocked(props.model.mode, props.draft, props.c);
+  const noInheritHint = createUniqueId();
   return (
     <>
       <FieldRow label={t.expr} path={`constraints[${i}].expr`} issues={props.issues} exact>
@@ -614,7 +617,8 @@ function CheckBody(props: CardProps & { c: ConstraintDef; onEdit: (f: (k: Constr
       <label class="inline-flex items-center gap-1.5 text-[13px]">
         <input
           type="checkbox"
-          disabled={ro()}
+          aria-describedby={blocked() ? noInheritHint : undefined}
+          disabled={ro() || blocked()}
           checked={k().noInherit}
           onChange={(ev) => {
             const v = ev.currentTarget.checked;
@@ -623,6 +627,11 @@ function CheckBody(props: CardProps & { c: ConstraintDef; onEdit: (f: (k: Constr
         />
         {t.noInherit}
       </label>
+      <Show when={blocked()}>
+        <span id={noInheritHint} class="text-xs text-muted">
+          {t.noInheritPartitioned}
+        </span>
+      </Show>
     </>
   );
 }
@@ -639,7 +648,10 @@ function FkBody(
   const p = (f: string) => `constraints[${i}].${f}`;
   const fk = () => (props.c.kind.type === "foreign_key" ? props.c.kind : null);
   const pairs = createMemo(() => (fk()?.columns ?? []).map((_, j) => j), undefined, { equals: (a, b) => a.length === b.length });
-  const source = () => fkRefColumnSource(props.draft, props.c);
+  // Kendine-başvuru kararı SelfSnap'ten (ad yayılımı ve sarkan referansla aynı kaynak); ad eşleşmesi yetmez.
+  const selfRef = () => props.editor.snap().includes(i);
+  const source = () => fkRefColumnSource(props.draft, props.c, selfRef());
+  const nameOnly = () => fkSelfNameOnly(props.draft, props.c, selfRef());
   const ro = () => !props.editable;
   const refHintId = createUniqueId();
   const pairErrors = () => [
@@ -699,7 +711,7 @@ function FkBody(
           )}
         </FieldRow>
       </div>
-      <div role="group" aria-label={t.pairs} aria-describedby={source() === "lookup" ? undefined : refHintId} class="flex flex-col gap-1">
+      <div role="group" aria-label={t.pairs} aria-describedby={source() !== "lookup" || nameOnly() ? refHintId : undefined} class="flex flex-col gap-1">
         <span class="text-xs text-muted" aria-hidden="true">
           {t.pairs}
         </span>
@@ -735,7 +747,7 @@ function FkBody(
                   <input
                     class={`${inputClass} !w-auto min-w-36 flex-1${invalidClass(refErr().length > 0)}`}
                     aria-label={`${t.pair(j)}: ${t.refColumn}`}
-                    aria-describedby={join(refErr().length > 0 && refErrId, source() !== "lookup" && refHintId)}
+                    aria-describedby={join(refErr().length > 0 && refErrId, (source() !== "lookup" || nameOnly()) && refHintId)}
                     aria-invalid={refErr().length > 0}
                     list={source() === "draft" ? props.lookups.draftColList : source() === "lookup" ? props.lookups.refColList : undefined}
                     autocomplete="off"
@@ -775,9 +787,9 @@ function FkBody(
             );
           }}
         </For>
-        <Show when={source() !== "lookup"}>
+        <Show when={source() !== "lookup" || nameOnly()}>
           <span id={refHintId} class="text-xs text-muted">
-            {source() === "draft" ? t.selfRefHint : t.noRefTable}
+            {source() === "draft" ? t.selfRefHint : source() === "none" ? t.noRefTable : t.selfRefNotRecorded}
           </span>
         </Show>
         <Show when={pairErrors().length > 0}>

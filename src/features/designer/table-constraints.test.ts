@@ -8,9 +8,10 @@ import {
   removedConstraints, restoreConstraint, supportsDeferrable, supportsNotValid, switchConstraintType, unsupportedKind, updateConstraint,
   updateFkPair, withDeferrable, withFkActions, withFkTarget, withInitiallyDeferred, withPrimaryKeyNotNull,
   columnChoices, constraintStructureChanged, fkRefColumnSource, switchConstraintTypeSnap, withFkTargetSnap,
+  fkSelfNameOnly, noInheritBlocked, restoreConstraintWithPk, scanNoteVisible, stableAddType,
 } from "./table-constraints";
 import type { SelfSnap } from "./table-constraints";
-import { newColumn, renameTable, selfRefs } from "./table-model";
+import { columnRefs, newColumn, renameTable, renameTableColumn, selfRefs } from "./table-model";
 
 const T = (p: Partial<TableDef> = {}): TableDef => ({
   schema: "public", name: "t", owner: null, tablespace: null, persistence: "permanent", columns: [], constraints: [], partitionBy: null,
@@ -392,5 +393,126 @@ describe("Task 7 yardımcıları", () => {
     // Yeni kısıt / özgün yok.
     expect(constraintStructureChanged(o, d0, uq(["a"]))).toBe(false);
     expect(constraintStructureChanged(null, d0, uq(["a"], 2))).toBe(false);
+  });
+});
+
+describe("Task 7 inceleme düzeltmeleri", () => {
+  const fkOf = (d: TableDef, i: number) => d.constraints[i]!.kind as Extract<ConstraintDef["kind"], { type: "foreign_key" }>;
+
+  it("I-1 (R1): hedef tablo adı yazıldıktan SONRA tabloya aynı ad verilirse FK kendine-başvuru değildir; öneri/ipucu snap'i izler", () => {
+    let d = T({ name: "", columns: [col("id"), col("parent")] });
+    let snap: SelfSnap = selfRefs(d);
+    ({ d, snap } = addConstraintSnap(d, "foreign_key", snap));
+    for (const t of ["e", "em", "emp"]) ({ d, snap } = withFkTargetSnap(d, 0, { refTable: t }, snap));
+    for (const n of ["e", "em", "emp"]) d = renameTable(d, { name: n }, snap);
+    expect(snap).toEqual([]);
+    const self = snap.includes(0);
+    // Ad eşleşmesi kayıtsız FK'yi "kendine" yapmaz: sunucudaki emp tablosunun kolonları önerilir, açıklayıcı ipucu.
+    expect(fkRefColumnSource(d, d.constraints[0]!, self)).toBe("lookup");
+    expect(fkSelfNameOnly(d, d.constraints[0]!, self)).toBe(true);
+    // Sonraki kolon/tablo adı değişimi FK'ye dokunmaz (tutarlı biçimde başka tabloyu hedefler).
+    d = updateConstraint(d, 0, (c) => updateFkPair(c, 0, { local: "parent", ref: "id" }));
+    d = renameTableColumn(d, 0, "pk_id", columnRefs(d, "id", snap));
+    expect(fkOf(d, 0)).toMatchObject({ columns: ["parent"], refTable: "emp", refColumns: ["id"] });
+    expect(danglingColumns(d, d.constraints[0]!, self)).toEqual([]);
+    d = renameTable(d, { name: "emp2" }, snap);
+    expect(fkOf(d, 0).refTable).toBe("emp");
+    expect(fkSelfNameOnly(d, d.constraints[0]!, self)).toBe(false);
+    // Kendine-başvuru için hedef yeniden yazılır: snap'e girer, öneriler taslaktan, ad değişimi taşır.
+    d = renameTable(d, { name: "emp" }, snap);
+    for (const t of ["em", "emp"]) ({ d, snap } = withFkTargetSnap(d, 0, { refTable: t }, snap));
+    expect(snap).toEqual([0]);
+    expect(fkRefColumnSource(d, d.constraints[0]!, snap.includes(0))).toBe("draft");
+    expect(fkSelfNameOnly(d, d.constraints[0]!, true)).toBe(false);
+    d = updateConstraint(d, 0, (c) => updateFkPair(c, 0, { ref: "pk_id" }));
+    d = renameTableColumn(d, 0, "key", columnRefs(d, "pk_id", snap));
+    d = renameTable(d, { name: "emp3" }, snap);
+    expect(fkOf(d, 0)).toMatchObject({ refTable: "emp3", refColumns: ["key"] });
+  });
+
+  it("I-1 (R3): alter'da geçici ad başka tablonun adına eşitken gerçek FK 'kendine' gösterilmez", () => {
+    let d = T({ name: "orders", columns: [col("id", 1), col("cust", 2)], constraints: [fk(["cust"], "customers", ["id"], 10)] });
+    const snap = selfRefs(d);
+    d = renameTable(d, { name: "customers" }, snap);
+    expect(fkRefColumnSource(d, d.constraints[0]!, snap.includes(0))).toBe("lookup");
+    // Ad bazlı varsayılan (selfRef verilmezse) eski davranış.
+    expect(fkRefColumnSource(d, d.constraints[0]!)).toBe("draft");
+  });
+
+  it("M-1: geri alınan kısıt kolon adlarını attnum ile güncel adlara eşler; silinmiş kolon adı aynen kalır (sarkan)", () => {
+    const o = T({
+      name: "t", columns: [col("a", 1, true), col("b", 2)],
+      constraints: [pk(["a"], 1), uq(["b"], 2, ["a"]), fk(["b"], "t", ["a"], 3)],
+    });
+    let d: TableDef = structuredClone(o);
+    let snap: SelfSnap = selfRefs(d);
+    d = renameTableColumn(d, 0, "a2", columnRefs(d, "a", snap));
+    for (let k = 0; k < 3; k++) ({ d, snap } = removeConstraintSnap(d, 0, snap));
+    for (const oid of [1, 2, 3]) ({ d, snap } = restoreConstraintSnap(d, o, oid, snap));
+    expect(d.constraints.map((c) => c.kind)).toEqual([
+      { type: "primary_key", columns: ["a2"], include: [] },
+      { type: "unique", columns: ["b"], include: ["a2"], nullsNotDistinct: false },
+      fk(["b"], "t", ["a2"]).kind,
+    ]);
+    expect(snap).toEqual([2]);
+    expect(d.constraints.map((c, i) => danglingColumns(d, c, snap.includes(i)))).toEqual([[], [], []]);
+    expect(d.constraints.map((c) => constraintStructureChanged(o, d, c))).toEqual([false, false, false]);
+    // Kendine başvurmayan FK'nin hedef kolonları eşlenmez.
+    const o2 = T({ name: "t", columns: [col("a", 1)], constraints: [fk(["a"], "other", ["a"], 4)] });
+    const d2 = renameTableColumn(structuredClone(o2), 0, "x", [{ at: "constraint", c: 0, list: "columns", j: 0 }]);
+    const r2 = restoreConstraint(removeConstraint(d2, 0), o2, 4);
+    expect(fkOf(r2, 0)).toMatchObject({ columns: ["x"], refColumns: ["a"] });
+    // Silinmiş kolon: ad aynen, sarkan uyarısı.
+    const d3: TableDef = { ...structuredClone(o), columns: [col("b", 2)], constraints: [] };
+    const r3 = restoreConstraint(d3, o, 1);
+    expect(r3.constraints[0]!.kind).toMatchObject({ columns: ["a"] });
+    expect(danglingColumns(r3, r3.constraints[0]!)).toEqual(["a"]);
+  });
+
+  it("restoreConstraintWithPk: geri alınan PK, NOT NULL'ı kaldırılmış kolonu yeniden NOT NULL yapar; geri alınamıyorsa aynen", () => {
+    const o = T({ columns: [col("a", 1, true), col("b", 2)], constraints: [pk(["a"], 1)] });
+    const d: TableDef = { ...structuredClone(o), constraints: [], columns: [col("a", 1, false), col("b", 2)] };
+    const r = restoreConstraintWithPk(d, o, 1, []);
+    expect(r.d.columns.map((c) => c.notNull)).toEqual([true, false]);
+    expect(r.d.constraints).toHaveLength(1);
+    const same = restoreConstraintWithPk(r.d, o, 1, [7]);
+    expect(same.d).toBe(r.d);
+    expect(same.snap).toEqual([7]);
+  });
+
+  it("m-1: kendine-başvuran FK'nin hedef anahtarı silinir/yeniden kurulursa FK da yeniden kurulur sayılır", () => {
+    const o = T({ name: "t", columns: [col("id", 1, true), col("p", 2)], constraints: [pk(["id"], 1), { ...fk(["p"], "t", ["id"], 2), notValid: true }] });
+    const d0: TableDef = structuredClone(o);
+    expect(constraintStructureChanged(o, d0, d0.constraints[1]!)).toBe(false);
+    const dropped: TableDef = { ...d0, constraints: [d0.constraints[1]!] };
+    expect(constraintStructureChanged(o, dropped, dropped.constraints[0]!)).toBe(true);
+    const rebuilt: TableDef = { ...d0, constraints: [pk(["id", "p"], 1), d0.constraints[1]!] };
+    expect(constraintStructureChanged(o, rebuilt, rebuilt.constraints[1]!)).toBe(true);
+    // PK yalnızca yeniden adlandırıldı: FK korunur.
+    const renamed: TableDef = { ...d0, constraints: [{ ...pk(["id"], 1), name: "x" }, d0.constraints[1]!] };
+    expect(constraintStructureChanged(o, renamed, renamed.constraints[1]!)).toBe(false);
+    // Kendine başvurmayan FK etkilenmez.
+    const o2 = T({ name: "t", columns: [col("id", 1)], constraints: [pk(["id"], 1), fk(["id"], "other", ["id"], 2)] });
+    const d2: TableDef = { ...structuredClone(o2), constraints: [structuredClone(o2.constraints[1]!)] };
+    expect(constraintStructureChanged(o2, d2, d2.constraints[0]!)).toBe(false);
+  });
+
+  it("m-3/m-4/m-5: NO INHERIT bölümlenmiş create'te kapalı; ekle seçimi PK'dan UNIQUE'e geçer; NOT VALID işaretliyse tarama notu yok", () => {
+    const part = T({ partitionBy: { strategy: "range", keys: [] } });
+    const on: ConstraintDef = { ...chk(), kind: { type: "check", expr: "a>0", noInherit: true } };
+    expect(noInheritBlocked("create", part, chk())).toBe(true);
+    expect(noInheritBlocked("create", part, on)).toBe(false); // işaretliyse kaldırılabilsin
+    expect(noInheritBlocked("create", T(), chk())).toBe(false);
+    expect(noInheritBlocked("alter", part, chk())).toBe(false);
+    expect(noInheritBlocked("create", part, uq(["a"]))).toBe(false);
+    expect(stableAddType("primary_key", false)).toBe("unique");
+    expect(stableAddType("primary_key", true)).toBe("primary_key");
+    expect(stableAddType("check", false)).toBe("check");
+    expect(scanNoteVisible("alter", chk())).toBe(true);
+    expect(scanNoteVisible("alter", { ...chk(), notValid: true })).toBe(false);
+    expect(scanNoteVisible("alter", { ...fk(["a"], "x", ["a"]), notValid: true })).toBe(false);
+    expect(scanNoteVisible("alter", uq(["a"]))).toBe(true);
+    expect(scanNoteVisible("create", chk())).toBe(false);
+    expect(scanNoteVisible("alter", chk(5))).toBe(false);
   });
 });

@@ -165,6 +165,9 @@ export const ttbl = {
     refColumnPlaceholder: "hedef kolon",
     noRefTable: "Hedef kolon önerileri için önce hedef tabloyu girin.",
     selfRefHint: "Tablo kendine başvuruyor: öneriler bu formdaki kolonlardır.",
+    selfRefNotRecorded:
+      "Hedef bu tablonun adıyla aynı, ancak kendine başvuru olarak kaydedilmedi: sunucudaki aynı adlı tablo hedeflenir. Kendine başvuru için hedef tabloyu yeniden yazın.",
+    noInheritPartitioned: "Bölümlenmiş tabloda CHECK kısıtı NO INHERIT olamaz.",
     restoreBlocked: "Tabloda başka bir PRIMARY KEY var; önce onu silin.",
   },
   unsupported: {
