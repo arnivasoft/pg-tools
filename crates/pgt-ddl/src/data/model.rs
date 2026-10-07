@@ -11,6 +11,7 @@ use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::load::ObjectRef;
+use crate::model::FieldError;
 
 /// Kaynağın `pg_class.relkind` karşılığı (`r`, `p`, `v`, `m`, `f`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -232,6 +233,24 @@ pub struct DataSelect {
     #[ts(type = "number")]
     pub version_index: u32,
     pub has_version: bool,
+}
+
+/// `data_select` sonucu: filtre/sıralama alan hataları kapı hatası değil **veri** olarak döner (önizleme gibi).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "result", rename_all = "snake_case")]
+#[ts(export)]
+pub enum DataSelectResult {
+    Ok { select: DataSelect },
+    Invalid { errors: Vec<FieldError> },
+}
+
+impl From<Result<DataSelect, Vec<FieldError>>> for DataSelectResult {
+    fn from(r: Result<DataSelect, Vec<FieldError>>) -> Self {
+        match r {
+            Ok(select) => DataSelectResult::Ok { select },
+            Err(errors) => DataSelectResult::Invalid { errors },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -8,6 +8,7 @@ use pgt_core::registry::Registry;
 use pgt_core::store::{AppSettings, Drafts, History};
 use pgt_dash::DashManager;
 use pgt_ddl::DdlManager;
+use pgt_ddl::data::DataManager;
 use pgt_query::session::QueryManager;
 
 /// Sorgu geçmişi, taslaklar ve ayarlar (config dizini altında).
@@ -27,6 +28,7 @@ pub struct AppState {
     pub query: Arc<QueryManager>,
     pub dash: Arc<DashManager>,
     pub ddl: Arc<DdlManager>,
+    pub data: Arc<DataManager>,
     pub startup_notice: Option<String>,
 }
 
@@ -90,6 +92,7 @@ impl AppState {
             query: Arc::new(QueryManager::new(manager.clone(), registry.clone())),
             dash: Arc::new(DashManager::new(manager.clone())),
             ddl: Arc::new(DdlManager::new(manager.clone(), registry.clone())),
+            data: Arc::new(DataManager::new(manager.clone(), registry.clone())),
             credentials: Credentials::new(store),
             registry,
             manager,
@@ -147,6 +150,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = AppState::with_store(dir.path(), Arc::new(MemorySecretStore::default()));
         state.ddl.cancel_all(); // uçuşta uygulama yokken panik etmez
+        state.data.cancel_all();
     }
 
     #[test]
