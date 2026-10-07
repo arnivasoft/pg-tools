@@ -104,7 +104,8 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
   }
   if (isCollection(node.kind)) return canCreateIn(node.kind) ? ["createObject", "refresh", "copyName"] : ["refresh", "copyName"];
   const out: ActionId[] = [...q];
-  if (canEditObject(node.kind)) out.push("editObject", "renameObject", "dropObject");
+  // Önceden tanımlı pg_* rolleri arka uçta da reddedilir; menü göstermez.
+  if (canEditObject(node.kind) && !(node.kind === "role" && node.flags.system)) out.push("editObject", "renameObject", "dropObject");
   else if (isTableRowKind(node.kind) && ownedByTable(s, node.id)) out.push("editObject");
   if (node.hasChildren) out.push("refresh");
   out.push("copyName");

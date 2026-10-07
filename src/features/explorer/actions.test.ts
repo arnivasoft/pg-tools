@@ -85,7 +85,9 @@ describe("qualifiedParts / actionsFor", () => {
   });
   it("Dashboard: bağlı sunucuda ve veritabanında var, bağlı olmayan sunucuda ve diğer düğümlerde yok", () => {
     expect(actionsFor(s, node(s, "srv-up"))).toContain("openDashboard");
-    expect(actionsFor(s, node(s, "db-app"))).toEqual(["openQueryTool", "openDashboard", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "db-app"))).toEqual([
+      "openQueryTool", "openDashboard", "editObject", "renameObject", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl",
+    ]);
     expect(actionsFor(s, node(s, "srv-down"))).not.toContain("openDashboard");
     for (const id of ["sch-app", "tbl-orders", "coll-tables", "col-id"]) expect(actionsFor(s, node(s, id))).not.toContain("openDashboard");
     // Query Tool ile aynı menü grubunda (ayırıcısız).
@@ -222,6 +224,10 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
     add("coll-roles", "srv-up", "roleCollection", "Roles", { hasChildren: true });
     add("role-1", "coll-roles", "role", "app_user");
     add("coll-dbs", "srv-up", "databaseCollection", "Databases", { hasChildren: true });
+    add("role-app", "coll-roles", "role", "app");
+    add("role-sys", "coll-roles", "role", "pg_monitor", { flags: { ...flags, system: true } });
+    add("coll-mvs", "sch-app", "materializedViewCollection", "Materialized Views", { hasChildren: true });
+    add("mv-1", "coll-mvs", "materializedView", "m");
     add("coll-vcols", "view-1", "columnCollection", "Columns", { hasChildren: true });
     add("vcol-1", "coll-vcols", "column", "id");
     return s;
@@ -260,10 +266,26 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
       expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual([]);
     }
   });
+  it("view/MV/database/role koleksiyonlarında createObject", () => {
+    for (const id of ["coll-dbs", "coll-roles", "coll-views", "coll-mvs"]) expect(actionsFor(s, node(s, id))).toContain("createObject");
+  });
+  it("view, MV, database ve kullanıcı rolü düğümünde edit/rename/drop", () => {
+    for (const id of ["view-1", "mv-1", "db-app", "role-app"]) {
+      expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual(["editObject", "renameObject", "dropObject"]);
+    }
+  });
+  it("sistem rolü (pg_*) ve görünüm kolonu designer eylemi almaz", () => {
+    for (const id of ["role-sys", "vcol-1"]) expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual([]);
+  });
+  it("kilitli sunucuda database dropObject gerekçeli kapalı", () => {
+    const lockedTree = ddlTree();
+    const srv = lockedTree.nodes.get("srv-up")!;
+    lockedTree.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
+    expect(disabledReason("dropObject", { state: () => lockedTree } as unknown as ActionDeps, "db-app")).toBe(t.query.hint.locked);
+  });
   it("diğer düğümlerde designer eylemi yok", () => {
     for (const id of [
-      "srv-up", "srv-down", "db-app", "trg-1", "fn-fmt-int", "view-1", "role-1",
-      "coll-cols", "coll-views", "coll-roles", "coll-dbs", "coll-fn", "coll-con",
+      "srv-up", "srv-down", "trg-1", "fn-fmt-int", "coll-cols", "coll-fn", "coll-con",
     ]) {
       expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual([]);
     }

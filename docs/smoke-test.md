@@ -374,6 +374,8 @@ Plan 13 Task 1: index-*.js = 233088 B (taban 233733 B; tavan 233088 B)
 
 Plan 13 sonu: index-*.js = 233088 B; TableForm-*.js = 81467 B (index.html yalnızca solid/web/Icon parçalarını önyükler; Table metinleri ana pakette yok).
 
+Plan 15 Task 1: index-*.js = 232805 B (taban 233088 B; tavan 233088 B; `t.query.editorSettings` bloğu tembel `strings-editor.ts`'e taşındı, "Satır uzunluğu" artık yalnızca QueryTab-*.js'te).
+
 Notlar: Birimler — Plan 2, Plan 6 ve Plan 7 satırlarının bellek ve exe/paket değerleri `measure.ps1`/bayt sayısından geldiği için başlıktaki "MB" orada MiB'dir (Plan 6: 3,56 / 76,1 / 109,1 / 7,4 MiB; Plan 7: exe 14,19 / 77,5 / 113,2 / 7,4 MiB) (1 MiB = 1.048.576 bayt); Plan 1 satırının birimi belirsiz kaynaktandır (bkz. `docs/performance.md` "Birimler"). Plan 2 satırı `scripts/measure.ps1 -Runs 5` ile ölçüldü (8 sn boşta, sunucu yok, seçilen WebView2/tokio ayarlarıyla); yöntem ve denenen ayarlar `docs/performance.md`'de. Plan 1 satırı: ölçüm `target/release/pg-tools.exe` doğrudan çalıştırılarak yapıldı (kurulum yapılmadı); boşta 5 sn, sunucu bağlı değil. Toplam bellek, WebView2 alt süreçleri dahil 7 sürecin çalışma kümesi toplamıdır (paylaşılan sayfalar tekrar sayıldığından özel bellek ≈191 MB). Açılış süresi `MainWindowHandle` oluşana kadar geçen süredir; içerik çizimi dahil olmayabilir. Yukarıdaki kutucuklar GUI üzerinden elle uygulanmadı; sürüm öncesi işaretlenmelidir.
 
 ## Nesne diyalogları: Table arka ucu (Plan 12)
