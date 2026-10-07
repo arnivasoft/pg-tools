@@ -28,6 +28,10 @@ export interface NewRow {
 /** Değişiklik sırasındaki yer: var olan satır (Update ya da Delete) veya yeni satır (Insert). */
 export type EditSlot = { kind: "row"; rowIndex: number } | { kind: "new"; newId: number };
 
+/**
+ * Düzenleme durumu. `cells`/`deleted`/`order` satır indeksleri yalnızca kurulduğu `Loaded` için geçerlidir:
+ * denetleyici `Loaded` her değiştiğinde (yeniden yükleme, `applyResults`) durumu `EMPTY_EDIT`'e sıfırlamalıdır.
+ */
 export interface EditState {
   /** rowIndex → kolon → yeni değer; yalnızca özgünden farklı olanlar. */
   cells: ReadonlyMap<number, ReadonlyMap<string, CellValue>>;
@@ -98,11 +102,12 @@ function columnUpdateReason(c: DataColumn, s: DataSource): CellReason | undefine
   return undefined;
 }
 
+/** `insertable=false` ALWAYS kimlikten önce: yetkisiz kolona `Default` bile yazılamaz (arka uç `column_error`). */
 function columnInsertReason(c: DataColumn, s: DataSource): CellReason | undefined {
   if (!s.canInsert) return "notInsertable";
   if (c.generated) return "generated";
-  if (c.identity === "always") return "identityAlways";
   if (!c.insertable) return "notInsertable";
+  if (c.identity === "always") return "identityAlways";
   return undefined;
 }
 
@@ -138,17 +143,19 @@ function withCell(e: EditState, row: number, column: string, value: CellValue | 
 
 // --- Durum sorguları -----------------------------------------------------------------------------
 
-export function changeCount(e: EditState): number {
-  let n = 0;
-  for (const s of e.order) {
-    if (s.kind === "row") n += 1;
-    else if ((e.inserted.find((r) => r.id === s.newId)?.values.size ?? 0) > 0) n += 1;
-  }
-  return n;
+/** Gönderilecek değişiklik sayısı (= `toChangeSet(l, e).changes.length`; rozet her zaman yükle eşit). */
+export function changeCount(l: Loaded, e: EditState): number {
+  return toChangeSet(l, e).changes.length;
 }
 
+/**
+ * Durum tabanlı ucuz denetim: değişmiş satır ya da dokunulmuş yeni satır var mı. `changeCount` 0 iken `true`
+ * olabilmesi yalnızca bayat durumda (başka `Loaded`'a karşı kurulmuş ya da kaynak sonradan salt okunur) mümkündür.
+ */
 export function isDirty(e: EditState): boolean {
-  return changeCount(e) > 0;
+  return e.order.some((s) =>
+    s.kind === "row" ? true : (e.inserted.find((r) => r.id === s.newId)?.values.size ?? 0) > 0,
+  );
 }
 
 /** Hücre düzenlenebilir mi ve değilse neden. Yeni satırda `identityAlways` yalnızca `Default` kabul eder. */
@@ -222,6 +229,19 @@ export function newRowSetCell(l: Loaded, e: EditState, id: number, column: strin
   return { ...e, inserted };
 }
 
+/** Yeni satırın kolon girdisini kaldırır; tümü kalkan satır listede kalır ama yeniden atlanır. */
+export function newRowRevertCell(e: EditState, id: number, column: string): EditState {
+  const target = e.inserted.find((r) => r.id === id);
+  if (!target?.values.has(column)) return e;
+  const inserted = e.inserted.map((r) => {
+    if (r.id !== id) return r;
+    const values = new Map(r.values);
+    values.delete(column);
+    return { id, values };
+  });
+  return { ...e, inserted };
+}
+
 /** Silinecek ↔ geri al; silinen satırın düzenlemeleri tutulur ama gönderilmez. */
 export function toggleDelete(l: Loaded, e: EditState, row: number): EditState {
   if (!writable(l) || !l.source.canDelete || !identity(l, row)) return e;
@@ -231,8 +251,9 @@ export function toggleDelete(l: Loaded, e: EditState, row: number): EditState {
   return { ...e, deleted, order: syncRowSlot(e.order, row, e.cells, deleted) };
 }
 
-/** Boş yeni satır (kimlik artan). Kaynağın yazılabilirliğini denetleyici sınar; dokunulmamış satır gönderilmez. */
-export function addRow(e: EditState): EditState {
+/** Boş yeni satır (kimlik artan); yazılamaz kaynakta ya da `canInsert=false` iken no-op. Dokunulmamış satır gönderilmez. */
+export function addRow(l: Loaded, e: EditState): EditState {
+  if (!writable(l) || !l.source.canInsert) return e;
   const id = e.nextId;
   return {
     ...e,
@@ -298,9 +319,12 @@ export function toChangeSet(l: Loaded, e: EditState): { changes: RowChange[]; or
 
 // --- Uygulama sonuçları --------------------------------------------------------------------------
 
+/** `returned` = kaynak kolonları + sürüm (son); `versionIndex` kolon sayısına eşit değilse hepsi biçimsiz sayılır. */
 function returnedRow(l: Loaded, results: readonly RowResult[], index: number): Row | null {
+  const width = l.source.columns.length;
+  if (l.versionIndex !== width) return null;
   const r = results.find((x) => x.index === index)?.returned;
-  return r && r.length === l.versionIndex + 1 ? [...r] : null;
+  return r && r.length === width + 1 ? [...r] : null;
 }
 
 /**
@@ -320,8 +344,9 @@ export function resultIssues(l: Loaded, origin: readonly ChangeOrigin[], results
 /**
  * Başarılı uygulama sonrası yükleneni tazeler: UPDATE → satır yerinde (`returned`: kolonlar + yeni sürüm),
  * DELETE → satır çıkarılır (büyükten küçüğe; indeks kayması yanlış satırı silmez), INSERT → değişiklik sırasıyla
- * sona eklenir. `returned` kullanılamayan değişiklik atlanır (bkz. `resultIssues`). Düzenleme durumu çağıranca
- * `EMPTY_EDIT`'e sıfırlanır.
+ * sona eklenir. `returned` kullanılamayan INSERT/UPDATE atlanır (bkz. `resultIssues`). DELETE'ler her zaman uygulanır
+ * (uygulama ya hep ya hiç: `Applied` geldiyse silindi) — `resultIssues` sonucu eksik DELETE'i yine bildirebilir.
+ * Düzenleme durumu çağıranca `EMPTY_EDIT`'e sıfırlanır.
  */
 export function applyResults(l: Loaded, origin: readonly ChangeOrigin[], results: readonly RowResult[]): Loaded {
   const rows = [...l.rows];

@@ -12,6 +12,7 @@ import {
   changeCount,
   isDirty,
   keyOf,
+  newRowRevertCell,
   newRowSetCell,
   removeNewRow,
   resultIssues,
@@ -110,23 +111,23 @@ describe("data-edit-model", () => {
   it("setCell özgün değere dönünce girdi kalkar; changeCount no-op saymaz", () => {
     expect(isDirty(EMPTY_EDIT)).toBe(false);
     const e1 = setCell(L, EMPTY_EDIT, 0, "name", T("z"));
-    expect(changeCount(e1)).toBe(1);
+    expect(changeCount(L,e1)).toBe(1);
     expect(isDirty(e1)).toBe(true);
     expect(cellValueAt(L, e1, 0, "name")).toEqual({ value: T("z"), changed: true });
     const e2 = setCell(L, e1, 0, "name", T("a"));
-    expect(changeCount(e2)).toBe(0);
+    expect(changeCount(L,e2)).toBe(0);
     expect(isDirty(e2)).toBe(false);
     expect(e2.cells.size).toBe(0);
     expect(e2.order).toEqual([]);
     expect(cellValueAt(L, e2, 0, "name")).toEqual({ value: { kind: "orig", value: "a" }, changed: false });
     // Aynı satırda iki hücre tek değişiklik
     const e3 = setCell(L, setCell(L, EMPTY_EDIT, 1, "name", T("q")), 1, "note", NULL);
-    expect(changeCount(e3)).toBe(1);
+    expect(changeCount(L,e3)).toBe(1);
     // revertCell
     const e4 = revertCell(e3, 1, "name");
     expect(cellValueAt(L, e4, 1, "name").changed).toBe(false);
-    expect(changeCount(e4)).toBe(1);
-    expect(changeCount(revertCell(e4, 1, "note"))).toBe(0);
+    expect(changeCount(L,e4)).toBe(1);
+    expect(changeCount(L,revertCell(e4, 1, "note"))).toBe(0);
     expect(revertCell(EMPTY_EDIT, 0, "name")).toBe(EMPTY_EDIT);
     // Özgün değere eşit ilk yazım durum değiştirmez
     expect(setCell(L, EMPTY_EDIT, 0, "name", T("a"))).toBe(EMPTY_EDIT);
@@ -135,22 +136,22 @@ describe("data-edit-model", () => {
   it("Null/Text/Default ayrımı: '' ≠ null ≠ 'NULL' ≠ 'DEFAULT'; özgün null'a Null yazmak no-op", () => {
     // satır 0: note = null
     expect(setCell(L, EMPTY_EDIT, 0, "note", NULL)).toBe(EMPTY_EDIT);
-    expect(changeCount(setCell(L, EMPTY_EDIT, 0, "note", T("")))).toBe(1);
-    expect(changeCount(setCell(L, EMPTY_EDIT, 0, "note", T("NULL")))).toBe(1);
-    expect(changeCount(setCell(L, EMPTY_EDIT, 0, "note", T("DEFAULT")))).toBe(1);
+    expect(changeCount(L,setCell(L, EMPTY_EDIT, 0, "note", T("")))).toBe(1);
+    expect(changeCount(L,setCell(L, EMPTY_EDIT, 0, "note", T("NULL")))).toBe(1);
+    expect(changeCount(L,setCell(L, EMPTY_EDIT, 0, "note", T("DEFAULT")))).toBe(1);
     // satır 2: note = 'NULL' metni
-    expect(changeCount(setCell(L, EMPTY_EDIT, 2, "note", NULL))).toBe(1);
+    expect(changeCount(L,setCell(L, EMPTY_EDIT, 2, "note", NULL))).toBe(1);
     expect(setCell(L, EMPTY_EDIT, 2, "note", T("NULL"))).toBe(EMPTY_EDIT);
     // satır 3: note = ''
-    expect(changeCount(setCell(L, EMPTY_EDIT, 3, "note", NULL))).toBe(1);
+    expect(changeCount(L,setCell(L, EMPTY_EDIT, 3, "note", NULL))).toBe(1);
     expect(setCell(L, EMPTY_EDIT, 3, "note", T(""))).toBe(EMPTY_EDIT);
     // Default her zaman değişiklik; UPDATE'te sıradan kolonda serbest
     const d = setCell(L, EMPTY_EDIT, 1, "note", DEF);
-    expect(changeCount(d)).toBe(1);
+    expect(changeCount(L,d)).toBe(1);
     expect(toChangeSet(L, d).changes).toEqual([
       { op: "update", key: ["2"], version: "101", set: [{ column: "note", value: DEF }] },
     ]);
-    expect(changeCount(setCell(L, EMPTY_EDIT, 1, "bd", DEF))).toBe(1);
+    expect(changeCount(L,setCell(L, EMPTY_EDIT, 1, "bd", DEF))).toBe(1);
     // Default üretilmiş / ALWAYS kimlik / güncellenemez kolonda reddedilir
     expect(setCell(L, EMPTY_EDIT, 1, "gen", DEF)).toBe(EMPTY_EDIT);
     expect(setCell(L, EMPTY_EDIT, 1, "ident", DEF)).toBe(EMPTY_EDIT);
@@ -183,7 +184,7 @@ describe("data-edit-model", () => {
   it("toChangeSet Delete: key+version; silinmiş satırın düzenlemeleri gönderilmez; geri alınca Update'e döner", () => {
     let e = setCell(L, EMPTY_EDIT, 2, "name", T("w"));
     e = toggleDelete(L, e, 2);
-    expect(changeCount(e)).toBe(1);
+    expect(changeCount(L,e)).toBe(1);
     expect(toChangeSet(L, e)).toEqual({
       changes: [{ op: "delete", key: ["3"], version: "102" }],
       origin: [{ kind: "delete", rowIndex: 2 }],
@@ -199,7 +200,7 @@ describe("data-edit-model", () => {
     ]);
     // Düzenlemesiz satırı sil + geri al → temiz
     const clean = toggleDelete(L, toggleDelete(L, EMPTY_EDIT, 0), 0);
-    expect(changeCount(clean)).toBe(0);
+    expect(changeCount(L,clean)).toBe(0);
     expect(clean.order).toEqual([]);
     // Silme yetkisi yoksa no-op
     const nd = loaded({ canDelete: false });
@@ -208,16 +209,16 @@ describe("data-edit-model", () => {
 
   it("toChangeSet Insert: yalnız dokunulan kolonlar; hiç dokunulmamış yeni satır atlanır; sırası değişiklik sırasıyla (insert/update/delete karışık) korunur ve origin eşler", () => {
     let e = toggleDelete(L, EMPTY_EDIT, 3); // 1. delete
-    e = addRow(e); // id 1 — dokunulmamış, atlanır
-    e = addRow(e); // id 2
+    e = addRow(L,e); // id 1 — dokunulmamış, atlanır
+    e = addRow(L,e); // id 2
     e = newRowSetCell(L, e, 2, "name", T("n"));
     e = newRowSetCell(L, e, 2, "id", T("5"));
     e = setCell(L, e, 0, "name", T("u")); // 3. update
-    e = addRow(e); // id 3 — yalnız Default ile dokunulmuş
+    e = addRow(L,e); // id 3 — yalnız Default ile dokunulmuş
     e = newRowSetCell(L, e, 3, "note", DEF);
     e = setCell(L, e, 0, "note", T("v")); // aynı satır: sıra ilk dokunuşta kalır
     expect(e.inserted.map((n) => n.id)).toEqual([1, 2, 3]);
-    expect(changeCount(e)).toBe(4);
+    expect(changeCount(L,e)).toBe(4);
     const { changes, origin } = toChangeSet(L, e);
     expect(changes).toEqual([
       { op: "delete", key: ["4"], version: "103" },
@@ -251,12 +252,40 @@ describe("data-edit-model", () => {
     expect(toChangeSet(L, r).changes.map((c) => c.op)).toEqual(["delete", "update", "insert"]);
     expect(removeNewRow(e, 42)).toBe(e);
     // Kaldırılan id yeniden kullanılmaz
-    expect(addRow(r).inserted.map((n) => n.id)).toEqual([1, 3, 4]);
+    expect(addRow(L,r).inserted.map((n) => n.id)).toEqual([1, 3, 4]);
     // Hiç dokunulmamış tek yeni satır: değişiklik yok, kirli değil
-    const blank = addRow(EMPTY_EDIT);
-    expect(changeCount(blank)).toBe(0);
+    const blank = addRow(L,EMPTY_EDIT);
+    expect(changeCount(L,blank)).toBe(0);
     expect(isDirty(blank)).toBe(false);
     expect(toChangeSet(L, blank)).toEqual({ changes: [], origin: [] });
+  });
+
+  it("newRowRevertCell: yeni satır hücresi geri alınır; boşalan satır yeniden atlanır", () => {
+    let e = addRow(L, EMPTY_EDIT);
+    e = newRowSetCell(L, e, 1, "name", T("n"));
+    e = newRowSetCell(L, e, 1, "note", DEF);
+    const one = newRowRevertCell(e, 1, "note");
+    expect(toChangeSet(L, one).changes).toEqual([{ op: "insert", values: [{ column: "name", value: T("n") }] }]);
+    const none = newRowRevertCell(one, 1, "name");
+    expect(none.inserted.map((n) => n.id)).toEqual([1]); // satır kalır, yalnız boş
+    expect(changeCount(L, none)).toBe(0);
+    expect(isDirty(none)).toBe(false);
+    expect(toChangeSet(L, none)).toEqual({ changes: [], origin: [] });
+    expect(newRowRevertCell(none, 1, "name")).toBe(none);
+    expect(newRowRevertCell(e, 42, "name")).toBe(e);
+  });
+
+  it("changeCount = toChangeSet uzunluğu; isDirty durum tabanlı (yalnız bayat durumda farklı)", () => {
+    let e = setCell(L, EMPTY_EDIT, 0, "name", T("z"));
+    e = toggleDelete(L, e, 1);
+    e = addRow(L, e);
+    e = newRowSetCell(L, e, 1, "name", T("n"));
+    expect(changeCount(L, e)).toBe(toChangeSet(L, e).changes.length);
+    expect(changeCount(L, e)).toBe(3);
+    // Yazılamaz kaynakla değerlendirilen bayat durum: rozet 0, isDirty yine true
+    const ro = loaded({ editable: false, readOnlyReason: "no_privilege" });
+    expect(changeCount(ro, e)).toBe(0);
+    expect(isDirty(e)).toBe(true);
   });
 
   it("cellState: generated, identity always (Insert'te yalnız Default), updatable=false, silinmiş satır, salt okunur kaynak, view/MV (editable=false)", () => {
@@ -273,7 +302,7 @@ describe("data-edit-model", () => {
     expect(cellState(L, toggleDelete(L, EMPTY_EDIT, 0), 0, "name")).toEqual({ editable: false, reason: "deleted" });
 
     // Yeni satır
-    const e = addRow(EMPTY_EDIT);
+    const e = addRow(L,EMPTY_EDIT);
     expect(cellState(L, e, { newId: 1 }, "name")).toEqual({ editable: true });
     expect(cellState(L, e, { newId: 1 }, "gen")).toEqual({ editable: false, reason: "generated" });
     expect(cellState(L, e, { newId: 1 }, "ident")).toEqual({ editable: false, reason: "identityAlways" });
@@ -291,6 +320,12 @@ describe("data-edit-model", () => {
       editable: false,
       reason: "notInsertable",
     });
+    // canInsert=false: yeni satır eklenmez
+    expect(addRow(loaded({ canInsert: false }), EMPTY_EDIT)).toBe(EMPTY_EDIT);
+    // identity ALWAYS + insertable=false: Default bile reddedilir (arka uç column_error sırası)
+    const ai = loaded({ columns: COLUMNS.map((c) => (c.name === "ident" ? { ...c, insertable: false } : c)) });
+    expect(cellState(ai, e, { newId: 1 }, "ident")).toEqual({ editable: false, reason: "notInsertable" });
+    expect(newRowSetCell(ai, e, 1, "ident", DEF)).toBe(e);
 
     // Salt okunur kaynak: her düzenleme işlevi no-op, toChangeSet boş
     for (const ro of [
@@ -304,6 +339,7 @@ describe("data-edit-model", () => {
       expect(setCell(ro, EMPTY_EDIT, 0, "name", T("z"))).toBe(EMPTY_EDIT);
       expect(toggleDelete(ro, EMPTY_EDIT, 0)).toBe(EMPTY_EDIT);
       expect(newRowSetCell(ro, e, 1, "name", T("z"))).toBe(e);
+      expect(addRow(ro, EMPTY_EDIT)).toBe(EMPTY_EDIT);
       // Önceki (düzenlenebilir) durumdan kalan düzenleme bile gönderilmez
       const stale = toggleDelete(L, setCell(L, e, 1, "name", T("z")), 2);
       expect(toChangeSet(ro, stale)).toEqual({ changes: [], origin: [] });
@@ -354,11 +390,11 @@ describe("data-edit-model", () => {
 
   it("applyResults: UPDATE satırı returned ile yerinde (yeni sürüm), INSERT sona eklenir, DELETE'ler büyükten küçüğe çıkarılır ve indeks kayması yanlış satırı silmez; düzenleme sıfırlanır", () => {
     let e = toggleDelete(L, EMPTY_EDIT, 0);
-    e = addRow(e);
+    e = addRow(L,e);
     e = newRowSetCell(L, e, 1, "name", T("n1"));
     e = setCell(L, e, 2, "name", T("C"));
     e = toggleDelete(L, e, 3);
-    e = addRow(e);
+    e = addRow(L,e);
     e = newRowSetCell(L, e, 2, "name", T("n2"));
     const { origin } = toChangeSet(L, e);
     expect(origin.map((o) => o.kind)).toEqual(["delete", "insert", "update", "delete", "insert"]);
@@ -391,7 +427,7 @@ describe("data-edit-model", () => {
   });
 
   it("applyResults: returned eksik/biçimsiz → satır eklenmez/değişmez, resultIssues değişiklik indekslerini bildirir", () => {
-    let e = addRow(EMPTY_EDIT);
+    let e = addRow(L,EMPTY_EDIT);
     e = newRowSetCell(L, e, 1, "name", T("n"));
     e = setCell(L, e, 1, "name", T("B"));
     e = setCell(L, e, 2, "name", T("C"));
@@ -407,11 +443,29 @@ describe("data-edit-model", () => {
     expect(resultIssues(L, origin, [{ index: 0, returned: ["9", "n", null, "g", "1", "2", "3"] }, { index: 1, returned: ["2", "B", "x", "g2", "12", "22", "300"] }, { index: 2, returned: ["3", "C", "NULL", "g3", "13", "23", "300"] }])).toEqual([]);
   });
 
+  it("applyResults: versionIndex ≠ kolon sayısı → biçimsiz sayılır, satır değişmez/eklenmez, bildirilir; DELETE yine uygulanır", () => {
+    let e = addRow(L, EMPTY_EDIT);
+    e = newRowSetCell(L, e, 1, "name", T("n"));
+    e = setCell(L, e, 1, "name", T("B"));
+    e = toggleDelete(L, e, 0);
+    const { origin } = toChangeSet(L, e);
+    const bad = deepFreeze({ ...L, versionIndex: 5 }) as Loaded;
+    const results: RowResult[] = [
+      { index: 0, returned: ["9", "n", null, "g", "1", "2", "3"] },
+      { index: 1, returned: ["2", "B", "x", "g2", "12", "22", "300"] },
+      { index: 2, returned: null },
+    ];
+    expect(resultIssues(bad, origin, results)).toEqual([0, 1]);
+    expect(applyResults(bad, origin, results).rows).toEqual(L.rows.slice(1));
+    // 6 elemanlı returned (versionIndex 5 ile "uyumlu") da kabul edilmez
+    expect(resultIssues(bad, origin, [{ index: 0, returned: ["9", "n", null, "g", "1", "3"] }, { index: 1, returned: ["2", "B", "x", "g2", "12", "300"] }, { index: 2, returned: null }])).toEqual([0, 1]);
+  });
+
   it("modül durumsuz: aynı girdi aynı çıktı; girdi nesneleri değiştirilmez (donmuş fikstürle)", () => {
     const build = () => {
       let e = setCell(L, EMPTY_EDIT, 0, "name", T("z"));
       e = toggleDelete(L, e, 1);
-      e = addRow(e);
+      e = addRow(L,e);
       e = newRowSetCell(L, e, 1, "name", T("n"));
       return e;
     };
@@ -428,7 +482,7 @@ describe("data-edit-model", () => {
     toggleDelete(L, a, 1);
     toggleDelete(L, a, 2);
     removeNewRow(a, 1);
-    addRow(a);
+    addRow(L,a);
     newRowSetCell(L, a, 1, "note", T("m"));
     toChangeSet(L, a);
     const { origin } = toChangeSet(L, a);
