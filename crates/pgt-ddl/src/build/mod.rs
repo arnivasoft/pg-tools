@@ -10,6 +10,7 @@
 pub mod extension;
 pub mod freesql;
 pub mod index;
+pub mod matview;
 pub mod schema;
 pub mod sequence;
 pub mod settings;
@@ -155,7 +156,7 @@ pub struct DropOptions {
     pub force: bool,
 }
 
-/// Task 2–5'in üreticileri gelene kadar yeni türlerin tek yer tutucu hatası.
+/// Task 4–5'in üreticileri gelene kadar yeni türlerin tek yer tutucu hatası.
 fn unsupported_kind() -> Vec<FieldError> {
     vec![err("kind", "Bu tür henüz desteklenmiyor.")]
 }
@@ -176,7 +177,8 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Index(d) => index::validate(d, ctx),
         ObjectDef::Table(d) => table::validate_table(d, ctx),
         ObjectDef::View(d) => view::validate(d, ctx),
-        ObjectDef::MaterializedView(_) | ObjectDef::Database(_) | ObjectDef::Role(_) => unsupported_kind(),
+        ObjectDef::MaterializedView(d) => matview::validate(d, ctx),
+        ObjectDef::Database(_) | ObjectDef::Role(_) => unsupported_kind(),
     }
 }
 
@@ -207,9 +209,10 @@ pub(crate) fn validate_identity(def: &ObjectDef) -> Vec<FieldError> {
             check_old_schema_ident("schema", &d.schema, &mut e);
             check_old_ident("name", &d.name, &mut e);
         }
+        // Materialized View: görünümle aynı gerekçe (gevşek eski taraf; sistem şeması yine yasak).
         ObjectDef::MaterializedView(d) => {
-            check_schema_ident("schema", &d.schema, &mut e);
-            check_ident("name", &d.name, &mut e);
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("name", &d.name, &mut e);
         }
         ObjectDef::Database(d) => check_ident("name", &d.name, &mut e),
         ObjectDef::Role(d) => check_ident("name", &d.name, &mut e),
@@ -238,7 +241,8 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Index(d) => Ok(index::create(d, ctx)),
         ObjectDef::Table(d) => Ok(table::create(d)),
         ObjectDef::View(d) => Ok(view::create(d)),
-        ObjectDef::MaterializedView(_) | ObjectDef::Database(_) | ObjectDef::Role(_) => Err(unsupported_kind()),
+        ObjectDef::MaterializedView(d) => Ok(matview::create(d)),
+        ObjectDef::Database(_) | ObjectDef::Role(_) => Err(unsupported_kind()),
     }
 }
 
@@ -258,6 +262,10 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         // SQL kapısına takılsa bile sorguya dokunmayan düzenlemeler yapılabilsin).
         return view::alter(o, n, ctx);
     }
+    if let (ObjectDef::MaterializedView(o), ObjectDef::MaterializedView(n)) = (old, new) {
+        // MV de kendi doğrulamasını yapar (sorgu yalnızca değiştiyse; yerinde düzenleme yalnızca değişen alanları).
+        return matview::alter(o, n, ctx);
+    }
     checked(new, ctx)?;
     // Eski tanımdaki ad/şema da SQL'e girer (RENAME/ALTER hedefi); yalnızca kimlik alanları doğrulanır.
     let mut old_errs = validate_identity(old);
@@ -272,8 +280,7 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         (ObjectDef::Sequence(o), ObjectDef::Sequence(n)) => Ok(sequence::alter(o, n)),
         (ObjectDef::Extension(o), ObjectDef::Extension(n)) => extension::alter(o, n),
         (ObjectDef::Index(o), ObjectDef::Index(n)) => index::alter(o, n),
-        (ObjectDef::MaterializedView(_), ObjectDef::MaterializedView(_))
-        | (ObjectDef::Database(_), ObjectDef::Database(_))
+        (ObjectDef::Database(_), ObjectDef::Database(_))
         | (ObjectDef::Role(_), ObjectDef::Role(_)) => Err(unsupported_kind()),
         _ => Err(mismatch(old, new)),
     }
@@ -304,7 +311,8 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, _ctx: &BuildCtx) -> Result<Pla
         ObjectDef::Index(d) => index::drop(d, cascade),
         ObjectDef::Table(d) => Ok(table::drop(d, cascade)),
         ObjectDef::View(d) => Ok(view::drop(d, cascade)),
-        ObjectDef::MaterializedView(_) | ObjectDef::Database(_) | ObjectDef::Role(_) => Err(unsupported_kind()),
+        ObjectDef::MaterializedView(d) => Ok(matview::drop(d, cascade)),
+        ObjectDef::Database(_) | ObjectDef::Role(_) => Err(unsupported_kind()),
     }
 }
 
@@ -516,7 +524,7 @@ mod tests {
 
     #[test]
     fn new_kinds_are_placeholders_for_now() {
-        for d in [matview(), database(), role("r")] {
+        for d in [database(), role("r")] {
             let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
             assert_eq!(validate(&d, &ctx())[0].path, "kind", "{d:?}");
             assert_eq!(kind(create(&d, &ctx())), "kind");
@@ -529,6 +537,23 @@ mod tests {
         // Yeni tür ile mevcut tür arasındaki alter yine tür uyuşmazlığıdır.
         let e = alter(&view("public"), &matview(), &ctx()).unwrap_err();
         assert!(e[0].message.contains("uyuşmazlığı"), "{e:?}");
+    }
+
+    #[test]
+    fn matview_is_wired() {
+        let mv = matview();
+        assert!(validate(&mv, &ctx()).is_empty());
+        assert_eq!(create(&mv, &ctx()).unwrap().statements[0].sql, "CREATE MATERIALIZED VIEW public.mv AS (SELECT 1
+) WITH DATA");
+        assert!(alter(&mv, &mv, &ctx()).unwrap().statements.is_empty());
+        assert_eq!(drop(&mv, false, &ctx()).unwrap().statements[0].sql, "DROP MATERIALIZED VIEW public.mv");
+        let ObjectDef::MaterializedView(mut sys) = mv.clone() else { unreachable!() };
+        sys.schema = "pg_catalog".into();
+        let sys = ObjectDef::MaterializedView(sys);
+        assert_eq!(alter(&sys, &mv, &ctx()).unwrap_err()[0].path, "old.schema");
+        assert_eq!(drop(&sys, false, &ctx()).unwrap_err()[0].path, "schema");
+        assert_eq!(drop_with(&mv, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
+        assert_eq!(alter(&mv, &view("public"), &ctx()).unwrap_err()[0].path, "kind");
     }
 
     #[test]

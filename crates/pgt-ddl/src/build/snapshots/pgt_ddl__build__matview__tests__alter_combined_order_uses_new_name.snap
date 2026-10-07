@@ -1,0 +1,11 @@
+---
+source: crates/pgt-ddl/src/build/matview.rs
+expression: render(&p)
+---
+[Safe] ALTER MATERIALIZED VIEW public.mv RENAME TO "select"
+[Safe] ALTER MATERIALIZED VIEW public."select" SET SCHEMA "App"
+[Safe] ALTER MATERIALIZED VIEW "App"."select" SET TABLESPACE fast  -- Veri yeniden yazılır; ACCESS EXCLUSIVE kilidi alır
+[Safe] ALTER MATERIALIZED VIEW "App"."select" SET (fillfactor = 50)
+[Safe] ALTER MATERIALIZED VIEW "App"."select" OWNER TO b
+[Safe] COMMENT ON MATERIALIZED VIEW "App"."select" IS NULL
+[Destructive] REFRESH MATERIALIZED VIEW "App"."select"  -- ACCESS EXCLUSIVE kilit: yenileme süresince okunamaz

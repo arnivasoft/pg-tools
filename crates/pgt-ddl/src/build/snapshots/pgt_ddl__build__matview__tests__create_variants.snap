@@ -1,0 +1,20 @@
+---
+source: crates/pgt-ddl/src/build/matview.rs
+expression: out
+---
+[Safe] CREATE MATERIALIZED VIEW public.mv AS (SELECT 1
+) WITH DATA  -- Sorgu çalıştırılır; uzun sürebilir
+
+[Safe] CREATE MATERIALIZED VIEW public.mv AS (SELECT 1
+) WITH NO DATA
+
+[Safe] CREATE MATERIALIZED VIEW public.mv WITH (fillfactor = 70) AS (SELECT 1
+) WITH DATA  -- Sorgu çalıştırılır; uzun sürebilir
+
+[Safe] CREATE MATERIALIZED VIEW public.mv TABLESPACE "Fast Disk" AS (SELECT 1
+) WITH DATA  -- Sorgu çalıştırılır; uzun sürebilir
+
+[Safe] CREATE MATERIALIZED VIEW "App"."My MV" WITH (fillfactor = 100) TABLESPACE pg_default AS (SELECT 1
+) WITH NO DATA
+[Safe] ALTER MATERIALIZED VIEW "App"."My MV" OWNER TO "Bob"
+[Safe] COMMENT ON MATERIALIZED VIEW "App"."My MV" IS E'it''s \\ ok'
