@@ -3,4 +3,5 @@
 //! ifadeleri arka uç üretir. Hücre/anahtar/sürüm değerleri ve adlar günlüğe ya da `Debug`'a girmez.
 
 pub mod model;
+pub mod select;
 pub mod source;

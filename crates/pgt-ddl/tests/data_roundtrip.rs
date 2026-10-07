@@ -10,8 +10,12 @@ mod common;
 use common::{Env, cleanup_in, guarded, servers, setup_in};
 use pgt_core::Error;
 use pgt_core::testing::TestServer;
-use pgt_ddl::data::model::{DataColumn, DataSource, Identity, KeySource, ReadOnlyReason, RelKind};
+use pgt_ddl::data::model::{
+    DataColumn, DataSelect, DataSource, Identity, KeySource, OrderBy, ReadOnlyReason, RelKind, SelectRequest,
+};
+use pgt_ddl::data::select::{select_sql, version_alias};
 use pgt_ddl::data::source::{NOT_VIEWABLE, load_source};
+use tokio_postgres::Row;
 use pgt_ddl::{ObjectKind, ObjectRef, quote_ident};
 
 const PFX: &str = "pgt_data";
@@ -420,4 +424,195 @@ async fn fp_body(ts: TestServer) {
     env.sql("ALTER TABLE t_fp RENAME TO t_fp2").await;
     let renamed = src(&env, "t_fp2").await.fingerprint;
     assert_ne!(renamed, s.fingerprint, "ad değişimi");
+}
+
+// ================================================================================================================
+// SELECT üretici: gerçek sunucuda çalışır, sürüm kolonu `xmin`, filtre kapısı
+// ================================================================================================================
+
+docker_test!(data_select_runs_on_server, select_body, "select");
+
+fn sreq(order: &[(&str, bool)], filter: Option<&str>) -> SelectRequest {
+    SelectRequest {
+        order: order.iter().map(|(c, d)| OrderBy { column: c.to_string(), desc: *d }).collect(),
+        filter: filter.map(str::to_string),
+    }
+}
+
+/// Üretilen SELECT'i istemci tarafı `prepare` ile çalıştırır (genişletilmiş protokol çok ifadeli metni reddeder →
+/// tek ifade olduğu sunucuda da kanıtlanır); dönen kolon sayısı/adı ve sürüm kolonu denetlenir.
+async fn run_select(env: &Env, s: &DataSource, req: &SelectRequest) -> (DataSelect, Vec<Row>) {
+    let sel = select_sql(s, req).unwrap_or_else(|e| panic!("{}: select_sql hatası {e:?}", s.name));
+    let stmt = env
+        .admin
+        .prepare(&sel.sql)
+        .await
+        .unwrap_or_else(|e| panic!("{}: SELECT hazırlanamadı: {}", s.name, common::db_message(&e)));
+    let want = s.columns.len() + usize::from(sel.has_version);
+    assert_eq!(stmt.columns().len(), want, "{}: dönen kolon sayısı", s.name);
+    for (i, c) in s.columns.iter().enumerate() {
+        assert_eq!(stmt.columns()[i].name(), c.name, "{}: kolon {i}", s.name);
+    }
+    if sel.has_version {
+        let v = &stmt.columns()[sel.version_index as usize];
+        assert_eq!(v.name(), version_alias(s), "{}: sürüm kolonu adı", s.name);
+        assert_eq!(v.type_(), &tokio_postgres::types::Type::TEXT);
+    }
+    let rows = env.admin.query(&stmt, &[]).await.unwrap_or_else(|e| panic!("{}: {}", s.name, common::db_message(&e)));
+    (sel, rows)
+}
+
+/// İlk kolonu `int` kimlik olan satırların kimlik listesi.
+fn ids(rows: &[Row]) -> Vec<i32> {
+    rows.iter().map(|r| r.get::<_, i32>(0)).collect()
+}
+
+/// Sürüm kolonu her satırda o satırın `xmin::text`'i ile aynı (`id_sql` ilk kolonun tırnaklı adı).
+async fn assert_versions(env: &Env, s: &DataSource, sel: &DataSelect, rows: &[Row], id_sql: &str) {
+    assert!(sel.has_version);
+    let q = format!("SELECT {id_sql}, xmin::text FROM {}", pgt_ddl::qualified(&s.schema, &s.name));
+    let mut got: Vec<(i32, String)> =
+        rows.iter().map(|r| (r.get::<_, i32>(0), r.get::<_, String>(sel.version_index as usize))).collect();
+    // Filtreli okumada yalnızca dönen satırlar karşılaştırılır.
+    let mut want: Vec<(i32, String)> = env
+        .admin
+        .query(&q, &[])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .filter(|(id, _): &(i32, String)| got.iter().any(|(g, _)| g == id))
+        .collect();
+    want.sort();
+    got.sort();
+    assert!(!got.is_empty(), "{}: satır yok", s.name);
+    assert_eq!(got, want, "{}: sürüm kolonu xmin ile aynı olmalı", s.name);
+}
+
+async fn select_body(ts: TestServer) {
+    let env = setup_in(&ts, PFX, "select").await;
+    let major = major(&env);
+    env.sql(
+        "CREATE TABLE t_sel (id int PRIMARY KEY, status text, n int);
+         INSERT INTO t_sel SELECT g, 's' || g, g * 10 FROM generate_series(1, 10) g;
+         UPDATE t_sel SET status = ')' WHERE id = 1;
+         UPDATE t_sel SET status = ';' WHERE id = 2;
+         UPDATE t_sel SET status = 'x;) DROP TABLE t_sel; --' WHERE id = 3;
+         CREATE VIEW v_sel AS SELECT id, status FROM t_sel;",
+    )
+    .await;
+    // Ayrı transaction'da güncellenen satırlar farklı sürüm taşır (yukarıdaki toplu metin tek transaction'dır).
+    env.sql("UPDATE t_sel SET n = n WHERE id = 7").await;
+    env.sql("UPDATE t_sel SET n = n WHERE id = 8").await;
+
+    // PK'lı tablo: varsayılan sıralama anahtar ASC, sürüm = xmin.
+    let s = src(&env, "t_sel").await;
+    let (sel, rows) = run_select(&env, &s, &sreq(&[], None)).await;
+    assert!(sel.sql.ends_with(" ORDER BY id ASC"), "{}", sel.sql);
+    assert_eq!(ids(&rows), (1..=10).collect::<Vec<_>>());
+    assert_versions(&env, &s, &sel, &rows, "id").await;
+    let vi = sel.version_index as usize;
+    let (v6, v7, v8) = (rows[5].get::<_, String>(vi), rows[6].get::<_, String>(vi), rows[7].get::<_, String>(vi));
+    assert!(v6 != v7 && v7 != v8 && v6 != v8, "ayrı güncellenen satırların sürümü farklı olmalı");
+
+    // İstek sıralaması (desc) ve filtre.
+    let (_, rows) = run_select(&env, &s, &sreq(&[("n", true)], None)).await;
+    assert_eq!(ids(&rows), (1..=10).rev().collect::<Vec<_>>());
+    let (sel, rows) = run_select(&env, &s, &sreq(&[], Some("id > 5"))).await;
+    assert!(sel.sql.contains(" WHERE (id > 5\n)"), "{}", sel.sql);
+    assert_eq!(ids(&rows), [6, 7, 8, 9, 10]);
+    assert_versions(&env, &s, &sel, &rows, "id").await;
+
+    // Kapının kabul ettiği "zor" filtreler (tırnak içi `)`/`;`, dolar tırnak, `)`/`;` içeren satır yorumu): sunucuda
+    // tek ifade olarak çalışır (prepare başarılı) ve yalnızca kendi koşulunu uygular.
+    for (f, want) in [
+        ("status = ')'", vec![1]),
+        ("status = ';'", vec![2]),
+        ("status = $$x;) DROP TABLE t_sel; --$$", vec![3]),
+        ("status = 'x;) DROP TABLE t_sel; --'", vec![3]),
+        ("status = $q$;$q$ OR id = 4 -- ) ; DROP TABLE t_sel\n", vec![2, 4]),
+        ("id IN (SELECT id FROM t_sel WHERE n > 80) /* ) ; */", vec![9, 10]),
+        ("status = E'\\x29'", vec![1]),
+    ] {
+        let (_, rows) = run_select(&env, &s, &sreq(&[], Some(f))).await;
+        assert_eq!(ids(&rows), want, "filtre {f:?}");
+    }
+
+    // Enjeksiyon denemeleri sunucuya gitmeden (saf `select_sql`) `filter` alan hatasıyla reddedilir; tablo yerinde.
+    for bad in [
+        "1=1; DROP TABLE t_sel",
+        "1=1); DROP TABLE t_sel; --",
+        "x) OR (1=1",
+        "status = 'b",
+        "status /* b",
+        "status = 'x\\y'",
+        "status = $$x",
+        "id > 1 --",
+        "id > 1\0",
+    ] {
+        let e = select_sql(&s, &sreq(&[], Some(bad))).expect_err(bad);
+        assert_eq!(e.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["filter"], "{bad:?}");
+    }
+    let n: i64 = env.admin.query_one("SELECT count(*) FROM t_sel", &[]).await.unwrap().get(0);
+    assert_eq!(n, 10);
+
+    // Görünüm: sürüm kolonu yok; anahtarsız → ORDER BY yok; istek sıralaması çalışır.
+    let v = src_kind(&env, ObjectKind::View, "public", "v_sel").await;
+    let (sel, rows) = run_select(&env, &v, &sreq(&[], None)).await;
+    assert!(!sel.has_version && !sel.sql.contains("ORDER BY") && !sel.sql.contains("xmin"), "{}", sel.sql);
+    assert_eq!(rows.len(), 10);
+    let (_, rows) = run_select(&env, &v, &sreq(&[("id", true)], Some("id <= 3"))).await;
+    assert_eq!(ids(&rows), [3, 2, 1]);
+
+    // Bölümlü tablo: üst tablodan xmin okunur (PG 11+ PK sıralı; PG 10 anahtarsız → sırasız).
+    if major >= 11 {
+        env.sql("CREATE TABLE t_psel (id int, k int, PRIMARY KEY (id, k)) PARTITION BY RANGE (k)").await;
+    } else {
+        env.sql("CREATE TABLE t_psel (id int, k int) PARTITION BY RANGE (k)").await;
+    }
+    env.sql(
+        "CREATE TABLE t_psel_1 PARTITION OF t_psel FOR VALUES FROM (0) TO (50);
+         CREATE TABLE t_psel_2 PARTITION OF t_psel FOR VALUES FROM (50) TO (100);
+         INSERT INTO t_psel SELECT g, g * 9 FROM generate_series(1, 10) g;",
+    )
+    .await;
+    let p = src(&env, "t_psel").await;
+    assert_eq!(p.relkind, RelKind::Partitioned);
+    let (sel, rows) = run_select(&env, &p, &sreq(&[], None)).await;
+    assert_versions(&env, &p, &sel, &rows, "id").await;
+    if major >= 11 {
+        assert!(sel.sql.ends_with(" ORDER BY id ASC, k ASC"), "{}", sel.sql);
+        assert_eq!(ids(&rows), (1..=10).collect::<Vec<_>>());
+    } else {
+        assert!(!sel.sql.contains("ORDER BY"), "{}", sel.sql);
+        eprintln!("PG {major}: bölümlü tabloda PK (PG 11+) yok; sırasız SELECT denetlendi");
+    }
+    let (_, rows) = run_select(&env, &p, &sreq(&[("k", true)], Some("k >= 50"))).await;
+    assert_eq!(ids(&rows), [10, 9, 8, 7, 6]);
+
+    // Hostile adlar + `__pgt_xmin`/`__pgt_xmin_1` adlı kolonlar → takma ad `__pgt_xmin_2`.
+    env.sql(
+        r#"CREATE SCHEMA "my ""s""";
+           CREATE TABLE "my ""s"""."t;DROP" (
+             "a""b" int PRIMARY KEY, "ç" text, "with space" text, "user" text,
+             "x'); DROP TABLE t_sel; --" text, "a\b" text, "__pgt_xmin" text, "__pgt_xmin_1" text);
+           INSERT INTO "my ""s"""."t;DROP" ("a""b", "ç", "__pgt_xmin") VALUES (1, 'ç1', 'sahte'), (2, 'ç2', 'sahte');"#,
+    )
+    .await;
+    let h = src_kind(&env, ObjectKind::Table, "my \"s\"", "t;DROP").await;
+    assert_eq!(version_alias(&h), "__pgt_xmin_2");
+    let (sel, rows) = run_select(&env, &h, &sreq(&[], None)).await;
+    assert_eq!(ids(&rows), [1, 2]);
+    assert_versions(&env, &h, &sel, &rows, r#""a""b""#).await;
+    let fake: Option<String> = rows[0].get(6);
+    assert_eq!(fake.as_deref(), Some("sahte"), "kullanıcının __pgt_xmin kolonu kendi değeriyle döner");
+    let (_, rows) = run_select(
+        &env,
+        &h,
+        &sreq(&[("x'); DROP TABLE t_sel; --", true), ("a\"b", true)], Some(r#""ç" = 'ç1' OR "user" IS NULL"#)),
+    )
+    .await;
+    assert_eq!(ids(&rows), [2, 1]);
+    let n: i64 = env.admin.query_one("SELECT count(*) FROM t_sel", &[]).await.unwrap().get(0);
+    assert_eq!(n, 10, "hostile adlar başka tabloya dokunmamalı");
 }

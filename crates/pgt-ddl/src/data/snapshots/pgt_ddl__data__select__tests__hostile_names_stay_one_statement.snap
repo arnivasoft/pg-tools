@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/data/select.rs
+expression: "render(&[(\"hostile varsayılan\", out), (\"hostile sıralama + filtre\", out2)])"
+---
+-- hostile varsayılan (version_index=7, has_version=true)
+SELECT "a""b", "ç", "with space", "user", "x'); DROP TABLE t; --", "a/*", "a\b", xmin::text AS __pgt_xmin FROM "my ""schema"""."t;DROP" ORDER BY "user" ASC, "a""b" ASC
+
+-- hostile sıralama + filtre (version_index=7, has_version=true)
+SELECT "a""b", "ç", "with space", "user", "x'); DROP TABLE t; --", "a/*", "a\b", xmin::text AS __pgt_xmin FROM "my ""schema"""."t;DROP" WHERE ("user" > 1
+) ORDER BY "x'); DROP TABLE t; --" DESC, "ç" ASC
