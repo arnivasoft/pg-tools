@@ -204,12 +204,22 @@ pub struct OrderBy {
 }
 
 /// `data_select` isteği: sıralama (kaynak kolonları) ve isteğe bağlı doğrulanan filtre gövdesi.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+// `Debug` elle: yalnızca sıralama sayısı ve filtrenin bayt uzunluğu (filtre sabit değer içerebilir).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct SelectRequest {
     pub order: Vec<OrderBy>,
     pub filter: Option<String>,
+}
+
+impl fmt::Debug for SelectRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SelectRequest")
+            .field("order", &self.order.len())
+            .field("filter_bytes", &self.filter.as_ref().map(String::len))
+            .finish()
+    }
 }
 
 /// Üretilen SELECT. `version_index`: sürüm (`xmin::text`) kolonunun sırası (= kaynak kolon sayısı, hep son);
@@ -240,7 +250,8 @@ pub struct DataApplyOptions {
 }
 
 /// Uygulanan bir ifadenin sonucu. `returned`: `RETURNING` satırı (kaynak kolonları + yeni `xmin`); `DELETE` → `None`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+// `Debug` elle: yalnızca sıra ve dönen hücre sayısı.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct RowResult {
@@ -249,12 +260,20 @@ pub struct RowResult {
     pub returned: Option<Vec<Option<String>>>,
 }
 
+impl fmt::Debug for RowResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RowResult").field("index", &self.index).field("returned", &self.returned.as_ref().map(Vec::len)).finish()
+    }
+}
+
 /// `data_apply` sonucu. Başarısızlıkta hiçbir ifade kalıcı değildir (tek transaction).
 ///
 /// `Failed.conflict`: satır bayat/silinmiş (`row_conflict`; bu durumda `sqlstate = None`). `position`: PG'nin hata
 /// konumu, başarısız ifadenin metnine göre. `ErrorPayload` yalnızca `Serialize` olduğundan bu tip de yalnızca
 /// arayüze gider (`Deserialize` yok; `ApplyOutcome` kalıbı).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+// `Debug` elle: dönen satırları ve hata metnini (PG `detail`'i satır verisi içerebilir) yazmaz; yalnızca sayılar,
+// `sqlstate`, konum, hata **kodu** ve `conflict`.
+#[derive(Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(tag = "outcome", rename_all = "snake_case", rename_all_fields = "camelCase")]
 #[ts(export)]
 pub enum DataOutcome {
@@ -271,6 +290,27 @@ pub enum DataOutcome {
         error: ErrorPayload,
         conflict: bool,
     },
+}
+
+impl fmt::Debug for DataOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataOutcome::Applied { statements, elapsed_ms, results } => f
+                .debug_struct("Applied")
+                .field("statements", statements)
+                .field("elapsed_ms", elapsed_ms)
+                .field("results", &results.len())
+                .finish(),
+            DataOutcome::Failed { failed_index, sqlstate, position, error, conflict } => f
+                .debug_struct("Failed")
+                .field("failed_index", failed_index)
+                .field("sqlstate", sqlstate)
+                .field("position", position)
+                .field("code", &error.code)
+                .field("conflict", conflict)
+                .finish(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -460,7 +500,54 @@ mod tests {
             }
         }
         // Yalnızca sayılar: kaç anahtar, kaç hücre, kaç değişiklik.
-        assert!(outputs[1].contains("Update"), "{}", outputs[1]);
-        assert!(outputs[4].contains('3'), "{}", outputs[4]);
+        assert_eq!(outputs[0], "Insert { values: 1 }");
+        assert_eq!(outputs[1], r#"Update { key: 1, version: "…", set: 1 }"#);
+        assert_eq!(outputs[2], r#"Delete { key: 1, version: "…" }"#);
+        assert_eq!(outputs[3], r#"CellEdit { column: "…", value: Text(…) }"#);
+        assert_eq!(outputs[4], "DataChangeSet { object: ObjectRef { kind: Table, oid: 42 }, changes: 3 }");
+    }
+
+    #[test]
+    fn debug_of_results_outcomes_and_select_hides_data() {
+        let row = RowResult { index: 2, returned: Some(vec![Some(SECRET.into()), None]) };
+        assert_eq!(format!("{row:?}"), "RowResult { index: 2, returned: Some(2) }");
+        assert_eq!(format!("{:?}", RowResult { index: 0, returned: None }), "RowResult { index: 0, returned: None }");
+
+        let applied = DataOutcome::Applied { statements: 2, elapsed_ms: 7, results: vec![row.clone()] };
+        assert_eq!(format!("{applied:?}"), "Applied { statements: 2, elapsed_ms: 7, results: 1 }");
+
+        const DETAIL: &str = "Key (gizli_kolon)=(gizli_anahtar) already exists.";
+        let failed = DataOutcome::Failed {
+            failed_index: 1,
+            sqlstate: Some("23505".into()),
+            position: Some(3),
+            error: ErrorPayload {
+                code: "query".into(),
+                message: format!("duplicate {SECRET}"),
+                detail: Some(DETAIL.into()),
+                hint: Some("gizli_ipucu".into()),
+            },
+            conflict: false,
+        };
+        let d = format!("{failed:?}");
+        assert_eq!(
+            d,
+            r#"Failed { failed_index: 1, sqlstate: Some("23505"), position: Some(3), code: "query", conflict: false }"#
+        );
+        let pretty = format!("{failed:#?}");
+        for needle in [SECRET, "gizli_kolon", "gizli_anahtar", "gizli_ipucu", "duplicate"] {
+            assert!(!d.contains(needle) && !pretty.contains(needle), "{needle} sızdı: {d} / {pretty}");
+        }
+
+        let req = SelectRequest {
+            order: vec![OrderBy { column: "gizli_kolon".into(), desc: false }],
+            filter: Some(format!("x = '{SECRET}'")),
+        };
+        let d = format!("{req:?}");
+        assert_eq!(d, format!("SelectRequest {{ order: 1, filter_bytes: Some({}) }}", req.filter.as_ref().unwrap().len()));
+        assert_eq!(
+            format!("{:?}", SelectRequest { order: vec![], filter: None }),
+            "SelectRequest { order: 0, filter_bytes: None }"
+        );
     }
 }
