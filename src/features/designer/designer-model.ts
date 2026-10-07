@@ -29,6 +29,25 @@ export function kindLabel(kind: ObjectKind): string {
   return KIND_LABELS[kind];
 }
 
+/** Plan 14: sunucu kapsamlı türler (bakım veritabanında; databaseOid her zaman null). */
+export function isServerScoped(kind: ObjectKind): boolean {
+  return kind === "database" || kind === "role";
+}
+
+/** Planda gizlenmiş (parola) ifade var mı → Query Tool'a aktarılmaz/kopyalanmaz, uygulamada parola gerekir. */
+export function planHasRedacted(view: PlanView | null): boolean {
+  return !!view && view.statements.some((s) => s.redacted);
+}
+
+/**
+ * SQL önizlemesindeki "Kopyala" ve ApplyBar'daki "Query Tool'da aç" açık mı (tek karar noktası). Görünüm yoksa ya da
+ * planda gizlenmiş ifade varsa ikisi de kapalı (gizlenmiş metin bilerek çalıştırılamaz; Plan 14 Karar 6).
+ */
+export function scriptActionsEnabled(view: PlanView | null): { copy: boolean; open: boolean } {
+  const ok = view !== null && !planHasRedacted(view);
+  return { copy: ok, open: ok };
+}
+
 /** Başlıkta/mesajlarda görünen ad; şema altındaki türler (sequence, indeks, tablo, view, MV) şema nitelikli, ad boşsa boş. */
 export function defName(def: ObjectDef): string {
   if (!def.name) return "";
@@ -101,7 +120,7 @@ export function issuesFor(issues: FieldIssues, path: string): string[] {
 
 export type ApplyGate =
   | { kind: "ready" }
-  | { kind: "blocked"; reason: "locked" | "invalid" | "empty" | "stale" | "pending" | "busy" | "disconnected" | "loading" }
+  | { kind: "blocked"; reason: "locked" | "partial" | "invalid" | "empty" | "password" | "stale" | "pending" | "busy" | "disconnected" | "loading" }
   | { kind: "needsConfirm" }                                  // onay kutusu gerekli
   | { kind: "needsProductionName"; expected: string };        // onay kutusu + sunucu adı gerekli
 
@@ -117,16 +136,22 @@ export interface GateInput {
   connected: boolean;
   /** Tanım yükleniyor ya da ilk yükleme hatayla bitti (sekme henüz düzenlenebilir değil; bağlantı kesik değil). */
   loading: boolean;
+  /** Planda gizlenmiş (parola) ifade var ve denetleyicide geçerli parola yok (`planHasRedacted(view) && !secretReady`). */
+  secretMissing: boolean;
+  /** Kısmi create (`failed.created`): nesne oluştu, aynı create yeniden gönderilmez ("Düzenle olarak aç"). */
+  partial?: boolean;
 }
 
 /**
- * Öncelik (ilk eşleşen kazanır): locked > disconnected > loading > busy > pending > stale (view yok dahil) > invalid > empty > risk.
+ * Öncelik (ilk eşleşen kazanır): locked > disconnected > partial (kısmi create) > loading > busy > pending > stale (view yok dahil) > invalid > empty >
+ * password (gizlenmiş planda parola yok) > risk.
  * Bayat/bekleyen görünümün hata ve boşluk durumu dikkate alınmaz; `invalid` `empty`den önce (geçersiz tanım empty=true da taşır).
  * Risk: safe → ready; destructive → needsConfirm; data_loss → üretimde needsProductionName, aksi halde needsConfirm.
  */
 export function applyGate(i: GateInput): ApplyGate {
   if (i.locked) return { kind: "blocked", reason: "locked" };
   if (!i.connected) return { kind: "blocked", reason: "disconnected" };
+  if (i.partial) return { kind: "blocked", reason: "partial" };
   if (i.loading) return { kind: "blocked", reason: "loading" };
   if (i.applying) return { kind: "blocked", reason: "busy" };
   if (i.pending) return { kind: "blocked", reason: "pending" };
@@ -134,6 +159,7 @@ export function applyGate(i: GateInput): ApplyGate {
   if (!v || !i.viewIsCurrent) return { kind: "blocked", reason: "stale" };
   if (v.errors.length > 0) return { kind: "blocked", reason: "invalid" };
   if (v.empty) return { kind: "blocked", reason: "empty" };
+  if (i.secretMissing) return { kind: "blocked", reason: "password" };
   if (v.risk === "data_loss" && i.production) return { kind: "needsProductionName", expected: i.serverName };
   if (v.risk === "destructive" || v.risk === "data_loss") return { kind: "needsConfirm" };
   return { kind: "ready" };
@@ -162,10 +188,15 @@ export function confirmFlags(g: ApplyGate, c: ConfirmState): { confirmed: boolea
   return { confirmed: false, confirmedProduction: false };
 }
 
-/** Gönderim seçenekleri; `!canSubmit(gate, c)` ise null (çağıran hiçbir şey göndermez — kapı UI'ya güvenmez). */
-export function applyOptionsFor(applyId: string, lockTimeoutMs: number, view: PlanView, gate: ApplyGate, c: ConfirmState): ApplyOptions | null {
+/**
+ * Gönderim seçenekleri; `!canSubmit(gate, c)` ise null (çağıran hiçbir şey göndermez — kapı UI'ya güvenmez). Parola
+ * yalnızca planda gizlenmiş ifade varsa gider; aksi halde verilmiş olsa bile `null` (arka uç zaten reddeder).
+ */
+export function applyOptionsFor(
+  applyId: string, lockTimeoutMs: number, view: PlanView, gate: ApplyGate, c: ConfirmState, password: string | null = null,
+): ApplyOptions | null {
   if (!canSubmit(gate, c)) return null;
-  return { applyId, lockTimeoutMs, expectedHash: view.hash, ...confirmFlags(gate, c), password: null };
+  return { applyId, lockTimeoutMs, expectedHash: view.hash, ...confirmFlags(gate, c), password: planHasRedacted(view) ? password : null };
 }
 
 // ---- Betik ----
@@ -297,13 +328,14 @@ export function previewEmptyState(
 // ---- Sekme anahtarı ----
 
 /** Designer sekmesinin hedefi: yeni nesne (`create`) ya da var olan nesne (`object`). */
-export type DesignerTarget = { serverId: string; databaseOid: number } & (
+export type DesignerTarget = { serverId: string; databaseOid: number | null } & (
   | { create: DdlCreate; object?: undefined }
   | { object: ObjectRef; create?: undefined }
 );
 
 /**
- * Sekme tekilleştirme anahtarı (`DesignerTab.key`). Alter: `alter:<kind>:<sunucu>:<db>:<oid>` — aynı nesne tek sekme.
+ * Sekme tekilleştirme anahtarı (`DesignerTab.key`). Alter: `alter:<kind>:<sunucu>:<db>:<oid>` — aynı nesne tek sekme
+ * (sunucu kapsamlı türlerde `<db>` = `null`, ör. `alter:role:<sunucu>:null:<oid>`).
  * Create: `create:<kind>:<sunucu>:<db>:<şema>:<tablo>:<n>` — aynı bağlamda birden çok "yeni" sekmesi serbest; `n` açık
  * create sekmelerinin en büyüğünden bir fazladır (anahtar her açılışta benzersiz).
  */

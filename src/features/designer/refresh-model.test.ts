@@ -93,4 +93,48 @@ describe("refresh-model", () => {
     expect(extraRefreshIds(t, CTX, move, "oth-t")).toEqual(["pub-t", "cols"]);
     expect(extraRefreshIds(t, CTX, move, "pub-t")).toEqual(["cols", "oth-t"]);
   });
+
+  const vw = (p: Record<string, unknown> = {}): ObjectDef => ({ kind: "view", schema: "public", name: "v", ...p }) as unknown as ObjectDef;
+  const mv = (p: Record<string, unknown> = {}): ObjectDef => ({ kind: "materialized_view", schema: "public", name: "m", ...p }) as unknown as ObjectDef;
+  const db = (p: Record<string, unknown> = {}): ObjectDef => ({ kind: "database", name: "app", ...p }) as unknown as ObjectDef;
+  const role = (p: Record<string, unknown> = {}): ObjectDef => ({ kind: "role", name: "r", ...p }) as unknown as ObjectDef;
+  /** `tree()` + other şemasında Views/Materialized Views koleksiyonları. */
+  function viewTree(loaded: string[]): TreeState {
+    const s = tree();
+    const add = (id: string, kind: NodeKind, label: string) => {
+      s.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, color: null, tag: null } as TreeNode);
+      s.parent.set(id, "oth");
+      s.children.set("oth", [...(s.children.get("oth") ?? []), id]);
+    };
+    add("oth-v", "viewCollection", "Views");
+    add("oth-m", "materializedViewCollection", "Materialized Views");
+    for (const id of loaded) if (!s.children.has(id)) s.children.set(id, []);
+    return s;
+  }
+
+  it("titleAfterApply: View/MatView/Database/Role yeniden adlandırmada yeni ad; sunucu kapsamlıda veritabanı adı yok", () => {
+    expect(titleAfterApply(info({ before: vw(), after: vw({ name: "v2" }) }))).toBe(tdes.tab.edit("View", "v2"));
+    expect(titleAfterApply(info({ before: mv(), after: mv({ schema: "other" }) }))).toBe(tdes.tab.edit("Materialized View", "m"));
+    expect(titleAfterApply(info({ before: db(), after: db({ name: "app2" }) }))).toBe("Düzenle: app2");
+    expect(titleAfterApply(info({ before: role(), after: role({ name: "r2" }) }))).toBe("Düzenle: r2");
+    expect(titleAfterApply(info({ before: db(), after: db({ comment: "c" }) }))).toBeNull();
+    expect(titleAfterApply(info({ mode: "create", before: null, after: role({ name: "yeni" }) }))).toBe("Düzenle: yeni");
+  });
+
+  it("extraRefreshIds: View/MatView şema taşımada yeni şemanın YÜKLÜ viewCollection/materializedViewCollection çocuğu", () => {
+    const ctx: OpenContext = { databaseNodeId: "db", tableNodeId: null };
+    expect(extraRefreshIds(viewTree(["oth-v", "oth-m"]), ctx, info({ before: vw(), after: vw({ schema: "other" }) }), null)).toEqual(["oth-v"]);
+    expect(extraRefreshIds(viewTree(["oth-v", "oth-m"]), ctx, info({ before: mv(), after: mv({ schema: "other" }) }), null)).toEqual(["oth-m"]);
+    // yüklü değil → eklenmez; şema değişmedi → eklenmez
+    expect(extraRefreshIds(viewTree([]), ctx, info({ before: vw(), after: vw({ schema: "other" }) }), null)).toEqual([]);
+    expect(extraRefreshIds(viewTree(["oth-v"]), ctx, info({ before: vw(), after: vw({ name: "v2" }) }), null)).toEqual([]);
+  });
+
+  it("extraRefreshIds: Database/Role için ek yenileme yok", () => {
+    const ctx: OpenContext = { databaseNodeId: "db", tableNodeId: null };
+    const t = viewTree(["oth-v", "oth-m", "oth-t", "oth-s"]);
+    expect(extraRefreshIds(t, ctx, info({ before: db(), after: db({ name: "app2" }) }), null)).toEqual([]);
+    expect(extraRefreshIds(t, ctx, info({ before: role(), after: role({ name: "r2" }) }), null)).toEqual([]);
+    expect(extraRefreshIds(t, null, info({ mode: "create", before: null, after: db() }), null)).toEqual([]);
+  });
 });

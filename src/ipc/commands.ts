@@ -129,14 +129,14 @@ export const commands = {
 
   // Nesne diyalogları (ddl_*): Tauri parametre adları src-tauri/src/ddl.rs ile birebir (camelCase).
   ddlTargetOf: (nodeId: string) => call<DdlTarget>("ddl_target_of", { nodeId }),
-  ddlDefaults: (serverId: string, databaseOid: number, kind: ObjectKind, ctx: CreateContext) =>
+  ddlDefaults: (serverId: string, databaseOid: number | null, kind: ObjectKind, ctx: CreateContext) =>
     call<ObjectDef>("ddl_defaults", { serverId, databaseOid, kind, ctx }),
-  ddlLoad: (serverId: string, databaseOid: number, object: ObjectRef) => call<ObjectDef>("ddl_load", { serverId, databaseOid, object }),
-  ddlLookup: (serverId: string, databaseOid: number, request: LookupRequest) =>
+  ddlLoad: (serverId: string, databaseOid: number | null, object: ObjectRef) => call<ObjectDef>("ddl_load", { serverId, databaseOid, object }),
+  ddlLookup: (serverId: string, databaseOid: number | null, request: LookupRequest) =>
     call<LookupItem[]>("ddl_lookup", { serverId, databaseOid, request }),
-  ddlPreview: (serverId: string, databaseOid: number, request: PlanRequest) =>
+  ddlPreview: (serverId: string, databaseOid: number | null, request: PlanRequest) =>
     call<PlanView>("ddl_preview", { serverId, databaseOid, request }),
-  ddlApply: (serverId: string, databaseOid: number, request: PlanRequest, options: ApplyOptions) =>
+  ddlApply: (serverId: string, databaseOid: number | null, request: PlanRequest, options: ApplyOptions) =>
     call<ApplyOutcome>("ddl_apply", { serverId, databaseOid, request, options }),
   ddlCancel: (applyId: string) => call<null>("ddl_cancel", { applyId }),
 };

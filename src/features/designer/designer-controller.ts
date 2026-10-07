@@ -15,6 +15,10 @@
 // - Tepkisellik: `model(tabId)` yalnızca `openCreate`/`openAlter` girdiyi kaydettikten sonra tepkiseldir. Girdi bu
 //   çağrıların içinde EŞZAMANLI kurulur (`makeEntry` eşzamanlıdır, ilk `await`'ten önce); arayüz (Task 3) sekmeyi
 //   çizmeden önce bu çağrıları eşzamanlı başlatmalıdır (sözü beklemek gerekmez).
+// - Parola (Plan 15): değer yalnızca tepkisiz `secrets` haritasında (sekme başına) ve tek `ddl_apply` çağrısının
+//   `options.password` alanında bulunur; modele, `PlanRequest`'e, kirli karşılaştırmasına, bildirime, günlüğe girmez.
+//   Başarılı uygulamada, yeniden yüklemede, kapanışta, sekme düşünce (bağlantı kaybı/oturumlar kapandı/nesne yok) ve
+//   taslağın parola niyeti `set` dışına çıkınca silinir. `secretReady` `registry` sinyaline bağlıdır.
 import { createSignal, type Accessor, type Setter } from "solid-js";
 import { tdes } from "../../app/strings-designer";
 import type { ToastKind } from "../../app/toast-model";
@@ -31,7 +35,7 @@ import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Api } from "../../ipc/commands";
 import { errorText, toPayload } from "../../ipc/errors";
 import {
-  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, localBlock, type ApplyGate, type ConfirmState,
+  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, isServerScoped, localBlock, planHasRedacted, type ApplyGate, type ConfirmState,
 } from "./designer-model";
 import { createDropController } from "./drop-controller";
 import { dropRequest, matchesObject } from "./drop-model";
@@ -50,7 +54,8 @@ export interface DesignerModel {
   id: string;
   serverId: string;
   serverName: string;
-  databaseOid: number;
+  /** Sunucu kapsamlı türlerde (Database/Role) `null` (bakım veritabanı). */
+  databaseOid: number | null;
   mode: DesignerMode;
   kind: ObjectKind;
   /** alter: yüklenen nesne; create: başarıdan sonra `created` ile dolar. */
@@ -90,16 +95,31 @@ export interface DesignerModel {
   concurrently: boolean;
   /** Silme isteği için (`planRequest(m, "drop")`). */
   cascade: boolean;
+  /**
+   * Son başarılı uygulamanın `applied.warnings` iletileri (arka uç metni; SQL/değer/parola içermez). Yeniden yüklemede
+   * korunur; bir sonraki uygulamada ve kapanışta temizlenir.
+   */
+  postApplyWarnings: string[];
+  /**
+   * Kısmi create (`failed.created`): oluşturulan nesne. Doluyken create yeniden gönderilmez (kapı `partial`);
+   * `openCreatedAsAlter` sekmeyi bu nesnenin düzenlemesine çevirir. Yalnızca create kipinde dolar.
+   */
+  partialCreated: ObjectRef | null;
 }
 
-export interface ServerInfo { name: string; locked: boolean; production: boolean }
+/** `username`: sunucu kaydındaki bağlantı kullanıcısı (Role formunun kendini kilitleme uyarıları; isteğe bağlı). */
+export interface ServerInfo { name: string; locked: boolean; production: boolean; username?: string }
 export interface FocusRequest { field: string; seq: number }
 
 export const DEFAULT_LOCK_TIMEOUT_MS = 5000;
 /** Kısa ömürlü lookup türlerinin önbellek süresi. */
 export const LOOKUP_TTL_MS = 30_000;
 /** Oturum süresince tutulan lookup türleri (diğerleri `LOOKUP_TTL_MS`). */
-const SESSION_LOOKUPS = new Set<LookupRequest["kind"]>(["roles", "schemas", "tablespaces", "available_extensions", "index_methods", "collations"]);
+const SESSION_LOOKUPS = new Set<LookupRequest["kind"]>([
+  "roles", "schemas", "tablespaces", "available_extensions", "index_methods", "collations",
+  // Plan 15 (sunucu kapsamlı): anahtar isteğin tamamını içerir — `locales{provider}` sağlayıcı başına ayrı girdidir.
+  "grantable_roles", "encodings", "template_databases", "locales", "settings",
+]);
 
 const emptyConfirm = (): ConfirmState => ({ checked: false, typedName: "" });
 
@@ -123,7 +143,7 @@ export function planRequest(
 }
 
 /** Düz `LookupRequest` için anahtar sırasından bağımsız JSON. */
-const lookupKey = (serverId: string, databaseOid: number, r: LookupRequest) =>
+const lookupKey = (serverId: string, databaseOid: number | null, r: LookupRequest) =>
   `${serverId}|${databaseOid}|${JSON.stringify(r, Object.keys(r).sort())}`;
 
 interface PreviewOk { view: PlanView; version: number; gen: number }
@@ -176,8 +196,8 @@ export interface DesignerControllerDeps {
   now?: () => number;
 }
 
-export interface OpenCreateInput { tabId: string; serverId: string; databaseOid: number; create: DdlCreate; refreshNodeId: string | null }
-export interface OpenAlterInput { tabId: string; serverId: string; databaseOid: number; object: ObjectRef; refreshNodeId: string | null }
+export interface OpenCreateInput { tabId: string; serverId: string; databaseOid: number | null; create: DdlCreate; refreshNodeId: string | null }
+export interface OpenAlterInput { tabId: string; serverId: string; databaseOid: number | null; object: ObjectRef; refreshNodeId: string | null }
 
 export function createDesignerController(deps: DesignerControllerDeps) {
   const { api, notify } = deps;
@@ -195,6 +215,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   // eklenince/silinince yeniden çalışır.
   const [registry, bump] = createSignal<void>(undefined, { equals: false });
   const lookups = new Map<string, LookupSlot>();
+  /** Sekme → parola (tepkisiz, kalıcı değil; yalnızca `ddl_apply` seçeneğine girer). Okuyucular `registry`'ye bağlanır. */
+  const secrets = new Map<string, string>();
   let focusSeq = 0;
 
   const model = (tabId: string): DesignerModel | undefined => (registry(), entries.get(tabId)?.model());
@@ -219,14 +241,22 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       /* ağaç yenileme hatası uygulama sonucunu etkilemez */
     }
   };
-  const dropLookups = (serverId: string, databaseOid?: number) => {
+  const dropLookups = (serverId: string, databaseOid?: number | null) => {
     const prefix = databaseOid === undefined ? `${serverId}|` : `${serverId}|${databaseOid}|`;
     for (const k of [...lookups.keys()]) if (k.startsWith(prefix)) lookups.delete(k);
   };
 
-  /** Sekme salt okunur (`disconnected`/`gone`): kuşak artar, önizleme iptal, uçuştaki apply için `ddl_cancel`. */
+  /** Parola girdisini siler; varsa okuyucular (`secretReady`) yeniden çalışır. */
+  const forgetSecret = (tabId: string) => {
+    if (secrets.delete(tabId)) bump();
+  };
+  /** Bu sekmede geçerli (boş olmayan) parola var mı. Tepkisel (`registry`). */
+  const secretReady = (tabId: string): boolean => (registry(), secrets.has(tabId));
+
+  /** Sekme salt okunur (`disconnected`/`gone`): kuşak artar, önizleme iptal, uçuştaki apply için `ddl_cancel`, parola silinir. */
   const markDown = (e: Entry, status: "disconnected" | "gone", error: string | null) => {
     const m = e.model();
+    forgetSecret(m.id);
     e.gen++;
     e.previewer.cancel();
     if (m.applying && m.applyId) cancelQuietly(m.applyId);
@@ -270,6 +300,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       applying: m.applying,
       connected: m.status !== "disconnected" && m.status !== "gone" && (!fresh || info !== null),
       loading: m.status === "loading" || m.status === "error",
+      secretMissing: planHasRedacted(m.view) && !secretReady(m.id),
+      partial: m.mode === "create" && m.partialCreated !== null,
     });
   };
 
@@ -326,7 +358,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
 
   // ---- açma / yükleme
   const makeEntry = (
-    tabId: string, serverId: string, databaseOid: number, mode: DesignerMode, kind: ObjectKind, object: ObjectRef | null,
+    tabId: string, serverId: string, databaseOid: number | null, mode: DesignerMode, kind: ObjectKind, object: ObjectRef | null,
     refreshNodeId: string | null, create: DdlCreate | null,
   ): Entry => {
     const info = deps.serverInfo(serverId);
@@ -337,7 +369,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       applying: false, applyId: null, outcome: null, applyError: null, gateError: null, needsReload: false,
       lockTimeoutMs: DEFAULT_LOCK_TIMEOUT_MS, confirm: emptyConfirm(),
       locked: info?.locked ?? false, production: info?.production ?? false,
-      concurrently: false, cascade: false,
+      concurrently: false, cascade: false, postApplyWarnings: [], partialCreated: null,
     });
     const [focus, setFocus] = createSignal<FocusRequest | null>(null);
     const previewer = createPreviewer<PreviewOk>(pd, onPreview(tabId), onPreviewError(tabId), delay);
@@ -417,6 +449,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const m = e?.model();
     if (!e || !m || m.applying || m.status === "gone") return;
     if (m.dirty && !opts?.force) return;
+    forgetSecret(tabId);
     if (m.mode === "alter") await loadObject(tabId, e);
     else await loadDefaults(tabId, e);
   };
@@ -435,6 +468,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     update(e, (cur) => ({
       ...cur, draft: next, version: cur.version + 1, dirty: dirtyOf(e, next, cur), outcome: null, applyError: null,
     }));
+    // Parola niyeti `set` değilse (keep/clear ya da rol dışı) girilmiş parola tutulmaz.
+    if (!(next.kind === "role" && next.password === "set")) forgetSecret(tabId);
     startPreview(e, false);
   };
 
@@ -469,8 +504,14 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   // ---- uygulama
   const applied = async (tabId: string, e: Entry, mode: DesignerMode, out: Extract<ApplyOutcome, { outcome: "applied" }>) => {
     const m = e.model();
-    notify(tdes.apply.applied(out.statements), "success");
-    dropLookups(m.serverId, m.databaseOid);
+    forgetSecret(tabId);
+    const warnings = out.warnings ?? [];
+    if (warnings.length > 0) notify(tdes.apply.appliedWarnings(out.statements, warnings.length), "info");
+    else notify(tdes.apply.applied(out.statements), "success");
+    // Uyarılar sekmede kalıcı (yeniden yükleme `setBase` bunlara dokunmaz).
+    patch(e, { postApplyWarnings: [...warnings] });
+    // Sunucu kapsamlı nesne (rol/veritabanı) her veritabanının lookup'larını (ör. `roles`) etkiler.
+    dropLookups(m.serverId, isServerScoped(m.kind) ? undefined : m.databaseOid);
     refresh(e.refreshNodeId);
     if ((mode === "alter" || out.created) && m.draft) {
       try {
@@ -500,10 +541,27 @@ export function createDesignerController(deps: DesignerControllerDeps) {
 
   const failed = (e: Entry, out: Extract<ApplyOutcome, { outcome: "failed" }>) => {
     patch(e, { applyError: failedText(out) });
+    if (out.created) {
+      // Kısmi uygulama: nesne oluştu/yeniden adlandırıldı (ör. CREATE DATABASE kalıcı, sonraki SET/COMMENT başarısız).
+      refresh(e.refreshNodeId);
+      const m = e.model();
+      dropLookups(m.serverId, isServerScoped(m.kind) ? undefined : m.databaseOid);
+      const created = { ...out.created };
+      if (m.mode === "create") {
+        // Aynı create yeniden gönderilmez (42P04/42710): kapı `partial`, arayüz "Düzenle olarak aç" sunar. Nesne
+        // oluştuğu için parola bir daha gönderilmez: silinir.
+        forgetSecret(m.id);
+        notify(tdes.gate.partial, "error");
+        patch(e, { partialCreated: created });
+        return;
+      }
+      // Alter: kimlik değişmiş olabilir; yeniden yükleme yeni nesneyle yapılır (aşağıdaki kısmi yol).
+      patch(e, { object: created });
+    }
     if (out.committed > 0) {
       // Bir kısmı kalıcı: nesne değişti, `original` bayat. Taslak korunur; bayat temele karşı önizleme istenmez.
       notify(tdes.apply.committed(out.committed), "error");
-      patch(e, { gateError: tdes.gate.partial, needsReload: true });
+      patch(e, { gateError: tdes.gate.partialChanged, needsReload: true });
       return;
     }
     // Aynı `expectedHash` ile yeniden gönderilmez: görünüm düştü, yenisi istenir.
@@ -538,12 +596,12 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     if (!canSubmit(gate, m.confirm)) return;
     const req = planRequest(m);
     if (!req) return;
-    const options = applyOptionsFor(newId(), m.lockTimeoutMs, m.view, gate, m.confirm);
+    const options = applyOptionsFor(newId(), m.lockTimeoutMs, m.view, gate, m.confirm, secrets.get(tabId) ?? null);
     if (!options) return;
     const gen = e.gen;
     const mode = m.mode;
     e.previewer.cancel();
-    patch(e, { applying: true, applyId: options.applyId, gateError: null, applyError: null, outcome: null });
+    patch(e, { applying: true, applyId: options.applyId, gateError: null, applyError: null, outcome: null, postApplyWarnings: [] });
     let out: ApplyOutcome;
     try {
       out = await api.ddlApply(m.serverId, m.databaseOid, req, options);
@@ -558,6 +616,30 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     patch(e, { applying: false, applyId: null, outcome: out, view: null, viewFor: -1, confirm: emptyConfirm() });
     if (out.outcome === "applied") await applied(tabId, e, mode, out);
     else failed(e, out);
+  };
+
+  /**
+   * "Düzenle olarak aç" (kısmi create): aynı sekme, oluşturulan nesnenin alter sekmesine çevrilir (`openAlter` ile;
+   * sekme kimliği ve `refreshNodeId` korunur). Yükleme başarılıysa başlık `onApplied` ile güncellenir. Kısmi durum
+   * yoksa ya da uygulama sürüyorsa etkisizdir.
+   */
+  const openCreatedAsAlter = async (tabId: string): Promise<void> => {
+    const e = entries.get(tabId);
+    const m = e?.model();
+    if (!e || !m || m.mode !== "create" || !m.partialCreated || m.applying) return;
+    const object = { ...m.partialCreated };
+    entries.delete(tabId);
+    secrets.delete(tabId);
+    e.gen++;
+    e.previewer.dispose();
+    await openAlter({ tabId, serverId: m.serverId, databaseOid: m.databaseOid, object, refreshNodeId: e.refreshNodeId });
+    const n = entries.get(tabId)?.model();
+    if (!n || n.status !== "ready" || !n.original) return;
+    try {
+      deps.onApplied?.({ tabId, kind: n.kind, mode: "create", before: null, after: cloneDef(n.original), object: { ...object } });
+    } catch {
+      /* başlık/ek yenileme hatası sonucu etkilemez */
+    }
   };
 
   /** Uçuştaki uygulamayı iptal ister; sonuç `apply`'ın yanıtıyla gelir (iptal hatası yok sayılır). */
@@ -592,14 +674,28 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     }
   };
 
-  /** Silme diyaloğu başarıyla sildi: aynı nesnenin alter sekmeleri `gone`. */
-  const objectDropped = (serverId: string, databaseOid: number, object: ObjectRef) => {
+  /**
+   * Veritabanı silindi: o veritabanına ait (veritabanı kapsamlı, `databaseOid === oid`) tüm sekmeler `gone` ("Nesne
+   * artık yok"); sekmeler kapanmaz. Sunucu kapsamlı (`null`) sekmeler etkilenmez.
+   */
+  const databaseDropped = (serverId: string, databaseOid: number) => {
     dropLookups(serverId, databaseOid);
+    for (const e of entries.values()) {
+      const m = e.model();
+      if (m.serverId !== serverId || m.databaseOid !== databaseOid || m.status === "gone") continue;
+      markDown(e, "gone", tdes.status.gone);
+    }
+  };
+
+  /** Silme diyaloğu başarıyla sildi: aynı nesnenin alter sekmeleri `gone`; Database ise o veritabanının sekmeleri de. */
+  const objectDropped = (serverId: string, databaseOid: number | null, object: ObjectRef) => {
+    dropLookups(serverId, isServerScoped(object.kind) ? undefined : databaseOid);
     for (const e of entries.values()) {
       const m = e.model();
       if (!matchesObject(m, { serverId, databaseOid, object }) || m.status === "gone") continue;
       markDown(e, "gone", tdes.status.dropped);
     }
+    if (object.kind === "database") databaseDropped(serverId, object.oid);
   };
 
   /** Sekme kapandı: önizleyici kapanır, uçuştaki yanıtlar yoksayılır, uçuştaki apply için `ddl_cancel`. */
@@ -607,6 +703,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const e = entries.get(tabId);
     if (!e) return;
     entries.delete(tabId);
+    secrets.delete(tabId);
     bump();
     e.gen++;
     e.previewer.dispose();
@@ -652,6 +749,29 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     return slot.promise;
   };
 
+  // ---- parola
+  /**
+   * Formun girdiği parola (iki alan eşleşince değer, aksi halde `null`). Yalnızca taslak rolün parola niyeti `set` ve
+   * sekme `ready` iken saklanır; aksi halde (`null`/boş, bilinmeyen sekme, başka tür/niyet, yükleniyor/kesik) silinir.
+   * `registry` yalnızca saklanan değer gerçekten değişince dürtülür (`secretReady` ve kapı tepkisel).
+   */
+  const setSecret = (tabId: string, value: string | null): void => {
+    const m = entries.get(tabId)?.model();
+    const accept = !!value && !!m && m.status === "ready" && m.draft?.kind === "role" && m.draft.password === "set";
+    if (accept) {
+      if (secrets.get(tabId) === value) return;
+      secrets.set(tabId, value!);
+      bump();
+    } else {
+      forgetSecret(tabId);
+    }
+  };
+  /** Sekmenin sunucu kaydındaki kullanıcı adı (kendini kilitleme uyarıları için; kayıt yoksa `null`). */
+  const connectedUser = (tabId: string): string | null => {
+    const m = model(tabId);
+    return m ? (deps.serverInfo(m.serverId)?.username ?? null) : null;
+  };
+
   // ---- odak
   /** Formdan alan odağı ister (ör. "Yeniden adlandır" → `name`); her çağrı yeni `seq` (aynı alan tekrar odaklanır). */
   const requestFocus = (tabId: string, field: string) => {
@@ -659,7 +779,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   };
 
   /** Aynı nesnenin (`gone` olmayan) alter sekmesi — create'ten dönüşen ya da kimliği `created` ile güncellenen dahil. Tepkisel değil. */
-  const findAlter = (serverId: string, databaseOid: number, object: ObjectRef): string | null => {
+  const findAlter = (serverId: string, databaseOid: number | null, object: ObjectRef): string | null => {
     for (const [id, e] of entries) {
       const m = e.model();
       if (m.status !== "gone" && matchesObject(m, { serverId, databaseOid, object })) return id;
@@ -678,6 +798,9 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     setConfirm,
     setConcurrently,
     setCascade,
+    setSecret,
+    secretReady,
+    connectedUser,
     previewNow,
     apply,
     cancelApply,
@@ -688,6 +811,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     serverChanged,
     serverSessionsClosed,
     objectDropped,
+    databaseDropped,
+    openCreatedAsAlter,
     drop,
     close,
     isDirty: (tabId: string) => model(tabId)?.dirty ?? false,

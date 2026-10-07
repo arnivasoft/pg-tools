@@ -35,7 +35,6 @@ export const tdes = {
     retry: "Yeniden dene",
     reloadTitle: "Tanımı sunucudan yeniden yükle",
     loadError: "Tanım yüklenemedi",
-    formMissing: "Bu tür için form henüz yok.",
     needsReload: "Nesnenin sunucudaki tanımı değişmiş olabilir; devam etmeden önce yeniden yükleyin.",
     disconnected: "Sunucu bağlantısı kesildi; sekme salt okunur. Sunucuyu yeniden bağlayıp Yeniden yükle'ye basın.",
     done: "Nesne oluşturuldu, ancak ağaçta bulunamadı. Sekmeyi kapatabilirsiniz.",
@@ -82,6 +81,7 @@ export const tdes = {
     cancelTitle: "Süren uygulamayı iptal et",
     openScript: "Query Tool'da aç",
     openScriptTitle: "Betiği yeni sorgu sekmesine koy (çalıştırmaz)",
+    openScriptRedacted: "Parola içeren plan Query Tool'a aktarılamaz ya da kopyalanamaz.",
     close: "Kapat",
     lockedTitle: "Sunucu salt okunur kilitli",
     /** Uygula kapalıyken `title` gerekçesi (`ApplyGate.reason`). */
@@ -94,6 +94,7 @@ export const tdes = {
       stale: "Önizleme güncel değil",
       invalid: "Formdaki hataları düzeltin",
       empty: "Uygulanacak değişiklik yok",
+      partial: "Nesne oluşturuldu; düzenleme olarak açın",
     },
     needsConfirm: "Uygulamak için etkisini anladığınızı onaylayın",
     needsName: "Uygulamak için onaylayıp sunucu adını yazın",
@@ -101,16 +102,29 @@ export const tdes = {
   },
   apply: {
     applied: (n: number) => `Değişiklikler uygulandı (${n} ifade).`,
+    /** `applied.warnings` dolu: toast özeti. */
+    appliedWarnings: (n: number, w: number) => `Uygulandı, ${w} uyarı (${n} ifade).`,
+    /** Uygulama sonrası uyarı şeridinin başlığı (arka ucun iletileri olduğu gibi listelenir). */
+    warnings: "Uygulama sonrası uyarılar",
     committed: (n: number) => `Hata öncesi ${n} ifade kalıcı oldu; nesne kısmen değişmiş olabilir.`,
     failed: (index: number, text: string) => `${index + 1}. ifade başarısız: ${text}`,
     lockTimeout: "Kilit beklerken zaman aşımı (lock_timeout). Nesneyi kullanan oturumlar bitince yeniden deneyin.",
   },
   gate: {
     planChanged: "Nesne değişti; yeniden yükleyin.",
-    partial: "Nesne kısmen değişti; yeniden yükleyin.",
+    /** Kısmen kalıcı `Failed` (create dışı ya da `created` yok): temel bayat. */
+    partialChanged: "Nesne kısmen değişti; yeniden yükleyin.",
+    /** Kısmi create (`failed.created`; `ApplyGate.reason === "partial"`). */
+    partial: "Nesne oluşturuldu ancak sonraki ifadeler uygulanamadı; düzenleme olarak açın.",
+    openAsAlter: "Düzenle olarak aç",
+    openAsAlterTitle: "Oluşturulan nesneyi bu sekmede düzenleme olarak yükle",
     invalidDef: "Tanım geçersiz; önizleme yenilendi.",
     locked: "Sunucu salt okunur kilitli.",
     confirmationRequired: "Bu değişiklik onay gerektiriyor; önizlemeyi kontrol edip onaylayın.",
+    /** Uygula kapalıyken gerekçe (`ApplyGate.reason === "password"`). */
+    password: "Parolayı iki alana aynı girin.",
+    /** `role_password_missing` reddi (arka uç parolayı almadı). */
+    passwordMissing: "Parola gönderilmedi; parolayı yeniden girip uygulayın.",
   },
   /** Gezgin menüsünden açma (designer-open). */
   open: {
@@ -128,7 +142,11 @@ export const tdes = {
     previewError: "Önizleme alınamadı",
     cascade: "Bağımlı nesnelerle birlikte sil (CASCADE)",
     cascadeHint: "Bu nesneye bağlı tüm nesneler de silinir; veri kaybı olabilir.",
+    force: "Bağlı oturumları sonlandır (WITH (FORCE), PG 13+)",
+    forceHint: "Query Tool sekmeleri dahil tüm oturumlar kesilir.",
     dependents: "Bağımlı nesneler var; CASCADE ile silin ya da bağımlıları kaldırın.",
+    /** CASCADE sunulmayan türler (rol, veritabanı) için 2BP01. */
+    dependentsNoCascade: "Bağımlı nesneler var; önce bağımlıları kaldırın (rol için REASSIGN OWNED / DROP OWNED).",
     dependentsDetail: "Bağımlı nesneler",
     stale: "Nesne değişti ya da artık yok; Gezgini yenileyin.",
     needsConfirm: "Silmek için 'Etkisini anladım'ı işaretleyin",

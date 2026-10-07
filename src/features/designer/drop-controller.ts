@@ -5,7 +5,7 @@
 // - Durum makinesi: loading → ready ⇄ applying; `error` uç durumdur (yükleme hatası, nesne değişti/yok, kısmi silme):
 //   yalnızca Vazgeç (ve uygunsa yeniden yükleme). Bağlantı kodları diyaloğu bildirimle kapatır.
 // - Kuşak sayacı: açma/kapama/yeniden yükleme kuşağı artırır; eski kuşağın yanıtı durum yazmaz.
-// - `cascade` değişince sürüm ilerler, onay sıfırlanır, önizleme beklemeden yeniden istenir (en son istek kazanır).
+// - `cascade`/`force` (yalnızca `dropOptionsFor` sunuyorsa) değişince sürüm ilerler, onay sıfırlanır, önizleme beklemeden yeniden istenir (en son istek kazanır).
 // - Uygulama tek uçuştadır; kapı çağrı anında sunucu kaydıyla yeniden hesaplanır, `applyOptionsFor` null ise hiçbir şey
 //   gönderilmez. Uçuştayken kapatılırsa `ddl_cancel` istenir; geç gelen başarı yine Gezgini yeniler ve açık alter
 //   sekmelerini `gone` yapar (nesne gerçekten silinmiş olabilir) ama diyalog durumu yazılmaz.
@@ -19,11 +19,11 @@ import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Api } from "../../ipc/commands";
 import { errorText, toPayload } from "../../ipc/errors";
 import { applyGate, applyOptionsFor, canSubmit, cloneDef, type ApplyGate, type ConfirmState } from "./designer-model";
-import { dropRequest, dropStatusText, type DropStatus } from "./drop-model";
+import { dropOptionsFor, dropRequest, dropStatusText, type DropStatus } from "./drop-model";
 import { isConnectionCode } from "./errors";
 import { createPreviewer, type PreviewDeps } from "./preview";
 
-export interface DropInput { serverId: string; databaseOid: number; object: ObjectRef; refreshNodeId: string | null; name: string }
+export interface DropInput { serverId: string; databaseOid: number | null; object: ObjectRef; refreshNodeId: string | null; name: string }
 
 export type DropPhase = "loading" | "ready" | "applying" | "error";
 
@@ -33,6 +33,8 @@ export interface DropState {
   /** `ddl_load` çıktısı (DEĞİŞTİRİLMEZ; isteğe derin kopyası gider). */
   def: ObjectDef | null;
   cascade: boolean;
+  /** Yalnızca Database: `DROP DATABASE … WITH (FORCE)` (PG 13+). */
+  force: boolean;
   view: PlanView | null;
   viewFor: number;
   version: number;
@@ -55,7 +57,7 @@ export interface DropControllerDeps {
   /** Explorer düğüm yenilemesi (hatası yutulur). */
   refreshNode(nodeId: string): void;
   /** Başarılı silme: aynı nesnenin alter sekmeleri `gone`. */
-  objectDropped(serverId: string, databaseOid: number, object: ObjectRef): void;
+  objectDropped(serverId: string, databaseOid: number | null, object: ObjectRef): void;
   lockTimeoutMs: number;
   previewDeps: PreviewDeps;
   newId: () => string;
@@ -120,11 +122,11 @@ export function createDropController(deps: DropControllerDeps) {
   };
   const previewer = createPreviewer<PreviewOk>(deps.previewDeps, onPreview, onPreviewError, 0);
 
-  /** Mevcut tanım + cascade için önizleme (beklemeden; en son istek kazanır). Yalnızca `ready`. */
+  /** Mevcut tanım + cascade/force için önizleme (beklemeden; en son istek kazanır). Yalnızca `ready`. */
   const preview = () => {
     const s = state();
     if (!s || s.phase !== "ready" || !s.def) return;
-    const req = dropRequest(s.input.object, s.def, s.cascade);
+    const req = dropRequest(s.input.object, s.def, s.cascade, s.force);
     const { version } = s;
     const g = gen;
     patch({ pending: true });
@@ -176,7 +178,7 @@ export function createDropController(deps: DropControllerDeps) {
     close();
     const info = deps.serverInfo(input.serverId);
     setState({
-      input: { ...input, object: { ...input.object } }, phase: "loading", def: null, cascade: false,
+      input: { ...input, object: { ...input.object } }, phase: "loading", def: null, cascade: false, force: false,
       view: null, viewFor: -1, version: 0, pending: false, previewError: null, confirm: emptyConfirm(), status: null,
       canReload: false, serverName: info?.name ?? "", locked: info?.locked ?? false, production: info?.production ?? false,
     });
@@ -195,13 +197,22 @@ export function createDropController(deps: DropControllerDeps) {
       applying: s.phase === "applying",
       connected: !fresh || info !== null,
       loading: s.phase === "loading" || s.phase === "error",
+      // Silme planında gizlenmiş ifade yok (parola yalnızca rol create/alter'da).
+      secretMissing: false,
     });
   };
 
   const setCascade = (v: boolean) => {
     const s = state();
-    if (!s || s.phase !== "ready" || s.cascade === v) return;
+    if (!s || s.phase !== "ready" || s.cascade === v || !dropOptionsFor(s.input.object.kind).cascade) return;
     patch({ cascade: v, version: s.version + 1, confirm: emptyConfirm(), status: null });
+    preview();
+  };
+  /** Yalnızca Database: `WITH (FORCE)` — cascade kalıbı (sürüm ilerler, onay sıfırlanır, önizleme yeniden). */
+  const setForce = (v: boolean) => {
+    const s = state();
+    if (!s || s.phase !== "ready" || s.force === v || !dropOptionsFor(s.input.object.kind).force) return;
+    patch({ force: v, version: s.version + 1, confirm: emptyConfirm(), status: null });
     preview();
   };
   const setConfirm = (c: Partial<ConfirmState>) => {
@@ -224,7 +235,7 @@ export function createDropController(deps: DropControllerDeps) {
     if (!canSubmit(gate, s.confirm)) return;
     const options = applyOptionsFor(deps.newId(), deps.lockTimeoutMs, s.view, gate, s.confirm);
     if (!options) return;
-    const req = dropRequest(s.input.object, s.def, s.cascade);
+    const req = dropRequest(s.input.object, s.def, s.cascade, s.force);
     const g = gen;
     const input = s.input;
     previewer.cancel();
@@ -256,7 +267,7 @@ export function createDropController(deps: DropControllerDeps) {
     }
     if (g !== gen) return;
     applyId = null;
-    const st = dropStatusText(null, out)!;
+    const st = dropStatusText(null, out, dropOptionsFor(input.object.kind).cascade)!;
     // Kısmi silme (committed > 0): nesne değişmiş olabilir; Gezgin yenilenir.
     if (st.kind === "stale") refreshTree(input);
     patch({ phase: st.kind === "stale" ? "error" : "ready", status: st, view: null, viewFor: -1, confirm: emptyConfirm(), canReload: false });
@@ -291,11 +302,20 @@ export function createDropController(deps: DropControllerDeps) {
       if (s?.phase === "error" && s.canReload) void load();
     },
     setCascade,
+    setForce,
     setConfirm,
     apply,
     cancelApply,
     serverChanged,
     serverSessionsClosed,
+    /**
+     * Diyaloğun sunduğu kutular (`dropOptionsFor`; diyalog `drop-model`'i doğrudan içe aktarmaz — paylaşılan parça
+     * ana paketin `__vite__mapDeps` listesine yeni ad eklemesin). Diyalog kapalıyken ikisi de false.
+     */
+    options: (): { cascade: boolean; force: boolean } => {
+      const s = state();
+      return s ? dropOptionsFor(s.input.object.kind) : { cascade: false, force: false };
+    },
     /** Arayüz kapısı (denetleyici `apply` anında yeniden hesaplar). */
     gate: (): ApplyGate => {
       const s = state();

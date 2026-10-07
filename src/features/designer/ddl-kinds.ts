@@ -5,8 +5,10 @@ import type { NodeKind } from "../../ipc/bindings/NodeKind";
  * `ddl_target_of` ile alınır ve arka uç desteklemediği düğümü reddeder. Gezgin bunu statik içe aktarır; bu dosya bilerek
  * bağımlılıksızdır (designer parçasının geri kalanını ana pakete çekmez).
  */
-export const DDL_OBJECT_KINDS: NodeKind[] = ["schema", "sequence", "extension", "index", "table"];
-/** schemaCollection, sequenceCollection, extensionCollection, indexCollection, tableCollection. */
+export const DDL_OBJECT_KINDS: NodeKind[] = [
+  "schema", "sequence", "extension", "index", "table", "view", "materializedView", "database", "role",
+];
+/** …Collection: schema, sequence, extension, index, table, view, materializedView, database, role. */
 export const DDL_CREATE_COLLECTIONS = DDL_OBJECT_KINDS.map((k) => `${k}Collection` as NodeKind);
 
 /** "Oluştur…" bu koleksiyonda gösterilir mi? */

@@ -8,7 +8,7 @@ import type { SchemaDef } from "../../ipc/bindings/SchemaDef";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
 import { addColumn, groupIssues, issuesFor, moveColumn, removeColumn, updateColumn } from "./designer-model";
 import {
-  EXTENSION_PATHS, FORM_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
+  DATABASE_PATHS, EXTENSION_PATHS, FORM_PATHS, ROLE_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
   columnKeyLabel, exactIssues, extensionEditPatch, extensionOptionLabel, extensionVersionNote, fillfactorEnabled,
   fillfactorFromInput, findExtension, incrementEditPatch, incrementSign, indexEditPatch, indexMethodPatch, indexReadOnlyReason,
   newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect, orphanRowIssues, ownedByHint, restrictedControlDisabled, schemaEditPatch, sequenceSchemaPatch, tablespaceChoices,
@@ -393,5 +393,73 @@ describe("FORM_PATHS (tür → form eşlemesi)", () => {
     );
     expect([...g.byPath.keys()]).toEqual(["columns[1].dataType", "partitionBy.keys[0]"]);
     expect(g.general).toEqual(["b", "c"]);
+  });
+});
+
+describe("view/matview yolları", () => {
+  it("FORM_PATHS.view === VIEW_PATHS; FORM_PATHS.materialized_view === MATVIEW_PATHS", () => {
+    expect(FORM_PATHS.view).toBe(VIEW_PATHS);
+    expect(FORM_PATHS.materialized_view).toBe(MATVIEW_PATHS);
+  });
+  it("groupIssues: query alan, old.name ve columns genel", () => {
+    const g = groupIssues(
+      [{ path: "query", message: "a" }, { path: "old.name", message: "b" }, { path: "columns", message: "c" }] as never,
+      VIEW_PATHS,
+    );
+    expect(g.byPath.get("query")).toEqual(["a"]);
+    expect(g.general).toEqual(expect.arrayContaining(["b", "c"]));
+    expect(g.general).toHaveLength(2);
+  });
+});
+
+describe("view/matview onay kutusu yolları alan hatasıdır", () => {
+  it("securityBarrier/securityInvoker/recreate (view) ve withData (MV) byPath'e düşer, genel şeride değil", () => {
+    const gv = groupIssues(
+      [{ path: "securityBarrier", message: "a" }, { path: "securityInvoker", message: "b" }, { path: "recreate", message: "c" }] as never,
+      VIEW_PATHS,
+    );
+    expect(gv.general).toEqual([]);
+    expect(issuesFor(gv, "recreate")).toEqual(["c"]);
+    const gm = groupIssues([{ path: "withData", message: "d" }] as never, MATVIEW_PATHS);
+    expect(gm.general).toEqual([]);
+    expect(issuesFor(gm, "withData")).toEqual(["d"]);
+  });
+});
+
+describe("DATABASE_PATHS", () => {
+  it("Plan 15 Task 4 yol kümesi; FORM_PATHS.database aynı", () => {
+    expect([...DATABASE_PATHS].sort()).toEqual(
+      ["name", "owner", "template", "encoding", "localeProvider", "lcCollate", "lcCtype", "providerLocale", "tablespace", "connectionLimit", "isTemplate", "allowConnections", "settings", "comment"].sort(),
+    );
+    expect(FORM_PATHS.database).toBe(DATABASE_PATHS);
+  });
+  it("settings[i].name kökte; force/cascade/old.* genel", () => {
+    const g = groupIssues(
+      [{ path: "settings[0].name", message: "a" }, { path: "force", message: "b" }, { path: "old.name", message: "c" }] as never,
+      DATABASE_PATHS,
+    );
+    expect(g.byPath.get("settings[0].name")).toEqual(["a"]);
+    expect(g.general).toHaveLength(2);
+  });
+});
+
+describe("ROLE_PATHS", () => {
+  it("Plan 15 Task 5 yol kümesi; FORM_PATHS her ObjectKind için tanımlı (dokuz tür)", () => {
+    expect([...ROLE_PATHS].sort()).toEqual(
+      ["name", "login", "superuser", "createdb", "createrole", "inherit", "replication", "bypassrls", "connectionLimit", "validUntil", "password", "memberOf", "settings", "comment"].sort(),
+    );
+    expect(FORM_PATHS.role).toBe(ROLE_PATHS);
+    const kinds = ["schema", "sequence", "extension", "index", "table", "view", "materialized_view", "database", "role"] as const;
+    expect(Object.keys(FORM_PATHS).sort()).toEqual([...kinds].sort());
+    expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
+  });
+  it("memberOf[i].role ve settings[i].value kökte; cascade/old.* genel", () => {
+    const g = groupIssues(
+      [{ path: "memberOf[1].role", message: "a" }, { path: "settings[0].value", message: "b" }, { path: "cascade", message: "c" }, { path: "old.name", message: "d" }] as never,
+      ROLE_PATHS,
+    );
+    expect(issuesFor(g, "memberOf")).toEqual(["a"]);
+    expect(g.byPath.get("settings[0].value")).toEqual(["b"]);
+    expect(g.general).toEqual(["c", "d"]);
   });
 });

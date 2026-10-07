@@ -24,7 +24,7 @@ export interface DashTab {
 export interface DesignerTab {
   id: string;
   serverId: string;
-  databaseOid: number;
+  databaseOid: number | null;
   title: string;
   /**
    * Tekilleştirme anahtarı (`designerTabKey`): alter `alter:<kind>:<sunucu>:<db>:<oid>` (aynı nesne tek sekme); create
@@ -73,7 +73,7 @@ export interface OpenDashInput {
  */
 export interface OpenDesignerInput {
   serverId: string;
-  databaseOid: number;
+  databaseOid: number | null;
   title: string;
   key: string;
   where?: string | null;

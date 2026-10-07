@@ -2,6 +2,7 @@
 // Düğüm kimlikleri ayrıştırılmaz: düğümler ağaç yapısı ve etiketleriyle bulunur.
 import { tdes } from "../../app/strings-designer";
 import type { NodeKind } from "../../ipc/bindings/NodeKind";
+import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
 import type { TreeState } from "../explorer/tree-model";
 import type { AppliedInfo } from "./designer-controller";
 import { kindLabel } from "./designer-model";
@@ -29,11 +30,19 @@ export function titleAfterApply(info: AppliedInfo): string | null {
   return info.before.name !== name || schemaOf(info.before) !== schemaOf(info.after) ? title : null;
 }
 
+/** Şema taşımada yeni şemanın altında yenilenecek koleksiyon (Database/Role sunucu kapsamlı: ek yenileme yok). */
+const SCHEMA_MOVE_COLLECTION: Partial<Record<ObjectKind, NodeKind>> = {
+  table: "tableCollection",
+  sequence: "sequenceCollection",
+  view: "viewCollection",
+  materialized_view: "materializedViewCollection",
+};
+
 /**
  * `refreshNodeId` dışındaki yenilemeler (yalnızca yüklü — `tree.children.has(id)` — düğümler, tekrarsız, `primary` hariç):
  * (1) table: tablo düğümünün yüklü columnCollection/constraintCollection/indexCollection çocukları;
- * (2) sequence/table şema değişimi: veritabanı düğümünün schemaCollection'ındaki `after.schema` etiketli şemanın
- *     `${kind}Collection` çocuğu. Düğüm bulunamazsa hiçbir şey eklenmez.
+ * (2) sequence/table/view/materialized_view şema değişimi: veritabanı düğümünün schemaCollection'ındaki `after.schema`
+ *     etiketli şemanın `SCHEMA_MOVE_COLLECTION[kind]` çocuğu. Düğüm bulunamazsa hiçbir şey eklenmez.
  */
 export function extraRefreshIds(tree: TreeState, ctx: OpenContext | null, info: AppliedInfo, primary: string | null): string[] {
   const out: string[] = [];
@@ -58,10 +67,10 @@ export function extraRefreshIds(tree: TreeState, ctx: OpenContext | null, info: 
     }
   }
 
-  if ((info.kind === "sequence" || info.kind === "table") && info.mode === "alter" && info.before) {
+  const target = SCHEMA_MOVE_COLLECTION[info.kind];
+  if (target && info.mode === "alter" && info.before) {
     const to = schemaOf(info.after);
     if (to !== null && to !== schemaOf(info.before) && ctx?.databaseNodeId) {
-      const target: NodeKind = info.kind === "table" ? "tableCollection" : "sequenceCollection";
       for (const sc of kids(ctx.databaseNodeId)) {
         if (kindOf(sc) !== "schemaCollection") continue;
         for (const sch of kids(sc)) {

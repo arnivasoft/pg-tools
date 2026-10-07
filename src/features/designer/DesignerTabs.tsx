@@ -47,7 +47,7 @@ export function DesignerPanels(props: {
   designer: DesignerController;
   tabs: DesignerTab[];
   activeId: string;
-  onOpenScript: (input: { serverId: string; databaseOid: number; text: string }) => void;
+  onOpenScript: (input: { serverId: string; databaseOid: number | null; text: string }) => void;
   onClose: (tabId: string) => void;
   /** Kapatma onayı bekleyen (kirli) sekme; `onCloseAnswer(true)` = değişiklikleri at ve kapat. */
   closing: string | null;

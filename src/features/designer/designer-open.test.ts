@@ -23,7 +23,11 @@ function tree(): TreeState {
     s.parent.set(id, parent);
   };
   add("srv", ROOT, "server", "srv", { serverId: "S1" });
-  add("db", "srv", "database", "app");
+  add("dbs", "srv", "databaseCollection", "Databases");
+  add("db", "dbs", "database", "app");
+  add("roles", "srv", "roleCollection", "Login/Group Roles");
+  add("rl", "roles", "role", "app_user");
+  add("coll-view", "sch", "viewCollection", "Views");
   add("coll-seq", "db", "sequenceCollection", "Sequences");
   add("seq", "coll-seq", "sequence", "orders_id_seq");
   add("coll-sch", "db", "schemaCollection", "Schemas");
@@ -310,5 +314,68 @@ describe("designer-open Task 4", () => {
     await opener.open("seq", "edit");
     expect(opener.context(store.state.designers[0].id)).toEqual({ databaseNodeId: "db", tableNodeId: null });
     expect(opener.context("yok")).toBeNull();
+  });
+});
+
+const roleTarget: DdlTarget = {
+  serverId: "S1", databaseOid: null, object: { kind: "role", oid: 16384 }, create: null, focus: null, refreshNodeId: "roles",
+};
+const dbTarget: DdlTarget = {
+  serverId: "S1", databaseOid: null, object: { kind: "database", oid: 5 }, create: null, focus: null, refreshNodeId: "dbs",
+};
+
+describe("designer-open Plan 15: sunucu kapsamı", () => {
+  it("rol düğümünden edit: databaseOid null, where = sunucu adı, başlıkta veritabanı adı yok", async () => {
+    const { opener, store, designer, tabs } = setup(roleTarget);
+    await opener.open("rl", "edit");
+    const tab = store.state.designers[0];
+    expect(tabs.openDesigner).toHaveBeenCalledWith(expect.objectContaining({ databaseOid: null, where: "srv" }));
+    expect(tab).toMatchObject({ databaseOid: null, where: "srv", key: "alter:role:S1:null:16384" });
+    expect(tab.title).toBe(tdes.tab.edit("Role", "app_user"));
+    expect(designer.openAlter).toHaveBeenCalledWith({ tabId: tab.id, serverId: "S1", databaseOid: null, object: roleTarget.object, refreshNodeId: "roles" });
+    expect(designer.findAlter).toHaveBeenCalledWith("S1", null, roleTarget.object);
+  });
+
+  it("rol create: başlık tdes.tab.create(kind, sunucu, null)", async () => {
+    const t: DdlTarget = { ...roleTarget, object: null, create: { kind: "role", context: { schemaOid: null, tableOid: null } } };
+    const { opener, store, designer } = setup(t);
+    await opener.open("roles", "create");
+    const tab = store.state.designers[0];
+    expect(tab.title).toBe(tdes.tab.create("Role", "srv", null));
+    expect(tab.where).toBe("srv");
+    expect(designer.openCreate).toHaveBeenCalledWith(expect.objectContaining({ databaseOid: null }));
+  });
+
+  it("veritabanı düğümünden Database edit: databaseOid null (düğüm veritabanının altında olsa da), where = sunucu", async () => {
+    const { opener, store, designer } = setup(dbTarget);
+    await opener.open("db", "edit");
+    const tab = store.state.designers[0];
+    expect(tab).toMatchObject({ databaseOid: null, where: "srv" });
+    expect(designer.openAlter).toHaveBeenCalledWith(expect.objectContaining({ databaseOid: null, object: dbTarget.object }));
+    expect(opener.databaseName("S1", 5)).toBeNull(); // dbNames yalnız veritabanı kapsamlıda
+  });
+
+  it("savunma: arka uç sunucu kapsamlı türe databaseOid verse bile null gönderilir", async () => {
+    const { opener, store, designer } = setup({ ...dbTarget, databaseOid: 5 });
+    await opener.open("db", "edit");
+    expect(store.state.designers[0]).toMatchObject({ databaseOid: null, where: "srv" });
+    expect(designer.openAlter).toHaveBeenCalledWith(expect.objectContaining({ databaseOid: null }));
+  });
+
+  it("databaseOid null + view hedefi → tdes.open.none", async () => {
+    const t: DdlTarget = { serverId: "S1", databaseOid: null, object: { kind: "view", oid: 900 }, create: null, focus: null, refreshNodeId: "coll-view" };
+    const { opener, deps, store } = setup(t);
+    await opener.open("coll-view", "edit");
+    expect(deps.notify).toHaveBeenCalledWith(tdes.open.none, "info");
+    expect(store.state.designers).toHaveLength(0);
+    expect(deps.connect).not.toHaveBeenCalled();
+  });
+
+  it("drop: rol/database için openDrop({ databaseOid: null })", async () => {
+    for (const [target, node, name] of [[roleTarget, "rl", "app_user"], [dbTarget, "db", "app"]] as const) {
+      const { opener, deps } = setup(target);
+      await opener.open(node, "drop");
+      expect(deps.openDrop).toHaveBeenCalledWith({ serverId: "S1", databaseOid: null, object: target.object, refreshNodeId: target.refreshNodeId, name });
+    }
   });
 });

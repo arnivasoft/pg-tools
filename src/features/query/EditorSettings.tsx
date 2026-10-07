@@ -1,5 +1,5 @@
 import { For } from "solid-js";
-import { t } from "../../app/strings";
+import { tedit } from "./strings-editor";
 import type { CommaStyle } from "../../ipc/bindings/CommaStyle";
 import type { FormatOptions } from "../../ipc/bindings/FormatOptions";
 import type { KeywordCase } from "../../ipc/bindings/KeywordCase";
@@ -16,7 +16,7 @@ export function EditorSettings(props: {
   format: FormatOptions;
   onChange: (checkEnabled: boolean, format: FormatOptions) => void;
 }) {
-  const e = t.query.editorSettings;
+  const e = tedit;
   const setFormat = (p: Partial<FormatOptions>) => props.onChange(props.checkEnabled, { ...props.format, ...p });
   const field = "flex items-center gap-1.5 text-[12px]";
   return (

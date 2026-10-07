@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 import { tdes } from "../../app/strings-designer";
 import type { ApplyOutcome } from "../../ipc/bindings/ApplyOutcome";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
+import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
 import { planRequest } from "./designer-controller";
-import { dropRequest, dropStatusText, matchesObject } from "./drop-model";
+import { dropOptionsFor, dropRequest, dropStatusText, matchesObject } from "./drop-model";
 
 const def = (): ObjectDef => ({ kind: "schema", name: "app", owner: "alice", comment: "c" });
 const err = (code: string, message = `m:${code}`, detail: string | null = null) => ({ code, message, detail, hint: null });
@@ -19,6 +20,22 @@ describe("dropRequest", () => {
     expect(r).toEqual({ op: "drop", object, def: d, cascade: true, force: false });
     expect(r.def).not.toBe(d);
     expect(r.object).not.toBe(object);
+  });
+
+  it("force bayrağı isteğe girer (varsayılan false)", () => {
+    const r = dropRequest({ kind: "database", oid: 5 }, def(), false, true);
+    expect(r).toMatchObject({ op: "drop", cascade: false, force: true });
+    expect(dropRequest({ kind: "database", oid: 5 }, def(), false).force).toBe(false);
+  });
+
+  it("dropOptionsFor: database → FORCE (CASCADE yok); role → hiçbiri; diğerleri → CASCADE", () => {
+    const table: Record<ObjectKind, { cascade: boolean; force: boolean }> = {
+      schema: { cascade: true, force: false }, sequence: { cascade: true, force: false }, extension: { cascade: true, force: false },
+      index: { cascade: true, force: false }, table: { cascade: true, force: false }, view: { cascade: true, force: false },
+      materialized_view: { cascade: true, force: false },
+      database: { cascade: false, force: true }, role: { cascade: false, force: false },
+    };
+    for (const [k, v] of Object.entries(table)) expect(dropOptionsFor(k as ObjectKind)).toEqual(v);
   });
 
   it("designer planRequest(m, 'drop') aynı tanımı kullanır", () => {
@@ -39,9 +56,25 @@ describe("dropStatusText", () => {
     expect(dropStatusText(null, bare)?.detail).toBe("cannot drop");
   });
 
+  it("Failed 2BP01, CASCADE sunulmayan tür (rol/veritabanı): CASCADE önermeyen metin", () => {
+    const out = failed({ sqlstate: "2BP01", error: err("query", "cannot drop role u", "owner of table app.t") });
+    expect(dropStatusText(null, out, false)).toEqual({ kind: "dependents", text: tdes.drop.dependentsNoCascade, detail: "owner of table app.t" });
+    expect(tdes.drop.dependentsNoCascade).not.toContain("CASCADE");
+    expect(dropStatusText(null, out, true)!.text).toBe(tdes.drop.dependents);
+  });
+
   it("metin üzerinden eşleşme yok: 'depends on' içeren başka sqlstate genel hata", () => {
     const out = failed({ sqlstate: "42501", error: err("query", "depends on", "other objects depend on it") });
     expect(dropStatusText(null, out)?.kind).toBe("other");
+  });
+
+  it("Failed 55006 (DROP DATABASE, bağlı oturum) → other; metinde arka ucun ipucu görünür", () => {
+    const hint = "Veritabanına bağlı oturumlar var: … WITH (FORCE) kullanılabilir.";
+    const out = failed({ sqlstate: "55006", error: { code: "query", message: "veritabanı kullanımda", detail: "database \"app\" is being accessed by other users", hint } });
+    const st = dropStatusText(null, out)!;
+    expect(st.kind).toBe("other");
+    expect(st.text).toContain(hint);
+    expect(st.text).toContain("veritabanı kullanımda");
   });
 
   it("Failed 55P03 → kilit zaman aşımı; kısmen kalıcı → stale + uyarı", () => {
@@ -71,5 +104,11 @@ describe("matchesObject", () => {
     expect(matchesObject({ ...tab, object: { kind: "schema", oid: 8 } }, ref)).toBe(false);
     expect(matchesObject({ ...tab, mode: "create" }, ref)).toBe(false);
     expect(matchesObject({ ...tab, object: null }, ref)).toBe(false);
+  });
+  it("sunucu kapsamı: databaseOid null yalnızca null ile eşleşir", () => {
+    const r = { serverId: "S1", databaseOid: null, object: { kind: "role" as const, oid: 9 } };
+    const tab = { serverId: "S1", databaseOid: null, mode: "alter" as const, object: { kind: "role" as const, oid: 9 } };
+    expect(matchesObject(tab, r)).toBe(true);
+    expect(matchesObject({ ...tab, databaseOid: 5 }, r)).toBe(false);
   });
 });

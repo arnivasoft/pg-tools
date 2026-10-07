@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 5: Nesne Oluşturma / Düzenleme Diyalogları Tasarımı
 
 - **Tarih:** 2026-10-06
-- **Durum:** Plan 10–14 (View/MatView, Database, Role arka ucu dahil) uygulandı; Plan 15 (bu türlerin arayüzü) kalan
+- **Durum:** Plan 10–15 uygulandı (tüm nesne türleri)
 - **Kapsam:** Object Explorer'dan nesne **oluşturma, düzenleme, yeniden adlandırma, silme** (Schema, Sequence, Extension, Index, Table/Column/Constraint, View/Materialized View, Database, Role); önizlemeli, korumalı DDL uygulaması
 - **Önceki alt projeler:** Object Explorer (Plan 1–4), Query Tool (5–6), Editör zekâsı (7), Dashboard (8–9) — hepsi `main`'de.
 - **Teslim planları:** Plan 10 (arka uç çerçevesi + Schema, Sequence, Extension, Index) → Plan 11 (ön yüz çerçevesi + aynı dört tür) → Plan 12 (Table arka ucu: kolon/kısıt farkı) → Plan 13 (Table arayüzü) → Plan 14 (View/MatView, Database, Role arka ucu) → Plan 15 (View/MatView, Database, Role arayüzü).
@@ -92,6 +92,7 @@ Object Explorer salt okunurdu; Query Tool SQL yazdırır ama nesne tanımlamak i
     - **Ayar adları:** `search_path`/`temp_tablespaces` öğelerinde tırnaksız büyük harfli öğe (`MySchema`) sunucuda `"MySchema"` anlamına gelir → ön uyarı; noktasız ad yalnızca küçük harf, noktalı özel ad yazımını korur (`App.Mode`), yalnızca harf büyüklüğü değişen özel ad için arka uç plan uyarısı verir.
     - **Gizlenmiş ifadeler:** `redacted: true` ifade içeren plan Query Tool'a **açılmaz ve kopyalanmaz** (kopya/aç düğmeleri kapalı + gerekçe); parola değeri denetleyicide tepkisel olmayan haritada tutulur, yalnızca `ddl_apply`'da gider; uygulama kapısı (`password`) iki girdi eşleşmeden Uygula'yı kapatır.
     - **Backlog:** noktalı özel ayarın yalnızca harf büyüklüğü değişimi PG'de güvenilir uygulanmaz (`RESET` başka oturumda yer tutucu oluşturup eşleşmeyebilir; üretici uyarı verir, hata değil); Table/Sequence/Schema/Index için de `OWNER TO` en sonda; `load_table.sql` tablespace `pg_default` süzgeci (MatView'deki `reltablespace = 0` kuralı); spec "SQL editörü" ile Plan 15 metin alanı farkı; view/MV kolon yeniden adlandırma/yorum, MV indekslerinin yeniden kurmada otomatik oluşturulması, `CREATE DATABASE … STRATEGY/OID/ICU_RULES`, `ALTER ROLE … IN DATABASE … SET`, rol üyeleri (ters yön), `REASSIGN/DROP OWNED`, GRANT matrisi; serbest bırakma ile yeniden bağlanma yarışı (G-6: yeniden deneme ipucu var).
+  - **View/MatView/Database/Role arayüzü (Plan 15) notları:** Sorgu alanı `textarea`'dır (Karar 1; CodeMirror ana paketi şişirir). Parola yalnızca uygulamada (`ApplyOptions.password`) ve denetleyicinin `secrets` haritasında yaşar (`setSecret`); taslağa, önizleme isteğine, kirli karşılaştırmasına ve günlüğe yalnızca niyet (`keep|set|clear`) girer (Karar 2–3; gizlenmiş planda Query Tool'da aç kapalıdır). "Yeniden oluştur" açık bir kullanıcı seçimidir (Karar 4). Database ve Role sekmeleri sunucu kapsamlıdır (`databaseOid: null`); veritabanı silinince yalnızca o veritabanındaki designer sekmeleri "artık yok" olur. Kısmi create'te "Düzenle olarak aç" kaydedilmemiş taslağı atar. Ana paket telafisi: `t.query.editorSettings` → tembel `strings-editor.ts`. **Backlog:** CodeMirror sorgu düzenleyicisi; view/MV kolon yeniden adlandırma; rol üyeleri ters yönü (bu role üye olanlar); GRANT matrisi; VALID UNTIL "Süresiz" kaldırıldığında eski tarih/saatin görünmesi (UX).
 
 ## 3. Plan ve risk modeli
 
