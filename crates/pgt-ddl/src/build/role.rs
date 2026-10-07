@@ -100,6 +100,11 @@ pub const MAX_SECRET_BYTES: usize = 1024;
 /// özetlenir (rastgele tuz, 4096 tur, SASLprep); sunucuya, `log_min_error_statement` günlüğüne, `pg_stat_statements`'a
 /// ya da hata metnine düz metin hiç gitmez. Sunucunun `password_encryption` ayarından bağımsızdır (PG 10+ SCRAM
 /// doğrulayıcısını olduğu gibi saklar). Hata iletileri sabittir.
+///
+/// Bilinen sınır (inceleme G-8, kabul edildi): tur sayısı sabit 4096'dır (postgres-protocol 0.6.12
+/// `SCRAM_DEFAULT_ITERATIONS`); PG 16+ `scram_iterations` ayarı (psql `\password`/libpq 16+ uyar) dikkate alınmaz.
+/// IPC `serde_json` değeri, serde ara belleği ve kütüphanenin SASLprep/tuzlu parola kopyaları bizim sıfırlamamızın
+/// dışındadır (en iyi çaba).
 pub(crate) fn materialize_password(role: &str, secret: &Secret) -> Result<PasswordStatement, &'static str> {
     check_secret(secret)?;
     let verifier = postgres_protocol::password::scram_sha_256(secret.expose().as_bytes());

@@ -26,7 +26,8 @@ use uuid::Uuid;
 use crate::apply::{self, CancelMap, ExecSql, ExecStatement, RunResult};
 use crate::build::{self, BuildCtx, role};
 use crate::error_codes::{
-    CONFIRMATION_REQUIRED, INVALID_DEF, LOCKED_MESSAGE, MAINTENANCE_DATABASE, NEEDS_DATABASE, NO_CHANGES, PASSWORD_NOT_USED,
+    CONFIRMATION_REQUIRED, INVALID_DEF, LOCKED_MESSAGE, MAINTENANCE_DATABASE, MAINTENANCE_TEMPLATE, NO_CHANGES,
+    PASSWORD_NOT_USED,
     PLAN_CHANGED, PRODUCTION_CONFIRMATION_REQUIRED, ROLE_PASSWORD_MISSING,
 };
 use crate::load::{self, ObjectRef};
@@ -232,21 +233,22 @@ fn identity_changed(old: &ObjectDef, new: &ObjectDef) -> bool {
     }
 }
 
-/// Uygulama/yükleme hedefi: sunucu kapsamlı türler (Database/Role) bakım veritabanında (`database_oid` yok sayılır);
-/// diğerleri verilen veritabanında, yoksa `Invalid(NEEDS_DATABASE)`.
-pub(crate) fn target_for(kind: ObjectKind, database_oid: Option<u32>) -> Result<Target> {
-    match (kind.server_scoped(), database_oid) {
-        (true, _) => Ok(Target::Maintenance),
-        (false, Some(db)) => Ok(Target::Database(db)),
-        (false, None) => Err(Error::Invalid(NEEDS_DATABASE.into())),
-    }
-}
+/// Uygulama hedefi: yükleyiciyle aynı tek kural (`load::target_for`).
+pub(crate) use crate::load::target_for;
 
 /// (4a) Bakım veritabanının kendisini yeniden adlandıran, taşıyan, bağlantıya kapatan (ALLOW_CONNECTIONS false ya da
 /// CONNECTION LIMIT 0) ya da silen istek (`old`/`def`
 /// nesne denetiminden geçmiştir: sunucudaki güncel ad). Yorum/ayar/sahip/bağlantı sınırı değişimi serbesttir.
+#[cfg(test)]
 fn touches_maintenance(req: &PlanRequest, maintenance_db: &str) -> bool {
-    match req {
+    maintenance_refusal(req, maintenance_db) == Some(MAINTENANCE_DATABASE)
+}
+
+/// (4a) Reddin iletisi: bakım veritabanının yeniden adlandırılması/taşınması/bağlantıya kapatılması/silinmesi →
+/// `MAINTENANCE_DATABASE`; şablon olarak kopyalanması (uygulamanın kendi bakım bağlantısı ona bağlıdır, PG 55006
+/// verirdi; inceleme G-5) → `MAINTENANCE_TEMPLATE`.
+fn maintenance_refusal(req: &PlanRequest, maintenance_db: &str) -> Option<&'static str> {
+    let refused = match req {
         PlanRequest::Alter { old: ObjectDef::Database(o), new: ObjectDef::Database(n), .. } => {
             o.name == maintenance_db
                 && (o.name != n.name
@@ -255,8 +257,12 @@ fn touches_maintenance(req: &PlanRequest, maintenance_db: &str) -> bool {
                     || (o.connection_limit != 0 && n.connection_limit == 0))
         }
         PlanRequest::Drop { def: ObjectDef::Database(d), .. } => d.name == maintenance_db,
+        PlanRequest::Create { def: ObjectDef::Database(d), .. } if d.template.as_deref() == Some(maintenance_db) => {
+            return Some(MAINTENANCE_TEMPLATE);
+        }
         _ => false,
-    }
+    };
+    refused.then_some(MAINTENANCE_DATABASE)
 }
 
 /// Kendi havuz bağlantılarımızın kapatılması gereken veritabanı (yeniden adlandırma / taşıma / silme).
@@ -392,8 +398,9 @@ struct Job {
     created: Option<ObjectDef>,
     /// Değiştirilen nesne (alter/drop).
     object: Option<ObjectRef>,
-    /// Çalıştırma öncesi ve sonrası havuzdan bırakılacak veritabanı (Database yeniden adlandırma/taşıma/silme).
-    release: Option<u32>,
+    /// Çalıştırma öncesi ve sonrası havuzdan bırakılacak veritabanları (Database yeniden adlandırma/taşıma/silme;
+    /// CREATE DATABASE'in şablonu).
+    release: Vec<u32>,
     /// Uygulama sonrası üyelikleri denetlenecek rol tanımı (Role create/alter).
     verify_role: Option<RoleDef>,
 }
@@ -460,9 +467,13 @@ impl DdlManager {
                 return Err(Error::Invalid(PLAN_CHANGED.into()));
             }
         }
-        // (4a)
-        if touches_maintenance(req, &guard.maintenance_db) {
-            return Err(Error::Invalid(MAINTENANCE_DATABASE.into()));
+        // (4a) Oturumun gerçekten bağlı olduğu bakım veritabanı da (kayıt bağlantıdan sonra değişmiş olabilir; inceleme
+        // G-7) kayıttaki ad da korunur.
+        let session_maintenance = self.mgr.session_maintenance_db(server).await;
+        for name in [Some(guard.maintenance_db.as_str()), session_maintenance.as_deref()].into_iter().flatten() {
+            if let Some(m) = maintenance_refusal(req, name) {
+                return Err(Error::Invalid(m.into()));
+            }
         }
         // (5)
         if view.hash != opts.expected_hash {
@@ -498,7 +509,7 @@ impl DdlManager {
             apply_id: opts.apply_id,
             created,
             object: object_check(req).map(|(o, _)| o),
-            release: database_to_release(req),
+            release: self.databases_to_release(server, req).await,
             verify_role,
         };
         self.execute(server, &view.statements, exec, job).await
@@ -526,7 +537,7 @@ impl DdlManager {
             });
         }
         // Kendi havuz bağlantımız (Gezgin/katalog) yeniden adlandırma/taşıma/silmeyi 55006 ile engellemesin (Karar 8).
-        if let Some(oid) = release {
+        for &oid in &release {
             self.mgr.release_database(server, oid).await;
         }
         let conn = match apply::open_apply_conn(&self.mgr, server, target, lock_timeout_ms).await {
@@ -547,7 +558,7 @@ impl DdlManager {
         // Uygulama bağlantısı, havuzdaki katalog sorgusundan (`find_created`) önce kapanır.
         drop(conn);
         // Arada (ör. Gezgin yenilemesi) açılmış bağlantı ve eski ad önbelleği de bırakılır.
-        if let Some(oid) = release {
+        for &oid in &release {
             self.mgr.release_database(server, oid).await;
         }
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -617,7 +628,7 @@ impl DdlManager {
             apply_id: Uuid::new_v4(),
             created: None,
             object: None,
-            release: None,
+            release: vec![],
             verify_role: None,
         };
         self.execute(server, statements, exec, job).await
@@ -663,6 +674,27 @@ impl DdlManager {
             });
         }
         n
+    }
+
+    /// Bırakılacak veritabanları: yeniden adlandırılan/taşınan/silinen veritabanı ve CREATE DATABASE şablonu (kendi havuz
+    /// bağlantımız kopyalamayı 55006 ile engellemesin; inceleme G-5). Şablon oid'i bulunamazsa (yok/yetki) atlanır.
+    async fn databases_to_release(&self, server: Uuid, req: &PlanRequest) -> Vec<u32> {
+        let mut out: Vec<u32> = database_to_release(req).into_iter().collect();
+        if let PlanRequest::Create { def: ObjectDef::Database(d), .. } = req
+            && let Some(template) = d.template.clone()
+        {
+            let row = self
+                .mgr
+                .run(server, Target::Maintenance, move |c| {
+                    let template = template.clone();
+                    async move { c.client.query_opt(FIND_DATABASE_SQL, &[&template]).await }
+                })
+                .await;
+            if let Ok(Some(r)) = row {
+                out.push(r.get::<_, u32>(0));
+            }
+        }
+        out
     }
 
     /// Yeni nesnenin oid'i (kimlik tür + şema + addan, havuzdaki katalog bağlantısıyla; Database/Role bakım
@@ -917,6 +949,7 @@ fn check_lock_timeout(ms: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error_codes::NEEDS_DATABASE;
     use serde_json::json;
 
     fn schema(name: &str) -> ObjectDef {
@@ -1061,6 +1094,35 @@ mod tests {
     fn lock_timeout_bound() {
         assert!(check_lock_timeout(MAX_STATEMENT_TIMEOUT_MS).is_ok());
         assert!(matches!(check_lock_timeout(MAX_STATEMENT_TIMEOUT_MS + 1), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn load_and_apply_targets_agree_for_every_kind() {
+        // Yükleme ve uygulama aynı işlevi kullanır; tüm türlerde ve her `database_oid` biçiminde aynı sonuç.
+        let kinds = [
+            ObjectKind::Schema,
+            ObjectKind::Sequence,
+            ObjectKind::Extension,
+            ObjectKind::Index,
+            ObjectKind::Table,
+            ObjectKind::View,
+            ObjectKind::MaterializedView,
+            ObjectKind::Database,
+            ObjectKind::Role,
+        ];
+        for k in kinds {
+            for db in [None, Some(5)] {
+                let a = target_for(k, db).map_err(|e| format!("{e:?}"));
+                let l = crate::load::target_for(k, db).map_err(|e| format!("{e:?}"));
+                assert_eq!(a, l, "{k:?} {db:?}");
+                let expected = match (k.server_scoped(), db) {
+                    (true, _) => Ok(Target::Maintenance),
+                    (false, Some(d)) => Ok(Target::Database(d)),
+                    (false, None) => Err(format!("{:?}", Error::Invalid(NEEDS_DATABASE.into()))),
+                };
+                assert_eq!(a, expected, "{k:?} {db:?}");
+            }
+        }
     }
 
     #[test]
@@ -1346,6 +1408,13 @@ mod tests {
         for r in [&comment, &limit] {
             assert!(!touches_maintenance(r, "postgres"), "{r:?}");
         }
+        // Bakım veritabanını şablon alan CREATE DATABASE ayrı iletiyle reddedilir.
+        let mut copy = d("kopya");
+        copy.template = Some("postgres".into());
+        let copy = PlanRequest::Create { def: ObjectDef::Database(copy), concurrently: false };
+        assert_eq!(maintenance_refusal(&copy, "postgres"), Some(MAINTENANCE_TEMPLATE));
+        assert_eq!(maintenance_refusal(&copy, "other"), None);
+        assert_eq!(maintenance_refusal(&drop, "postgres"), Some(MAINTENANCE_DATABASE));
         assert_eq!(database_to_release(&rename), Some(7));
         assert_eq!(database_to_release(&move_ts), Some(7));
         assert_eq!(database_to_release(&drop), Some(7));

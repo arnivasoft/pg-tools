@@ -380,6 +380,14 @@ impl ConnectionManager {
         result
     }
 
+    /// Bağlı oturumun GERÇEKTEN kullandığı bakım veritabanı adı (oturum açılışındaki yapılandırma; kayıt sonradan
+    /// değişmiş olabilir). Bağlı değilse `None`.
+    pub async fn session_maintenance_db(&self, server: Uuid) -> Option<String> {
+        let session = self.session(server).ok()?;
+        let s = session.state.lock().await;
+        Some(s.config.maintenance_db.clone())
+    }
+
     /// Havuzdaki `Target::Database(oid)` bağlantısını kapatır ve ad önbelleğinden siler (oturum bağlı kalır).
     /// Veritabanı yeniden adlandırma/silme/taşıma öncesi ve sonrası çağrılır (kendi bağlantımız 55006'ya yol
     /// açmasın; sonra eski ad önbellekte kalmasın); bağlı değilse sessizce döner. O an `run` içinde kullanılan

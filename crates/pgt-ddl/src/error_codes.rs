@@ -27,6 +27,9 @@ pub const PASSWORD_NOT_USED: &str = "Bu planda parola kullanılmıyor.";
 /// Bakım veritabanının kendisi hedeflendi; kodlu değildir (düz `invalid`).
 pub const MAINTENANCE_DATABASE: &str =
     "Bakım veritabanı yeniden adlandırılamaz, silinemez ya da taşınamaz; sunucu ayarlarından başka bir bakım veritabanı seçin.";
+/// Bakım veritabanı şablon olarak kopyalanmak istendi; kodlu değildir (düz `invalid`).
+pub const MAINTENANCE_TEMPLATE: &str = "Bakım veritabanı şablon olarak kullanılamaz (uygulamanın kendi bağlantısı ona bağlıdır); \
+     template0, template1 ya da başka bir veritabanı seçin.";
 /// Veritabanı kapsamlı türde `database_oid` yok; kodlu değildir (düz `invalid`).
 pub const NEEDS_DATABASE: &str = "Bu nesne türü bir veritabanı gerektirir.";
 
@@ -118,7 +121,7 @@ mod tests {
         assert_eq!(ddl_payload(&Error::NotConnected).code, "not_connected");
         assert_eq!(ddl_payload(&Error::NotFound("sunucu".into())).code, "not_found");
         // Kodsuz düz iletiler.
-        for m in [PASSWORD_NOT_USED, MAINTENANCE_DATABASE, NEEDS_DATABASE, NO_CHANGES, APPLY_ID_IN_USE] {
+        for m in [PASSWORD_NOT_USED, MAINTENANCE_DATABASE, MAINTENANCE_TEMPLATE, NEEDS_DATABASE, NO_CHANGES, APPLY_ID_IN_USE] {
             assert_eq!(ddl_payload(&Error::Invalid(m.into())).code, "invalid", "{m}");
         }
     }

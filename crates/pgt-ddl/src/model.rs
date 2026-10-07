@@ -498,7 +498,7 @@ pub struct DatabaseDef {
 }
 
 /// Parola niyeti; değer asla tanımda değildir (Karar 6).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum PasswordChange {
@@ -507,6 +507,23 @@ pub enum PasswordChange {
     Set,
     Clear,
 }
+
+/// Elle yazılmış girdi: serde'nin "unknown variant `…`" iletisi gelen değeri yankılardı; yanlış bağlanmış bir arayüz
+/// parolayı bu alana koyarsa IPC hata metnine düşerdi (inceleme G-10). İleti sabittir.
+impl<'de> Deserialize<'de> for PasswordChange {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = String::deserialize(d).map_err(|_| serde::de::Error::custom(PASSWORD_INTENT_MSG))?;
+        match v.as_str() {
+            "keep" => Ok(PasswordChange::Keep),
+            "set" => Ok(PasswordChange::Set),
+            "clear" => Ok(PasswordChange::Clear),
+            _ => Err(serde::de::Error::custom(PASSWORD_INTENT_MSG)),
+        }
+    }
+}
+
+/// Geçersiz parola niyeti iletisi (değer içermez).
+pub const PASSWORD_INTENT_MSG: &str = "Geçersiz parola niyeti: keep, set ya da clear bekleniyor.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

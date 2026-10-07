@@ -98,13 +98,23 @@ fn not_found(what: &str) -> Error {
     Error::NotFound(what.to_string())
 }
 
-/// Katalogdan tanım okur; yok ise `Error::NotFound`, sistem nesnesi ise `Error::Invalid`. Sunucu kapsamlı türlerde
-/// (Database/Role) `database_oid` yok sayılır (bakım bağlantısı); diğerlerinde `None` → `Invalid(NEEDS_DATABASE)`.
+/// Yükleme/uygulama hedefi (tek kural; `DdlManager::apply` de bunu kullanır, inceleme G-13): sunucu kapsamlı türler
+/// (Database/Role) bakım veritabanında (`database_oid` yok sayılır); diğerleri verilen veritabanında, yoksa
+/// `Invalid(NEEDS_DATABASE)`.
+pub(crate) fn target_for(kind: ObjectKind, database_oid: Option<u32>) -> Result<Target> {
+    match (kind.server_scoped(), database_oid) {
+        (true, _) => Ok(Target::Maintenance),
+        (false, Some(db)) => Ok(Target::Database(db)),
+        (false, None) => Err(Error::Invalid(crate::error_codes::NEEDS_DATABASE.to_string())),
+    }
+}
+
+/// Katalogdan tanım okur; yok ise `Error::NotFound`, sistem nesnesi ise `Error::Invalid`. Hedef `target_for` ile.
 pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into<Option<u32>> + Send, obj: ObjectRef) -> Result<ObjectDef> {
-    let database_oid = match (obj.kind.server_scoped(), database_oid.into()) {
-        (true, _) => 0,
-        (false, Some(db)) => db,
-        (false, None) => return Err(Error::Invalid(crate::error_codes::NEEDS_DATABASE.to_string())),
+    let database_oid = match target_for(obj.kind, database_oid.into())? {
+        Target::Database(db) => db,
+        // Sunucu kapsamlı yükleyiciler `Target::Maintenance` alır; bu değer kullanılmaz.
+        Target::Maintenance => 0,
     };
     match obj.kind {
         ObjectKind::Schema => load_schema(mgr, server, database_oid, obj.oid).await,
@@ -640,15 +650,18 @@ async fn load_matview(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) 
 // Database / Role (sunucu kapsamlı)
 // ---------------------------------------------------------------------------------------------------------------
 
-/// `setconfig` öğeleri (`ad=değer`, ilk `=`'den bölünür) → ayarlar: ad küçük harf (GUC adı harfe duyarsızdır; PG
-/// `TimeZone`/`DateStyle` gibi kanonik adı saklar, üretici dilbilgisi küçük harftir), ada göre sıralı (üreticinin
-/// `diff_settings` sırası). `=` içermeyen öğe (beklenmez) boş değerli ayar olur.
+/// `setconfig` öğeleri (`ad=değer`, ilk `=`'den bölünür) → ayarlar, ada göre sıralı (üreticinin `diff_settings` sırası).
+/// Ad: NOKTASIZ (yerleşik) adlar ASCII küçük harfe çevrilir (PG `TimeZone`/`DateStyle` gibi kanonik adı saklar; arama
+/// harfe duyarsız, üretici dilbilgisi küçük harf); NOKTALI özel adlar saklandığı gibi kalır (PG yazımı korur ve başka
+/// oturumda RESET/SET harfe duyarlı eşleşir — küçültmek RESET'i etkisiz, SET'i yinelenen kılardı, inceleme G-2).
+/// Katlama yalnızca ASCII'dir (PG `guc_name_compare`). `=` içermeyen öğe (beklenmez) boş değerli ayar olur.
 fn config_settings(items: &[String]) -> Vec<ConfigSetting> {
     let mut out: Vec<ConfigSetting> = items
         .iter()
         .map(|i| {
             let (k, v) = i.split_once('=').unwrap_or((i.as_str(), ""));
-            ConfigSetting { name: k.to_lowercase(), value: v.to_string() }
+            let name = if k.contains('.') { k.to_string() } else { k.to_ascii_lowercase() };
+            ConfigSetting { name, value: v.to_string() }
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -844,6 +857,15 @@ mod tests {
         for other in ["IN DATABASE d: work_mem=1", "MEMBER app", "INDEX m_i", "MEMBER app (grantor g"] {
             assert_eq!(unsupported_membership_role(other), None, "{other}");
         }
+    }
+
+    #[test]
+    fn config_settings_keeps_custom_names_and_folds_ascii_only() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let got = config_settings(&s(&["App.Mode=x", "DateStyle=ISO, MDY", "ÇAĞ=1", "ext.Ölçü=2", "pg_stat_statements.track=all"]));
+        let names: Vec<&str> = got.iter().map(|c| c.name.as_str()).collect();
+        // Noktalı adlar korunur; noktasızda yalnızca ASCII harfler küçülür.
+        assert_eq!(names, ["App.Mode", "datestyle", "ext.Ölçü", "pg_stat_statements.track", "ÇaĞ"]);
     }
 
     #[test]

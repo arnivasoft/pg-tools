@@ -76,6 +76,7 @@ async fn password_free_logging() {
             "already exists",
             ROLE_PASSWORD,
             OTHER_PASSWORD,
+            MASKED_PASSWORD,
             "SCRAM-SHA-256$",
             role.as_str(),
         ] {
@@ -143,4 +144,52 @@ async fn logging_body(ts: TestServer) {
             assert!(!text.contains(p), "{p:?} sızdı: {text}");
         }
     }
+
+    // G-11: GERÇEK (somutlaşmış) parola ifadesi sunucuda başarısız olur — CREATEROLE'lü süper kullanıcı olmayan rol bir
+    // süper kullanıcının parolasını değiştirmeye çalışır → 42501, gizlenmiş ifadede; konum yok, yükte/Debug'da/günlükte
+    // ne doğrulayıcı ne düz metin.
+    role_password_statement_failure_is_masked_end_to_end(&ts, &env).await;
 }
+
+async fn role_password_statement_failure_is_masked_end_to_end(ts: &TestServer, env: &common::Env) {
+    let base = cluster_name(ts, ObjectKind::Role, "mlog").await;
+    let (creator, sup) = (format!("{base}_c"), format!("{base}_s"));
+    let pw = format!("Pw{}", Uuid::new_v4().simple());
+    env.admin
+        .batch_execute(&format!(
+            "CREATE ROLE {creator} LOGIN CREATEROLE PASSWORD {}; CREATE ROLE {sup} SUPERUSER",
+            quote_literal(&pw)
+        ))
+        .await
+        .unwrap();
+    let mut config = ts.config.clone();
+    config.id = Uuid::new_v4();
+    config.username = creator.clone();
+    let mgr = Arc::new(pgt_core::connection::ConnectionManager::new());
+    if mgr.connect(config.clone(), Some(pw)).await.is_err() {
+        panic!("CREATEROLE rolüyle bağlanılamadı");
+    }
+    let (dm, _dir) = manager(&config, mgr.clone());
+    let oid: u32 = env.admin.query_one("SELECT oid FROM pg_roles WHERE rolname = $1::text", &[&sup]).await.unwrap().get(0);
+    let object = ObjectRef { kind: ObjectKind::Role, oid };
+    let ObjectDef::Role(loaded) = dm.load(config.id, None, object).await.unwrap() else { panic!() };
+    let mut new = loaded.clone();
+    new.password = PasswordChange::Set;
+    let req = PlanRequest::Alter { object, old: ObjectDef::Role(loaded), new: ObjectDef::Role(new) };
+    let view = dm.preview(config.id, None, &req).await.unwrap();
+    assert!(view.statements.len() == 1 && view.statements[0].redacted, "{view:?}");
+    let mut o = opts(&view.hash);
+    o.password = Some(secret(MASKED_PASSWORD));
+    let out = dm.apply(config.id, None, &req, o).await.unwrap();
+    let ApplyOutcome::Failed { failed_index, sqlstate, position, error, .. } = &out else { panic!("{out:?}") };
+    assert_eq!((*failed_index, sqlstate.as_deref(), *position), (0, Some("42501"), None));
+    for text in [error.message.clone(), format!("{:?}", error.detail), format!("{:?}", error.hint), format!("{out:?}"), serde_json::to_string(&out).unwrap()] {
+        for p in [MASKED_PASSWORD, "SCRAM-SHA-256$"] {
+            assert!(!text.contains(p), "{p:?} sızdı: {text}");
+        }
+    }
+    mgr.disconnect(config.id);
+}
+
+/// G-11 senaryosunun parolası (günlükte de aranır).
+const MASKED_PASSWORD: &str = "maskeli-parola-K4";

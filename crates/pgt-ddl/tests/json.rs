@@ -267,3 +267,27 @@ fn ddl_target_with_focus_serializes_as_the_frontend_expects() {
     assert_eq!((v["object"].clone(), v["databaseOid"].clone()), (json!({"kind": "view", "oid": 30}), json!(5)));
     assert_eq!(v["refreshNodeId"], format!("srv:{u}/db:5/sch:2200/views"));
 }
+
+#[test]
+fn password_intent_deserialize_error_does_not_echo_value() {
+    // Yanlış bağlanmış arayüz parolayı niyet alanına koyarsa hata iletisi değeri yankılamamalı.
+    let secret = "Gizli-Parola-7x9";
+    let mut v = defs()[8].1.clone();
+    v["password"] = json!(secret);
+    let e = serde_json::from_value::<ObjectDef>(v.clone()).unwrap_err().to_string();
+    assert!(!e.contains(secret), "{e}");
+    assert!(e.contains(PASSWORD_INTENT_MSG), "{e}");
+    let req = json!({"op": "create", "def": v, "concurrently": false});
+    let e = serde_json::from_value::<PlanRequest>(req).unwrap_err().to_string();
+    assert!(!e.contains(secret), "{e}");
+    // Dizge olmayan değer de yankılanmaz.
+    let mut n = defs()[8].1.clone();
+    n["password"] = json!(123456789);
+    let e = serde_json::from_value::<ObjectDef>(n).unwrap_err().to_string();
+    assert!(!e.contains("123456789"), "{e}");
+    for ok in ["keep", "set", "clear"] {
+        let mut v = defs()[8].1.clone();
+        v["password"] = json!(ok);
+        assert!(serde_json::from_value::<ObjectDef>(v).is_ok(), "{ok}");
+    }
+}

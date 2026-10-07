@@ -1906,3 +1906,135 @@ async fn locked_new_body(ts: TestServer) {
     assert!(!f.dm.lookup(f.server, None, LookupRequest::Settings).await.unwrap().is_empty());
     assert!(!f.dm.lookup(f.server, f.db, LookupRequest::Schemas).await.unwrap().is_empty());
 }
+
+// ---- denetim düzeltmeleri (G-2, G-5, G-7) ----
+
+#[tokio::test]
+async fn mixed_case_custom_guc_settings_round_trip() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(mixed_guc_body(ts.clone()), cleanup_both(ts.clone(), "m_mixguc", "mmixguc")).await;
+    }
+}
+
+/// Ham `setconfig` girdileri (bakımdaki `pg_db_role_setting`; veritabanı ya da rol satırı).
+async fn raw_settings(admin: &tokio_postgres::Client, db: Option<u32>, role: Option<u32>) -> Vec<String> {
+    let rows = admin
+        .query(
+            "SELECT unnest(setconfig)::text FROM pg_db_role_setting WHERE setdatabase = $1::oid AND setrole = $2::oid",
+            &[&db.unwrap_or(0), &role.unwrap_or(0)],
+        )
+        .await
+        .unwrap();
+    rows.iter().map(|r| r.get(0)).collect()
+}
+
+async fn mixed_guc_body(ts: TestServer) {
+    let env = setup(&ts, "m_mixguc").await;
+    let f = fx(&env, &ts, false, None);
+    let admin = &env.admin;
+    let role = cluster_name(&ts, ObjectKind::Role, "mmixguc").await;
+    let db = cluster_name(&ts, ObjectKind::Database, "mmixguc").await;
+    admin.batch_execute(&format!("CREATE ROLE {role}")).await.unwrap();
+    admin.batch_execute(&format!("CREATE DATABASE {db} TEMPLATE template0")).await.unwrap();
+    admin.batch_execute(&format!("ALTER ROLE {role} SET \"App.Mode\" = 'x'; ALTER DATABASE {db} SET \"App.Mode\" = 'x'")).await.unwrap();
+    let roid = role_oid(admin, &role).await.unwrap();
+    let doid = database_oid(admin, &db).await.unwrap();
+    let robj = ObjectRef { kind: ObjectKind::Role, oid: roid };
+    let dobj = ObjectRef { kind: ObjectKind::Database, oid: doid };
+    let mode = |v: &str| vec![ConfigSetting { name: "App.Mode".into(), value: v.into() }];
+
+    // Rol: yazım korunur, boş plan; değiştir → tek girdi; kaldır → yok.
+    let loaded = f.load_role(roid).await;
+    assert_eq!(loaded.settings, mode("x"));
+    let noop = PlanRequest::Alter { object: robj, old: ObjectDef::Role(loaded.clone()), new: ObjectDef::Role(loaded.clone()) };
+    assert!(f.preview(&noop).await.empty);
+    let mut changed = loaded.clone();
+    changed.settings = mode("y");
+    applied(f.apply(&PlanRequest::Alter { object: robj, old: ObjectDef::Role(loaded), new: ObjectDef::Role(changed) }).await);
+    assert_eq!(raw_settings(admin, None, Some(roid)).await, ["App.Mode=y"]);
+    let loaded = f.load_role(roid).await;
+    assert_eq!(loaded.settings, mode("y"));
+    let mut removed = loaded.clone();
+    removed.settings.clear();
+    applied(f.apply(&PlanRequest::Alter { object: robj, old: ObjectDef::Role(loaded), new: ObjectDef::Role(removed) }).await);
+    assert!(raw_settings(admin, None, Some(roid)).await.is_empty(), "RESET etkisiz kalmamalı");
+
+    // Veritabanı: aynı kurallar (transaction dışı ifadeler).
+    let loaded = f.load_database(doid).await;
+    assert_eq!(loaded.settings, mode("x"));
+    let noop = PlanRequest::Alter { object: dobj, old: ObjectDef::Database(loaded.clone()), new: ObjectDef::Database(loaded.clone()) };
+    assert!(f.preview(&noop).await.empty);
+    let mut changed = loaded.clone();
+    changed.settings = mode("y");
+    applied(f.apply(&PlanRequest::Alter { object: dobj, old: ObjectDef::Database(loaded), new: ObjectDef::Database(changed) }).await);
+    assert_eq!(raw_settings(admin, Some(doid), None).await, ["App.Mode=y"]);
+    let loaded = f.load_database(doid).await;
+    let mut removed = loaded.clone();
+    removed.settings.clear();
+    applied(f.apply(&PlanRequest::Alter { object: dobj, old: ObjectDef::Database(loaded), new: ObjectDef::Database(removed) }).await);
+    assert!(raw_settings(admin, Some(doid), None).await.is_empty(), "RESET etkisiz kalmamalı");
+    // Yerleşik ad hâlâ küçük harfe katlanır.
+    admin.batch_execute(&format!("ALTER ROLE {role} SET TimeZone = 'UTC'")).await.unwrap();
+    assert_eq!(f.load_role(roid).await.settings, vec![ConfigSetting { name: "timezone".into(), value: "UTC".into() }]);
+}
+
+#[tokio::test]
+async fn create_database_from_pooled_template_is_released_or_refused() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(pooled_template_body(ts.clone()), cleanup_both(ts.clone(), "m_pooltpl", "mpooltpl")).await;
+    }
+}
+
+async fn pooled_template_body(ts: TestServer) {
+    let env = setup(&ts, "m_pooltpl").await;
+    let f = fx(&env, &ts, false, None);
+    let base = cluster_name(&ts, ObjectKind::Database, "mpooltpl").await;
+    // Bakım veritabanını şablon almak: uygulamanın kendi bakım bağlantısı → bağlantı açılmadan açık ret.
+    let mut copy = database_def(&format!("{base}_m"));
+    copy.template = Some(ts.config.maintenance_db.clone());
+    let r = f.apply(&create(ObjectDef::Database(copy))).await;
+    assert_eq!(invalid_message(&r), error_codes::MAINTENANCE_TEMPLATE);
+    assert_eq!(database_oid(&env.admin, &format!("{base}_m")).await, None);
+    // Gezginin havuzda bağlı olduğu veritabanı (açılır liste çalıştı) şablon olarak kopyalanır: yönetici kendi havuz
+    // bağlantısını bırakır (aksi halde 55006).
+    let source = format!("{base}_t");
+    env.admin.batch_execute(&format!("CREATE DATABASE {source} TEMPLATE template0")).await.unwrap();
+    let soid = database_oid(&env.admin, &source).await.unwrap();
+    assert!(!f.dm.lookup(f.server, Some(soid), LookupRequest::Schemas).await.unwrap().is_empty());
+    let mut copy = database_def(&format!("{base}_c"));
+    copy.template = Some(source);
+    let created = created_of(f.apply(&create(ObjectDef::Database(copy))).await).expect("created");
+    assert_eq!(Some(created.oid), database_oid(&env.admin, &format!("{base}_c")).await);
+    // Kaynak veritabanı yeniden kullanılabilir (havuz yeniden bağlanır).
+    assert!(!f.dm.lookup(f.server, Some(soid), LookupRequest::Schemas).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn maintenance_gate_follows_connected_database() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(gate_session_body(ts.clone()), cleanup(&ts, "m_gatesess")).await;
+    }
+}
+
+async fn gate_session_body(ts: TestServer) {
+    let env = setup(&ts, "m_gatesess").await;
+    // Kayıttaki bakım veritabanı bağlantıdan SONRA değişti (yeniden bağlanılmadı): oturum hâlâ özgün veritabanında.
+    let mut edited = ts.config.clone();
+    edited.maintenance_db = "template1".into();
+    let (dm, dir) = manager(env.mgr.clone(), &edited, false, None);
+    let f = Fx { dm, server: env.server, db: env.db_oid, _dir: dir };
+    let oid = database_oid(&env.admin, &ts.config.maintenance_db).await.unwrap();
+    let loaded = f.load_database(oid).await;
+    let mut renamed = loaded.clone();
+    renamed.name = format!("{}_x", loaded.name);
+    let object = ObjectRef { kind: ObjectKind::Database, oid };
+    let r = f.apply(&PlanRequest::Alter { object, old: ObjectDef::Database(loaded.clone()), new: ObjectDef::Database(renamed) }).await;
+    assert_eq!(invalid_message(&r), error_codes::MAINTENANCE_DATABASE);
+    let drop = PlanRequest::Drop { object, def: ObjectDef::Database(loaded), cascade: false, force: false };
+    let r = f.apply_with(&drop, |o| (o.confirmed, o.confirmed_production) = (true, true)).await;
+    assert_eq!(invalid_message(&r), error_codes::MAINTENANCE_DATABASE);
+    assert_eq!(database_oid(&env.admin, &ts.config.maintenance_db).await, Some(oid));
+}

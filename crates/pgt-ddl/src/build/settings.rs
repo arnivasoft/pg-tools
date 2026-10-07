@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use super::err;
+use super::type_syntax::is_spoofing_format;
 use crate::model::{ConfigSetting, FieldError};
 use crate::quote::{quote_ident, quote_literal};
 
@@ -22,6 +23,8 @@ pub const LIST_QUOTE_GUCS: [&str; 6] = [
 
 /// GUC adı üst sınırı (karakter; dilbilgisi yalnızca ASCII kabul eder).
 pub const MAX_GUC_NAME: usize = 128;
+/// Ad parçası üst sınırı (bayt; PG tanımlayıcı sınırı NAMEDATALEN-1 — aşan parçayı sunucu sessizce keser).
+pub const MAX_GUC_PART_BYTES: usize = 63;
 const DUPLICATE_MSG: &str = "Bu ayar birden çok kez tanımlanmış.";
 /// GUC değeri üst sınırı (bayt).
 pub const MAX_GUC_VALUE_BYTES: usize = 4096;
@@ -30,19 +33,40 @@ fn is_list_guc(name: &str) -> bool {
     LIST_QUOTE_GUCS.contains(&name)
 }
 
-/// `^[a-z_][a-z0-9_$]*(\.[a-z_][a-z0-9_$]*)*$`
+/// Noktasız (yerleşik) ad: `^[a-z_][a-z0-9_$]*$`; noktalı (özel/eklenti) ad: her parça `[A-Za-z_][A-Za-z0-9_$]*`
+/// (PG özel adların yazımını korur: `"App.Mode"` öyle saklanır). Parça ≤ 63 bayt ayrıca denetlenir.
 fn valid_guc_name(name: &str) -> bool {
+    let dotted = name.contains('.');
     name.split('.').all(|part| {
+        let lower_ok = |c: char| c.is_ascii_lowercase() || (dotted && c.is_ascii_uppercase());
         let mut chars = part.chars();
-        matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c == '_')
-            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$')
+        matches!(chars.next(), Some(c) if lower_ok(c) || c == '_')
+            && chars.all(|c| lower_ok(c) || c.is_ascii_digit() || c == '_' || c == '$')
     })
 }
 
-/// Ad büyük/küçük harf KARARI (inceleme I-1): PG `ALTER … SET` sırasında adı kanonik yazımına çevirip saklar
-/// (`timezone` → `TimeZone`, `DateStyle`, `IntervalStyle`). Bu yüzden:
-/// - yükleyiciler (Task 6/7) ayar adlarını **küçük harfe çevirerek** döndürür (GUC araması harfe duyarsızdır);
-/// - YENİ taraf dilbilgisi yalnızca küçük harftir; büyük harfli ad açık bir "küçük harfle yazın" iletisiyle reddedilir;
+/// Ad karşılaştırma anahtarı: PG `guc_name_compare` gibi yalnızca ASCII harf katlanır.
+fn name_key(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
+
+/// Bu yeni girdi alter'da YAZILIR mı (eskiyle aynı değilse)? `diff_settings` ile aynı ölçüt (son yinelenen kazanır):
+/// doğrulama tam olarak yazılan girdileri kapsar (inceleme G-1).
+fn written(old_map: &BTreeMap<&str, &str>, s: &ConfigSetting) -> bool {
+    old_map.get(s.name.as_str()) != Some(&s.value.as_str())
+}
+
+fn old_values(old: &[ConfigSetting]) -> BTreeMap<&str, &str> {
+    old.iter().map(|s| (s.name.as_str(), s.value.as_str())).collect()
+}
+
+/// Ad büyük/küçük harf KARARI (inceleme I-1, G-2): PG `ALTER … SET` sırasında yerleşik adı kanonik yazımına çevirip
+/// saklar (`timezone` → `TimeZone`, `DateStyle`, `IntervalStyle`); özel (noktalı) adları ise YAZILDIĞI gibi saklar
+/// (`"App.Mode"`) ve başka oturumda yer tutucu olmadığından RESET/SET harfe duyarlı eşleşir. Bu yüzden:
+/// - yükleyiciler yalnızca NOKTASIZ adları ASCII küçük harfe çevirir; noktalı adlar saklandığı gibi döner;
+/// - YENİ taraf dilbilgisi noktasız adlarda yalnızca küçük harftir (büyük harfli ad açık bir "küçük harfle yazın"
+///   iletisiyle reddedilir); noktalı adlarda büyük harf serbesttir (yazım korunur, parçalar `quote_ident` ile);
+/// - yinelenen ad denetimi ASCII harfe duyarsızdır (`App.Mode` ile `app.mode` aynı listede olamaz);
 /// - ESKİ taraf adları (yalnızca `RESET` hedefi) katı dilbilgisinden geçmez: `validate_old_setting_names` yalnızca
 ///   boş/NUL/denetim karakteri denetler (yükleyici küçültmeyi unutsa ya da eski bir istemci kanonik adı gönderse bile
 ///   `RESET "TimeZone"` güvenli ve geçerlidir; ad yalnızca `quote_ident` ile yerleşir).
@@ -57,7 +81,8 @@ pub fn validate_settings(list: &[ConfigSetting], errs: &mut Vec<FieldError>) {
 /// zaman** tüm yeni listede çalışır (inceleme M-1): `[a=2, a=1]` gibi bir listede ikinci girdi yüklü değerle aynı olsa
 /// bile hata verir; aksi halde `diff_settings` son girdiyi seçer ve kullanıcının `a=2`'si sessizce kaybolurdu.
 pub fn validate_written_settings(old: &[ConfigSetting], new: &[ConfigSetting], errs: &mut Vec<FieldError>) {
-    validate_settings_where(new, |s| !old.contains(s), errs);
+    let old_map = old_values(old);
+    validate_settings_where(new, |s| written(&old_map, s), errs);
 }
 
 /// `check(s)` false ise girdinin ad dilbilgisi ve değeri atlanır; yinelenen ad denetimi yine yapılır.
@@ -67,7 +92,7 @@ fn validate_settings_where(list: &[ConfigSetting], check: impl Fn(&ConfigSetting
         let np = format!("settings[{i}].name");
         let vp = format!("settings[{i}].value");
         if !check(s) {
-            if !seen.insert(s.name.as_str()) {
+            if !seen.insert(name_key(&s.name)) {
                 errs.push(err(&np, DUPLICATE_MSG));
             }
             continue;
@@ -75,7 +100,7 @@ fn validate_settings_where(list: &[ConfigSetting], check: impl Fn(&ConfigSetting
         let name_ok = if s.name.chars().count() > MAX_GUC_NAME {
             errs.push(err(&np, format!("Ayar adı en çok {MAX_GUC_NAME} karakter olabilir.")));
             false
-        } else if !valid_guc_name(&s.name) && valid_guc_name(&s.name.to_ascii_lowercase()) {
+        } else if !s.name.contains('.') && !valid_guc_name(&s.name) && valid_guc_name(&s.name.to_ascii_lowercase()) {
             errs.push(err(
                 &np,
                 format!(
@@ -87,10 +112,14 @@ fn validate_settings_where(list: &[ConfigSetting], check: impl Fn(&ConfigSetting
         } else if !valid_guc_name(&s.name) {
             errs.push(err(
                 &np,
-                "Ayar adı geçersiz: küçük harf, rakam, '_' ve '$' (ör. work_mem, app.mode); parçalar '.' ile ayrılır.",
+                "Ayar adı geçersiz: küçük harf, rakam, '_' ve '$' (ör. work_mem, app.mode); parçalar '.' ile ayrılır \
+                 (yalnızca noktalı özel adlarda büyük harf korunur).",
             ));
             false
-        } else if !seen.insert(s.name.as_str()) {
+        } else if s.name.split('.').any(|p| p.len() > MAX_GUC_PART_BYTES) {
+            errs.push(err(&np, format!("Ayar adının her parçası en çok {MAX_GUC_PART_BYTES} bayt olabilir.")));
+            false
+        } else if !seen.insert(name_key(&s.name)) {
             errs.push(err(&np, DUPLICATE_MSG));
             false
         } else {
@@ -100,6 +129,8 @@ fn validate_settings_where(list: &[ConfigSetting], check: impl Fn(&ConfigSetting
             errs.push(err(&vp, "Değer NUL karakteri içeremez."));
         } else if s.value.chars().any(char::is_control) {
             errs.push(err(&vp, "Değer denetim karakteri (satır sonu, sekme vb.) içeremez."));
+        } else if s.value.chars().any(is_spoofing_format) {
+            errs.push(err(&vp, "Değer görünmez biçim/yön karakteri (ör. U+202E, U+200B) içeremez."));
         } else if s.value.len() > MAX_GUC_VALUE_BYTES {
             errs.push(err(&vp, format!("Değer en çok {MAX_GUC_VALUE_BYTES} bayt olabilir.")));
         } else if name_ok
@@ -122,6 +153,9 @@ pub fn validate_old_setting_names(prefix: &str, list: &[ConfigSetting], errs: &m
             errs.push(err(&np, "Ayar adı NUL karakteri içeremez."));
         } else if s.name.chars().any(char::is_control) {
             errs.push(err(&np, "Ayar adı denetim karakteri (satır sonu, sekme vb.) içeremez."));
+        } else if s.name.split('.').any(str::is_empty) {
+            // PG boş parçalı ad saklamaz; `RESET "".x` yalnızca sözdizimi hatası olurdu (inceleme G-4).
+            errs.push(err(&np, "Ayar adında boş parça olamaz ('.x', 'a..b', 'a.')."));
         }
     }
 }
@@ -208,15 +242,12 @@ pub fn guc_assignment_sql(s: &ConfigSetting) -> String {
 }
 
 /// Fark: (kaldırılan adlar, eklenen/değişen ayarlar), her ikisi ad sırasıyla (deterministik).
+/// Yazılan her girdi `validate_written_settings`'in `written` ölçütüyle doğrulanmıştır (aynı işlev).
 pub fn diff_settings<'a>(old: &'a [ConfigSetting], new: &'a [ConfigSetting]) -> (Vec<&'a str>, Vec<&'a ConfigSetting>) {
-    let old_map: BTreeMap<&str, &str> = old.iter().map(|s| (s.name.as_str(), s.value.as_str())).collect();
+    let old_map = old_values(old);
     let new_map: BTreeMap<&str, &ConfigSetting> = new.iter().map(|s| (s.name.as_str(), s)).collect();
     let removed = old_map.keys().filter(|n| !new_map.contains_key(*n)).copied().collect();
-    let set = new_map
-        .values()
-        .filter(|s| old_map.get(s.name.as_str()) != Some(&s.value.as_str()))
-        .copied()
-        .collect();
+    let set = new_map.values().filter(|s| written(&old_map, s)).copied().collect();
     (removed, set)
 }
 
@@ -276,9 +307,12 @@ mod tests {
         for ok in ["work_mem", "app.mode", "a_b.c$d", "_x", "a1.b2"] {
             assert!(paths(&[s(ok, "1")]).is_empty(), "{ok:?}");
         }
-        assert!(paths(&[s(&"a".repeat(128), "1")]).is_empty());
+        // 128 karakter (parça başına ≤ 63 bayt) sınırda kabul.
+        let max = format!("{}.{}.c", "a".repeat(63), "b".repeat(62));
+        assert_eq!(max.len(), 128);
+        assert!(paths(&[s(&max, "1")]).is_empty());
         let long = "a".repeat(129);
-        for bad in ["", "Work_Mem", "a-b", "a..b", ".a", "a.", "a b", "a;b", "1a", long.as_str(), "a\0", "a\"b", "ş", "a.1b"] {
+        for bad in ["", "Work_Mem", "a-b", "a..b", ".a", "a.", "a b", "a;b", "1a", long.as_str(), "a\0", "a\"b", "ş", "a.1b", "App.ş"] {
             assert_eq!(paths(&[s(bad, "1")]), ["settings[0].name"], "{bad:?}");
         }
         let big = "x".repeat(4097);
@@ -356,6 +390,111 @@ mod tests {
         // Yinelenen değişmeyen girdi de yakalanır; tam doğrulamayla aynı yol.
         assert_eq!(w(&old, &[s("TimeZone", "UTC"), s("TimeZone", "UTC")]), dup(1));
         assert_eq!(paths(&[s("a", "2"), s("a", "1")]), ["settings[1].name"]);
+    }
+
+    #[test]
+    fn written_settings_validate_every_emitted_entry_when_old_has_duplicate_names() {
+        let nul = format!("x{}X", char::from(0));
+        for bad in [nul.as_str(), "x\nX", "a\u{202e}b"] {
+            // Eski tarafta aynı ad iki kez (son kazanır: `1`); yeni girdi ilk (son olmayan) eski değere eşit → yazılır.
+            let old = [s("app.a", bad), s("app.a", "1")];
+            let new = [s("app.a", bad)];
+            let (_, set) = diff_settings(&old, &new);
+            assert_eq!(set.len(), 1, "yazılıyor");
+            let mut e = vec![];
+            validate_written_settings(&old, &new, &mut e);
+            assert_eq!(e.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["settings[0].value"], "{bad:?}");
+        }
+        // Ad tarafı: büyük harfli noktasız ad aynı yolla yazılırdı.
+        let old = [s("Work_Mem", "1"), s("Work_Mem", "2")];
+        let new = [s("Work_Mem", "1")];
+        let mut e = vec![];
+        validate_written_settings(&old, &new, &mut e);
+        assert_eq!(e[0].path, "settings[0].name");
+        // Üreticiler doğrulamadan önce yazmaz: rol ve veritabanı alter'ı panik yerine alan hatası döndürür.
+        use crate::build::{BuildCtx, alter};
+        use crate::model::ObjectDef;
+        let ctx = BuildCtx { version_num: 160000, concurrently: false };
+        let role = |settings: Vec<ConfigSetting>| {
+            ObjectDef::Role(crate::model::RoleDef {
+                name: "r".into(),
+                login: false,
+                superuser: false,
+                createdb: false,
+                createrole: false,
+                inherit: true,
+                replication: false,
+                bypassrls: false,
+                connection_limit: -1,
+                valid_until: None,
+                password: crate::model::PasswordChange::Keep,
+                member_of: vec![],
+                settings,
+                comment: None,
+                unsupported: vec![],
+            })
+        };
+        let r = alter(&role(vec![s("app.a", &nul), s("app.a", "1")]), &role(vec![s("app.a", &nul)]), &ctx);
+        assert!(r.is_err_and(|e| e.iter().any(|e| e.path == "settings[0].value")));
+        let db = |settings: Vec<ConfigSetting>| {
+            ObjectDef::Database(crate::model::DatabaseDef {
+                name: "d".into(),
+                owner: Some("o".into()),
+                template: None,
+                encoding: Some("UTF8".into()),
+                locale_provider: None,
+                lc_collate: Some("C".into()),
+                lc_ctype: Some("C".into()),
+                provider_locale: None,
+                tablespace: Some("pg_default".into()),
+                connection_limit: -1,
+                is_template: false,
+                allow_connections: true,
+                settings,
+                comment: None,
+            })
+        };
+        let r = alter(&db(vec![s("app.a", &nul), s("app.a", "1")]), &db(vec![s("app.a", &nul)]), &ctx);
+        assert!(r.is_err_and(|e| e.iter().any(|e| e.path == "settings[0].value")));
+    }
+
+    #[test]
+    fn guc_name_parts_over_63_bytes_are_rejected() {
+        let ok = format!("app.{}", "a".repeat(63));
+        assert!(paths(&[s(&ok, "1")]).is_empty());
+        let bad = format!("app.{}", "a".repeat(64));
+        assert_eq!(paths(&[s(&bad, "1")]), ["settings[0].name"]);
+        let mut e = vec![];
+        validate_settings(&[s(&"b".repeat(64), "1")], &mut e);
+        assert!(e[0].message.contains("63"), "{e:?}");
+    }
+
+    #[test]
+    fn old_setting_names_reject_empty_segments() {
+        let mut e = vec![];
+        validate_old_setting_names("old.", &[s(".x", ""), s("a..b", ""), s("a.", ""), s("App.Mode", ""), s("TimeZone", "")], &mut e);
+        let p: Vec<_> = e.into_iter().map(|e| e.path).collect();
+        assert_eq!(p, ["old.settings[0].name", "old.settings[1].name", "old.settings[2].name"]);
+    }
+
+    #[test]
+    fn setting_values_reject_spoofing_format_chars() {
+        for bad in ["a\u{202e}b", "\u{200b}", "x\u{2066}y", "\u{feff}"] {
+            assert_eq!(paths(&[s("work_mem", bad)]), ["settings[0].value"], "{bad:?}");
+        }
+        assert!(paths(&[s("app.note", "çağrı ünlü")]).is_empty());
+    }
+
+    #[test]
+    fn dotted_custom_names_keep_case_and_duplicates_fold_ascii() {
+        assert!(paths(&[s("App.Mode", "x")]).is_empty());
+        assert_eq!(guc_name_sql("App.Mode"), "\"App\".\"Mode\"");
+        // Noktasız ad yine küçük harf ister.
+        let mut e = vec![];
+        validate_settings(&[s("Work_Mem", "1")], &mut e);
+        assert!(e[0].message.contains("küçük harfle yazılmalı"), "{e:?}");
+        // ASCII harfe duyarsız yinelenen.
+        assert_eq!(paths(&[s("App.Mode", "x"), s("app.mode", "y")]), ["settings[1].name"]);
     }
 
     #[test]
