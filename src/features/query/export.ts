@@ -4,6 +4,7 @@
 // Üzerine yazma onayı: Windows'ta yerel kaydet diyaloğu (rfd 0.17, IFileSaveDialog varsayılan FOS_OVERWRITEPROMPT)
 // var olan dosya için kendisi sorar (spec §8); bu yüzden ayrıca kendi onayımız ve `fs_exists` yoktur.
 import { t } from "../../app/strings";
+import { texp } from "./strings-export";
 import type { CsvOptions } from "../../ipc/bindings/CsvOptions";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { ExportSummary } from "../../ipc/bindings/ExportSummary";
@@ -31,7 +32,7 @@ export function exportTarget(plans: StmtPlan[], hasSession: boolean, preferredIn
 export function statementLabel(index: number, sql: string): string {
   const flat = Array.from(sql.replace(/\s+/g, " ").trim());
   const head = flat.slice(0, 80).join("") + (flat.length > 80 ? "…" : "");
-  return t.query.export.statementLabel(index + 1, head);
+  return texp.statementLabel(index + 1, head);
 }
 
 /** Aktarılacak SQL: yalnızca hedef ifadenin metni (betiğin diğer ifadeleri değil). */
@@ -46,13 +47,13 @@ const MAX_BASE = 100;
 export function sanitizeFileBase(raw: string): string {
   let base = raw.replace(/[\x5c/:*?"<>|\u0000-\u001f]/g, "_");
   base = Array.from(base).slice(0, MAX_BASE).join("").replace(/[. ]+$/, "").trim();
-  if (base === "") base = t.query.export.defaultName;
+  if (base === "") base = texp.defaultName;
   return RESERVED.test(base) ? `_${base}` : base;
 }
 
 /** `<tablo|sorgu>-<YYYYMMDD-HHmm>.csv`; yerel saat. */
 export function defaultFileName(relation: string | null, now: Date): string {
-  const base = sanitizeFileBase(relation?.trim() || t.query.export.defaultName);
+  const base = sanitizeFileBase(relation?.trim() || texp.defaultName);
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
   return `${base}-${stamp}.csv`;
 }
@@ -78,8 +79,8 @@ export type ExportOutcome =
 export function exportErrorHint(error: ErrorPayload): string | null {
   const known = hintFor(error);
   if (known) return known;
-  if (error.code === "busy") return t.query.export.busy;
-  return error.code === "config" ? t.query.export.lockedTarget : null;
+  if (error.code === "busy") return texp.busy;
+  return error.code === "config" ? texp.lockedTarget : null;
 }
 
 /**

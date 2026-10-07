@@ -1,6 +1,7 @@
 import { save } from "@tauri-apps/plugin-dialog";
 import { For, createSignal } from "solid-js";
 import { t } from "../../app/strings";
+import { texp } from "./strings-export";
 import { toast } from "../../app/toast";
 import type { CsvDelimiter } from "../../ipc/bindings/CsvDelimiter";
 import type { CsvOptions } from "../../ipc/bindings/CsvOptions";
@@ -22,7 +23,7 @@ export function createExportUi() {
   const [running, setRunning] = createSignal(false);
   const [rows, setRows] = createSignal(0);
   const [opts, setOpts] = createSignal<CsvOptions>(DEFAULT_CSV_OPTIONS);
-  const e = t.query.export;
+  const e = texp;
 
   const [label, setLabel] = createSignal("");
   const askOptions = (stmtLabel: string) =>

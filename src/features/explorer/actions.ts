@@ -7,7 +7,19 @@ import type { ExplorerController } from "./controller";
 import { ROOT, ancestorOfKind, isCollection, serverOf, type TreeState } from "./tree-model";
 import { canOpenQueryTool } from "../query/open-kinds";
 import { canOpenDashboard } from "../dashboard/open-kinds";
-import { canCreateIn, canEditObject } from "../designer/ddl-kinds";
+import { canCreateIn, canEditObject, isTableRowKind } from "../designer/ddl-kinds";
+
+/** Kolon/kısıt düğümünün sahibi (koleksiyonlar atlanarak ilk ata) tablo mu (görünüm/MV kolonu ya da domain kısıtı değil). */
+function ownedByTable(s: TreeState, id: string): boolean {
+  let cur = s.parent.get(id);
+  while (cur !== undefined && cur !== ROOT) {
+    const kind = s.nodes.get(cur)?.kind;
+    if (!kind) return false;
+    if (!isCollection(kind)) return kind === "table";
+    cur = s.parent.get(cur);
+  }
+  return false;
+}
 
 export type ActionId =
   | "refresh" | "connect" | "disconnect" | "editServer" | "deleteServer"
@@ -93,6 +105,7 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
   if (isCollection(node.kind)) return canCreateIn(node.kind) ? ["createObject", "refresh", "copyName"] : ["refresh", "copyName"];
   const out: ActionId[] = [...q];
   if (canEditObject(node.kind)) out.push("editObject", "renameObject", "dropObject");
+  else if (isTableRowKind(node.kind) && ownedByTable(s, node.id)) out.push("editObject");
   if (node.hasChildren) out.push("refresh");
   out.push("copyName");
   if (qualifiedParts(s, node.id) !== null) out.push("copyQualifiedName");
