@@ -33,6 +33,7 @@ import { sqlLookExtensions } from "../inspector/codemirror-setup";
 import { mapMarks, type CheckView, type LintMark } from "./check-model";
 import { formatTransaction } from "./format-edit";
 import { scopeFromEditor } from "./offsets";
+import { tqt } from "./strings-querytab";
 
 export type RunKind = "stmt" | "all";
 export type ErrorRange = { from: number; to: number };
@@ -172,12 +173,12 @@ const lintHover = hoverTooltip((view, pos) => {
         const row = document.createElement("div");
         const label = document.createElement("span");
         label.className = m.severity === "error" ? "cm-lint-label-error" : "cm-lint-label-info";
-        label.textContent = m.severity === "error" ? t.query.check.error : t.query.check.info;
+        label.textContent = m.severity === "error" ? tqt.check.error : tqt.check.info;
         row.append(label, ` ${lintText(m)}`);
         if (m.severity === "info") {
           const hint = document.createElement("div");
           hint.className = "cm-lint-hint";
-          hint.textContent = t.query.check.infoHint;
+          hint.textContent = tqt.check.infoHint;
           row.append(hint);
         }
         dom.appendChild(row);

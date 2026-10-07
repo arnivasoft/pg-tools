@@ -7,6 +7,7 @@ import { Button } from "../../ui/Button";
 import { isProductionLabel } from "../servers/server-form";
 import type { TabModel } from "./query-controller";
 import { canCancel, canCommit, canRollback } from "./run-model";
+import { tqt } from "./strings-querytab";
 import { TIMEOUT_CHOICES, formatElapsed, serverLineColor } from "./workspace-model";
 
 const selectClass =
@@ -149,8 +150,8 @@ export function ContextBar(props: {
             variant="ghost"
             class="h-7 text-[12px]"
             aria-pressed={!m().checkOff}
-            aria-label={t.query.check.toggle}
-            title={!m().session || m().serverGone ? t.query.check.unavailable : m().checkOff ? t.query.check.toggleOff : t.query.check.toggleOn}
+            aria-label={tqt.check.toggle}
+            title={!m().session || m().serverGone ? tqt.check.unavailable : m().checkOff ? tqt.check.toggleOff : tqt.check.toggleOn}
             disabled={!m().session || m().serverGone}
             onClick={() => props.onToggleCheck()}
           >

@@ -9,6 +9,7 @@ import { Inspector } from "../features/inspector/Inspector";
 import { ROOT } from "../features/explorer/tree-model";
 import type { Dashboard } from "../features/dashboard/dash-open";
 import type { Designer } from "../features/designer/designer-open";
+import type { Data } from "../features/data/data-open";
 import { createPasswordPrompt } from "../features/servers/PasswordPrompt";
 import { groupsOf } from "../features/servers/server-form";
 import { createQueryController } from "../features/query/query-controller";
@@ -69,6 +70,9 @@ export default function App() {
       setDesigner(m.createDesigner({ ...lazyDeps(), query, explorer: explorer.controller })),
     ),
   );
+  // Veri düzenleyici de tembel: ilk "Verileri Görüntüle/Düzenle"de yüklenir.
+  const [data, setData] = createSignal<Data | null>(null);
+  const loadData = once(() => import("../features/data/data-open").then((m) => setData(m.createData(lazyDeps()))));
   const loadFailed = (err: unknown) => toast.show(toPayload(err).message, "error");
   const query = createQueryController({
     api: commands,
@@ -77,9 +81,9 @@ export default function App() {
     connect: connectServer,
     serversChanged: () => void explorer.controller.reloadServers().catch(() => {}),
     // Arka uç sunucunun dashboard oturumlarını da kapatır (sil/kes/kayıt değişimi): sekmeler "bağlantı kesildi".
-    // Designer sekmeleri de "bağlantı kesildi" olur ve istek atmaz.
+    // Designer ve veri sekmeleri de "bağlantı kesildi" olur ve istek atmaz.
     sessionsClosed: (serverId, gone) => {
-      for (const x of [dash(), designer()]) x?.ctl.serverSessionsClosed(serverId, gone);
+      for (const x of [dash(), designer(), data()]) x?.ctl.serverSessionsClosed(serverId, gone);
     },
   });
   const [themePref, setThemePref] = createSignal(loadThemePreference());
@@ -117,6 +121,7 @@ export default function App() {
     openQueryTool: (id) => void query.openFromNode(id),
     openDashboard: (id) => void loadDash().then((d) => d.openFromNode(id), loadFailed),
     openDesigner: (id, mode) => void loadDesigner().then((d) => d.open(id, mode), loadFailed),
+    openData: (id) => void loadData().then((d) => d.open(id), loadFailed),
     beforeServerChange: query.confirmServerChange,
     afterServerChange: (serverId, gone) => {
       query.serverSessionsClosed(serverId, gone);
@@ -250,6 +255,7 @@ export default function App() {
             onReopenDash={(id) => void dash()?.reopen(id)}
             designer={() => designer()?.ctl ?? null}
             onOpenScript={(input) => designer()?.openScript(input)}
+            data={() => data()?.ctl ?? null}
           />
         }
       />

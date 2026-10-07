@@ -1,5 +1,5 @@
-// Sağ panel: sabit "Nesne" sekmesi (Inspector) + sorgu + dashboard + designer sekmeleri. Ana pakette kalır; çalışma
-// alanı (CodeMirror, ızgara) ilk sorgu sekmesi etkinleşene kadar, dashboard/designer gövdeleri ilk sekmeleri açılana kadar
+// Sağ panel: sabit "Nesne" sekmesi (Inspector) + sorgu + dashboard + designer + veri sekmeleri. Ana pakette kalır; çalışma
+// alanı (CodeMirror, ızgara) ilk sorgu sekmesi etkinleşene kadar, dashboard/designer/veri gövdeleri ilk sekmeleri açılana kadar
 // inmeyen tembel parçalardır.
 import { Lock, X } from "lucide-solid";
 import { For, Show, Suspense, createSignal, lazy, onCleanup, onMount, type JSX } from "solid-js";
@@ -7,10 +7,11 @@ import { t } from "../../app/strings";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import type { DashController } from "../dashboard/dash-controller";
+import type { DataController } from "../data/data-open";
 import type { DesignerController } from "../designer/designer-controller";
 import { isProductionLabel } from "../servers/server-form";
 import type { QueryController } from "./query-controller";
-import { OBJECT_TAB_ID, isDashTabId, isDesignerTabId, isQueryTabId } from "./tabs-store";
+import { OBJECT_TAB_ID, isDashTabId, isDataTabId, isDesignerTabId, isQueryTabId } from "./tabs-store";
 import { ENV_CHOICES, canCommitAny, envLabel, envLockDefault, serverLineColor, type EnvChoice } from "./workspace-model";
 
 const QueryTab = lazy(() => import("./QueryTab"));
@@ -22,6 +23,10 @@ const DashPanels = lazy(() => dashTabs().then((m) => ({ default: m.DashPanels })
 const designerTabs = () => import("../designer/DesignerTabs");
 const DesignerTabHeads = lazy(() => designerTabs().then((m) => ({ default: m.DesignerTabHeads })));
 const DesignerPanels = lazy(() => designerTabs().then((m) => ({ default: m.DesignerPanels })));
+// Veri sekme başlıkları ve panelleri (kapatma onayı dahil): veri denetleyicisi yüklendiğinde inen tembel parça.
+const dataTabs = () => import("../data/DataTabs");
+const DataTabHeads = lazy(() => dataTabs().then((m) => ({ default: m.DataTabHeads })));
+const DataPanels = lazy(() => dataTabs().then((m) => ({ default: m.DataPanels })));
 
 export function QueryTabs(props: {
   ctl: QueryController;
@@ -34,6 +39,8 @@ export function QueryTabs(props: {
   designer?: () => DesignerController | null;
   /** Designer betiğini yeni sorgu sekmesinde aç (çalıştırmaz). */
   onOpenScript?: (input: { serverId: string; databaseOid: number | null; text: string }) => void;
+  /** Tembel veri denetleyicisi (ilk "Verileri Görüntüle/Düzenle"de yüklenir; o zamana kadar `null`). */
+  data?: () => DataController | null;
 }) {
   const ctl = props.ctl;
   const active = () => ctl.tabs.state.activeId;
@@ -52,24 +59,39 @@ export function QueryTabs(props: {
     props.designer?.()?.close(id);
     ctl.tabs.close(id);
   };
-  // Kirli designer sekmesi kapatılmadan önce onay ister (odak Vazgeç'te); temiz sekme doğrudan kapanır.
+  /** Veri sekmesi: önce denetleyici girdisi (oturum kapanır, uçuştaki uygulama iptal), sonra sekme. */
+  const closeData = (id: string) => {
+    props.data?.()?.close(id);
+    ctl.tabs.close(id);
+  };
+  // Kirli designer/veri sekmesi kapatılmadan önce onay ister (odak Vazgeç'te; metin tembel parçada); temiz sekme doğrudan
+  // kapanır. Tür başına ayrı sinyal (ortak `{ kind, id }` sinyalinden ana pakette birkaç bayt daha küçük; Plan 17 Task 1).
   const [designerClosing, setDesignerClosing] = createSignal<string | null>(null);
   const answerDesignerClose = (discard: boolean) => {
     const id = designerClosing();
     setDesignerClosing(null);
     if (discard && id !== null && isDesigner(id)) closeDesigner(id);
   };
+  const [dataClosing, setDataClosing] = createSignal<string | null>(null);
+  const answerDataClose = (discard: boolean) => {
+    const id = dataClosing();
+    setDataClosing(null);
+    if (discard && id !== null) closeData(id);
+  };
   const requestClose = (id: string) => {
     if (isDash(id)) closeDash(id);
     else if (isDesigner(id)) {
       if (props.designer?.()?.isDirty(id)) setDesignerClosing(id);
       else closeDesigner(id);
+    } else if (isDataTabId(id)) {
+      if (props.data?.()?.isDirty(id)) setDataClosing(id);
+      else closeData(id);
     } else void ctl.requestClose(id);
   };
 
   // WebView yeniden yüklemesi (F5, Ctrl+R, Ctrl+Shift+R) oturumları kaybettirir: her zaman engellenir.
   // Sorgu sekmesi etkinken (ağaç dışında) F5 tüm betiği çalıştırır, dashboard etkinken onu yeniler, designer etkinken
-  // önizlemeyi hemen yeniler (sorgu çalışmaz); ağaçta F5 düğümü yeniler.
+  // önizlemeyi hemen yeniler (sorgu çalışmaz), veri sekmesinde satırları yeniden yükler; ağaçta F5 düğümü yeniler.
   const onKeyCapture = (e: KeyboardEvent) => {
     const k = e.key;
     const reload = k === "F5" || ((e.ctrlKey || e.metaKey) && !e.altKey && k.toLowerCase() === "r");
@@ -84,6 +106,7 @@ export function QueryTabs(props: {
     e.stopPropagation();
     if (isDash(a)) props.dash?.()?.refreshNow(a);
     else if (isDesigner(a)) props.designer?.()?.previewNow(a);
+    else if (isDataTabId(a)) props.data?.()?.reloadNow(a);
     else if (isQuery()) ctl.runActive("all");
   };
 
@@ -239,6 +262,13 @@ export function QueryTabs(props: {
             </Suspense>
           )}
         </Show>
+        <Show when={props.data?.()}>
+          {(data) => (
+            <Suspense>
+              <DataTabHeads data={data()} tabs={ctl.tabs.state.data} Head={TabHead} />
+            </Suspense>
+          )}
+        </Show>
       </div>
       {/* Gizli panel `invisible` ile saklanır (display:none kaydırma konumunu sıfırlar). */}
       <div class="relative min-h-0 flex-1">
@@ -270,6 +300,20 @@ export function QueryTabs(props: {
                 onClose={requestClose}
                 closing={designerClosing()}
                 onCloseAnswer={answerDesignerClose}
+              />
+            </Suspense>
+          )}
+        </Show>
+        <Show when={props.data?.()}>
+          {(data) => (
+            <Suspense>
+              <DataPanels
+                data={data()}
+                tabs={ctl.tabs.state.data}
+                activeId={active()}
+                onClose={requestClose}
+                closing={dataClosing()}
+                onCloseAnswer={answerDataClose}
               />
             </Suspense>
           )}

@@ -8,6 +8,7 @@ import { ConfirmDialog } from "../../ui/ConfirmDialog";
 import { inputClass } from "../../ui/Field";
 import { Button } from "../../ui/Button";
 import { displaySql, searchQuery } from "./history-model";
+import { thist } from "./strings-history";
 
 const LIST_LIMIT = 500;
 
@@ -39,7 +40,7 @@ export function HistoryView(props: {
       }
     },
   );
-  const h = t.query.history;
+  const h = thist;
   return (
     <div role="region" class="flex h-full flex-col" aria-label={h.ariaLabel}>
       <div class="border-b border-border p-2">
@@ -55,7 +56,7 @@ export function HistoryView(props: {
       <ul class="min-h-0 flex-1 overflow-auto">
         <Show
           when={(entries() ?? []).length > 0}
-          fallback={<li class="p-3 text-xs text-muted">{entries.loading ? t.query.history.loading : h.empty}</li>}
+          fallback={<li class="p-3 text-xs text-muted">{entries.loading ? h.loading : h.empty}</li>}
         >
           <For each={entries()}>
             {(e) => (
@@ -96,7 +97,7 @@ export function HistorySettings(props: {
 }) {
   const api = () => props.api ?? commands;
   const [confirming, setConfirming] = createSignal(false);
-  const h = t.query.history;
+  const h = thist;
   const clear = async () => {
     setConfirming(false);
     try {
