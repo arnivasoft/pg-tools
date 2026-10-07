@@ -123,7 +123,7 @@ pub struct DataSource {
 #[ts(export)]
 pub enum CellValue {
     Null,
-    /// `DEFAULT` anahtar sözcüğü (yalnızca `INSERT`).
+    /// `DEFAULT` anahtar sözcüğü (`INSERT … VALUES` ve `UPDATE … SET`).
     Default,
     Text { value: String },
 }
@@ -153,7 +153,7 @@ impl fmt::Debug for CellEdit {
     }
 }
 
-/// Bir satır değişikliği. `key`: `DataKey.columns` sırasıyla anahtar değerleri; `version`: okumadaki `xmin::text`.
+/// Bir satır değişikliği. `key`: `DataKey.columns` sırasıyla anahtar değerleri; `version`: okumadaki `xmin::pg_catalog.text`.
 /// `Debug` yalnızca hâl adı ve sayıları yazar.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "op", rename_all = "snake_case", rename_all_fields = "camelCase")]
@@ -222,7 +222,7 @@ impl fmt::Debug for SelectRequest {
     }
 }
 
-/// Üretilen SELECT. `version_index`: sürüm (`xmin::text`) kolonunun sırası (= kaynak kolon sayısı, hep son);
+/// Üretilen SELECT. `version_index`: sürüm (`xmin::pg_catalog.text`) kolonunun sırası (= kaynak kolon sayısı, hep son);
 /// `has_version`: yalnızca Table/Partitioned (görünüm/MV/yabancı tabloda `xmin` sistem kolonu yok).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

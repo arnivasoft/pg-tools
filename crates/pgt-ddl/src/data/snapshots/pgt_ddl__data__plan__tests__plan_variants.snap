@@ -11,6 +11,9 @@ expression: render_cases(&cases)
 -- Update iki kolon
 [Safe] UPDATE public.t SET "name" = 'Ali', status = 'b' WHERE id = '1' AND xmin::pg_catalog.text = '736' RETURNING id, "name", status, note, xmin::pg_catalog.text
 
+-- Update DEFAULT/NULL (kaynak sırası)
+[Safe] UPDATE public.t SET status = NULL, note = DEFAULT WHERE id = '1' AND xmin::pg_catalog.text = '736' RETURNING id, "name", status, note, xmin::pg_catalog.text
+
 -- çok kolonlu anahtarlı Update
 [Safe] UPDATE "App"."Order Lines" SET qty = '5' WHERE order_id = '10' AND line_no = '2' AND xmin::pg_catalog.text = '99' RETURNING order_id, line_no, qty, xmin::pg_catalog.text
 

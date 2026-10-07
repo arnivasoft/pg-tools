@@ -2,7 +2,7 @@
 import type { CellEdit } from "./CellEdit";
 
 /**
- * Bir satır değişikliği. `key`: `DataKey.columns` sırasıyla anahtar değerleri; `version`: okumadaki `xmin::text`.
+ * Bir satır değişikliği. `key`: `DataKey.columns` sırasıyla anahtar değerleri; `version`: okumadaki `xmin::pg_catalog.text`.
  * `Debug` yalnızca hâl adı ve sayıları yazar.
  */
 export type RowChange = { "op": "insert", values: Array<CellEdit>, } | { "op": "update", key: Array<string>, version: string, set: Array<CellEdit>, } | { "op": "delete", key: Array<string>, version: string, };

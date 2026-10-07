@@ -44,6 +44,7 @@ const LIMITS: Limits = Limits { value: MAX_VALUE_BYTES, total: MAX_TOTAL_BYTES }
 /// Saf. `source` güncel yüklenen kaynak; `source.fingerprint == set.fingerprint` denetimi YÖNETİCİDEDİR.
 /// Alan hatası yolları: `changes` (sayı/toplam boyut), `changes[i]` (genel), `changes[i].values[j]`/`changes[i].set[j]`
 /// (hücre), `changes[i].key` (anahtar uzunluğu), `changes[i].key[j]`, `changes[i].version`, `object` (salt okunur kaynak).
+/// Boş `changes` → boş plan yalnızca düzenlenebilir kaynakta; salt okunur kaynak yine `object` hatası verir.
 pub fn plan_changes(source: &DataSource, set: &DataChangeSet) -> std::result::Result<Plan, Vec<FieldError>> {
     plan_with(source, &set.changes, LIMITS)
 }
@@ -255,7 +256,6 @@ fn column_error(col: &DataColumn, value: &CellValue, op: Op) -> Option<&'static 
         Op::Insert => None,
         Op::Update if col.identity == Identity::Always => Some("GENERATED ALWAYS kimlik kolonu güncellenemez."),
         Op::Update if !col.updatable => Some("Bu kolonu güncelleme yetkiniz yok."),
-        Op::Update if *value == CellValue::Default => Some("Varsayılan (DEFAULT) yalnızca yeni satırda kullanılabilir."),
         Op::Update => None,
     }
 }
@@ -478,6 +478,10 @@ mod tests {
             ),
             ("DEFAULT VALUES", ok(&s, vec![ins(vec![])])),
             ("Update iki kolon", ok(&s, vec![upd(&["1"], "736", vec![e("status", t("b")), e("name", t("Ali"))])])),
+            (
+                "Update DEFAULT/NULL (kaynak sırası)",
+                ok(&s, vec![upd(&["1"], "736", vec![e("note", CellValue::Default), e("status", CellValue::Null)])]),
+            ),
             ("çok kolonlu anahtarlı Update", ok(&m, vec![upd(&["10", "2"], "99", vec![e("qty", t("5"))])])),
             ("Delete", ok(&s, vec![del(&["1"], "736")])),
             ("çok kolonlu anahtarlı Delete", ok(&m, vec![del(&["10", "2"], "99")])),
@@ -557,6 +561,9 @@ mod tests {
         let labelled: Vec<(&str, Plan)> = cases.iter().map(|(l, p)| (l.as_str(), p.clone())).collect();
         insta::assert_snapshot!(render_cases(&labelled));
 
+        // insta satır sonlarını normalleştirir; çok satırlı değerin `\r\n\t` baytları ifadede aynen kalmalı.
+        let p = ok(&s, vec![ins(vec![e("name", t(HOSTILE[9]))])]);
+        assert!(p.statements[0].sql.contains("VALUES ('satır1\nsatır2\r\n\tsatır3')"), "{:?}", p.statements[0].sql);
         // Boş dize NULL değildir; `NULL`/`DEFAULT` metinleri tırnaklı kalır; `\` → `E'…'`.
         let p = ok(&s, vec![ins(vec![e("id", t("")), e("name", t("NULL")), e("status", t("DEFAULT")), e("note", CellValue::Null)])]);
         assert!(p.statements[0].sql.contains("VALUES ('', 'NULL', 'DEFAULT', NULL)"), "{}", p.statements[0].sql);
@@ -628,7 +635,9 @@ mod tests {
             (&sp, upd(&["1"], "1", vec![e("id", t("2"))]), &["changes[0].set[0]"]),
             (&sp, upd(&["1"], "1", vec![e("gen", t("2"))]), &["changes[0].set[0]"]),
             (&sp, upd(&["1"], "1", vec![e("ro", t("2"))]), &["changes[0].set[0]"]),
-            (&s, upd(&["1"], "1", vec![e("name", CellValue::Default)]), &["changes[0].set[0]"]),
+            (&sp, upd(&["1"], "1", vec![e("id", CellValue::Default)]), &["changes[0].set[0]"]),
+            (&sp, upd(&["1"], "1", vec![e("gen", CellValue::Default)]), &["changes[0].set[0]"]),
+            (&sp, upd(&["1"], "1", vec![e("ro", CellValue::Default)]), &["changes[0].set[0]"]),
             (&s, upd(&["1"], "1", vec![]), &["changes[0]"]),
             (&s, upd(&["1", "2"], "1", vec![e("name", t("a"))]), &["changes[0].key"]),
             (&s, del(&[], "1"), &["changes[0].key"]),
@@ -651,6 +660,10 @@ mod tests {
         ok(&s, vec![del(&["1"], &"9".repeat(20))]);
         ok(&sp, vec![ins(vec![e("id", CellValue::Default), e("bd", t("5")), e("v", t("x"))])]);
         ok(&sp, vec![upd(&["1"], "1", vec![e("bd", t("6"))])]);
+        // Sıradan (güncellenebilir) kolonda `SET c = DEFAULT` serbesttir.
+        let p = ok(&s, vec![upd(&["1"], "1", vec![e("name", CellValue::Default)])]);
+        assert!(p.statements[0].sql.contains("SET \"name\" = DEFAULT WHERE"), "{}", p.statements[0].sql);
+        ok(&sp, vec![upd(&["1"], "1", vec![e("bd", CellValue::Default), e("v", CellValue::Default)])]);
     }
 
     #[test]
