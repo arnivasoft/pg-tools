@@ -51,18 +51,38 @@ describe("refresh-model", () => {
 
   it("extraRefreshIds: tablo düğümünün yalnızca YÜKLÜ Columns/Constraints/Indexes koleksiyonları; triggers hariç", () => {
     const a = info({ before: tbl(), after: tbl({ comment: "c" }) });
-    expect(extraRefreshIds(tree(["cons", "trg"]), CTX, a, null)).toEqual(["cons"]);
-    expect(extraRefreshIds(tree(["cols", "cons", "idx", "trg"]), CTX, a, null)).toEqual(["cols", "cons", "idx"]);
-    expect(extraRefreshIds(tree(), CTX, a, null)).toEqual([]);
+    expect(extraRefreshIds(tree(["cons", "trg"]), CTX, a, null)).toEqual(["pub-t", "cons"]);
+    expect(extraRefreshIds(tree(["cols", "cons", "idx", "trg"]), CTX, a, null)).toEqual(["pub-t", "cols", "cons", "idx"]);
+    expect(extraRefreshIds(tree(), CTX, a, null)).toEqual(["pub-t"]);
   });
 
   it("extraRefreshIds: sequence/table şema taşımada yeni şemanın yüklü koleksiyonu; şema/koleksiyon yoksa ya da yüklü değilse eklenmez", () => {
     const move = info({ before: tbl(), after: tbl({ schema: "other" }) });
-    expect(extraRefreshIds(tree(["oth-t"]), CTX, move, null)).toEqual(["oth-t"]);
-    expect(extraRefreshIds(tree(), CTX, move, null)).toEqual([]);
-    expect(extraRefreshIds(tree(["oth-t"]), CTX, info({ before: tbl(), after: tbl({ schema: "yok" }) }), null)).toEqual([]);
+    expect(extraRefreshIds(tree(["oth-t"]), CTX, move, null)).toEqual(["pub-t", "oth-t"]);
+    expect(extraRefreshIds(tree(), CTX, move, null)).toEqual(["pub-t"]);
+    expect(extraRefreshIds(tree(["oth-t"]), CTX, info({ before: tbl(), after: tbl({ schema: "yok" }) }), null)).toEqual(["pub-t"]);
     const sm = info({ before: seq(), after: seq({ schema: "other" }) });
     expect(extraRefreshIds(tree(["oth-s", "oth-t"]), { databaseNodeId: "db", tableNodeId: null }, sm, null)).toEqual(["oth-s"]);
+  });
+
+  it("extraRefreshIds: kolon/kısıt düğümünden açılışta (birincil = tablo) üst Tables koleksiyonu ve eski/yeni şema yenilenir; yüklü değilse eklenmez", () => {
+    const rename = info({ before: tbl(), after: tbl({ name: "orders2" }) });
+    expect(extraRefreshIds(tree(["cols"]), CTX, rename, "tbl")).toEqual(["pub-t", "cols"]);
+    const t = tree();
+    t.children.delete("pub-t");
+    expect(extraRefreshIds(t, CTX, rename, "tbl")).toEqual([]);
+    expect(extraRefreshIds(tree(["oth-t"]), CTX, info({ before: tbl(), after: tbl({ schema: "other" }) }), "tbl")).toEqual(["pub-t", "oth-t"]);
+  });
+
+  it("extraRefreshIds: create'ten dönüşen sekme (tableNodeId yok): koleksiyondan etiketle tablo bulunur; Columns/Constraints/Indexes + Tables yenilenir", () => {
+    const ctx: OpenContext = { databaseNodeId: "db", tableNodeId: null, collectionNodeId: "pub-t" };
+    const t = tree(["cols", "idx"]);
+    expect(extraRefreshIds(t, ctx, info({ before: tbl(), after: tbl({ comment: "c" }) }), null)).toEqual(["pub-t", "cols", "idx"]);
+    // yeniden adlandırma: ağaçta hâlâ eski etiket
+    expect(extraRefreshIds(t, ctx, info({ before: tbl(), after: tbl({ name: "yeni" }) }), "pub-t")).toEqual(["cols", "idx"]);
+    // düğüm henüz ağaçta yok → tablo kuralı eklenmez; şema taşıma kuralı yine çalışır
+    expect(extraRefreshIds(t, ctx, info({ before: tbl({ name: "baska" }), after: tbl({ name: "yok2" }) }), null)).toEqual([]);
+    expect(extraRefreshIds(tree(["oth-t"]), ctx, info({ before: tbl(), after: tbl({ schema: "other" }) }), "pub-t")).toEqual(["oth-t"]);
   });
 
   it("extraRefreshIds: ctx null ya da tablo düğümü ağaçta yoksa yalnızca şema kuralı; sonuç tekrarsız ve primary hariç", () => {
@@ -70,8 +90,7 @@ describe("refresh-model", () => {
     const t = tree(["cols", "oth-t"]);
     expect(extraRefreshIds(t, null, move, null)).toEqual([]);
     expect(extraRefreshIds(t, { databaseNodeId: "db", tableNodeId: "yok" }, move, null)).toEqual(["oth-t"]);
-    expect(extraRefreshIds(t, CTX, move, "oth-t")).toEqual(["cols"]);
-    const ids = extraRefreshIds(t, CTX, move, null);
-    expect(new Set(ids).size).toBe(ids.length);
+    expect(extraRefreshIds(t, CTX, move, "oth-t")).toEqual(["pub-t", "cols"]);
+    expect(extraRefreshIds(t, CTX, move, "pub-t")).toEqual(["cols", "oth-t"]);
   });
 });

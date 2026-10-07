@@ -248,6 +248,26 @@ describe("designer-open Task 4", () => {
     const tab = store.state.designers[0];
     expect(designer.openAlter).toHaveBeenCalledTimes(1);
     expect(designer.requestFocus).toHaveBeenCalledExactlyOnceWith(tab.id, "column:3");
+    expect(tab.title).toBe(tdes.tab.edit("Table", "orders"));
+  });
+
+  it("context budama: canlı sekmenin bağlamı korunur, ölü sekmeninki silinir; create sekmesi koleksiyon düğümünü saklar", async () => {
+    const a = setup(async (id) => (id === "seq" ? objectTarget : tableTarget(null)));
+    await a.opener.open("tbl", "edit");
+    const first = a.store.state.designers[0].id;
+    a.designer.ids.mockReturnValue([first]);
+    await a.opener.open("seq", "edit");
+    const second = a.store.state.designers[1].id;
+    expect(a.opener.context(first)).not.toBeNull();
+    expect(a.opener.context(second)).not.toBeNull();
+    a.designer.ids.mockReturnValue([second]);
+    a.designer.findAlter.mockReturnValue(second);
+    await a.opener.open("col", "edit");
+    expect(a.opener.context(first)).toBeNull();
+    expect(a.opener.context(second)).not.toBeNull();
+    const c = setup(createTarget);
+    await c.opener.open("coll-seq", "create");
+    expect(c.opener.context(c.store.state.designers[0].id)).toEqual({ databaseNodeId: "db", tableNodeId: null, collectionNodeId: "coll-seq" });
   });
 
   it("kısıt odağı mevcut sekmede: yeni sekme açmadan activate + requestFocus('constraint:40')", async () => {

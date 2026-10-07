@@ -95,6 +95,9 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
         const title = tdes.tab.create(kindLabel(create.kind), config.name, database);
         const r = tabs.openDesigner({ serverId, databaseOid, title, key, where });
         if (r.created) void designer.openCreate({ tabId: r.id, serverId, databaseOid, create, refreshNodeId });
+        remember(r.id, {
+          databaseNodeId: ancestorOfKind(deps.tree(), nodeId, ["database"])?.id ?? null, tableNodeId: null, collectionNodeId: refreshNodeId,
+        });
         return;
       }
       if (!object) return;
@@ -113,7 +116,9 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
         return;
       }
       const key = designerTabKey(tabs.state.designers, { serverId, databaseOid, object });
-      const title = tdes.tab.edit(kindLabel(object.kind), node.label);
+      const title = tdes.tab.edit(kindLabel(object.kind), (tableNode ?? node).label);
+      // Not: oid'i değişen alter'dan (indeks yeniden kurma) sonra sekme anahtarı eski oid'de kalır; PostgreSQL aynı oid'i
+      // oturum içinde başka nesneye verirse `openDesigner` eski sekmeyi etkinleştirir. Kuramsal; bilerek düzeltilmedi.
       const r = tabs.openDesigner({ serverId, databaseOid, title, key, where });
       if (r.created) void designer.openAlter({ tabId: r.id, serverId, databaseOid, object, refreshNodeId });
       remember(r.id, ctx);

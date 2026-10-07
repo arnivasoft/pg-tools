@@ -1052,8 +1052,17 @@ describe("designer-controller Task 4: findAlter, onApplied, Table", () => {
     await s.ctl.apply("T1");
     await settle();
     expect(s.ctl.model("T1")!.gateError).toContain(tdes.gate.confirmationRequired);
-    expect(s.ctl.model("T1")!.gateError).not.toBeNull();
     expect(s.api.ddlPreview.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it("findAlter: oid'i değiştiren alter (indeks yeniden kurma) sonrası yeni oid bulunur, eski oid bulunmaz", async () => {
+    const s = setup();
+    const id = await readyToApply(s);
+    s.api.ddlApply.mockResolvedValueOnce(applied({ kind: "schema", oid: 777 }));
+    await s.ctl.apply(id);
+    await flush();
+    expect(s.ctl.findAlter("S1", 5, { kind: "schema", oid: 777 })).toBe(id);
+    expect(s.ctl.findAlter("S1", 5, OBJ)).toBeNull();
   });
 
   it("lookup önbelleği: collations oturum boyunca (TTL sonrası yeni istek yok); types{query} 30 sn", async () => {
