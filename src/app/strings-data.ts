@@ -12,6 +12,11 @@ export const tdata = {
     reconnect: "Yeniden bağlan",
     gone: "Nesne ya da sunucu artık yok.",
     close: "Kapat",
+    dirty: "Kaydedilmemiş değişiklik var",
+  },
+  banner: {
+    stale: "Nesne değişti, yeniden yükleyin.",
+    loadError: "Satırlar yüklenemedi:",
   },
   open: {
     none: "Bu nesne için veri açılamıyor",
@@ -70,6 +75,7 @@ export const tdata = {
     hint: "Sıralamak için başlığa tıklayın; Shift ile ek sıralama (en çok 8).",
     position: (n: number) => `${n}. sıralama`,
     clear: "Sıralamayı temizle",
+    keyHint: "Alt+S: etkin kolona göre sırala (Shift+Alt+S ek sıralama)",
   },
   status: {
     rows: (n: number, more: boolean) => (more ? `${n} satır yüklendi (daha fazlası var)` : `${n} satır`),
@@ -88,6 +94,9 @@ export const tdata = {
     generated: "Üretilmiş kolon: düzenlenemez",
     identityAlways: "GENERATED ALWAYS identity: yalnızca DEFAULT",
     notUpdatable: "Bu kolonu güncelleme yetkiniz yok",
+    rowNumber: "Satır",
+    newBadge: "yeni",
+    keys: "Enter/F2 düzenle · Delete sil · Insert satır ekle · Alt+N NULL · Alt+D DEFAULT · Ctrl+Z geri al · Ctrl+C kopyala",
   },
   panel: {
     title: "Değişiklik paneli",
@@ -104,6 +113,8 @@ export const tdata = {
     copied: "SQL panoya kopyalandı.",
     copyFailed: "SQL panoya kopyalanamadı.",
     risk: "Risk",
+    changeIssue: (i: number, text: string) => `${i + 1}. değişiklik: ${text}`,
+    cellIssue: (i: number, column: string, text: string) => `${i + 1}. değişiklik, ${column}: ${text}`,
   },
   preview: {
     /** Nötr etiket: `n` UTF-16 kod birimi sayısıdır (karakter değil). */
@@ -125,6 +136,9 @@ export const tdata = {
     closeDiscard: "Kapat (düzenlemeler atılır)",
     reload: "Yeniden yükle (düzenlemeler atılır)",
     reloadBody: "Yeniden yükleme kaydedilmemiş düzenlemeleri atar.",
+    discardTitle: "Düzenlemeler atılsın mı?",
+    discardBody: (n: number) => `${n} kaydedilmemiş değişiklik atılacak.`,
+    discardConfirm: "Düzenlemeleri at",
     keep: "Vazgeç",
   },
   /** Kaydetme kapısının kapalı gerekçeleri (`title`). */
@@ -137,6 +151,7 @@ export const tdata = {
     disconnected: "Sunucu bağlantısı yok",
     unknown: "Sonuç belirsiz; önce yeniden yükleyin",
     readOnly: "Kaynak salt okunur",
+    noCell: "Önce bir hücre seçin",
   },
   conflict: {
     updateDelete: "Satır başka bir oturumca değiştirilmiş ya da silinmiş (ya da tetikleyici/RLS süzdü).",

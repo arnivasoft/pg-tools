@@ -55,6 +55,7 @@ export function createData(deps: DataDeps) {
     openTab: (input) => i()?.openTab(input) ?? input.tabId,
     reload: (id, opts) => i()?.reload(id, opts) ?? Promise.resolve(false),
     reloadNow: (id) => i()?.reloadNow(id) ?? false,
+    answerReload: (id, discard) => i()?.answerReload(id, discard) ?? Promise.resolve(false),
     reconnect: (id) => i()?.reconnect(id) ?? Promise.resolve(false),
     loadMore: (id) => i()?.loadMore(id) ?? Promise.resolve(),
     setSelect: (id, next, opts) => i()?.setSelect(id, next, opts) ?? Promise.resolve(false),

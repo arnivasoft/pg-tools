@@ -86,6 +86,8 @@ export interface DataModel {
   postApplyNote: string | null;
   locked: boolean;
   production: boolean;
+  /** Kirli sekmede F5 (`reloadNow`): arayüz "düzenlemeler atılır" onayı sorar, yanıt `answerReload` ile. */
+  askReload: boolean;
 }
 
 export interface ServerInfo { name: string; locked: boolean; production: boolean }
@@ -98,8 +100,10 @@ export interface DataTabCtl {
   openTab(input: OpenTabInput): string;
   /** Kirli ise yalnızca `discard: true` ile (çağıran onay almıştır); aksi halde `false`. */
   reload(tabId: string, opts?: { discard: boolean }): Promise<boolean>;
-  /** F5: kirli değilse yeniden yükler ve `true`; kirliyse hiçbir şey yapmaz, `false` (arayüz onay sorar). */
+  /** F5: kirli değilse yeniden yükler ve `true`; kirliyse yalnızca `askReload` kurulur, `false` (arayüz onay sorar). */
   reloadNow(tabId: string): boolean;
+  /** `askReload` onayının yanıtı: bayrak düşer; `discard` ise düzenlemeler atılıp yeniden yüklenir. */
+  answerReload(tabId: string, discard: boolean): Promise<boolean>;
   /** Bağlantısı kesilen sekmeyi yeniden bağlar; kaynak aynıysa düzenlemeler korunur. */
   reconnect(tabId: string): Promise<boolean>;
   loadMore(tabId: string): Promise<void>;
@@ -440,6 +444,7 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
       viewIsCurrent: false, pending: false, previewError: null, applying: false, gate: { kind: "blocked", reason: "loading" },
       confirm: { checked: false }, issues: null, conflictRow: null, failedChange: null, outcome: null, needsReload: false,
       outcomeUnknown: false, loadError: null, postApplyNote: null, locked: info?.locked ?? false, production: info?.production ?? false,
+      askReload: false,
     };
     const [m, set] = createSignal<DataModel>({ ...initial, gate: gateOf(initial) });
     const e: Entry = { model: m, set, gen: 0, previewSeq: 0, timer: null, session: null, applyId: null, loadedSelect: EMPTY_SELECT };
@@ -461,16 +466,28 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
     if (!e || !m || m.applying || m.loadingMore || m.status === "gone") return false;
     if (editDirty(m.edit) && !opts?.discard) return false;
     const info = deps.serverInfo(m.serverId);
-    if (info) patch(e, { serverName: info.name, locked: info.locked, production: info.production });
+    patch(e, { askReload: false, ...(info ? { serverName: info.name, locked: info.locked, production: info.production } : {}) });
     await load(tabId, e);
     return true;
   };
 
   const reloadNow = (tabId: string): boolean => {
     const m = model(tabId);
-    if (!m || m.applying || m.loadingMore || m.status === "gone" || isDirty(tabId)) return false;
+    if (!m || m.applying || m.loadingMore || m.status === "gone") return false;
+    if (isDirty(tabId)) {
+      const e = entries.get(tabId);
+      if (e) patch(e, { askReload: true });
+      return false;
+    }
     void reload(tabId);
     return true;
+  };
+
+  const answerReload = async (tabId: string, discard: boolean): Promise<boolean> => {
+    const e = entries.get(tabId);
+    if (!e) return false;
+    patch(e, { askReload: false });
+    return discard ? reload(tabId, { discard: true }) : false;
   };
 
   const reconnect = async (tabId: string): Promise<boolean> => {
@@ -704,6 +721,7 @@ export function createDataController(deps: DataControllerDeps): DataTabCtl {
     openTab,
     reload,
     reloadNow,
+    answerReload,
     reconnect,
     loadMore,
     setSelect,

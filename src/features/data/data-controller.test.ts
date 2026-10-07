@@ -566,6 +566,37 @@ describe("data-controller", () => {
     expect(ctl.model("g1")).toBeNull();
   });
 
+  it("kirli F5: reloadNow askReload bayrağını kurar; answerReload(false) düzenlemeleri korur, (true) atıp yeniden yükler", async () => {
+    const { api, ctl, open, fire, m } = setup();
+    await open();
+    expect(m().askReload).toBe(false);
+    const loads = api.dataLoad.mock.calls.length;
+    // Temiz: doğrudan yeniden yükler, bayrak yok.
+    expect(ctl.reloadNow("g1")).toBe(true);
+    await flush();
+    expect(api.dataLoad).toHaveBeenCalledTimes(loads + 1);
+    expect(m().askReload).toBe(false);
+
+    ctl.edit("g1", (l, e) => setCell(l, e, 0, "name", T("x")));
+    await fire();
+    expect(ctl.reloadNow("g1")).toBe(false);
+    expect(m().askReload).toBe(true);
+    expect(await ctl.answerReload("g1", false)).toBe(false);
+    expect(m().askReload).toBe(false);
+    expect(ctl.isDirty("g1")).toBe(true);
+    expect(api.dataLoad).toHaveBeenCalledTimes(loads + 1);
+
+    ctl.reloadNow("g1");
+    expect(m().askReload).toBe(true);
+    expect(await ctl.answerReload("g1", true)).toBe(true);
+    await flush();
+    expect(m().askReload).toBe(false);
+    expect(ctl.isDirty("g1")).toBe(false);
+    expect(api.dataLoad).toHaveBeenCalledTimes(loads + 2);
+    // Bilinmeyen sekme: yok sayılır.
+    expect(await ctl.answerReload("nope", true)).toBe(false);
+  });
+
   it("oturum kaybı: bir kez yeniden bağlan+aç+dene; connection_lost → disconnected; serverSessionsClosed düzenlemeyi korur", async () => {
     const a = setup();
     a.api.qtRun.mockRejectedValueOnce(ipcErr("session_reset"));
