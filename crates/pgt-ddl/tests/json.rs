@@ -121,7 +121,9 @@ fn apply_options_parse() {
         "confirmed": false, "confirmedProduction": false, "password": "p@ss"
     }))
     .unwrap();
-    assert_eq!(o.password.as_ref().map(Secret::expose), Some("p@ss"));
+    // Değerin kendisi yalnızca crate içinde okunur (`Secret::expose` pub(crate)); burada varlığı ve maskesi denetlenir.
+    assert!(o.password.is_some());
+    assert!(!format!("{o:?}").contains("p@ss"));
     assert_eq!(serde_json::to_value(&o).unwrap()["password"], "********");
     // Drop isteği `force: true` taşır.
     let d: PlanRequest = roundtrip(json!({"op": "drop", "object": {"kind": "database", "oid": 1}, "def": defs()[0].1, "cascade": false, "force": true}));

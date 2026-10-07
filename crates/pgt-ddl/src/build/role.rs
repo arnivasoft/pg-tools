@@ -12,8 +12,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use super::settings::{diff_settings, guc_assignment_sql, guc_name_sql, validate_old_setting_names, validate_settings,
-    validate_written_settings};
+use super::settings::{CASE_RENAME_WARNING, case_only_renames, diff_settings, guc_assignment_sql, guc_name_sql,
+    validate_old_setting_names, validate_settings, validate_written_settings};
 use super::{BuildCtx, check_ident, check_old_ident, check_text, err, stmt};
 use crate::model::{ConfigSetting, FieldError, PasswordChange, RoleDef, RoleMembership};
 use crate::plan::{Plan, REDACTED, Risk, Statement};
@@ -493,6 +493,9 @@ pub fn alter(old: &RoleDef, new: &RoleDef, _ctx: &BuildCtx) -> Result<Plan, Vec<
             Some(false) if admin => statements.push(grant_stmt(role, &q, true)),
             _ => {}
         }
+    }
+    if case_only_renames(&old.settings, &new.settings) {
+        warnings.push(CASE_RENAME_WARNING.to_string());
     }
     let (removed, set) = diff_settings(&old.settings, &new.settings);
     for name in removed {
@@ -1170,8 +1173,8 @@ mod tests {
         assert_eq!(paths(e), ["settings[0].name"]);
         // Task 4 M-1: yinelenen girdi yüklü değerle aynı olsa da hata.
         let a1 = RoleDef { settings: vec![s("a", "1")], ..role("r") };
-        for list in [vec![s("a", "2"), s("a", "1")], vec![s("a", "1"), s("a", "2")], vec![s("a", "1"), s("a", "1")]] {
-            assert_eq!(paths(alter_err(&a1, &RoleDef { settings: list.clone(), ..role("r") })), ["settings[1].name"], "{list:?}");
+        for (list, path) in [(vec![s("a", "2"), s("a", "1")], "settings[0].name"), (vec![s("a", "1"), s("a", "2")], "settings[1].name")] {
+            assert_eq!(paths(alter_err(&a1, &RoleDef { settings: list.clone(), ..role("r") })), [path], "{list:?}");
         }
         assert_eq!(paths(alter_err(&old, &RoleDef { comment: Some("b\0".into()), ..old.clone() })), ["comment"]);
         // Ayar sırası: RESET (ad sırası) sonra SET (ad sırası).

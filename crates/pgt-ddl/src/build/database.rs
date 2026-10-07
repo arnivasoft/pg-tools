@@ -11,8 +11,8 @@
 //! yeniden yüklenen tanımla gönderilen tanımı karşılaştıracak bir kapı bu alanları dışarıda bırakmalıdır. Bağlı veritabanı / bakım veritabanı korumaları
 //! (yeniden adlandırma, silme, taşıma) bu saf üreticide DEĞİL, yöneticidedir (Task 8, Karar 8).
 
-use super::settings::{diff_settings, guc_assignment_sql, guc_name_sql, validate_old_setting_names, validate_settings,
-    validate_written_settings};
+use super::settings::{CASE_RENAME_WARNING, case_only_renames, diff_settings, guc_assignment_sql, guc_name_sql,
+    validate_old_setting_names, validate_settings, validate_written_settings};
 use super::table::version_err;
 use super::table_alter::TABLESPACE_CLEAR_MSG;
 use super::type_syntax::is_spoofing_format;
@@ -360,6 +360,9 @@ pub fn alter(old: &DatabaseDef, new: &DatabaseDef, _ctx: &BuildCtx) -> Result<Pl
             Risk::Safe,
             Some(TABLESPACE_NOTE),
         ));
+    }
+    if case_only_renames(&old.settings, &new.settings) {
+        warnings.push(CASE_RENAME_WARNING.to_string());
     }
     let (removed, set) = diff_settings(&old.settings, &new.settings);
     for name in removed {
@@ -847,12 +850,14 @@ mod tests {
         assert!(e[0].message.contains("'datestyle'"), "{e:?}");
         let e = alter_err(&loaded(), &DatabaseDef { settings: vec![s("a", "1"), s("a", "2")], ..loaded() });
         assert_eq!(paths(e), ["settings[1].name"]);
-        // M-1: yinelenen girdi yüklü değerle aynı olsa da hata (iki sıra; aksi halde `a=2` sessizce kaybolurdu).
+        // M-1: yinelenen girdi yüklü değerle aynı olsa da hata (iki sıra; aksi halde `a=2` sessizce kaybolurdu); hata
+        // değişen girdide. İki değişmeyen kopya düzenlemeyi engellemez (son inceleme M-1).
         let a1 = DatabaseDef { settings: vec![s("a", "1")], ..loaded() };
-        for list in [vec![s("a", "2"), s("a", "1")], vec![s("a", "1"), s("a", "2")], vec![s("a", "1"), s("a", "1")]] {
+        for (list, path) in [(vec![s("a", "2"), s("a", "1")], "settings[0].name"), (vec![s("a", "1"), s("a", "2")], "settings[1].name")] {
             let e = alter_err(&a1, &DatabaseDef { settings: list.clone(), ..loaded() });
-            assert_eq!(paths(e), ["settings[1].name"], "{list:?}");
+            assert_eq!(paths(e), [path], "{list:?}");
         }
+        assert!(balter(&o(a1.clone()), &o(DatabaseDef { settings: vec![s("a", "1"), s("a", "1")], ..loaded() }), &ctx()).is_ok());
         // Değişen sahip/yorum katı.
         assert_eq!(paths(alter_err(&old, &DatabaseDef { owner: Some("x\u{202e}".into()), ..old.clone() })), ["owner"]);
         assert_eq!(paths(alter_err(&old, &DatabaseDef { comment: Some("b\0".into()), ..old.clone() })), ["comment"]);

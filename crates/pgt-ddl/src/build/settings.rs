@@ -4,7 +4,7 @@
 //! Liste ayarlarında (pg_dump `variable_is_guc_list_quote`) değer PG `SplitGUCList` kuralıyla öğelere bölünür ve her öğe
 //! ayrı tırnaklanır (`search_path = '$user', 'public'`); aksi halde tek tırnaklı değer tek bir öğe sayılırdı.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use super::err;
 use super::type_syntax::is_spoofing_format;
@@ -85,16 +85,22 @@ pub fn validate_written_settings(old: &[ConfigSetting], new: &[ConfigSetting], e
     validate_settings_where(new, |s| written(&old_map, s), errs);
 }
 
-/// `check(s)` false ise girdinin ad dilbilgisi ve değeri atlanır; yinelenen ad denetimi yine yapılır.
+/// `check(s)` false (değişmeyen, yüklü girdiyle birebir aynı) ise girdinin ad dilbilgisi ve değeri atlanır.
+///
+/// Yinelenen ad (ASCII harfe duyarsız): yalnızca YAZILAN (değişen/yeni) girdi hata alır — aynı anahtarlı başka bir girdi
+/// ondan önce geliyorsa ya da değişmeyen bir girdiyse. Değişmeyen girdiler kendi aralarında hata üretmez (inceleme
+/// M-1): katalog `{App.Mode, app.mode}` gibi yalnızca harfi farklı iki özel ad tutabilir; yorum/parola gibi ilgisiz bir
+/// düzenleme engellenmemeli. `[a=2, a=1]` (`a=1` yüklü) hâlâ hata verir (Task 4 M-1): `a=2` sessizce kaybolmasın.
 fn validate_settings_where(list: &[ConfigSetting], check: impl Fn(&ConfigSetting) -> bool, errs: &mut Vec<FieldError>) {
-    let mut seen = HashSet::new();
+    let written: Vec<bool> = list.iter().map(&check).collect();
+    let keys: Vec<String> = list.iter().map(|s| name_key(&s.name)).collect();
+    let duplicate = |i: usize| {
+        written[i] && keys.iter().enumerate().any(|(j, k)| j != i && *k == keys[i] && (j < i || !written[j]))
+    };
     for (i, s) in list.iter().enumerate() {
         let np = format!("settings[{i}].name");
         let vp = format!("settings[{i}].value");
-        if !check(s) {
-            if !seen.insert(name_key(&s.name)) {
-                errs.push(err(&np, DUPLICATE_MSG));
-            }
+        if !written[i] {
             continue;
         }
         let name_ok = if s.name.chars().count() > MAX_GUC_NAME {
@@ -119,7 +125,7 @@ fn validate_settings_where(list: &[ConfigSetting], check: impl Fn(&ConfigSetting
         } else if s.name.split('.').any(|p| p.len() > MAX_GUC_PART_BYTES) {
             errs.push(err(&np, format!("Ayar adının her parçası en çok {MAX_GUC_PART_BYTES} bayt olabilir.")));
             false
-        } else if !seen.insert(name_key(&s.name)) {
+        } else if duplicate(i) {
             errs.push(err(&np, DUPLICATE_MSG));
             false
         } else {
@@ -240,6 +246,20 @@ pub fn guc_assignment_sql(s: &ConfigSetting) -> String {
     };
     format!("{} = {value}", guc_name_sql(&s.name))
 }
+
+/// Yalnızca harf büyüklüğü değişen özel (noktalı) ad var mı (`App.Mode` → `app.mode`)? PG bunu güvenilir uygulamaz:
+/// `RESET "App"."Mode"` başka oturumdaki yer tutucu yüzünden eşleşmeyebilir (yer tutucu oluşturur) ve iki girdi kalabilir
+/// (inceleme M-2). Hata değil uyarı: üreticiler `CASE_RENAME_WARNING` ekler.
+pub fn case_only_renames(old: &[ConfigSetting], new: &[ConfigSetting]) -> bool {
+    new.iter().any(|n| {
+        n.name.contains('.')
+            && !old.iter().any(|o| o.name == n.name)
+            && old.iter().any(|o| o.name != n.name && name_key(&o.name) == name_key(&n.name) && !new.iter().any(|m| m.name == o.name))
+    })
+}
+
+pub const CASE_RENAME_WARNING: &str = "Özel ayar adının yalnızca harf büyüklüğü değişiyor: PostgreSQL bunu güvenilir \
+     uygulamayabilir (eski girdi kalabilir); gerekirse ayarı kaldırıp ayrı bir uygulamada yeniden ekleyin.";
 
 /// Fark: (kaldırılan adlar, eklenen/değişen ayarlar), her ikisi ad sırasıyla (deterministik).
 /// Yazılan her girdi `validate_written_settings`'in `written` ölçütüyle doğrulanmıştır (aynı işlev).
@@ -380,15 +400,17 @@ mod tests {
         let dup = |i: usize| vec![(format!("settings[{i}].name"), DUPLICATE_MSG.to_string())];
         // İnceleme M-1: yinelenen girdi yüklü değerle aynı olsa da hata (her iki sıra).
         let old = [s("a", "1")];
-        assert_eq!(w(&old, &[s("a", "2"), s("a", "1")]), dup(1));
+        // Değişen girdi hata alır (yolu değişen girdinin); iki değişmeyen kopya kendi aralarında hata vermez (M-1).
+        assert_eq!(w(&old, &[s("a", "2"), s("a", "1")]), dup(0));
         assert_eq!(w(&old, &[s("a", "1"), s("a", "2")]), dup(1));
-        assert_eq!(w(&old, &[s("a", "1"), s("a", "1")]), dup(1));
+        assert!(w(&old, &[s("a", "1"), s("a", "1")]).is_empty());
         // Değişmeyen yüklü girdi (büyük harfli ad, denetim karakterli değer) doğrulanmaz; yazılan girdi katı.
         let old = [s("TimeZone", "UTC"), s("work_mem", "a\nb")];
         assert!(w(&old, &old).is_empty());
         assert_eq!(w(&old, &[s("TimeZone", "UTC"), s("work_mem", "b\nc")])[0].0, "settings[1].value");
-        // Yinelenen değişmeyen girdi de yakalanır; tam doğrulamayla aynı yol.
-        assert_eq!(w(&old, &[s("TimeZone", "UTC"), s("TimeZone", "UTC")]), dup(1));
+        // Değişmeyen yinelenenler engellemez; yeni bir kopya (değişen) yakalanır.
+        assert!(w(&old, &[s("TimeZone", "UTC"), s("TimeZone", "UTC")]).is_empty());
+        assert_eq!(w(&old, &[s("TimeZone", "UTC"), s("timezone", "GMT")]), dup(1));
         assert_eq!(paths(&[s("a", "2"), s("a", "1")]), ["settings[1].name"]);
     }
 
@@ -495,6 +517,56 @@ mod tests {
         assert!(e[0].message.contains("küçük harfle yazılmalı"), "{e:?}");
         // ASCII harfe duyarsız yinelenen.
         assert_eq!(paths(&[s("App.Mode", "x"), s("app.mode", "y")]), ["settings[1].name"]);
+    }
+
+    #[test]
+    fn catalog_with_case_variant_custom_names_stays_editable() {
+        // Yükleyici biçimi: noktalı adlar yazımıyla, ada göre sıralı (bkz. load::config_settings).
+        let loaded = [s("App.Mode", "x"), s("app.mode", "y")];
+        let mut e = vec![];
+        validate_written_settings(&loaded, &loaded, &mut e);
+        assert!(e.is_empty(), "değişmeyen ayarlar düzenlemeyi engellememeli: {e:?}");
+        // Değişen girdi çakışırsa yine hata.
+        let mut e = vec![];
+        validate_written_settings(&loaded, &[s("App.Mode", "x"), s("app.mode", "z")], &mut e);
+        assert_eq!(e.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["settings[1].name"]);
+        // Rol alter: yalnızca yorum değişimi uygulanır.
+        use crate::build::{BuildCtx, alter};
+        use crate::model::{ObjectDef, PasswordChange, RoleDef};
+        let role = |comment: Option<&str>| {
+            ObjectDef::Role(RoleDef {
+                name: "r".into(),
+                login: false,
+                superuser: false,
+                createdb: false,
+                createrole: false,
+                inherit: true,
+                replication: false,
+                bypassrls: false,
+                connection_limit: -1,
+                valid_until: None,
+                password: PasswordChange::Keep,
+                member_of: vec![],
+                settings: loaded.to_vec(),
+                comment: comment.map(Into::into),
+                unsupported: vec![],
+            })
+        };
+        let ctx = BuildCtx { version_num: 160000, concurrently: false };
+        let p = alter(&role(None), &role(Some("c")), &ctx).unwrap();
+        assert_eq!(p.statements.len(), 1, "{p:?}");
+        assert!(p.statements[0].sql.starts_with("COMMENT ON ROLE"));
+    }
+
+    #[test]
+    fn case_only_rename_of_custom_setting_warns() {
+        assert!(case_only_renames(&[s("App.Mode", "x")], &[s("app.mode", "x")]));
+        assert!(!case_only_renames(&[s("App.Mode", "x")], &[s("App.Mode", "y")]));
+        assert!(!case_only_renames(&[s("app.mode", "x")], &[s("app.other", "x")]));
+        // Noktasız (yerleşik) adlar zaten küçük harftir; uyarı yok.
+        assert!(!case_only_renames(&[s("timezone", "UTC")], &[s("timezone", "GMT")]));
+        // Her iki biçim de yeni listede kalıyorsa yeniden adlandırma değildir.
+        assert!(!case_only_renames(&[s("App.Mode", "x")], &[s("App.Mode", "x"), s("app.mode", "x")]));
     }
 
     #[test]

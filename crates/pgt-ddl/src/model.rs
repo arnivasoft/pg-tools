@@ -562,7 +562,8 @@ pub struct RoleDef {
     pub member_of: Vec<RoleMembership>,
     pub settings: Vec<ConfigSetting>,
     pub comment: Option<String>,
-    /// Yalnızca yükleme: "IN DATABASE d: k=v", "MEMBER r (birden çok grantor)".
+    /// Yalnızca yükleme: "IN DATABASE d: k=v", "MEMBER r (birden çok grantor)", "MEMBER r (grantor g)" (PG 16+;
+    /// önyükleme süper kullanıcısından başkasının verdiği üyelik, salt okunur).
     #[serde(default)]
     pub unsupported: Vec<String>,
 }

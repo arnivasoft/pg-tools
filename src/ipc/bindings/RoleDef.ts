@@ -17,6 +17,7 @@ validUntil: string | null,
  */
 password: PasswordChange, memberOf: Array<RoleMembership>, settings: Array<ConfigSetting>, comment: string | null, 
 /**
- * Yalnızca yükleme: "IN DATABASE d: k=v", "MEMBER r (birden çok grantor)".
+ * Yalnızca yükleme: "IN DATABASE d: k=v", "MEMBER r (birden çok grantor)", "MEMBER r (grantor g)" (PG 16+;
+ * önyükleme süper kullanıcısından başkasının verdiği üyelik, salt okunur).
  */
 unsupported: Array<string>, };

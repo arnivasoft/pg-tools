@@ -8,7 +8,8 @@ use ts_rs::TS;
 pub struct Secret(String);
 
 impl Secret {
-    pub fn expose(&self) -> &str {
+    /// Yalnızca bu crate'te (parola kabul kuralı ve SCRAM özeti); başka crate değeri okuyamaz (inceleme M-4).
+    pub(crate) fn expose(&self) -> &str {
         &self.0
     }
 

@@ -5,7 +5,9 @@
 //! bakım veritabanı; veritabanı kapsamlı türde `database_oid` yok → `Invalid`), (3) plan üretimi (geçersiz tanım /
 //! boş plan), (4) nesne denetimi (yalnızca alter/drop: istemcinin `old`/`def`'i, `object`'in sunucudaki güncel
 //! tanımına eşit olmalı; fark → `plan_changed`; yükleme hataları — yok/sistem nesnesi/identity dizisi — olduğu gibi
-//! geçer), (4a) bakım veritabanı koruması (yeniden adlandırma/taşıma/silme/bağlantı kapatma → `Invalid`), (5) hash
+//! geçer), (4a) bakım veritabanı koruması (kayıttaki ve oturumun bağlı olduğu ad: yeniden adlandırma/taşıma/silme,
+//! ALLOW_CONNECTIONS false ya da CONNECTION LIMIT 0 → `MAINTENANCE_DATABASE`; şablon olarak kopyalama →
+//! `MAINTENANCE_TEMPLATE`), (5) hash
 //! uyuşmazlığı, (6) yıkıcı plan onayı, (7) üretim sunucusunda veri kaybı onayı, (8) `lock_timeout` sınırı,
 //! (9) parola kapısı (gizlenmiş ifade ↔ `ApplyOptions.password`), (10) somutlaştırma (gizlenmiş ifade yalnızca
 //! çalıştırma listesinde istemci tarafı SCRAM doğrulayıcısıyla kurulur; `PlanView`'e, özete ve günlüğe girmez).
@@ -185,6 +187,10 @@ pub const ROLE_DEPENDENTS_HINT: &str =
     "Rolün sahip olduğu nesneler/yetkiler var: önce REASSIGN OWNED / DROP OWNED (her veritabanında) çalıştırın.";
 /// Karar 2: görünüm/MV bağımlıları (2BP01).
 pub const VIEW_DEPENDENTS_HINT: &str = "Bağımlı nesneler var; silmek için CASCADE seçin ya da bağımlıları kaldırın.";
+/// Düzenlemede yeniden kurma (view `recreate`, MatView tanım değişikliği) bağımlılar yüzünden düşerse (2BP01): bu akışta
+/// CASCADE seçeneği yoktur (inceleme M-3).
+pub const REBUILD_DEPENDENTS_HINT: &str = "Bağımlı nesneler (ör. bu görünümü kullanan görünümler) yeniden kurmayı \
+     engelliyor: önce bağımlıları kaldırın ya da sorgu değişikliğini kolonları koruyacak biçimde yapın.";
 /// Kısmi uygulama (transaction dışı ifadeler): ilk ifadeler kalıcı.
 pub const PARTIAL_APPLY_HINT: &str =
     "Önceki ifadeler uygulandı (transaction dışı); nesneyi yenileyip kalan değişiklikleri yeniden deneyin.";
@@ -320,7 +326,7 @@ fn materialize_for<'a>(statements: &'a [Statement], role: Option<&str>, secret: 
 }
 
 /// İfadeye ve SQLSTATE'e göre ipucu (Karar 1/8/9, inceleme m-2: kod tek başına yetmez, başarısız ifade de eşleşmeli).
-fn hint_for(kind: ObjectKind, sql: &str, code: &str) -> Option<&'static str> {
+fn hint_for(kind: ObjectKind, op: &str, sql: &str, code: &str) -> Option<&'static str> {
     Some(match (code, kind) {
         ("42P16" | "42804", ObjectKind::View) if sql.starts_with("CREATE OR REPLACE VIEW ") => VIEW_COLUMNS_HINT,
         ("55000", ObjectKind::MaterializedView) if sql.starts_with("REFRESH MATERIALIZED VIEW CONCURRENTLY ") => {
@@ -331,6 +337,8 @@ fn hint_for(kind: ObjectKind, sql: &str, code: &str) -> Option<&'static str> {
         ("55006", ObjectKind::Database) => DATABASE_IN_USE_HINT,
         ("42501", _) => PRIVILEGE_HINT,
         ("2BP01", ObjectKind::Role) => ROLE_DEPENDENTS_HINT,
+        // Düzenlemedeki DROP (yeniden kurma) CASCADE sunmaz; yalnızca silme akışında CASCADE önerilir.
+        ("2BP01", ObjectKind::View | ObjectKind::MaterializedView) if op == "alter" => REBUILD_DEPENDENTS_HINT,
         ("2BP01", ObjectKind::View | ObjectKind::MaterializedView) => VIEW_DEPENDENTS_HINT,
         _ => return None,
     })
@@ -339,7 +347,7 @@ fn hint_for(kind: ObjectKind, sql: &str, code: &str) -> Option<&'static str> {
 /// Başarısız ifadenin arayüz yükü: `apply::failure_payload` + (PG ipucu yoksa) türe/ifadeye göre ipucu; kısmi
 /// uygulamada (`committed > 0`, transaction dışı) ipucu yoksa bunu söyler. Gizlenmiş ifadede sunucu iletisi
 /// doğrulayıcı izi taşıyorsa sabit iletiyle değiştirilir (savunma; konum zaten `None`).
-pub(crate) fn failure_payload_for(kind: ObjectKind, failed: Option<&Statement>, committed: u32, e: &Error) -> ErrorPayload {
+pub(crate) fn failure_payload_for(kind: ObjectKind, op: &str, failed: Option<&Statement>, committed: u32, e: &Error) -> ErrorPayload {
     let mut p = apply::failure_payload(e);
     if failed.is_some_and(|s| s.redacted) {
         let leaks = |v: &Option<String>| v.as_deref().is_some_and(|t| t.contains("SCRAM-SHA-256$"));
@@ -352,7 +360,7 @@ pub(crate) fn failure_payload_for(kind: ObjectKind, failed: Option<&Statement>, 
     if p.hint.is_none()
         && let (Some(s), Some(code)) = (failed, apply::sqlstate(e))
     {
-        p.hint = hint_for(kind, &s.sql, code).map(str::to_string);
+        p.hint = hint_for(kind, op, &s.sql, code).map(str::to_string);
     }
     if p.hint.is_none() && committed > 0 && failed.is_some_and(|s| !s.transactional) {
         p.hint = Some(PARTIAL_APPLY_HINT.into());
@@ -595,7 +603,7 @@ impl DdlManager {
                 let error = if outcome_unknown {
                     apply::unknown_outcome_payload(&error)
                 } else {
-                    failure_payload_for(kind, failed, committed, &error)
+                    failure_payload_for(kind, op, failed, committed, &error)
                 };
                 // Kısmi uygulama: oluşturulan/yeniden adlandırılan nesne yine de bulunur (ör. CREATE DATABASE kalıcı).
                 let created = match (&created, committed) {
@@ -1272,19 +1280,27 @@ mod tests {
             (ObjectKind::MaterializedView, stmt("DROP MATERIALIZED VIEW m", false), "2BP01", Some(VIEW_DEPENDENTS_HINT)),
         ];
         for (kind, st, code, want) in cases {
-            let p = failure_payload_for(kind, Some(&st), 0, &q(code, None));
+            let p = failure_payload_for(kind, "drop", Some(&st), 0, &q(code, None));
             assert_eq!(p.hint.as_deref(), want, "{kind:?} {code} {}", st.sql);
             // PG'nin kendi ipucu korunur.
-            let p = failure_payload_for(kind, Some(&st), 0, &q(code, Some("pg")));
+            let p = failure_payload_for(kind, "drop", Some(&st), 0, &q(code, Some("pg")));
             assert_eq!(p.hint.as_deref(), Some("pg"), "{kind:?} {code}");
         }
+        // Düzenlemede yeniden kurma: aynı DROP ifadesi CASCADE önermez (inceleme M-3).
+        for (kind, sql) in [(ObjectKind::View, "DROP VIEW public.v"), (ObjectKind::MaterializedView, "DROP MATERIALIZED VIEW public.m")] {
+            let p = failure_payload_for(kind, "alter", Some(&stmt(sql, false)), 0, &q("2BP01", None));
+            assert_eq!(p.hint.as_deref(), Some(REBUILD_DEPENDENTS_HINT), "{kind:?}");
+            assert!(!REBUILD_DEPENDENTS_HINT.contains("CASCADE"));
+            let p = failure_payload_for(kind, "drop", Some(&stmt(sql, false)), 0, &q("2BP01", None));
+            assert_eq!(p.hint.as_deref(), Some(VIEW_DEPENDENTS_HINT), "{kind:?}");
+        }
         // Kısmi uygulama (transaction dışı, ipucu yok).
-        let p = failure_payload_for(ObjectKind::Database, Some(&nt("COMMENT ON DATABASE d IS 'x'")), 1, &q("42704", None));
+        let p = failure_payload_for(ObjectKind::Database, "drop", Some(&nt("COMMENT ON DATABASE d IS 'x'")), 1, &q("42704", None));
         assert_eq!(p.hint.as_deref(), Some(PARTIAL_APPLY_HINT));
-        let p = failure_payload_for(ObjectKind::Database, Some(&nt("COMMENT ON DATABASE d IS 'x'")), 0, &q("42704", None));
+        let p = failure_payload_for(ObjectKind::Database, "drop", Some(&nt("COMMENT ON DATABASE d IS 'x'")), 0, &q("42704", None));
         assert_eq!(p.hint, None);
         // İptal/kilit iletileri ve ipuçları korunur.
-        let p = failure_payload_for(ObjectKind::Database, Some(&nt("DROP DATABASE d")), 0, &q("55P03", None));
+        let p = failure_payload_for(ObjectKind::Database, "drop", Some(&nt("DROP DATABASE d")), 0, &q("55P03", None));
         assert!(p.hint.is_some() && p.hint.as_deref() != Some(DATABASE_IN_USE_HINT));
     }
 
@@ -1297,10 +1313,10 @@ mod tests {
             detail: Some("SCRAM-SHA-256$x".into()),
             hint: None,
         };
-        let p = failure_payload_for(ObjectKind::Role, Some(&st), 0, &e);
+        let p = failure_payload_for(ObjectKind::Role, "drop", Some(&st), 0, &e);
         assert_eq!((p.message.as_str(), p.detail, p.hint), (REDACTED_FAILURE_MESSAGE, None, None));
         // Gizlenmemiş ifadede ileti olduğu gibi kalır.
-        let p = failure_payload_for(ObjectKind::Role, Some(&stmt("CREATE ROLE app", false)), 0, &q("42710", None));
+        let p = failure_payload_for(ObjectKind::Role, "drop", Some(&stmt("CREATE ROLE app", false)), 0, &q("42710", None));
         assert_eq!(p.message, "m");
     }
 
