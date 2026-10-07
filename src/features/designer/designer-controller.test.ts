@@ -11,6 +11,7 @@ import type { PlanRequest } from "../../ipc/bindings/PlanRequest";
 import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { CreateContext } from "../../ipc/bindings/CreateContext";
 import type { TableDef } from "../../ipc/bindings/TableDef";
+import type { RoleDef } from "../../ipc/bindings/RoleDef";
 import type { Risk } from "../../ipc/bindings/Risk";
 import { createDesignerController, planRequest, type AppliedInfo, type DesignerControllerDeps } from "./designer-controller";
 import { failedText } from "./errors";
@@ -41,11 +42,11 @@ function setup(extra: Partial<DesignerControllerDeps> = {}) {
     S2: { name: "other", locked: false, production: false },
   };
   const api = {
-    ddlDefaults: vi.fn(async (_s: string, _db: number, _k: ObjectKind, _c: CreateContext): Promise<ObjectDef> => schema({ name: "", owner: null })),
-    ddlLoad: vi.fn(async (_s: string, _db: number, _o: ObjectRef): Promise<ObjectDef> => schema()),
-    ddlLookup: vi.fn(async (_s: string, _db: number, _r: LookupRequest): Promise<LookupItem[]> => [{ value: "alice", detail: null }]),
-    ddlPreview: vi.fn(async (_s: string, _db: number, _r: PlanRequest): Promise<PlanView> => view()),
-    ddlApply: vi.fn(async (_s: string, _db: number, _r: PlanRequest, _o: ApplyOptions): Promise<ApplyOutcome> => applied()),
+    ddlDefaults: vi.fn(async (_s: string, _db: number | null, _k: ObjectKind, _c: CreateContext): Promise<ObjectDef> => schema({ name: "", owner: null })),
+    ddlLoad: vi.fn(async (_s: string, _db: number | null, _o: ObjectRef): Promise<ObjectDef> => schema()),
+    ddlLookup: vi.fn(async (_s: string, _db: number | null, _r: LookupRequest): Promise<LookupItem[]> => [{ value: "alice", detail: null }]),
+    ddlPreview: vi.fn(async (_s: string, _db: number | null, _r: PlanRequest): Promise<PlanView> => view()),
+    ddlApply: vi.fn(async (_s: string, _db: number | null, _r: PlanRequest, _o: ApplyOptions): Promise<ApplyOutcome> => applied()),
     ddlCancel: vi.fn(async (_id: string) => null),
   };
   const notify = vi.fn();
@@ -1097,5 +1098,250 @@ describe("designer-controller Task 4: findAlter, onApplied, Table", () => {
     expect(s.ctl.lookupCacheSize()).toBe(3);
     await s.ctl.lookup(id, { kind: "tables", schema: "public" });
     expect(s.ctl.lookupCacheSize()).toBe(2); // roles + tables
+  });
+});
+
+// ---- Plan 15 Task 2: sunucu kapsamı, parola haritası ve kapısı
+const SECRET = "Gizli-1";
+const role = (p: Partial<RoleDef> = {}): ObjectDef => ({
+  kind: "role", name: "app_user", login: true, superuser: false, createdb: false, createrole: false, inherit: true,
+  replication: false, bypassrls: false, connectionLimit: -1, validUntil: null, password: "keep", memberOf: [], settings: [],
+  comment: null, unsupported: [], ...p,
+});
+const ROLE: ObjectRef = { kind: "role", oid: 16384 };
+const redacted = (p: Partial<PlanView> = {}): PlanView => view({
+  statements: [
+    { sql: "CREATE ROLE app_user LOGIN", risk: "safe", transactional: true, note: null, redacted: false },
+    { sql: "ALTER ROLE app_user PASSWORD ********", risk: "safe", transactional: true, note: null, redacted: true },
+  ],
+  hash: "hp",
+  ...p,
+});
+const setPassword = (v: RoleDef["password"]) => (d: ObjectDef) => {
+  if (d.kind === "role") d.password = v;
+};
+async function openRoleCreate(s: S, tabId = "R1") {
+  s.api.ddlDefaults.mockResolvedValue(role({ name: "" }));
+  await s.ctl.openCreate({
+    tabId, serverId: "S1", databaseOid: null, create: { kind: "role", context: { schemaOid: null, tableOid: null } }, refreshNodeId: "roles",
+  });
+  return tabId;
+}
+async function openRoleAlter(s: S, tabId = "R1") {
+  s.api.ddlLoad.mockResolvedValue(role());
+  await s.ctl.openAlter({ tabId, serverId: "S1", databaseOid: null, object: ROLE, refreshNodeId: "roles" });
+  return tabId;
+}
+/** Rol taslağı password="set" + gizlenmiş önizleme gelmiş. */
+async function roleWithPasswordPlan(s: S, v: PlanView = redacted(), alter = false) {
+  const id = alter ? await openRoleAlter(s) : await openRoleCreate(s);
+  s.api.ddlPreview.mockResolvedValue(v);
+  s.ctl.edit(id, (d) => {
+    if (d.kind === "role") {
+      d.name = "app_user";
+      d.password = "set";
+    }
+  });
+  await settle();
+  return id;
+}
+
+describe("designer-controller Plan 15: parola", () => {
+  it("parola yalnızca ddlApply options.password'da gider; ddlPreview isteğinde ve modelde yok", async () => {
+    const s = setup();
+    const id = await roleWithPasswordPlan(s);
+    s.ctl.setSecret(id, SECRET);
+    s.ctl.previewNow(id);
+    await flush();
+    expect(s.api.ddlPreview).toHaveBeenCalledTimes(2);
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "ready" });
+    expect(JSON.stringify(s.ctl.model(id))).not.toContain(SECRET);
+    s.api.ddlApply.mockResolvedValueOnce(applied(ROLE));
+    await s.ctl.apply(id);
+    await flush();
+    expect(JSON.stringify(s.api.ddlPreview.mock.calls)).not.toContain(SECRET);
+    expect(s.api.ddlApply).toHaveBeenCalledOnce();
+    expect(s.api.ddlApply.mock.calls[0]![3].password).toBe(SECRET);
+    expect(JSON.stringify(s.api.ddlApply.mock.calls[0]![2])).not.toContain(SECRET);
+    expect(JSON.stringify(s.ctl.model(id))).not.toContain(SECRET);
+    expect(JSON.stringify(s.notify.mock.calls)).not.toContain(SECRET);
+  });
+
+  it("gizlenmemiş planda (parola niyeti yok) verilen parola gönderilmez", async () => {
+    const s = setup();
+    const id = await openRoleAlter(s);
+    s.api.ddlPreview.mockResolvedValue(view());
+    s.ctl.edit(id, (d) => {
+      if (d.kind === "role") d.comment = "x";
+    });
+    await settle();
+    s.ctl.setSecret(id, SECRET); // savunma: harita boşaltılmamış olsa bile
+    await s.ctl.apply(id);
+    expect(s.api.ddlApply.mock.calls[0]![3].password).toBeNull();
+  });
+
+  it("başarılı uygulama, reload, close ve password≠set düzenlemesi parolayı siler; secretReady false olur", async () => {
+    // başarılı uygulama
+    let s = setup();
+    let id = await roleWithPasswordPlan(s);
+    s.ctl.setSecret(id, SECRET);
+    expect(s.ctl.secretReady(id)).toBe(true);
+    s.api.ddlApply.mockResolvedValueOnce(applied(ROLE));
+    await s.ctl.apply(id);
+    await flush();
+    expect(s.ctl.secretReady(id)).toBe(false);
+
+    // başarısız uygulama (Failed, committed=0) parolayı korur: yeniden denenebilir
+    s = setup();
+    id = await roleWithPasswordPlan(s);
+    s.ctl.setSecret(id, SECRET);
+    s.api.ddlApply.mockResolvedValueOnce({
+      outcome: "failed", failedIndex: 1, committed: 0, sqlstate: "42501", position: null, error: err("query", "denied"),
+    });
+    await s.ctl.apply(id);
+    await flush();
+    expect(s.ctl.secretReady(id)).toBe(true);
+
+    // reload (force)
+    s = setup();
+    id = await roleWithPasswordPlan(s);
+    s.ctl.setSecret(id, SECRET);
+    await s.ctl.reload(id, { force: true });
+    expect(s.ctl.secretReady(id)).toBe(false);
+
+    // close (aynı kimlikle yeniden açılan sekme parolayı görmez)
+    s = setup();
+    id = await roleWithPasswordPlan(s);
+    s.ctl.setSecret(id, SECRET);
+    s.ctl.close(id);
+    expect(s.ctl.secretReady(id)).toBe(false);
+    id = await roleWithPasswordPlan(s);
+    expect(s.ctl.secretReady(id)).toBe(false);
+
+    // password ≠ set düzenlemesi
+    for (const next of ["keep", "clear"] as const) {
+      s = setup();
+      id = await roleWithPasswordPlan(s);
+      s.ctl.setSecret(id, SECRET);
+      s.ctl.edit(id, (d) => {
+        if (d.kind === "role") d.comment = "yorum"; // set kalır → silinmez
+      });
+      expect(s.ctl.secretReady(id)).toBe(true);
+      s.ctl.edit(id, setPassword(next));
+      expect(s.ctl.secretReady(id)).toBe(false);
+    }
+
+    // sunucu oturumları kapandı
+    s = setup();
+    id = await roleWithPasswordPlan(s);
+    s.ctl.setSecret(id, SECRET);
+    s.ctl.serverSessionsClosed("S1", false);
+    expect(s.ctl.secretReady(id)).toBe(false);
+
+    // setSecret(null/boş) siler; bilinmeyen sekme saklanmaz
+    s = setup();
+    id = await roleWithPasswordPlan(s);
+    s.ctl.setSecret(id, SECRET);
+    s.ctl.setSecret(id, "");
+    expect(s.ctl.secretReady(id)).toBe(false);
+    s.ctl.setSecret(id, SECRET);
+    s.ctl.setSecret(id, null);
+    expect(s.ctl.secretReady(id)).toBe(false);
+    s.ctl.setSecret("YOK", SECRET);
+    expect(s.ctl.secretReady("YOK")).toBe(false);
+  });
+
+  it("gizlenmiş planda parola yokken gate 'password'; parola girilince needsConfirm/ready; önizleme her durumda istenir", async () => {
+    const s = setup();
+    const id = await roleWithPasswordPlan(s, redacted({ risk: "destructive", hash: "hd" }), true);
+    expect(s.api.ddlPreview).toHaveBeenCalledOnce(); // parola yokken de önizleme istendi
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "password" });
+    s.ctl.setConfirm(id, { checked: true });
+    await s.ctl.apply(id);
+    expect(s.api.ddlApply).not.toHaveBeenCalled();
+    s.ctl.setSecret(id, SECRET);
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "needsConfirm" });
+    s.ctl.setSecret(id, null);
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "password" });
+    // gizlenmemiş, güvenli plan: parola gerekmez
+    s.api.ddlPreview.mockResolvedValue(view({ hash: "hs" }));
+    s.ctl.edit(id, (d) => {
+      if (d.kind === "role") d.comment = "x";
+    });
+    await settle();
+    expect(s.api.ddlPreview).toHaveBeenCalledTimes(2);
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "ready" });
+    // gizlenmiş + güvenli: parola girilince ready
+    s.api.ddlPreview.mockResolvedValue(redacted({ hash: "hr2" }));
+    s.ctl.edit(id, (d) => {
+      if (d.kind === "role") d.comment = "y";
+    });
+    await settle();
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "password" });
+    s.ctl.setSecret(id, SECRET);
+    expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "ready" });
+  });
+
+  it("role_password_missing hata kodu gateError metnine eşlenir ve uygulama yeniden denenebilir", async () => {
+    const s = setup();
+    const id = await roleWithPasswordPlan(s);
+    s.ctl.setSecret(id, SECRET);
+    s.api.ddlApply.mockRejectedValueOnce(err("role_password_missing"));
+    await s.ctl.apply(id);
+    await flush();
+    const m = s.ctl.model(id)!;
+    expect(m.gateError).toBe(tdes.gate.passwordMissing);
+    expect(m.status).toBe("ready");
+    expect(m.needsReload).toBe(false);
+    expect(s.api.ddlPreview).toHaveBeenCalledTimes(2); // önizleme yeniden istendi
+    s.api.ddlApply.mockResolvedValueOnce(applied(ROLE));
+    await s.ctl.apply(id);
+    expect(s.api.ddlApply).toHaveBeenCalledTimes(2);
+    expect(s.api.ddlApply.mock.calls[1]![3].password).toBe(SECRET);
+  });
+});
+
+describe("designer-controller Plan 15: sunucu kapsamı", () => {
+  it("sunucu kapsamlı sekme: ddlLoad/ddlPreview/ddlApply/ddlLookup databaseOid=null ile çağrılır", async () => {
+    const s = setup();
+    const id = await openRoleAlter(s);
+    expect(s.api.ddlLoad).toHaveBeenCalledWith("S1", null, ROLE);
+    expect(s.ctl.model(id)!.databaseOid).toBeNull();
+    s.ctl.edit(id, (d) => {
+      if (d.kind === "role") d.comment = "x";
+    });
+    await settle();
+    expect(s.api.ddlPreview.mock.calls[0]![1]).toBeNull();
+    await s.ctl.apply(id);
+    await flush();
+    expect(s.api.ddlApply.mock.calls[0]![1]).toBeNull();
+    await s.ctl.lookup(id, { kind: "grantable_roles" });
+    expect(s.api.ddlLookup).toHaveBeenCalledWith("S1", null, { kind: "grantable_roles" });
+    expect(s.ctl.findAlter("S1", null, ROLE)).toBe(id);
+    expect(s.ctl.findAlter("S1", 5, ROLE)).toBeNull();
+    // create (Database) varsayılanları da null ile
+    s.api.ddlDefaults.mockResolvedValueOnce({
+      kind: "database", name: "", owner: null, template: null, encoding: null, localeProvider: null, lcCollate: null, lcCtype: null,
+      providerLocale: null, tablespace: null, connectionLimit: -1, isTemplate: false, allowConnections: true, settings: [], comment: null,
+    });
+    await s.ctl.openCreate({ tabId: "D1", serverId: "S1", databaseOid: null, create: { kind: "database", context: { schemaOid: null, tableOid: null } }, refreshNodeId: "dbs" });
+    expect(s.api.ddlDefaults).toHaveBeenLastCalledWith("S1", null, "database", { schemaOid: null, tableOid: null });
+    // objectDropped null ile eşleşir
+    s.ctl.objectDropped("S1", null, ROLE);
+    expect(s.ctl.model(id)!.status).toBe("gone");
+  });
+
+  it("SESSION_LOOKUPS: grantable_roles/encodings/template_databases/locales/settings TTL sonrası yeniden istenmez", async () => {
+    const s = setup();
+    const id = await openRoleAlter(s);
+    const reqs: LookupRequest[] = [
+      { kind: "grantable_roles" }, { kind: "encodings" }, { kind: "template_databases" },
+      { kind: "locales", provider: "libc" }, { kind: "locales", provider: "icu" }, { kind: "settings" },
+    ];
+    for (const r of reqs) await s.ctl.lookup(id, r);
+    expect(s.api.ddlLookup).toHaveBeenCalledTimes(6); // locales{provider} ayrı anahtar
+    s.tick(3_600_000);
+    for (const r of reqs) await s.ctl.lookup(id, r);
+    expect(s.api.ddlLookup).toHaveBeenCalledTimes(6);
   });
 });

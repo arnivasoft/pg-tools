@@ -34,6 +34,12 @@ describe("designer errors", () => {
     expect(designerErrorText(p("io", "m", "d"))).toBe("m");
   });
 
+  it("role_password_missing → passwordMissing sınıfı ve tdes.gate.passwordMissing metni; kapı kodu", () => {
+    expect(classifyError(p("role_password_missing"))).toBe("passwordMissing");
+    expect(designerErrorText(p("role_password_missing", "arka uç iletisi"))).toBe(tdes.gate.passwordMissing);
+    expect(isGateCode("role_password_missing")).toBe(true);
+  });
+
   it("failedText: 55P03 → kilit zaman aşımı; diğerleri errorText", () => {
     const base = { outcome: "failed" as const, failedIndex: 1, committed: 0, position: null };
     expect(failedText({ ...base, sqlstate: "55P03", error: p("query", "canceling statement") })).toBe(tdes.apply.failed(1, tdes.apply.lockTimeout));

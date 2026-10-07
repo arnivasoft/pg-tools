@@ -4,6 +4,7 @@ import { tdes } from "../../app/strings-designer";
 import type { ApplyOutcome } from "../../ipc/bindings/ApplyOutcome";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
+import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
 import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { PlanRequest } from "../../ipc/bindings/PlanRequest";
 import { errorText } from "../../ipc/errors";
@@ -16,6 +17,17 @@ import { classifyError, designerErrorText, failedText, isConnectionCode } from "
  */
 export function dropRequest(object: ObjectRef, def: ObjectDef, cascade: boolean, force = false): Extract<PlanRequest, { op: "drop" }> {
   return { op: "drop", object: { ...object }, def: cloneDef(def), cascade, force };
+}
+
+/**
+ * Silme diyaloğunun sunduğu seçenekler (Plan 14 sözleşmesi): Database → yalnızca `WITH (FORCE)` (PG 13+; CASCADE alan
+ * hatasıdır); Role → hiçbiri; diğer türler → yalnızca CASCADE. Diyalog yalnızca sunulan kutuları çizer, denetleyici de
+ * sunulmayanı değiştirmez.
+ */
+export function dropOptionsFor(kind: ObjectKind): { cascade: boolean; force: boolean } {
+  if (kind === "database") return { cascade: false, force: true };
+  if (kind === "role") return { cascade: false, force: false };
+  return { cascade: true, force: false };
 }
 
 /** PostgreSQL `dependent_objects_still_exist`: CASCADE olmadan silinemeyen nesne. */
@@ -59,8 +71,8 @@ export function dropStatusText(error: ErrorPayload | null, outcome: Failed | nul
 
 /** Designer sekmesi bu nesnenin alter sekmesi mi (aynı sunucu, veritabanı, tür ve oid). */
 export function matchesObject(
-  tab: { serverId: string; databaseOid: number; mode: "create" | "alter"; object: ObjectRef | null },
-  ref: { serverId: string; databaseOid: number; object: ObjectRef },
+  tab: { serverId: string; databaseOid: number | null; mode: "create" | "alter"; object: ObjectRef | null },
+  ref: { serverId: string; databaseOid: number | null; object: ObjectRef },
 ): boolean {
   return tab.mode === "alter" && tab.object !== null && tab.serverId === ref.serverId && tab.databaseOid === ref.databaseOid
     && tab.object.kind === ref.object.kind && tab.object.oid === ref.object.oid;

@@ -82,6 +82,7 @@ export const tdes = {
     cancelTitle: "Süren uygulamayı iptal et",
     openScript: "Query Tool'da aç",
     openScriptTitle: "Betiği yeni sorgu sekmesine koy (çalıştırmaz)",
+    openScriptRedacted: "Parola içeren plan Query Tool'a aktarılamaz ya da kopyalanamaz.",
     close: "Kapat",
     lockedTitle: "Sunucu salt okunur kilitli",
     /** Uygula kapalıyken `title` gerekçesi (`ApplyGate.reason`). */
@@ -111,6 +112,10 @@ export const tdes = {
     invalidDef: "Tanım geçersiz; önizleme yenilendi.",
     locked: "Sunucu salt okunur kilitli.",
     confirmationRequired: "Bu değişiklik onay gerektiriyor; önizlemeyi kontrol edip onaylayın.",
+    /** Uygula kapalıyken gerekçe (`ApplyGate.reason === "password"`). */
+    password: "Parolayı iki alana aynı girin.",
+    /** `role_password_missing` reddi (arka uç parolayı almadı). */
+    passwordMissing: "Parola gönderilmedi; parolayı yeniden girip uygulayın.",
   },
   /** Gezgin menüsünden açma (designer-open). */
   open: {
@@ -128,6 +133,8 @@ export const tdes = {
     previewError: "Önizleme alınamadı",
     cascade: "Bağımlı nesnelerle birlikte sil (CASCADE)",
     cascadeHint: "Bu nesneye bağlı tüm nesneler de silinir; veri kaybı olabilir.",
+    force: "Bağlı oturumları sonlandır (WITH (FORCE), PG 13+)",
+    forceHint: "Query Tool sekmeleri dahil tüm oturumlar kesilir.",
     dependents: "Bağımlı nesneler var; CASCADE ile silin ya da bağımlıları kaldırın.",
     dependentsDetail: "Bağımlı nesneler",
     stale: "Nesne değişti ya da artık yok; Gezgini yenileyin.",

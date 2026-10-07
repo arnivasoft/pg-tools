@@ -57,7 +57,7 @@ export default function DesignerView(props: {
   tabId: string;
   /** "<sunucu>/<veritabanı>" (sekme kaydından; yoksa sunucu adı). */
   where: string | null;
-  onOpenScript: (input: { serverId: string; databaseOid: number; text: string }) => void;
+  onOpenScript: (input: { serverId: string; databaseOid: number | null; text: string }) => void;
   onClose: (tabId: string) => void;
 }) {
   const model = () => props.designer.model(props.tabId);

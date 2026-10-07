@@ -1,4 +1,5 @@
-// Silme diyaloğu (tembel parça; sekme açmaz): yüklenen tanımın `Drop` planı, CASCADE seçimi, risk onayı ve Sil.
+// Silme diyaloğu (tembel parça; sekme açmaz): yüklenen tanımın `Drop` planı, CASCADE / WITH (FORCE) seçimi (yalnızca
+// `drop.options()` = `dropOptionsFor` sunduğu kutular: Database → FORCE, Role → hiçbiri, diğerleri → CASCADE), risk onayı ve Sil.
 // Önizleme metni yalnızca `PlanView.statements[].sql`'dir (salt okunur `<pre>`; CodeMirror yok). Kapı (`drop.gate()`)
 // yalnızca arayüz içindir; denetleyici `apply` anında yeniden hesaplar. Odak Vazgeç'te başlar; Enter silmeyi onaylamaz
 // (onay kutusu ve Sil ayrı denetimlerdir, ad alanında Enter yutulur).
@@ -16,6 +17,7 @@ export default function DropDialog(props: { drop: DropController }) {
   const b = tdes.bar;
   const nameId = createUniqueId();
   const cascadeHintId = createUniqueId();
+  const forceHintId = createUniqueId();
   let cancelEl: HTMLButtonElement | undefined;
   const s = () => props.drop.state();
   const gate = () => props.drop.gate();
@@ -47,7 +49,7 @@ export default function DropDialog(props: { drop: DropController }) {
     // Uç durumda gerekçe şeritte yazılıdır ("Tanım yükleniyor" yanıltıcı olurdu).
     if (s()?.phase === "error") return undefined;
     const g = gate();
-    if (g.kind === "blocked") return b.blocked[g.reason];
+    if (g.kind === "blocked") return g.reason === "password" ? tdes.gate.password : b.blocked[g.reason];
     if (submittable()) return undefined;
     return g.kind === "needsProductionName" ? d.needsName : d.needsConfirm;
   };
@@ -165,21 +167,40 @@ export default function DropDialog(props: { drop: DropController }) {
                   </ul>
                 </Show>
               </section>
-              <div class="flex flex-col gap-1">
-                <label class="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={cur().cascade}
-                    disabled={cur().phase !== "ready"}
-                    aria-describedby={cascadeHintId}
-                    onChange={(ev) => props.drop.setCascade(ev.currentTarget.checked)}
-                  />
-                  {d.cascade}
-                </label>
-                <p id={cascadeHintId} class="pl-6 text-[12px] text-muted">
-                  {d.cascadeHint}
-                </p>
-              </div>
+              <Show when={props.drop.options().cascade}>
+                <div class="flex flex-col gap-1">
+                  <label class="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={cur().cascade}
+                      disabled={cur().phase !== "ready"}
+                      aria-describedby={cascadeHintId}
+                      onChange={(ev) => props.drop.setCascade(ev.currentTarget.checked)}
+                    />
+                    {d.cascade}
+                  </label>
+                  <p id={cascadeHintId} class="pl-6 text-[12px] text-muted">
+                    {d.cascadeHint}
+                  </p>
+                </div>
+              </Show>
+              <Show when={props.drop.options().force}>
+                <div class="flex flex-col gap-1">
+                  <label class="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={cur().force}
+                      disabled={cur().phase !== "ready"}
+                      aria-describedby={forceHintId}
+                      onChange={(ev) => props.drop.setForce(ev.currentTarget.checked)}
+                    />
+                    {d.force}
+                  </label>
+                  <p id={forceHintId} class="pl-6 text-[12px] text-muted">
+                    {d.forceHint}
+                  </p>
+                </div>
+              </Show>
               <Show when={showConfirm() && !cur().locked}>
                 <div class="flex flex-col gap-1.5 border-t border-border pt-2">
                   <label class="flex items-center gap-2">

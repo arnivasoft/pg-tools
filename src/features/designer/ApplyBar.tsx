@@ -1,13 +1,14 @@
 // Designer uygulama çubuğu (tembel parça): risk özeti, lock_timeout, kapıya göre onay denetimleri ve düğmeler.
 // Kapı (`peekApplyGate`) yalnızca arayüz içindir; denetleyici `apply` anında kapıyı yeniden hesaplar (arayüze güvenmez).
 // Enter yıkıcı eylemi onaylamaz: onay kutusu ve Uygula ayrı denetimlerdir, ad alanında Enter gönderim yapmaz.
+// Gizlenmiş (parola) ifadeli planda "Query Tool'da aç" kapalıdır (`scriptActionsEnabled`; işleyici de erken döner).
 import { Play, SquareTerminal, X } from "lucide-solid";
 import { For, Show, createUniqueId } from "solid-js";
 import { tdes } from "../../app/strings-designer";
 import { Button } from "../../ui/Button";
 import { inputClass } from "../../ui/Field";
 import type { DesignerController, DesignerModel } from "./designer-controller";
-import { canSubmit, scriptWithRanges, type ApplyGate } from "./designer-model";
+import { canSubmit, scriptActionsEnabled, scriptWithRanges, type ApplyGate } from "./designer-model";
 import { RiskBadge } from "./RiskBadge";
 
 /** lock_timeout seçenekleri (ms; 0 = sınırsız). */
@@ -44,10 +45,12 @@ export default function ApplyBar(props: {
   /** Uygula kapalıyken gerekçe. */
   const applyTitle = () => {
     const g = gate();
-    if (g.kind === "blocked") return b.blocked[g.reason];
+    if (g.kind === "blocked") return g.reason === "password" ? tdes.gate.password : b.blocked[g.reason];
     if (submittable()) return undefined;
     return g.kind === "needsProductionName" ? b.needsName : g.kind === "needsConfirm" ? b.needsConfirm : undefined;
   };
+  /** Query Tool'da aç: güncel görünüm var ve gizlenmiş ifade yok. */
+  const canOpenScript = () => scriptActionsEnabled(view()).open;
   const failed = () => (props.model.outcome?.outcome === "failed" ? props.model.outcome : null);
   // Kısmen kalıcı hata/plan değişimi yeniden yükleme şeridinde (DesignerView) gösterilir; burada tekrarlanmaz.
   const gateError = () => (props.model.needsReload ? null : props.model.gateError);
@@ -124,9 +127,13 @@ export default function ApplyBar(props: {
         <div class="ml-auto flex items-center gap-1.5">
           <Button
             variant="ghost"
-            disabled={statements().length === 0 || applying()}
-            title={b.openScriptTitle}
-            onClick={() => props.onOpenScript(scriptWithRanges(statements()).text)}
+            disabled={statements().length === 0 || applying() || !canOpenScript()}
+            title={view() && !canOpenScript() ? b.openScriptRedacted : b.openScriptTitle}
+            onClick={() => {
+              // Savunma: gizlenmiş plan düğme kapalı olsa da aktarılmaz.
+              if (!canOpenScript()) return;
+              props.onOpenScript(scriptWithRanges(statements()).text);
+            }}
           >
             <SquareTerminal size={14} /> {b.openScript}
           </Button>

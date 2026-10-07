@@ -1,6 +1,8 @@
 // Designer SQL önizlemesi (tembel parça): arka ucun döndürdüğü ifadeler salt okunur CodeMirror'da (metin yalnızca
 // `PlanView.statements[].sql`; istemci SQL üretmez/değiştirmez), ifade listesi (risk, transaction dışı, not), uyarılar,
 // genel hatalar ve boş durumlar. Başarısız uygulamada (`outcome.failed`) ilgili ifadenin satırları vurgulanır.
+// Gizlenmiş (parola) ifadeli planda kopyalama kapalıdır: düğme, işleyici ve düzenleyicideki kopyala/kes kısayolu
+// (`scriptActionsEnabled`).
 import { Compartment, RangeSetBuilder, type Extension } from "@codemirror/state";
 import { Decoration, EditorView } from "@codemirror/view";
 import { Copy } from "lucide-solid";
@@ -12,7 +14,7 @@ import type { PlanView } from "../../ipc/bindings/PlanView";
 import { Button } from "../../ui/Button";
 import { createReadOnlyEditor, replaceDoc } from "../inspector/codemirror-setup";
 import type { DesignerModel } from "./designer-controller";
-import { previewEmptyState, scriptWithRanges, statementRangesToLineRanges } from "./designer-model";
+import { previewEmptyState, scriptActionsEnabled, scriptWithRanges, statementRangesToLineRanges } from "./designer-model";
 import { RiskBadge } from "./RiskBadge";
 
 const failedLine = Decoration.line({ class: "cm-pgt-failed" });
@@ -57,11 +59,27 @@ export default function SqlPreview(props: { model: DesignerModel; general: strin
     return statementRangesToLineRanges(s.text, s.ranges)[i] ?? null;
   });
 
+  /** Kopyalama açık mı (gösterilen plan; gizlenmiş planda kapalı). */
+  const canCopy = () => scriptActionsEnabled(shown()).copy;
+
   let host!: HTMLDivElement;
   let editor: EditorView | undefined;
   const decos = new Compartment();
+  // Düzenleyicide seçili metnin Ctrl+C / Ctrl+X ile kopyalanması da gizlenmiş planda engellenir.
+  const blockCopy = EditorView.domEventHandlers({
+    copy: (ev) => {
+      if (canCopy()) return false;
+      ev.preventDefault();
+      return true;
+    },
+    cut: (ev) => {
+      if (canCopy()) return false;
+      ev.preventDefault();
+      return true;
+    },
+  });
   onMount(() => {
-    editor = createReadOnlyEditor(host, "", [failedTheme, decos.of([])]);
+    editor = createReadOnlyEditor(host, "", [failedTheme, decos.of([]), blockCopy]);
   });
   createEffect(() => {
     const text = empty() === null ? script().text : "";
@@ -76,6 +94,8 @@ export default function SqlPreview(props: { model: DesignerModel; general: strin
   onCleanup(() => editor?.destroy());
 
   const copy = async () => {
+    // Savunma: gizlenmiş plan düğme kapalı olsa da kopyalanmaz.
+    if (!canCopy()) return;
     try {
       await copyText(script().text);
       toast.show(p.copied, "success");
@@ -109,8 +129,8 @@ export default function SqlPreview(props: { model: DesignerModel; general: strin
         <Button
           variant="ghost"
           class="ml-auto !h-6 !px-1.5 text-[12px]"
-          title={p.copyTitle}
-          disabled={empty() !== null || script().text === ""}
+          title={shown() && !canCopy() ? tdes.bar.openScriptRedacted : p.copyTitle}
+          disabled={empty() !== null || script().text === "" || !canCopy()}
           onClick={() => void copy()}
         >
           <Copy size={13} /> {p.copy}

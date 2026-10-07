@@ -33,7 +33,7 @@ export function QueryTabs(props: {
   /** Tembel designer denetleyicisi (ilk "Oluştur/Düzenle"de yüklenir; o zamana kadar `null`). */
   designer?: () => DesignerController | null;
   /** Designer betiğini yeni sorgu sekmesinde aç (çalıştırmaz). */
-  onOpenScript?: (input: { serverId: string; databaseOid: number; text: string }) => void;
+  onOpenScript?: (input: { serverId: string; databaseOid: number | null; text: string }) => void;
 }) {
   const ctl = props.ctl;
   const active = () => ctl.tabs.state.activeId;

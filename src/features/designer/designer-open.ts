@@ -6,6 +6,8 @@
 // - Kilitli sunucuda değiştiren açma reddedilir (menü zaten kapalıdır; savunma). Önizleme-only açma burada sunulmaz.
 // - Tek seferde bir açma (`opening`); `openCreate`/`openAlter`, `openDesigner` yeni sekme ürettikten hemen sonra
 //   EŞZAMANLI çağrılır (sekme çizilmeden denetleyici girdisi hazır olsun).
+// - Sunucu kapsamlı türler (Database/Role; Plan 14): `databaseOid` her zaman `null` gönderilir (hedef zaten null
+//   döner; savunma), sekme başlığında/`where`'de veritabanı adı yoktur. Veritabanı kapsamlı türde `null` → açılmaz.
 import { createRoot, createEffect, on } from "solid-js";
 import { t } from "../../app/strings";
 import { tdes } from "../../app/strings-designer";
@@ -20,7 +22,7 @@ import type { QueryController } from "../query/query-controller";
 import type { TabsStore } from "../query/tabs-store";
 import { isProductionLabel } from "../servers/server-form";
 import { createDesignerController, type DesignerController, type DesignerControllerDeps } from "./designer-controller";
-import { designerTabKey, focusFieldOf, kindLabel } from "./designer-model";
+import { designerTabKey, focusFieldOf, isServerScoped, kindLabel } from "./designer-model";
 import type { DropInput } from "./drop-controller";
 import { extraRefreshIds, titleAfterApply, type OpenContext } from "./refresh-model";
 
@@ -60,15 +62,16 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
     opening = true;
     try {
       const [target, list] = await Promise.all([deps.api.ddlTargetOf(nodeId), deps.refreshServers()]);
-      const { databaseOid, refreshNodeId } = target;
+      const { refreshNodeId } = target;
       const create = mode === "create" ? target.create : null;
       const object = mode === "create" ? null : target.object;
+      const kind = create?.kind ?? object?.kind;
       // Kolon/kısıt odağı olan hedef (tablo diyaloğu) hiçbir zaman DROP TABLE/yeniden adlandırma diyaloğu açmaz.
       if (target.focus && (mode === "drop" || mode === "rename")) {
         notify(tdes.open.rowInTable, "info");
         return;
       }
-      if ((!create && !object) || databaseOid === null) {
+      if (kind === undefined || (target.databaseOid === null && !isServerScoped(kind))) {
         notify(tdes.open.none, "info");
         return;
       }
@@ -83,8 +86,10 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
       }
       if (!(await deps.connect(config.id))) return;
       const serverId = config.id;
-      const database = ancestorOfKind(deps.tree(), nodeId, ["database"])?.label ?? null;
-      if (database !== null) dbNames.set(`${serverId}|${databaseOid}`, database);
+      const serverScoped = isServerScoped(kind);
+      const databaseOid = serverScoped ? null : target.databaseOid;
+      const database = serverScoped ? null : (ancestorOfKind(deps.tree(), nodeId, ["database"])?.label ?? null);
+      if (database !== null && databaseOid !== null) dbNames.set(`${serverId}|${databaseOid}`, database);
       const where = database === null ? config.name : `${config.name}/${database}`;
       if (object && mode === "drop") {
         deps.openDrop({ serverId, databaseOid, object, refreshNodeId, name: node.label });
@@ -130,7 +135,13 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
     }
   };
 
-  return { open, context: (tabId: string): OpenContext | null => contexts.get(tabId) ?? null, databaseName: (serverId: string, databaseOid: number) => dbNames.get(`${serverId}|${databaseOid}`) ?? null };
+  return {
+    open,
+    context: (tabId: string): OpenContext | null => contexts.get(tabId) ?? null,
+    /** Veritabanı kapsamlı hedefin veritabanı adı; sunucu kapsamlıda (`null`) her zaman null (bakım veritabanı). */
+    databaseName: (serverId: string, databaseOid: number | null) =>
+      (databaseOid === null ? null : (dbNames.get(`${serverId}|${databaseOid}`) ?? null)),
+  };
 }
 
 export interface DesignerDeps extends Omit<DesignerOpenDeps, "designer" | "openDrop"> {
@@ -174,7 +185,7 @@ export function createDesigner(deps: DesignerDeps) {
   return {
     ctl,
     open: opener.open,
-    openScript: (input: { serverId: string; databaseOid: number; text: string }) =>
+    openScript: (input: { serverId: string; databaseOid: number | null; text: string }) =>
       void deps.query.openScript({ ...input, database: opener.databaseName(input.serverId, input.databaseOid) }),
   };
 }

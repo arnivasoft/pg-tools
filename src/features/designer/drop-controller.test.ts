@@ -38,12 +38,12 @@ function setup() {
     S1: { name: "prod-1", locked: false, production: false },
   };
   const api = {
-    ddlDefaults: vi.fn(async (_s: string, _db: number, _k: ObjectKind, _c: CreateContext): Promise<ObjectDef> => schema()),
-    ddlLoad: vi.fn(async (_s: string, _db: number, _o: ObjectRef): Promise<ObjectDef> => schema()),
-    ddlLookup: vi.fn(async (_s: string, _db: number, _r: LookupRequest): Promise<LookupItem[]> => []),
-    ddlPreview: vi.fn(async (_s: string, _db: number, r: PlanRequest): Promise<PlanView> =>
+    ddlDefaults: vi.fn(async (_s: string, _db: number | null, _k: ObjectKind, _c: CreateContext): Promise<ObjectDef> => schema()),
+    ddlLoad: vi.fn(async (_s: string, _db: number | null, _o: ObjectRef): Promise<ObjectDef> => schema()),
+    ddlLookup: vi.fn(async (_s: string, _db: number | null, _r: LookupRequest): Promise<LookupItem[]> => []),
+    ddlPreview: vi.fn(async (_s: string, _db: number | null, r: PlanRequest): Promise<PlanView> =>
       view(r.op === "drop" && r.cascade ? "data_loss" : "destructive", r.op === "drop" && r.cascade ? "hc" : "h1")),
-    ddlApply: vi.fn(async (_s: string, _db: number, _r: PlanRequest, _o: ApplyOptions): Promise<ApplyOutcome> => applied()),
+    ddlApply: vi.fn(async (_s: string, _db: number | null, _r: PlanRequest, _o: ApplyOptions): Promise<ApplyOutcome> => applied()),
     ddlCancel: vi.fn(async (_id: string) => null),
   };
   const notify = vi.fn();
@@ -383,5 +383,75 @@ describe("drop-controller kapı ve uygulama", () => {
     expect(s.drop.state()).not.toBeNull();
     s.ctl.serverSessionsClosed("S1", false);
     expect(s.drop.state()).toBeNull();
+  });
+});
+
+const DB: ObjectRef = { kind: "database", oid: 5 };
+const DB_INPUT: DropInput = { serverId: "S1", databaseOid: null, object: DB, refreshNodeId: "dbs", name: "app" };
+const ROLE_INPUT: DropInput = { serverId: "S1", databaseOid: null, object: { kind: "role", oid: 16384 }, refreshNodeId: "roles", name: "u" };
+
+describe("drop-controller Plan 15: FORCE ve sunucu kapsamı", () => {
+  it("database: force varsayılan kapalı; setForce sürümü ilerletir, onayı sıfırlar, önizlemeyi force ile yeniden ister; en son istek kazanır", async () => {
+    const s = setup();
+    const st = await ready(s, DB_INPUT);
+    expect(st.force).toBe(false);
+    expect(s.api.ddlLoad).toHaveBeenCalledWith("S1", null, DB);
+    expect(s.api.ddlPreview.mock.calls[0]![1]).toBeNull();
+    const v0 = s.drop.state()!.version;
+    s.drop.setConfirm({ checked: true });
+    const a = deferred<PlanView>();
+    const b = deferred<PlanView>();
+    s.api.ddlPreview.mockReturnValueOnce(a.promise).mockReturnValueOnce(b.promise);
+    s.drop.setForce(true);
+    expect(s.drop.state()).toMatchObject({ force: true, version: v0 + 1, confirm: { checked: false } });
+    s.drop.setForce(false);
+    expect(s.api.ddlPreview.mock.calls.map((c) => (c[2] as Extract<PlanRequest, { op: "drop" }>).force)).toEqual([false, true, false]);
+    expect(s.api.ddlPreview.mock.calls.every((c) => (c[2] as Extract<PlanRequest, { op: "drop" }>).cascade === false)).toBe(true);
+    b.resolve(view("data_loss", "h-last"));
+    await flush();
+    a.resolve(view("data_loss", "h-old"));
+    await flush();
+    expect(s.drop.state()).toMatchObject({ force: false, pending: false });
+    expect(s.drop.state()!.view?.hash).toBe("h-last");
+    // aynı değer: etkisiz
+    const calls = s.api.ddlPreview.mock.calls.length;
+    s.drop.setForce(false);
+    expect(s.api.ddlPreview.mock.calls.length).toBe(calls);
+  });
+
+  it("database: force=true uygulamada da gider; databaseOid null; başarıda objectDropped null ile", async () => {
+    const s = setup();
+    await s.ctl.openAlter({ tabId: "D1", serverId: "S1", databaseOid: null, object: DB, refreshNodeId: "dbs" });
+    await ready(s, DB_INPUT);
+    s.drop.setForce(true);
+    await flush();
+    s.drop.setConfirm({ checked: true });
+    await s.drop.apply();
+    expect(s.api.ddlApply).toHaveBeenCalledOnce();
+    expect(s.api.ddlApply.mock.calls[0]![1]).toBeNull();
+    expect(s.api.ddlApply.mock.calls[0]![2]).toMatchObject({ op: "drop", cascade: false, force: true });
+    expect(s.api.ddlApply.mock.calls[0]![3].password).toBeNull();
+    expect(s.ctl.model("D1")!.status).toBe("gone");
+  });
+
+  it("dropOptionsFor'da sunulmayan kutular denetleyicide de etkisiz (database cascade, role cascade/force, schema force)", async () => {
+    let s = setup();
+    expect(s.drop.options()).toEqual({ cascade: false, force: false }); // kapalı diyalog
+    await ready(s, DB_INPUT);
+    expect(s.drop.options()).toEqual({ cascade: false, force: true });
+    s.drop.setCascade(true);
+    expect(s.drop.state()!.cascade).toBe(false);
+    s = setup();
+    await ready(s, ROLE_INPUT);
+    expect(s.drop.options()).toEqual({ cascade: false, force: false });
+    s.drop.setCascade(true);
+    s.drop.setForce(true);
+    expect(s.drop.state()).toMatchObject({ cascade: false, force: false });
+    expect(s.api.ddlPreview).toHaveBeenCalledOnce();
+    s = setup();
+    await ready(s);
+    expect(s.drop.options()).toEqual({ cascade: true, force: false });
+    s.drop.setForce(true);
+    expect(s.drop.state()!.force).toBe(false);
   });
 });

@@ -63,6 +63,25 @@ describe("designer-controller tepkisellik (tarayıcı yapısı)", () => {
     });
   });
 
+  it("secretReady ve parola kapısı setSecret sonrası memo'da güncellenir (harita tepkisiz; registry dürtülür)", async () => {
+    const { solid, ctl } = await setup();
+    await solid.createRoot(async (dispose) => {
+      const ready = solid.createMemo(() => ctl.secretReady("T1"));
+      expect(ready()).toBe(false);
+      await ctl.openAlter({ tabId: "T1", serverId: "S1", databaseOid: null, object: { kind: "role", oid: 16384 }, refreshNodeId: null });
+      expect(ready()).toBe(false);
+      ctl.setSecret("T1", "Gizli-1");
+      expect(ready()).toBe(true);
+      ctl.setSecret("T1", null);
+      expect(ready()).toBe(false);
+      ctl.setSecret("T1", "Gizli-1");
+      expect(ready()).toBe(true);
+      ctl.close("T1");
+      expect(ready()).toBe(false);
+      dispose();
+    });
+  });
+
   it("focusRequest okuyucusu girdi sonradan kurulsa da güncellenir", async () => {
     const { solid, ctl } = await setup();
     await solid.createRoot(async (dispose) => {

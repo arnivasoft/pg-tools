@@ -15,6 +15,10 @@
 // - Tepkisellik: `model(tabId)` yalnızca `openCreate`/`openAlter` girdiyi kaydettikten sonra tepkiseldir. Girdi bu
 //   çağrıların içinde EŞZAMANLI kurulur (`makeEntry` eşzamanlıdır, ilk `await`'ten önce); arayüz (Task 3) sekmeyi
 //   çizmeden önce bu çağrıları eşzamanlı başlatmalıdır (sözü beklemek gerekmez).
+// - Parola (Plan 15): değer yalnızca tepkisiz `secrets` haritasında (sekme başına) ve tek `ddl_apply` çağrısının
+//   `options.password` alanında bulunur; modele, `PlanRequest`'e, kirli karşılaştırmasına, bildirime, günlüğe girmez.
+//   Başarılı uygulamada, yeniden yüklemede, kapanışta, sekme düşünce (bağlantı kaybı/oturumlar kapandı/nesne yok) ve
+//   taslağın parola niyeti `set` dışına çıkınca silinir. `secretReady` `registry` sinyaline bağlıdır.
 import { createSignal, type Accessor, type Setter } from "solid-js";
 import { tdes } from "../../app/strings-designer";
 import type { ToastKind } from "../../app/toast-model";
@@ -31,7 +35,7 @@ import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Api } from "../../ipc/commands";
 import { errorText, toPayload } from "../../ipc/errors";
 import {
-  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, localBlock, type ApplyGate, type ConfirmState,
+  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, localBlock, planHasRedacted, type ApplyGate, type ConfirmState,
 } from "./designer-model";
 import { createDropController } from "./drop-controller";
 import { dropRequest, matchesObject } from "./drop-model";
@@ -50,7 +54,8 @@ export interface DesignerModel {
   id: string;
   serverId: string;
   serverName: string;
-  databaseOid: number;
+  /** Sunucu kapsamlı türlerde (Database/Role) `null` (bakım veritabanı). */
+  databaseOid: number | null;
   mode: DesignerMode;
   kind: ObjectKind;
   /** alter: yüklenen nesne; create: başarıdan sonra `created` ile dolar. */
@@ -99,7 +104,11 @@ export const DEFAULT_LOCK_TIMEOUT_MS = 5000;
 /** Kısa ömürlü lookup türlerinin önbellek süresi. */
 export const LOOKUP_TTL_MS = 30_000;
 /** Oturum süresince tutulan lookup türleri (diğerleri `LOOKUP_TTL_MS`). */
-const SESSION_LOOKUPS = new Set<LookupRequest["kind"]>(["roles", "schemas", "tablespaces", "available_extensions", "index_methods", "collations"]);
+const SESSION_LOOKUPS = new Set<LookupRequest["kind"]>([
+  "roles", "schemas", "tablespaces", "available_extensions", "index_methods", "collations",
+  // Plan 15 (sunucu kapsamlı): anahtar isteğin tamamını içerir — `locales{provider}` sağlayıcı başına ayrı girdidir.
+  "grantable_roles", "encodings", "template_databases", "locales", "settings",
+]);
 
 const emptyConfirm = (): ConfirmState => ({ checked: false, typedName: "" });
 
@@ -123,7 +132,7 @@ export function planRequest(
 }
 
 /** Düz `LookupRequest` için anahtar sırasından bağımsız JSON. */
-const lookupKey = (serverId: string, databaseOid: number, r: LookupRequest) =>
+const lookupKey = (serverId: string, databaseOid: number | null, r: LookupRequest) =>
   `${serverId}|${databaseOid}|${JSON.stringify(r, Object.keys(r).sort())}`;
 
 interface PreviewOk { view: PlanView; version: number; gen: number }
@@ -176,8 +185,8 @@ export interface DesignerControllerDeps {
   now?: () => number;
 }
 
-export interface OpenCreateInput { tabId: string; serverId: string; databaseOid: number; create: DdlCreate; refreshNodeId: string | null }
-export interface OpenAlterInput { tabId: string; serverId: string; databaseOid: number; object: ObjectRef; refreshNodeId: string | null }
+export interface OpenCreateInput { tabId: string; serverId: string; databaseOid: number | null; create: DdlCreate; refreshNodeId: string | null }
+export interface OpenAlterInput { tabId: string; serverId: string; databaseOid: number | null; object: ObjectRef; refreshNodeId: string | null }
 
 export function createDesignerController(deps: DesignerControllerDeps) {
   const { api, notify } = deps;
@@ -195,6 +204,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   // eklenince/silinince yeniden çalışır.
   const [registry, bump] = createSignal<void>(undefined, { equals: false });
   const lookups = new Map<string, LookupSlot>();
+  /** Sekme → parola (tepkisiz, kalıcı değil; yalnızca `ddl_apply` seçeneğine girer). Okuyucular `registry`'ye bağlanır. */
+  const secrets = new Map<string, string>();
   let focusSeq = 0;
 
   const model = (tabId: string): DesignerModel | undefined => (registry(), entries.get(tabId)?.model());
@@ -219,14 +230,22 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       /* ağaç yenileme hatası uygulama sonucunu etkilemez */
     }
   };
-  const dropLookups = (serverId: string, databaseOid?: number) => {
+  const dropLookups = (serverId: string, databaseOid?: number | null) => {
     const prefix = databaseOid === undefined ? `${serverId}|` : `${serverId}|${databaseOid}|`;
     for (const k of [...lookups.keys()]) if (k.startsWith(prefix)) lookups.delete(k);
   };
 
-  /** Sekme salt okunur (`disconnected`/`gone`): kuşak artar, önizleme iptal, uçuştaki apply için `ddl_cancel`. */
+  /** Parola girdisini siler; varsa okuyucular (`secretReady`) yeniden çalışır. */
+  const forgetSecret = (tabId: string) => {
+    if (secrets.delete(tabId)) bump();
+  };
+  /** Bu sekmede geçerli (boş olmayan) parola var mı. Tepkisel (`registry`). */
+  const secretReady = (tabId: string): boolean => (registry(), secrets.has(tabId));
+
+  /** Sekme salt okunur (`disconnected`/`gone`): kuşak artar, önizleme iptal, uçuştaki apply için `ddl_cancel`, parola silinir. */
   const markDown = (e: Entry, status: "disconnected" | "gone", error: string | null) => {
     const m = e.model();
+    forgetSecret(m.id);
     e.gen++;
     e.previewer.cancel();
     if (m.applying && m.applyId) cancelQuietly(m.applyId);
@@ -270,6 +289,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       applying: m.applying,
       connected: m.status !== "disconnected" && m.status !== "gone" && (!fresh || info !== null),
       loading: m.status === "loading" || m.status === "error",
+      secretMissing: planHasRedacted(m.view) && !secretReady(m.id),
     });
   };
 
@@ -326,7 +346,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
 
   // ---- açma / yükleme
   const makeEntry = (
-    tabId: string, serverId: string, databaseOid: number, mode: DesignerMode, kind: ObjectKind, object: ObjectRef | null,
+    tabId: string, serverId: string, databaseOid: number | null, mode: DesignerMode, kind: ObjectKind, object: ObjectRef | null,
     refreshNodeId: string | null, create: DdlCreate | null,
   ): Entry => {
     const info = deps.serverInfo(serverId);
@@ -417,6 +437,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const m = e?.model();
     if (!e || !m || m.applying || m.status === "gone") return;
     if (m.dirty && !opts?.force) return;
+    forgetSecret(tabId);
     if (m.mode === "alter") await loadObject(tabId, e);
     else await loadDefaults(tabId, e);
   };
@@ -435,6 +456,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     update(e, (cur) => ({
       ...cur, draft: next, version: cur.version + 1, dirty: dirtyOf(e, next, cur), outcome: null, applyError: null,
     }));
+    // Parola niyeti `set` değilse (keep/clear ya da rol dışı) girilmiş parola tutulmaz.
+    if (!(next.kind === "role" && next.password === "set")) forgetSecret(tabId);
     startPreview(e, false);
   };
 
@@ -469,6 +492,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   // ---- uygulama
   const applied = async (tabId: string, e: Entry, mode: DesignerMode, out: Extract<ApplyOutcome, { outcome: "applied" }>) => {
     const m = e.model();
+    forgetSecret(tabId);
     notify(tdes.apply.applied(out.statements), "success");
     dropLookups(m.serverId, m.databaseOid);
     refresh(e.refreshNodeId);
@@ -538,7 +562,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     if (!canSubmit(gate, m.confirm)) return;
     const req = planRequest(m);
     if (!req) return;
-    const options = applyOptionsFor(newId(), m.lockTimeoutMs, m.view, gate, m.confirm);
+    const options = applyOptionsFor(newId(), m.lockTimeoutMs, m.view, gate, m.confirm, secrets.get(tabId) ?? null);
     if (!options) return;
     const gen = e.gen;
     const mode = m.mode;
@@ -593,7 +617,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   };
 
   /** Silme diyaloğu başarıyla sildi: aynı nesnenin alter sekmeleri `gone`. */
-  const objectDropped = (serverId: string, databaseOid: number, object: ObjectRef) => {
+  const objectDropped = (serverId: string, databaseOid: number | null, object: ObjectRef) => {
     dropLookups(serverId, databaseOid);
     for (const e of entries.values()) {
       const m = e.model();
@@ -607,6 +631,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const e = entries.get(tabId);
     if (!e) return;
     entries.delete(tabId);
+    secrets.delete(tabId);
     bump();
     e.gen++;
     e.previewer.dispose();
@@ -652,6 +677,17 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     return slot.promise;
   };
 
+  // ---- parola
+  /**
+   * Formun girdiği parola (iki alan eşleşince değer, aksi halde `null`). `null`/boş → silinir. Bilinmeyen sekme için
+   * saklanmaz. Her çağrıda `registry` dürtülür (`secretReady` ve kapı tepkisel).
+   */
+  const setSecret = (tabId: string, value: string | null): void => {
+    if (value && entries.has(tabId)) secrets.set(tabId, value);
+    else secrets.delete(tabId);
+    bump();
+  };
+
   // ---- odak
   /** Formdan alan odağı ister (ör. "Yeniden adlandır" → `name`); her çağrı yeni `seq` (aynı alan tekrar odaklanır). */
   const requestFocus = (tabId: string, field: string) => {
@@ -659,7 +695,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   };
 
   /** Aynı nesnenin (`gone` olmayan) alter sekmesi — create'ten dönüşen ya da kimliği `created` ile güncellenen dahil. Tepkisel değil. */
-  const findAlter = (serverId: string, databaseOid: number, object: ObjectRef): string | null => {
+  const findAlter = (serverId: string, databaseOid: number | null, object: ObjectRef): string | null => {
     for (const [id, e] of entries) {
       const m = e.model();
       if (m.status !== "gone" && matchesObject(m, { serverId, databaseOid, object })) return id;
@@ -678,6 +714,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     setConfirm,
     setConcurrently,
     setCascade,
+    setSecret,
+    secretReady,
     previewNow,
     apply,
     cancelApply,

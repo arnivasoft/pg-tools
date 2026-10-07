@@ -3,6 +3,7 @@ import type { FieldError } from "../../ipc/bindings/FieldError";
 import type { IndexColumn } from "../../ipc/bindings/IndexColumn";
 import type { IndexDef } from "../../ipc/bindings/IndexDef";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
+import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
 import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Risk } from "../../ipc/bindings/Risk";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
@@ -10,7 +11,7 @@ import type { Statement } from "../../ipc/bindings/Statement";
 import {
   addColumn, addInclude, focusFieldOf, parseFocusField, applyGate, applyOptionsFor, canSubmit, cloneDef, confirmFlags, defName, defsEqual, groupIssues,
   isSafeIntegerString, issuesFor, kindLabel, localBlock, moveColumn, previewEmptyState, removeColumn, removeInclude, scriptWithRanges,
-  statementRangesToLineRanges, updateColumn,
+  statementRangesToLineRanges, updateColumn, isServerScoped, planHasRedacted, scriptActionsEnabled, designerTabKey,
   type ApplyGate, type ConfirmState, type GateInput,
 } from "./designer-model";
 
@@ -21,7 +22,7 @@ const view = (p: Partial<PlanView> = {}): PlanView => ({
 });
 const gin = (p: Partial<GateInput> = {}): GateInput => ({
   locked: false, production: false, serverName: "prod-1", view: view(), viewIsCurrent: true, pending: false, applying: false,
-  connected: true, loading: false, ...p,
+  connected: true, loading: false, secretMissing: false, ...p,
 });
 const col = (name: string, p: Partial<IndexColumn> = {}): IndexColumn => ({
   key: { kind: "column", name }, opclass: null, collation: null, descending: false, nullsFirst: null, ...p,
@@ -484,5 +485,61 @@ describe("focusFieldOf / parseFocusField", () => {
     expect(focusFieldOf({ kind: "column", id: 3 })).toBe("column:3");
     expect(parseFocusField(focusFieldOf({ kind: "constraint", id: 40 }))).toEqual({ kind: "constraint", id: 40 });
     for (const bad of ["name", "column:", "column:-1", "index:3"]) expect(parseFocusField(bad)).toBeNull();
+  });
+});
+
+const redactedView = (p: Partial<PlanView> = {}): PlanView =>
+  view({ statements: [stmt("CREATE ROLE r LOGIN"), { ...stmt("ALTER ROLE r PASSWORD ********"), redacted: true }], ...p });
+
+describe("Plan 15: sunucu kapsamı, gizlenmiş plan, parola kapısı", () => {
+  it("isServerScoped: yalnızca database ve role", () => {
+    const table: Record<ObjectKind, boolean> = {
+      schema: false, sequence: false, extension: false, index: false, table: false, view: false, materialized_view: false,
+      database: true, role: true,
+    };
+    for (const [k, v] of Object.entries(table)) expect(isServerScoped(k as ObjectKind)).toBe(v);
+  });
+
+  it("planHasRedacted: null → false; gizlenmiş ifade varsa true", () => {
+    expect(planHasRedacted(null)).toBe(false);
+    expect(planHasRedacted(view())).toBe(false);
+    expect(planHasRedacted(redactedView())).toBe(true);
+  });
+
+  it("applyGate: secretMissing önceliği empty'den sonra, risk'ten önce", () => {
+    // empty + secretMissing → empty
+    expect(applyGate(gin({ view: view({ empty: true }), secretMissing: true }))).toEqual({ kind: "blocked", reason: "empty" });
+    // invalid + secretMissing → invalid
+    expect(applyGate(gin({ view: view({ errors: [fe("password")], empty: true }), secretMissing: true }))).toEqual({ kind: "blocked", reason: "invalid" });
+    // stale + secretMissing → stale
+    expect(applyGate(gin({ viewIsCurrent: false, secretMissing: true }))).toEqual({ kind: "blocked", reason: "stale" });
+    // destructive / data_loss (üretim) + secretMissing → password
+    expect(applyGate(gin({ view: redactedView({ risk: "destructive" }), secretMissing: true }))).toEqual({ kind: "blocked", reason: "password" });
+    expect(applyGate(gin({ view: redactedView({ risk: "data_loss" }), production: true, secretMissing: true }))).toEqual({ kind: "blocked", reason: "password" });
+    expect(applyGate(gin({ view: redactedView(), secretMissing: true }))).toEqual({ kind: "blocked", reason: "password" });
+    // parola hazır → risk kapısı
+    expect(applyGate(gin({ view: redactedView({ risk: "destructive" }) }))).toEqual({ kind: "needsConfirm" });
+    expect(applyGate(gin({ view: redactedView() }))).toEqual({ kind: "ready" });
+  });
+
+  it("applyOptionsFor: gizlenmiş planda parola geçer; gizlenmemiş planda verilen parola null'a çekilir", () => {
+    const c = { checked: false, typedName: "" };
+    expect(applyOptionsFor("a", 5000, redactedView(), { kind: "ready" }, c, "Gizli-1")).toMatchObject({ password: "Gizli-1" });
+    expect(applyOptionsFor("a", 5000, redactedView(), { kind: "ready" }, c, null)).toMatchObject({ password: null });
+    expect(applyOptionsFor("a", 5000, view(), { kind: "ready" }, c, "Gizli-1")).toMatchObject({ password: null });
+    expect(applyOptionsFor("a", 5000, view(), { kind: "ready" }, c)).toMatchObject({ password: null });
+    expect(applyOptionsFor("a", 5000, redactedView(), { kind: "blocked", reason: "password" }, c, "Gizli-1")).toBeNull();
+  });
+
+  it("scriptActionsEnabled: gizlenmiş planda copy/open false; gizlenmemiş planda true; null plan → false", () => {
+    expect(scriptActionsEnabled(redactedView())).toEqual({ copy: false, open: false });
+    expect(scriptActionsEnabled(view())).toEqual({ copy: true, open: true });
+    expect(scriptActionsEnabled(null)).toEqual({ copy: false, open: false });
+  });
+
+  it("designerTabKey: databaseOid null → alter:role:s1:null:16384; create anahtarında da null", () => {
+    expect(designerTabKey([], { serverId: "s1", databaseOid: null, object: { kind: "role", oid: 16384 } })).toBe("alter:role:s1:null:16384");
+    expect(designerTabKey([], { serverId: "s1", databaseOid: null, create: { kind: "database", context: { schemaOid: null, tableOid: null } } }))
+      .toBe("create:database:s1:null:::1");
   });
 });
