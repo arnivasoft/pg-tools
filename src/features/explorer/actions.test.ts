@@ -79,7 +79,7 @@ describe("qualifiedParts / actionsFor", () => {
     expect(actionsFor(s, node(s, "srv-down"))).toEqual(["openQueryTool", "connect", "editServer", "deleteServer", "copyName"]);
     expect(actionsFor(s, node(s, "srv-up"))).toEqual(["openQueryTool", "openDashboard", "refresh", "disconnect", "editServer", "deleteServer", "copyName"]);
     expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["createObject", "refresh", "copyName"]);
-    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "editObject", "renameObject", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "openData", "editObject", "renameObject", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "col-id"))).toEqual(["editObject", "copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "con-1"))).toEqual(["editObject", "copyName", "copyDdl"]);
   });
@@ -319,6 +319,36 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
     for (const a of ["refresh", "copyName", "copyDdl", "openQueryTool", "disconnect"] as ActionId[]) {
       expect(disabledReason(a, locked, "sch-app")).toBeNull();
     }
+  });
+  it("Verileri Görüntüle/Düzenle: table/view/MV (bölüm dahil) düğümünde, Query Tool'un yanında, grup −1", () => {
+    for (const id of ["tbl-orders", "tbl-partition", "view-1", "mv-1"]) {
+      const a = actionsFor(s, node(s, id));
+      expect(a).toContain("openData");
+      expect(a.indexOf("openData")).toBe(a.indexOf("openQueryTool") + 1);
+    }
+    expect(groupOf("openData")).toBe(-1);
+    expect(groupOf("openData")).toBe(groupOf("openQueryTool"));
+    expect("openData".endsWith("Object")).toBe(false);
+  });
+  it("database, şema, kolon, kısıt ve koleksiyon düğümlerinde openData yok", () => {
+    for (const id of ["srv-up", "db-app", "sch-app", "col-id", "vcol-1", "con-1", "coll-tables", "coll-cols", "coll-part", "coll-views", "seq-1", "fn-fmt-int"]) {
+      expect(actionsFor(s, node(s, id))).not.toContain("openData");
+    }
+  });
+  it("kilitli sunucuda openData kapalı değil (salt okunur açılır)", () => {
+    const locked = { serverLocked: vi.fn(() => true) } as unknown as ActionDeps;
+    const lockedTree = ddlTree();
+    const srv = lockedTree.nodes.get("srv-up")!;
+    lockedTree.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
+    expect(disabledReason("openData", locked, "tbl-orders")).toBeNull();
+    expect(disabledReason("openData", { state: () => lockedTree } as unknown as ActionDeps, "tbl-orders")).toBeNull();
+  });
+  it("executeAction(openData) düğüm kimliğiyle deps.openData'yı çağırır (kilitli sunucuda da)", async () => {
+    const d = { ...deps(s), openData: vi.fn(), openQueryTool: vi.fn(), openDesigner: vi.fn(), serverLocked: vi.fn(() => true) };
+    await executeAction(d as unknown as ActionDeps, "openData", "view-1");
+    expect(d.openData).toHaveBeenCalledWith("view-1");
+    expect(d.openQueryTool).not.toHaveBeenCalled();
+    expect(d.openDesigner).not.toHaveBeenCalled();
   });
   it("executeAction designer eylemlerini doğru kiple iletir", async () => {
     const d = { ...deps(s), openDesigner: vi.fn(), serverLocked: vi.fn(() => false) };

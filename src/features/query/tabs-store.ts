@@ -1,5 +1,6 @@
-// Sağ panel sekmeleri (sorgu + dashboard + designer): saf işlevler + ince bir Solid store sarmalayıcısı.
+// Sağ panel sekmeleri (sorgu + dashboard + designer + veri): saf işlevler + ince bir Solid store sarmalayıcısı.
 import { createStore } from "solid-js/store";
+import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 
 /** Sabit, kapatılamaz "Nesne" sekmesinin kimliği (sorgu sekmelerinin önünde durur, listede yer almaz). */
 export const OBJECT_TAB_ID = "object";
@@ -35,6 +36,21 @@ export interface DesignerTab {
   where: string | null;
 }
 
+/**
+ * Veri düzenleyici sekmesi (durumu tembel veri denetleyicisinde; burada yalnızca sekme kaydı). Başlık ve `key` (aynı
+ * nesne tek sekme) veri parçasında üretilir; bu modül metin ve anahtar kuralı taşımaz.
+ */
+export interface DataTab {
+  id: string;
+  serverId: string;
+  databaseOid: number;
+  object: ObjectRef;
+  title: string;
+  key: string;
+  /** Üst çubukta görünen "<sunucu>/<veritabanı>". */
+  where: string;
+}
+
 export interface TabsState {
   /** Sorgu sekmeleri, görünüm sırasıyla ("Nesne" sekmesi hariç). */
   tabs: QueryTab[];
@@ -42,7 +58,9 @@ export interface TabsState {
   dashboards: DashTab[];
   /** Designer sekmeleri; dashboard'lardan sonra çizilir. */
   designers: DesignerTab[];
-  /** Etkin sekme: `OBJECT_TAB_ID`, bir sorgu, dashboard ya da designer sekmesinin kimliği. */
+  /** Veri sekmeleri; designer'lardan sonra çizilir. */
+  data: DataTab[];
+  /** Etkin sekme: `OBJECT_TAB_ID`, bir sorgu, dashboard, designer ya da veri sekmesinin kimliği. */
   activeId: string;
   /** Sekme kimliği sayacı. */
   nextId: number;
@@ -80,14 +98,15 @@ export interface OpenDesignerInput {
 }
 
 export function initialTabs(): TabsState {
-  return { tabs: [], dashboards: [], designers: [], activeId: OBJECT_TAB_ID, nextId: 1, seq: {} };
+  return { tabs: [], dashboards: [], designers: [], data: [], activeId: OBJECT_TAB_ID, nextId: 1, seq: {} };
 }
 
 const taken = (state: TabsState, id: string) =>
   id === OBJECT_TAB_ID ||
   state.tabs.some((x) => x.id === id) ||
   state.dashboards.some((x) => x.id === id) ||
-  state.designers.some((x) => x.id === id);
+  state.designers.some((x) => x.id === id) ||
+  state.data.some((x) => x.id === id);
 
 /** Kimlik bir sorgu sekmesine mi ait (dashboard ya da "Nesne" değil)? */
 export function isQueryTabId(state: TabsState, id: string): boolean {
@@ -100,6 +119,20 @@ export function isDashTabId(state: TabsState, id: string): boolean {
 
 export function isDesignerTabId(state: TabsState, id: string): boolean {
   return state.designers.some((x) => x.id === id);
+}
+
+/** Veri sekmesi kimliği (`g` öneki; yalnızca `openData` üretir). */
+export const isDataTabId = (id: string): boolean => id[0] === "g";
+
+/** Aynı `key` (nesne) zaten açıksa o sekme etkinleşir (`created = false`); değilse yenisi eklenir ve etkinleşir. */
+export function openData(state: TabsState, input: Omit<DataTab, "id">): { state: TabsState; id: string; created: boolean } {
+  const same = state.data.find((d) => d.key === input.key);
+  if (same) return { state: activateTab(state, same.id), id: same.id, created: false };
+  let nextId = state.nextId;
+  let id: string;
+  do id = `g${nextId++}`;
+  while (taken(state, id));
+  return { id, created: true, state: { ...state, data: [...state.data, { ...input, id }], activeId: id, nextId } };
 }
 
 /** Aynı sunucu + veritabanı için dashboard zaten açıksa onu etkinleştirir; değilse yenisini ekler ve etkinleştirir. */
@@ -158,10 +191,10 @@ export function openTab(state: TabsState, input: OpenTabInput): { state: TabsSta
 
 /**
  * Sekmeyi kapatır ("Nesne" kapatılamaz). Etkin sekme kapanırsa görünüm sırasında (sorgu sekmeleri → dashboard'lar →
- * designer'lar) sağdaki, yoksa soldaki, yoksa "Nesne" etkinleşir.
+ * designer'lar → veri) sağdaki, yoksa soldaki, yoksa "Nesne" etkinleşir.
  */
 export function closeTab(state: TabsState, id: string): TabsState {
-  const order = [...state.tabs.map((x) => x.id), ...state.dashboards.map((x) => x.id), ...state.designers.map((x) => x.id)];
+  const order = [state.tabs, state.dashboards, state.designers, state.data].flatMap((l) => l.map((x) => x.id));
   const i = order.indexOf(id);
   if (i < 0) return state;
   const rest = order.filter((x) => x !== id);
@@ -172,11 +205,12 @@ export function closeTab(state: TabsState, id: string): TabsState {
     tabs: state.tabs.filter((x) => x.id !== id),
     dashboards: state.dashboards.filter((x) => x.id !== id),
     designers: state.designers.filter((x) => x.id !== id),
+    data: state.data.filter((x) => x.id !== id),
     activeId,
   };
 }
 
-/** Sorgu, dashboard ya da designer sekmesi; boş/yalnız boşluk başlık yok sayılır. */
+/** Sorgu, dashboard, designer ya da veri sekmesi; boş/yalnız boşluk başlık yok sayılır. */
 export function renameTab(state: TabsState, id: string, title: string): TabsState {
   const tt = title.trim();
   if (!tt) return state;
@@ -190,7 +224,8 @@ export function renameTab(state: TabsState, id: string, title: string): TabsStat
   const tabs = retitle(state.tabs);
   const dashboards = retitle(state.dashboards);
   const designers = retitle(state.designers);
-  return changed ? { ...state, tabs, dashboards, designers } : state;
+  const data = retitle(state.data);
+  return changed ? { ...state, tabs, dashboards, designers, data } : state;
 }
 
 export function activateTab(state: TabsState, id: string): TabsState {
@@ -231,6 +266,12 @@ export function createTabsStore(initial: TabsState = initialTabs()) {
     /** Designer sekmesi ekler ya da (alter, aynı `key`) var olanı etkinleştirir. */
     openDesigner(input: OpenDesignerInput): { id: string; created: boolean } {
       const r = openDesigner(state, input);
+      setState(r.state);
+      return { id: r.id, created: r.created };
+    },
+    /** Veri sekmesi ekler ya da (aynı `key`) var olanı etkinleştirir. */
+    openData(input: Omit<DataTab, "id">): { id: string; created: boolean } {
+      const r = openData(state, input);
       setState(r.state);
       return { id: r.id, created: r.created };
     },

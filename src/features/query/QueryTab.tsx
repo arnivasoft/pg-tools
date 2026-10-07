@@ -6,6 +6,7 @@ import { Download, PanelRight } from "lucide-solid";
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
 import { t } from "../../app/strings";
 import { texp } from "./strings-export";
+import { tqt } from "./strings-querytab";
 import { readStorage, writeStorage } from "../../app/storage";
 import { toast } from "../../app/toast";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
@@ -288,14 +289,14 @@ export default function QueryTab(props: { ctl: QueryController }) {
         return;
       case "empty":
         ctl.dispatch(id, { type: "runAborted", runId });
-        addNote(id, { level: "info", text: t.query.confirm.empty });
+        addNote(id, { level: "info", text: tqt.confirm.empty });
         showMessages(id);
         return;
       case "locked":
         ctl.dispatch(id, { type: "runAborted", runId });
-        addNote(id, { level: "error", text: t.query.confirm.lockedSummary, hint: t.query.hint.locked });
+        addNote(id, { level: "error", text: tqt.confirm.lockedSummary, hint: t.query.hint.locked });
         for (const it of outcome.items) {
-          const reason = it.reason ? t.query.confirm.locked[it.reason] : t.query.hint.locked;
+          const reason = it.reason ? tqt.confirm.locked[it.reason] : t.query.hint.locked;
           addNote(id, { level: "error", text: r.lockedItem(it.index + 1, reason) });
         }
         showMessages(id);
@@ -481,7 +482,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
       // Seçimin ucu dize/yorum/tırnaklı ad içinde ya da belirteç ortasındaysa çevreleyen ifadeye genişletilir.
       const safe = safeFormatSelection(doc, range.from, range.to);
       if (!safe) {
-        notify(t.query.format.unsafeSelection, "info");
+        notify(tqt.format.unsafeSelection, "info");
         return;
       }
       range = { ...range, from: safe.from, to: safe.to };
@@ -496,7 +497,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
       editor.replaceFormatted(doc, range.from, range.to, insert);
     } catch (err) {
       const e = toPayload(err);
-      notify(e.message === FORMAT_FAILED ? t.query.format.failed : `${t.query.format.failed} ${e.message}`);
+      notify(e.message === FORMAT_FAILED ? tqt.format.failed : `${tqt.format.failed} ${e.message}`);
     }
   };
 
@@ -677,7 +678,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
                           <span classList={{ "text-danger": n.level === "error", "text-fg": n.level === "info" }}>{n.text}</span>
                           <Show when={n.hint}>
                             <div class="pl-3 text-muted">
-                              {t.query.messages.hint}: {n.hint}
+                              {tqt.messages.hint}: {n.hint}
                             </div>
                           </Show>
                           <Show when={n.rerun}>

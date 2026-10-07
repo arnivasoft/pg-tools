@@ -3,6 +3,7 @@ import { t } from "../../app/strings";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import { createConfirmGate, type ConfirmItem } from "./confirm-model";
+import { tqt } from "./strings-querytab";
 
 const MAX_CHARS = 500;
 const MAX_ITEMS = 50;
@@ -20,7 +21,7 @@ export function ConfirmRunDialog(props: {
   onCancel: () => void;
 }) {
   let cancelEl: HTMLButtonElement | undefined;
-  const c = t.query.confirm;
+  const c = tqt.confirm;
   return (
     <Dialog
       open={props.open}

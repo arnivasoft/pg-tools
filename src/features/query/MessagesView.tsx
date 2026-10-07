@@ -3,6 +3,7 @@ import { t } from "../../app/strings";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import { hintFor } from "./errors";
 import type { Message } from "./result-model";
+import { tqt } from "./strings-querytab";
 
 const TONE: Record<Message["level"], string> = {
   notice: "text-muted",
@@ -12,7 +13,7 @@ const TONE: Record<Message["level"], string> = {
 };
 
 function Detail(props: { error: Pick<ErrorPayload, "detail" | "hint">; position?: number | null; extraHint?: string | null }) {
-  const m = t.query.messages;
+  const m = tqt.messages;
   return (
     <div class="mt-0.5 flex flex-col gap-0.5 pl-3 text-muted">
       <Show when={props.position != null}>
@@ -33,7 +34,7 @@ function Detail(props: { error: Pick<ErrorPayload, "detail" | "hint">; position?
 
 /** NOTICE/WARNING, hata ayrıntıları (`detail`/`hint`/konum, `hintFor` ipucu) ve komut etiketleri. */
 export function MessagesView(props: { messages: Message[] }) {
-  const m = t.query.messages;
+  const m = tqt.messages;
   return (
     <div role="region" aria-label={m.ariaLabel} class="h-full overflow-auto p-2 font-mono text-xs">
       <Show when={props.messages.length > 0} fallback={<p class="text-muted">{m.empty}</p>}>

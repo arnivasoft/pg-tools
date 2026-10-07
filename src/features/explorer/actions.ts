@@ -7,6 +7,7 @@ import type { ExplorerController } from "./controller";
 import { ROOT, ancestorOfKind, isCollection, serverOf, type TreeState } from "./tree-model";
 import { canOpenQueryTool } from "../query/open-kinds";
 import { canOpenDashboard } from "../dashboard/open-kinds";
+import { canOpenData } from "../data/open-kinds";
 import { canCreateIn, canEditObject, isTableRowKind } from "../designer/ddl-kinds";
 
 /** Kolon/kısıt düğümünün sahibi (koleksiyonlar atlanarak ilk ata) tablo mu (görünüm/MV kolonu ya da domain kısıtı değil). */
@@ -23,7 +24,7 @@ function ownedByTable(s: TreeState, id: string): boolean {
 
 export type ActionId =
   | "refresh" | "connect" | "disconnect" | "editServer" | "deleteServer"
-  | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool" | "openDashboard"
+  | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool" | "openDashboard" | "openData"
   | "createObject" | "editObject" | "renameObject" | "dropObject";
 
 /**
@@ -44,6 +45,8 @@ export interface ActionDeps {
   openQueryTool?(id: string): void;
   /** "Dashboard'u aç" (bağlı sunucu / veritabanı). */
   openDashboard?(id: string): void;
+  /** "Verileri Görüntüle/Düzenle" (table/view/MV; kilitli sunucuda da açılır — salt okunur). */
+  openData?(id: string): void;
   /** Nesne diyaloğunu aç (Schema/Sequence/Extension/Index; `drop` sekme açmaz, silme diyaloğu). */
   openDesigner?(id: string, mode: DesignerOpenMode): void;
   /** Düğümün sunucusu salt okunur kilitli mi (designer eylemleri kapalı)? Verilmezse ağaçtaki sunucu düğümünün kilidi. */
@@ -95,6 +98,7 @@ export function qualifiedParts(s: TreeState, id: string): { parts: string[]; suf
 
 export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
   const q: ActionId[] = canOpenQueryTool(node.kind) ? ["openQueryTool"] : [];
+  if (canOpenData(node.kind)) q.push("openData");
   if (canOpenDashboard(node)) q.push("openDashboard");
   if (node.kind === "serverGroup") return ["refresh", "copyName"];
   if (node.kind === "server") {
@@ -116,7 +120,7 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
 
 /** Menüde ayırıcı yerleşimi için eylem grubu. */
 export function groupOf(a: ActionId): number {
-  if (a === "openQueryTool" || a === "openDashboard") return -1;
+  if (a === "openQueryTool" || a === "openDashboard" || a === "openData") return -1;
   if (a.endsWith("Object")) return 3;
   if (a === "refresh" || a === "connect" || a === "disconnect") return 0;
   if (a === "editServer" || a === "deleteServer") return 1;
@@ -149,6 +153,9 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
         return;
       case "openDashboard":
         deps.openDashboard?.(id);
+        return;
+      case "openData":
+        deps.openData?.(id);
         return;
       case "createObject":
       case "editObject":

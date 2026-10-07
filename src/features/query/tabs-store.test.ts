@@ -6,10 +6,12 @@ import {
   createTabsStore,
   initialTabs,
   isDashTabId,
+  isDataTabId,
   isDesignerTabId,
   isQueryTabId,
   moveTab,
   openDashboard,
+  openData,
   openDesigner,
   openTab,
   renameTab,
@@ -298,6 +300,93 @@ describe("tabs-store designer sekmeleri", () => {
     expect(store.state.activeId).toBe(a.id);
     store.close(a.id);
     expect(store.state.designers).toHaveLength(0);
+    expect(store.state.activeId).toBe(OBJECT_TAB_ID);
+  });
+});
+
+describe("tabs-store veri sekmeleri", () => {
+  // Anahtar ve başlık veri parçasında üretilir; sekme deposu yalnızca aynı anahtarı tekilleştirir.
+  const data = (s: TabsState, oid = 10, key = `data:s1:5:${oid}`) =>
+    openData(s, { serverId: "s1", databaseOid: 5, object: { kind: "table", oid }, title: `Veri: ${oid}`, key, where: "prod/app" });
+
+  it("aynı key tek sekme (ikinci açılış created=false, aynı id); farklı key yeni sekme", () => {
+    const a = data(initialTabs());
+    expect(a.created).toBe(true);
+    expect(a.state.activeId).toBe(a.id);
+    expect(a.state.data[0]).toEqual({
+      id: a.id, serverId: "s1", databaseOid: 5, object: { kind: "table", oid: 10 }, title: "Veri: 10", key: "data:s1:5:10", where: "prod/app",
+    });
+    const again = data(activateTab(a.state, OBJECT_TAB_ID));
+    expect(again.created).toBe(false);
+    expect(again.id).toBe(a.id);
+    expect(again.state.data).toHaveLength(1);
+    expect(again.state.activeId).toBe(a.id);
+    const b = data(again.state, 11);
+    expect(b.created).toBe(true);
+    expect(b.id).not.toBe(a.id);
+    expect(b.state.data).toHaveLength(2);
+  });
+
+  it("kimlik öneki g; isDataTabId; diğer türlerle çakışmaz", () => {
+    const { s, ids } = open3();
+    const d = openDashboard(s, { serverId: "s1", databaseOid: null, title: "D" });
+    const a = data(d.state);
+    expect(a.id.startsWith("g")).toBe(true);
+    expect(isDataTabId(a.id)).toBe(true);
+    for (const x of [...ids, d.id, OBJECT_TAB_ID]) expect(isDataTabId(x)).toBe(false);
+    expect(isQueryTabId(a.state, a.id)).toBe(false);
+    expect(isDesignerTabId(a.state, a.id)).toBe(false);
+    // Sonra açılan sorgu sekmesi veri sekmesinin kimliğini alamaz (`taken()` veri sekmesini de kapsar).
+    const q = openTab(a.state, { serverId: "s1", serverName: "prod", database: "a", id: a.id });
+    expect(q.id).not.toBe(a.id);
+    // Veri kimliği var olan kimliği atlar.
+    const g = openTab(initialTabs(), { serverId: "s1", serverName: "prod", database: "a", id: "g1" });
+    expect(data(g.state).id).not.toBe("g1");
+  });
+
+  it("activateTab veri sekmesini tanır", () => {
+    const a = data(initialTabs());
+    const s = activateTab(a.state, OBJECT_TAB_ID);
+    expect(activateTab(s, a.id).activeId).toBe(a.id);
+  });
+
+  it("kapanınca görünüm sırası: sorgu → dashboard → designer → veri → Nesne", () => {
+    const { s: s0, ids } = open3();
+    const d = openDashboard(s0, { serverId: "s1", databaseOid: null, title: "D" });
+    const e = openDesigner(d.state, { serverId: "s1", databaseOid: 5, title: "E", key: "alter:sequence:s1:5:1" });
+    const a = data(e.state, 1);
+    const b = data(a.state, 2);
+    let s = b.state;
+    // Son designer kapanınca sağındaki ilk veri sekmesi.
+    s = closeTab(activateTab(s, e.id), e.id);
+    expect(s.activeId).toBe(a.id);
+    s = closeTab(s, a.id);
+    expect(s.activeId).toBe(b.id);
+    // Son veri sekmesi kapanınca soldaki (dashboard).
+    s = closeTab(s, b.id);
+    expect(s.activeId).toBe(d.id);
+    expect(s.data).toEqual([]);
+    const c = data(s, 3);
+    s = closeTab(activateTab(c.state, d.id), d.id);
+    expect(s.activeId).toBe(c.id);
+    s = closeTab(closeTab(closeTab(s, ids[0]), ids[1]), ids[2]);
+    expect(closeTab(s, c.id).activeId).toBe(OBJECT_TAB_ID);
+  });
+
+  it("renameTab veri sekmesini de etkiler; store.openData var olanı yeniden kullanır", () => {
+    const a = data(initialTabs());
+    const r = renameTab(a.state, a.id, " Veri: yeni ");
+    expect(r.data[0].title).toBe("Veri: yeni");
+    expect(r.data[0].key).toBe(a.state.data[0].key);
+    const store = createTabsStore();
+    const input = { serverId: "s", databaseOid: 1, object: { kind: "view" as const, oid: 7 }, title: "V", key: "k", where: "s/db" };
+    const x = store.openData(input);
+    expect(x.created).toBe(true);
+    store.activate(OBJECT_TAB_ID);
+    expect(store.openData(input)).toEqual({ id: x.id, created: false });
+    expect(store.state.activeId).toBe(x.id);
+    store.close(x.id);
+    expect(store.state.data).toHaveLength(0);
     expect(store.state.activeId).toBe(OBJECT_TAB_ID);
   });
 });

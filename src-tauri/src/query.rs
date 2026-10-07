@@ -76,6 +76,20 @@ pub async fn qt_open(state: State<'_, AppState>, server_id: Uuid, database_oid: 
     Box::pin(state.query.open(server_id, target, options)).await.map_err(|e| query_payload(&e))
 }
 
+/// Veri düzenleyicinin okuma oturumu: `qt_open` gibi, ancak kilitten bağımsız olarak açıkça salt okunur
+/// (`default_transaction_read_only = on`; yeniden açılışta ve `qt_set_options` sonrasında korunur).
+/// Dönen kimlik `qt_open`'unkiyle aynı biçimdedir (dize olarak serileşen `Uuid`).
+#[tauri::command]
+pub async fn qt_open_readonly(
+    state: State<'_, AppState>,
+    server_id: Uuid,
+    database_oid: Option<u32>,
+    options: SessionOptions,
+) -> CmdResult<Uuid> {
+    let target = database_oid.map_or(Target::Maintenance, Target::Database);
+    Box::pin(state.query.open_read_only(server_id, target, options)).await.map_err(|e| query_payload(&e))
+}
+
 #[tauri::command]
 pub async fn qt_analyze(state: State<'_, AppState>, session: Uuid, sql: String, scope: Scope) -> CmdResult<Vec<StmtPlan>> {
     state.query.analyze(session, &sql, scope).map_err(|e| query_payload(&e))
