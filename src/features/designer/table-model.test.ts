@@ -261,3 +261,48 @@ describe("odak / bölümler / genel", () => {
     expect(tableEditPatch(s, { name: "x" })).toBe(s);
   });
 });
+
+describe("düzeltme turu", () => {
+  it("withValueSource(original): yüklü kaynağa dönüş birebir geri koyar; kimliğin zorladığı notNull geri alınır", () => {
+    const o = col("a", 1, { notNull: false });
+    const viaIdentity = withValueSource(withValueSource(o, "identity_always", o), "none", o);
+    expect(viaIdentity).toEqual(o);
+    const od = col("a", 1, { default: "now()" });
+    const back = withValueSource(withValueSource(od, "none", od), "default", od);
+    expect(back.default).toBe("now()");
+    expect(back).toEqual(od);
+    const og = col("a", 1, { generated: { expr: "b * 2", stored: true } });
+    const g = withValueSource(withValueSource(og, "none", og), "generated_stored", og);
+    expect(g).toEqual(og);
+    expect(g.generated).not.toBe(og.generated);
+    expect(defsEqual({ kind: "table", ...T({ columns: [viaIdentity] }) }, { kind: "table", ...T({ columns: [o] }) })).toBe(true);
+    // kullanıcının kendi notNull seçimi (kimlik dışı) korunur
+    expect(withValueSource({ ...o, notNull: true }, "default", o).notNull).toBe(true);
+  });
+  it("withValueSource/renameTable girdiyi değiştirmez", () => {
+    const o = col("a", 1, { default: "1" });
+    const snap = structuredClone(o);
+    withValueSource(o, "identity_always", o); withValueSource(o, "generated_stored", o); withValueSource(o, "none");
+    expect(o).toEqual(snap);
+    const d = T({ constraints: [fk(["a"], "public", "t", ["id"], 1)] });
+    const ds = structuredClone(d);
+    renameTable(d, { name: "x", schema: "y" }, [0]);
+    expect(d).toEqual(ds);
+  });
+  it("typeTextWarning: tırnaklı/parantez içi çift boşluk uyarmaz; uzunluk karakter sayar", () => {
+    expect(typeTextWarning("\"My  Type\"")).toBeNull();
+    expect(typeTextWarning("numeric(10,  2)")).toBeNull();
+    expect(typeTextWarning("int  4")).toBe(ttbl.type.spaces);
+    expect(typeTextWarning("\"" + "😀".repeat(100) + "\"")).toBeNull();
+    expect(typeTextWarning("x".repeat(128))).not.toBe(ttbl.type.tooLong);
+  });
+  it("usingVisible/using sıfırlama: biçim farkları (INTEGER, boşluk) tip değişimi sayılmaz", () => {
+    const o = col("a", 1, { dataType: "numeric(10,2)" });
+    expect(usingVisible(o, { ...o, dataType: "NUMERIC(10, 2)" })).toBe(false);
+    expect(usingVisible(o, { ...o, dataType: "  numeric(10,2) " })).toBe(false);
+    expect(usingVisible(o, { ...o, dataType: "bigint" })).toBe(true);
+    expect(withDataType({ ...o, using: "x" }, o, "NUMERIC(10,2)").using).toBeNull();
+    const q = col("a", 1, { dataType: "\"My Type\"" });
+    expect(usingVisible(q, { ...q, dataType: "\"my type\"" })).toBe(true);
+  });
+});

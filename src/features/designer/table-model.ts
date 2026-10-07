@@ -87,10 +87,22 @@ export function valueExpr(c: ColumnDef): string {
   return c.generated ? c.generated.expr : c.default ?? "";
 }
 
-/** İfade metni taşınır (default ↔ generated); identity seçilince notNull = true; diğer kaynaklar temizlenir. */
-export function withValueSource(c: ColumnDef, s: ValueSource): ColumnDef {
+/**
+ * İfade metni taşınır (default ↔ generated); identity seçilince notNull = true; diğer kaynaklar temizlenir.
+ * `original` (yüklü eş) verilirse: yüklü kolonun kendi kaynağına dönüş default/identity/generated'ı birebir geri koyar; kimlik
+ * seçiminin zorladığı notNull'dan çıkılınca (yüklü kolon kimlikli değilse) notNull özgün değerine döner.
+ */
+export function withValueSource(c: ColumnDef, s: ValueSource, original: ColumnDef | null = null): ColumnDef {
   const text = valueExpr(c);
-  const base: ColumnDef = { ...c, default: null, identity: null, generated: null };
+  const leavingIdentity = c.identity !== null && s !== "identity_always" && s !== "identity_by_default";
+  const restoreNotNull = !!original && leavingIdentity && original.identity === null ? original.notNull : null;
+  if (original && s === valueSourceOf(original)) {
+    return {
+      ...c, default: original.default, identity: original.identity, generated: original.generated ? { ...original.generated } : null,
+      notNull: leavingIdentity || original.identity !== null ? original.notNull : c.notNull,
+    };
+  }
+  const base: ColumnDef = { ...c, default: null, identity: null, generated: null, notNull: restoreNotNull ?? c.notNull };
   switch (s) {
     case "none": return base;
     case "default": return { ...base, default: text };
@@ -120,8 +132,17 @@ export function allowedValueSources(original: ColumnDef | null): ValueSource[] {
 
 // ---- tip
 
+/**
+ * Tip metni karşılaştırma biçimi: kırp, boşlukları sadeleştir, tırnaksız kısımlarda büyük/küçük harf duyarsız ve noktalama
+ * çevresindeki boşluk yok sayılır. Takma ad denkliği (int4 ↔ integer) arka uca bırakılır.
+ */
+function typeKey(t: string): string {
+  return t.trim().split(/("(?:[^"]|"")*")/).map((part, i) => (i % 2 === 1 ? part : part.toLowerCase().replace(/\s+/g, " ").replace(/ ?([(),[\]]) ?/g, "$1"))).join("");
+}
+const sameTypeAndCollation = (c: ColumnDef, o: ColumnDef) => typeKey(c.dataType) === typeKey(o.dataType) && c.collation === o.collation;
+
 function usingFor(c: ColumnDef, original: ColumnDef | null): ColumnDef {
-  if (original && c.dataType === original.dataType && c.collation === original.collation) return { ...c, using: null };
+  if (original && sameTypeAndCollation(c, original)) return { ...c, using: null };
   return c;
 }
 
@@ -135,7 +156,7 @@ export function withCollation(c: ColumnDef, original: ColumnDef | null, text: st
 }
 
 export function usingVisible(original: ColumnDef | null, c: ColumnDef): boolean {
-  return !!original && (c.dataType !== original.dataType || c.collation !== original.collation);
+  return !!original && !sameTypeAndCollation(c, original);
 }
 
 /** serial ailesi → { dataType } (büyük/küçük harf duyarsız, isteğe bağlı `pg_catalog.`). */
@@ -156,9 +177,11 @@ export function serialFix(text: string): { dataType: string } | null {
 export function typeTextWarning(text: string): string | null {
   const w = ttbl.type;
   if (text === "") return w.required;
-  if (text.length > 128) return w.tooLong;
+  if ([...text].length > 128) return w.tooLong;
   if (/[\u0000-\u001f\u007f]/.test(text)) return w.control;
-  if (text !== text.trim() || text.includes("  ")) return w.spaces;
+  // Çift boşluk: tırnaklı kısımlar ve parantez içi hariç (sunucu bunları kabul eder).
+  const spaced = text.replace(/"(?:[^"]|"")*"/g, "q").replace(/\([^)]*\)/g, "()");
+  if (text !== text.trim() || spaced.includes("  ")) return w.spaces;
   if (serialFix(text) !== null) return w.serial;
   const rest = text.replace(/"(?:[^"]|"")*"/g, "");
   if (rest.includes("\"")) return w.unclosedQuote;
