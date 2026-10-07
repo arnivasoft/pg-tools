@@ -7,7 +7,9 @@
 //! sorguyu doğrulamaz (yüklü `pg_get_viewdef` metni kapıya takılsa bile görünüm yeniden adlandırılabilir).
 
 use super::freesql::{check_free_sql, composed_is_clean, wrap};
-use super::{BuildCtx, check_ident, check_old_ident, check_old_schema_ident, check_schema_ident, check_text, err, stmt};
+use super::{
+    BuildCtx, check_ident, check_old_ident, check_old_ref, check_old_schema_ident, check_schema_ident, check_text, err, stmt,
+};
 use crate::model::{CheckOption, FieldError, ViewDef};
 use crate::plan::{Plan, Risk};
 use crate::quote::{qualified, quote_ident, quote_literal};
@@ -116,10 +118,17 @@ fn validate_alter(old: &ViewDef, new: &ViewDef, recreate: bool, ctx: &BuildCtx) 
     if new.name != old.name {
         check_ident("name", &new.name, &mut e);
     }
-    // Yeniden oluşturmada sahip her zaman yazılır (yeni nesne bağlı rolün olur).
-    let owner = if recreate { new.owner.as_ref().or(old.owner.as_ref()) } else { new.owner.as_ref().filter(|_| new.owner != old.owner) };
-    if let Some(o) = owner {
-        check_ident("owner", o, &mut e);
+    // Yeniden oluşturmada sahip her zaman yazılır (yeni nesne bağlı rolün olur). DEĞİŞEN sahip katı; değişmeyen (ya da
+    // `None` → eski) sahip var olan kimliktir, yalnızca `quote_ident` ile yerleşir → gevşek `check_old_ref` (MatView ile
+    // aynı kural). Değişmeyen şema/ad zaten yalnızca değiştiğinde katı denetlenir.
+    match &new.owner {
+        Some(o) if new.owner != old.owner => check_ident("owner", o, &mut e),
+        _ if recreate => {
+            if let Some(o) = &old.owner {
+                check_old_ref("owner", o, &mut e);
+            }
+        }
+        _ => {}
     }
     if let Some(c) = &new.comment
         && (recreate || new.comment != old.comment)
@@ -680,6 +689,28 @@ mod tests {
         assert_eq!(paths(validate(&zw, &ctx())), ["schema", "name"]);
         assert_eq!(paths(balter(&o(v()), &o(ViewDef { name: "v\u{200b}x".into(), ..v() }), &ctx()).unwrap_err()), ["name"]);
         assert_eq!(paths(balter(&o(v()), &o(ViewDef { schema: "s\u{200b}x".into(), ..v() }), &ctx()).unwrap_err()), ["schema"]);
+        // Yeniden oluşturma: değişmeyen yüklü sahip (sıfır genişlikli boşluk) yeniden yazılır, serbesttir; `None` → eski.
+        let loaded = ViewDef { owner: Some("o\u{200b}r".into()), ..zw.clone() };
+        for owner in [loaded.owner.clone(), None] {
+            let p = alter_ok(&loaded, &ViewDef { query: "SELECT 2".into(), recreate: true, owner, ..loaded.clone() });
+            assert_eq!(
+                sqls(&p),
+                [
+                    "DROP VIEW \"s\u{200b}x\".\"v\u{200b}x\"",
+                    "CREATE VIEW \"s\u{200b}x\".\"v\u{200b}x\" AS (SELECT 2\n)",
+                    "ALTER VIEW \"s\u{200b}x\".\"v\u{200b}x\" OWNER TO \"o\u{200b}r\"",
+                ]
+            );
+        }
+        // Satır sonlu yüklü sahip: yeniden yazıldığı için yine reddedilir.
+        let ctl = ViewDef { owner: Some("o\nr".into()), ..v() };
+        let r = ViewDef { query: "SELECT 2".into(), recreate: true, ..ctl.clone() };
+        assert_eq!(paths(balter(&o(ctl), &o(r), &ctx()).unwrap_err()), ["owner"]);
+        // DEĞİŞEN ad/sahip aynı karakterlerle reddedilir (recreate'te de).
+        let base = ViewDef { owner: Some("a".into()), ..v() };
+        let changed =
+            ViewDef { query: "SELECT 2".into(), recreate: true, name: "v\u{200b}y".into(), owner: Some("o\u{200b}r".into()), ..base.clone() };
+        assert_eq!(paths(balter(&o(base), &o(changed), &ctx()).unwrap_err()), ["name", "owner"]);
         // NUL eski tarafta da reddedilir.
         let nul = ViewDef { name: "a\0".into(), ..v() };
         assert_eq!(paths(balter(&o(nul.clone()), &o(v()), &ctx()).unwrap_err()), ["old.name"]);

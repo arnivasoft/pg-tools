@@ -92,6 +92,20 @@ pub(crate) fn check_old_ident(path: &str, value: &str, errs: &mut Vec<FieldError
     }
 }
 
+/// YÜKLENMİŞ (eski taraf) başvuru adı (sahip rol, tablespace): yeniden kurmada DEĞİŞMEDEN yeniden yazılır. Var olan
+/// adı yeniden yazmak yeni bir aldatma eklemez (görünmez biçim karakteri ve uzunluk serbest), ama boş/NUL ve denetim
+/// karakteri (satır sonu vb.) reddedilir.
+pub(crate) fn check_old_ref(path: &str, value: &str, errs: &mut Vec<FieldError>) {
+    let before = errs.len();
+    check_old_ident(path, value, errs);
+    if errs.len() == before && value.chars().any(char::is_control) {
+        errs.push(err(
+            path,
+            "Ad denetim karakteri (satır sonu, sekme vb.) içeremez.",
+        ));
+    }
+}
+
 /// YÜKLENMİŞ (eski taraf) şema: `check_old_ident` gevşekliği + sistem şeması yasağı (sistem nesnesine dokunulmaz).
 pub(crate) fn check_old_schema_ident(path: &str, value: &str, errs: &mut Vec<FieldError>) {
     let before = errs.len();

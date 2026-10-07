@@ -12,7 +12,9 @@
 use super::freesql::{check_free_sql, composed_is_clean, wrap};
 use super::table_alter::TABLESPACE_CLEAR_MSG;
 use super::view::CASCADE_WARNING;
-use super::{BuildCtx, check_ident, check_old_ident, check_old_schema_ident, check_schema_ident, check_text, err, stmt};
+use super::{
+    BuildCtx, check_ident, check_old_ident, check_old_ref, check_old_schema_ident, check_schema_ident, check_text, err, stmt,
+};
 use crate::model::{FieldError, MatViewDef, MatViewRefresh};
 use crate::plan::{Plan, Risk, Statement};
 use crate::quote::{qualified, quote_ident, quote_literal};
@@ -69,9 +71,8 @@ fn check_fillfactor(d: &MatViewDef, e: &mut Vec<FieldError>) {
 
 /// Sorgu + nihai ifade taraması (yalnızca adlar ve sorgu geçerliyse; geçersiz ad zaten raporlandı).
 fn check_query(d: &MatViewDef, e: &mut Vec<FieldError>) {
-    let before = e.len();
     check_free_sql("query", &d.query, e);
-    if e.len() == before && e.is_empty() && !composed_is_clean(&create_sql(d)) {
+    if e.is_empty() && !composed_is_clean(&create_sql(d)) {
         e.push(err("query", COMPOSED_BROKEN));
     }
 }
@@ -138,28 +139,31 @@ fn validate_alter(old: &MatViewDef, new: &MatViewDef, rebuild: bool) -> Vec<Fiel
     if !e.is_empty() {
         return e;
     }
-    // Yeniden kurmada CREATE yeni adı/şemayı doğrudan yazar; adlar değişmese de yeni (katı) kurala tabidir.
-    if rebuild || new.schema != old.schema {
+    // DEĞİŞEN değerler katı kurala tabidir. Yeniden kurmada CREATE değişmeyen şema/ad/sahip/tablespace'i de yeniden
+    // yazar: bunlar var olan nesnenin kimliğidir, yalnızca `quote_ident` ile yerleşir → gevşek eski taraf kuralı
+    // (şema/ad yukarıda `old.` olarak denetlendi; sahip/tablespace `check_old_ref`). View `recreate` ile aynı kural.
+    if new.schema != old.schema {
         check_schema_ident("schema", &new.schema, &mut e);
     }
-    if rebuild || new.name != old.name {
+    if new.name != old.name {
         check_ident("name", &new.name, &mut e);
     }
-    let owner = if rebuild {
-        new.owner.as_ref().or(old.owner.as_ref())
-    } else {
-        new.owner.as_ref().filter(|_| new.owner != old.owner)
-    };
-    if let Some(o) = owner {
-        check_ident("owner", o, &mut e);
-    }
-    if rebuild || new.tablespace != old.tablespace {
-        match &new.tablespace {
-            Some(ts) => check_ident("tablespace", ts, &mut e),
-            // ALTER ile tablespace "kaldırılamaz"; yeniden kurmada CREATE varsayılana koyar (sorun değil).
-            None if !rebuild => e.push(err("tablespace", TABLESPACE_CLEAR_MSG)),
-            None => {}
+    match &new.owner {
+        Some(o) if new.owner != old.owner => check_ident("owner", o, &mut e),
+        // Değişmedi ya da `None` (yeniden kurmada eski sahip yazılır).
+        _ if rebuild => {
+            if let Some(o) = &old.owner {
+                check_old_ref("owner", o, &mut e);
+            }
         }
+        _ => {}
+    }
+    match &new.tablespace {
+        Some(ts) if new.tablespace != old.tablespace => check_ident("tablespace", ts, &mut e),
+        // ALTER ile tablespace "kaldırılamaz"; yeniden kurmada CREATE varsayılana koyar (sorun değil).
+        None if old.tablespace.is_some() && !rebuild => e.push(err("tablespace", TABLESPACE_CLEAR_MSG)),
+        Some(ts) if rebuild => check_old_ref("tablespace", ts, &mut e),
+        _ => {}
     }
     if rebuild || new.fillfactor != old.fillfactor {
         check_fillfactor(new, &mut e);
@@ -182,6 +186,11 @@ fn validate_alter(old: &MatViewDef, new: &MatViewDef, rebuild: bool) -> Vec<Fiel
 /// Sorgu değiştiyse yeniden kurma: DROP eski (DataLoss) + CREATE yeni (yeni ad/şema/tablespace/fillfactor/withData) +
 /// sahip (`new ?? old`, her zaman) + yorum (doluysa); `refresh` yok sayılır (uyarı). Aksi halde sıra (sonrakiler YENİ
 /// adı kullanır): rename, set schema, set tablespace, fillfactor SET/RESET, owner, comment, REFRESH (kurallar tablosu).
+///
+/// Not (sıra bilerek değiştirilmez, Global Constraints): `OWNER TO`, `COMMENT` ve `REFRESH`'ten ÖNCE gelir. Süper
+/// kullanıcı olmayan bağlı rol nesneyi INHERIT'siz ama SET yetkili bir role (PG 16+) devrederse sonraki COMMENT/REFRESH
+/// sahiplik (PG 17+: MAINTAIN) denetimine takılıp plan geri alınabilir; ayrıca REFRESH sorguyu yeni sahip olarak çalıştırır.
+/// İleride Docker vakasıyla kapsanacak (sahip değişimi + REFRESH tek planda).
 pub fn alter(old: &MatViewDef, new: &MatViewDef, _ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     let rebuild = old.query != new.query;
     let errs = validate_alter(old, new, rebuild);
@@ -622,6 +631,11 @@ mod tests {
         );
         assert!(!sqls(&p).iter().any(|s| s.starts_with("REFRESH")));
         assert_eq!(p.warnings.last().map(String::as_str), Some(REFRESH_IGNORED_WARNING));
+        // withData false → true yeniden kurmada: CREATE … WITH DATA (not ile), ayrı REFRESH yok.
+        let p = alter_ok(&MatViewDef { with_data: false, ..m() }, &MatViewDef { query: "SELECT 2".into(), ..m() });
+        assert_eq!(sqls(&p), ["DROP MATERIALIZED VIEW public.mv", "CREATE MATERIALIZED VIEW public.mv AS (SELECT 2\n) WITH DATA"]);
+        assert_eq!(p.statements[1].note.as_deref(), Some(WITH_DATA_NOTE));
+        assert_eq!(p.warnings, [GRANT_WARNING]);
     }
 
     #[test]
@@ -791,11 +805,35 @@ mod tests {
         // Ad değişmeden kalan yerinde düzenlemeler eski adı yeniden yazar ve serbesttir.
         assert_single_statements(&alter_ok(&zw, &MatViewDef { comment: Some("k".into()), ..zw.clone() }));
         assert_single_statements(&alter_ok(&zw, &MatViewDef { refresh: Some(MatViewRefresh::Normal), ..zw.clone() }));
-        // Yeniden kurma YENİ adı CREATE'e yazar: aynı (yanıltıcı) ad katı kurala takılır.
+        // Yeniden kurma: değişmeyen yüklü ad/şema/sahip/tablespace (sıfır genişlikli boşluk) yeniden yazılır, serbesttir.
+        let loaded = MatViewDef {
+            owner: Some("o\u{200b}r".into()),
+            tablespace: Some("t\u{200b}s".into()),
+            ..zw.clone()
+        };
+        let p = alter_ok(&loaded, &MatViewDef { query: "SELECT 2".into(), ..loaded.clone() });
         assert_eq!(
-            paths(alter_err(&zw, &MatViewDef { query: "SELECT 2".into(), ..zw.clone() })),
-            ["schema", "name"]
+            sqls(&p),
+            [
+                "DROP MATERIALIZED VIEW \"s\u{200b}x\".\"v\nx\"",
+                "CREATE MATERIALIZED VIEW \"s\u{200b}x\".\"v\nx\" TABLESPACE \"t\u{200b}s\" AS (SELECT 2\n) WITH DATA",
+                "ALTER MATERIALIZED VIEW \"s\u{200b}x\".\"v\nx\" OWNER TO \"o\u{200b}r\"",
+            ]
         );
+        // Yeni sahip `None` → eski sahip yazılır, yine gevşek.
+        let p = alter_ok(&loaded, &MatViewDef { query: "SELECT 2".into(), owner: None, ..loaded.clone() });
+        assert_eq!(sqls(&p)[2], "ALTER MATERIALIZED VIEW \"s\u{200b}x\".\"v\nx\" OWNER TO \"o\u{200b}r\"");
+        // DEĞİŞEN değerler aynı karakterlerle katı kurala takılır (yeniden kurmada da).
+        let base = MatViewDef { owner: Some("a".into()), tablespace: Some("t".into()), ..m() };
+        let changed = MatViewDef {
+            query: "SELECT 2".into(),
+            schema: "s\u{200b}y".into(),
+            name: "v\u{200b}y".into(),
+            owner: Some("o\u{200b}r".into()),
+            tablespace: Some("t\u{200b}s".into()),
+            ..base.clone()
+        };
+        assert_eq!(paths(alter_err(&base, &changed)), ["schema", "name", "owner", "tablespace"]);
         // YENİ ad/şema olarak reddedilir (create ve alter).
         assert_eq!(paths(validate(&zw, &ctx())), ["schema", "name"]);
         assert_eq!(paths(alter_err(&m(), &MatViewDef { name: "v\u{200b}x".into(), ..m() })), ["name"]);
@@ -815,8 +853,12 @@ mod tests {
         };
         let p = alter_ok(&old, &MatViewDef { name: "w".into(), refresh: Some(MatViewRefresh::Normal), ..old.clone() });
         assert_eq!(sqls(&p), ["ALTER MATERIALIZED VIEW public.mv RENAME TO w", "REFRESH MATERIALIZED VIEW public.w"]);
+        // Yeniden kurmada değişmeyen sahip/tablespace gevşek denetlenir (denetim karakteri yine yasak; sıfır genişlikli
+        // boşluk serbest); fillfactor ve yorum CREATE/COMMENT'e yazıldığı için doğrulanır.
         let r = MatViewDef { query: "SELECT 2".into(), ..old.clone() };
-        assert_eq!(paths(alter_err(&old, &r)), ["owner", "tablespace", "fillfactor", "comment"]);
+        assert_eq!(paths(alter_err(&old, &r)), ["owner", "fillfactor", "comment"]);
+        let ts_ctl = MatViewDef { tablespace: Some("t\ns".into()), ..m() };
+        assert_eq!(paths(alter_err(&ts_ctl, &MatViewDef { query: "SELECT 2".into(), ..ts_ctl.clone() })), ["tablespace"]);
         // Sorgu değişimi aynı `\` ile reddedilir (E'…' ipucu).
         let e = alter_err(&m(), &MatViewDef { query: "SELECT 'a\\b'".into(), ..m() });
         assert!(e[0].message.contains("E'"), "{e:?}");
