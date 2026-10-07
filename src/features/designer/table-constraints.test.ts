@@ -3,11 +3,12 @@ import type { ConstraintDef } from "../../ipc/bindings/ConstraintDef";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import { defsEqual } from "./designer-model";
 import {
-  addConstraint, addConstraintColumn, addFkPair, availableColumns, canAddPrimaryKey, constraintColumns, constraintLabel, danglingColumns,
+  addConstraint, addConstraintColumn, addConstraintSnap, canRestoreConstraint, pointFkAtOther, pointFkAtSelf, removeConstraintSnap, restoreConstraintSnap, addFkPair, availableColumns, canAddPrimaryKey, constraintColumns, constraintLabel, danglingColumns,
   newConstraint, notValidMode, originalConstraint, primaryKeyNullable, removeConstraint, removeConstraintColumn, removeFkPair,
   removedConstraints, restoreConstraint, supportsDeferrable, supportsNotValid, switchConstraintType, unsupportedKind, updateConstraint,
   updateFkPair, withDeferrable, withFkActions, withFkTarget, withInitiallyDeferred, withPrimaryKeyNotNull,
 } from "./table-constraints";
+import type { SelfSnap } from "./table-constraints";
 import { newColumn, renameTable, selfRefs } from "./table-model";
 
 const T = (p: Partial<TableDef> = {}): TableDef => ({
@@ -218,5 +219,66 @@ describe("görünüm yardımcıları", () => {
     expect(constraintLabel(pk(["a"]))).toBe("adsız PRIMARY KEY");
     expect(constraintLabel(fk([""], "", [""]))).toBe("adsız FOREIGN KEY");
     expect(constraintLabel({ ...chk(), name: "" })).toBe("adsız CHECK");
+  });
+});
+
+describe("tur-guvenli duzeltmeler (D2-D7)", () => {
+  it("snapshot: ara ad + kisit sil/geri al + yeni self FK; son ad yalniz gercek self FK'lere yazilir", () => {
+    const original = T({ name: "orders", columns: [col("a", 1)], constraints: [chk(1), fk(["a"], "orders", ["a"], 2), fk(["a"], "customers", ["id"], 3)] });
+    let d = original;
+    let snap: SelfSnap = selfRefs(d);
+    expect(snap).toEqual([1]);
+    d = renameTable(d, { name: "customers" }, snap);
+    ({ d, snap } = removeConstraintSnap(d, 0, snap));
+    expect(snap).toEqual([0]);
+    ({ d, snap } = restoreConstraintSnap(d, original, 1, snap));
+    expect(d.constraints.map((c) => c.oid)).toEqual([1, 2, 3]);
+    expect(snap).toEqual([1]);
+    ({ d, snap } = addConstraintSnap(d, "foreign_key", snap));
+    ({ d, snap } = pointFkAtSelf(d, 3, snap));
+    expect(snap).toEqual([1, 3]);
+    d = renameTable(d, { name: "orders2" }, snap);
+    const refs = d.constraints.map((c) => (c.kind.type === "foreign_key" ? c.kind.refTable : null));
+    expect(refs).toEqual([null, "orders2", "customers", "orders2"]);
+    ({ d, snap } = pointFkAtOther(d, 3, { refTable: "x" }, snap));
+    expect(snap).toEqual([1]);
+    // geri alinan self FK adi guncel taslak adina hizalanir
+    ({ d, snap } = removeConstraintSnap(d, 1, snap));
+    expect(snap).toEqual([]);
+    ({ d, snap } = restoreConstraintSnap(d, original, 2, snap));
+    expect(snap).toEqual([1]);
+    expect(d.constraints[1]!.kind).toMatchObject({ refTable: "orders2" });
+    expect(removeConstraintSnap(d, 99, snap).d).toBe(d);
+  });
+  it("canRestoreConstraint: ikinci PK engellenir", () => {
+    const original = T({ constraints: [pk(["a"], 1), uq(["a"], 2)] });
+    const withOther = T({ constraints: [pk(["b"])] });
+    expect(canRestoreConstraint(withOther, original, 1)).toBe(false);
+    expect(canRestoreConstraint(withOther, original, 2)).toBe(true);
+    expect(canRestoreConstraint(T(), original, 1)).toBe(true);
+    expect(canRestoreConstraint(original, original, 1)).toBe(false);
+    expect(canRestoreConstraint(T(), original, 9)).toBe(false);
+  });
+  it("ayni nesne: no-op'lar", () => {
+    const f = fk(["a"], "x", ["id"]);
+    expect(withFkActions(f, { onDelete: "no_action" })).toBe(f);
+    expect(updateFkPair(f, 0, { local: "a", ref: "id" })).toBe(f);
+    const d = T({ constraints: [f] });
+    expect(updateConstraint(d, 0, (c) => c)).toBe(d);
+    const p = { ...pk(["a"]), deferrable: true };
+    expect(withDeferrable(p, true)).toBe(p);
+    expect(withInitiallyDeferred(p, false)).toBe(p);
+  });
+  it("withDeferrable CHECK'te etkisiz", () => {
+    const c = chk();
+    expect(withDeferrable(c, true)).toBe(c);
+  });
+  it("canAddPrimaryKey(excludingIndex) ve switch -> PK ikinci PK'yi reddeder", () => {
+    const d = T({ constraints: [pk(["a"]), uq(["b"])] });
+    expect(canAddPrimaryKey(d, 0)).toBe(true);
+    expect(canAddPrimaryKey(d, 1)).toBe(false);
+    expect(switchConstraintType(d.constraints[1]!, "primary_key", d)).toBe(d.constraints[1]);
+    const solo = T({ constraints: [uq(["b"])] });
+    expect(switchConstraintType(solo.constraints[0]!, "primary_key", solo).kind.type).toBe("primary_key");
   });
 });

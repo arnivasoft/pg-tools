@@ -34,7 +34,9 @@ export function addConstraint(d: TableDef, type: ConstraintType): TableDef {
 
 export function updateConstraint(d: TableDef, i: number, f: (c: ConstraintDef) => ConstraintDef): TableDef {
   if (!inRange(i, d.constraints.length)) return d;
-  return { ...d, constraints: d.constraints.map((c, k) => (k === i ? f(c) : c)) };
+  const next = f(d.constraints[i]!);
+  if (next === d.constraints[i]) return d;
+  return { ...d, constraints: d.constraints.map((c, k) => (k === i ? next : c)) };
 }
 
 export function removeConstraint(d: TableDef, i: number): TableDef {
@@ -53,6 +55,7 @@ export function supportsNotValid(type: ConstraintType): boolean {
 /** Yalnızca yeni kısıtta (oid null) tür değişimi: ad korunur; desteklenmeyen bayraklar false. Yüklü kısıtta c. */
 export function switchConstraintType(c: ConstraintDef, type: ConstraintType, d: TableDef): ConstraintDef {
   if (c.oid !== null || c.kind.type === type) return c;
+  if (type === "primary_key" && d.constraints.some((o) => o !== c && o.kind.type === "primary_key")) return c;
   const fresh = newConstraint(type, d);
   const deferrable = supportsDeferrable(type) && c.deferrable;
   return {
@@ -64,23 +67,35 @@ export function switchConstraintType(c: ConstraintDef, type: ConstraintType, d: 
   };
 }
 
-export function canAddPrimaryKey(d: TableDef): boolean {
-  return !d.constraints.some((c) => c.kind.type === "primary_key");
+/** `excludingIndex`: düzenlenen kısıt sayılmaz (kendi türünü PK'ya çevirirken). */
+export function canAddPrimaryKey(d: TableDef, excludingIndex?: number): boolean {
+  return !d.constraints.some((c, i) => i !== excludingIndex && c.kind.type === "primary_key");
+}
+
+/** Silinen yüklü kısıt geri alınabilir mi: taslakta yok, özgünde var ve (PK ise) taslakta başka PK yok. */
+export function canRestoreConstraint(d: TableDef, original: TableDef, oid: number): boolean {
+  if (d.constraints.some((c) => c.oid === oid)) return false;
+  const o = original.constraints.find((c) => c.oid === oid);
+  if (!o) return false;
+  return o.kind.type !== "primary_key" || canAddPrimaryKey(d);
 }
 
 /** DEFERRABLE kapatılınca initiallyDeferred da false. */
 export function withDeferrable(c: ConstraintDef, v: boolean): ConstraintDef {
+  if (!supportsDeferrable(c.kind.type)) return c;
+  if (c.deferrable === v) return c;
   return { ...c, deferrable: v, initiallyDeferred: v ? c.initiallyDeferred : false };
 }
 
 /** deferrable false iken etkisiz (c aynen). */
 export function withInitiallyDeferred(c: ConstraintDef, v: boolean): ConstraintDef {
-  return c.deferrable ? { ...c, initiallyDeferred: v } : c;
+  return c.deferrable && c.initiallyDeferred !== v ? { ...c, initiallyDeferred: v } : c;
 }
 
 /**
  * NOT VALID denetimi: "add" → yalnızca alter'da, yeni (oid null) FK/CHECK; "validate" → yüklü ve özgün tanımda
  * notValid=true olan kısıt ("Doğrula" kutusu notValid'i false yapar); "none" → gösterilmez.
+ * Not (Task 6 etiketi): yapısı değişmiş yüklü kısıtta notValid=false, arka uçta "yeniden doğrulanmış ekle" anlamına gelir.
  */
 export function notValidMode(mode: "create" | "alter", c: ConstraintDef, original: ConstraintDef | null): "add" | "validate" | "none" {
   const type = c.kind.type;
@@ -135,7 +150,8 @@ export function primaryKeyNullable(d: TableDef): string[] {
 
 // ---- kolon listeleri (PK/UNIQUE columns + include)
 
-export function constraintColumns(c: ConstraintDef, list: ColumnListName): string[] {
+/** Salt okunur görünüm (kopyalamaz; değiştirmeyin). FK'da yalnızca "columns"; include ve CHECK → []. */
+export function constraintColumns(c: ConstraintDef, list: ColumnListName): readonly string[] {
   const k = c.kind;
   if (k.type === "primary_key" || k.type === "unique") return k[list];
   if (k.type === "foreign_key" && list === "columns") return k.columns;
@@ -148,7 +164,7 @@ function withList(c: ConstraintDef, list: ColumnListName, f: (a: string[]) => st
   return { ...c, kind: { ...k, [list]: f(k[list]) } as ConstraintKind };
 }
 
-/** Boş/yinelenen ad eklenmez (aynı nesne). */
+/** Boş/yinelenen ad eklenmez (aynı nesne). Yalnızca PK/UNIQUE; FK/CHECK'te daima aynı nesne (FK için çift işlemleri). */
 export function addConstraintColumn(c: ConstraintDef, list: ColumnListName, name: string): ConstraintDef {
   if (name === "") return c;
   if (constraintColumns(c, list).includes(name)) return c;
@@ -183,6 +199,8 @@ export function addFkPair(c: ConstraintDef): ConstraintDef {
 
 export function updateFkPair(c: ConstraintDef, j: number, p: { local?: string; ref?: string }): ConstraintDef {
   if (c.kind.type !== "foreign_key" || !inRange(j, c.kind.columns.length)) return c;
+  const k0 = c.kind;
+  if ((p.local === undefined || p.local === k0.columns[j]) && (p.ref === undefined || p.ref === k0.refColumns[j])) return c;
   return withFk(c, (k) => ({
     ...k,
     columns: p.local === undefined ? k.columns : k.columns.map((n, i) => (i === j ? p.local! : n)),
@@ -206,7 +224,8 @@ export function withFkTarget(c: ConstraintDef, p: { refSchema?: string; refTable
 }
 
 export function withFkActions(c: ConstraintDef, p: { matchType?: FkMatch; onUpdate?: FkAction; onDelete?: FkAction }): ConstraintDef {
-  return withFk(c, (k) => ({
+  return withFk(c, (k) => (
+    (p.matchType ?? k.matchType) === k.matchType && (p.onUpdate ?? k.onUpdate) === k.onUpdate && (p.onDelete ?? k.onDelete) === k.onDelete ? k : {
     ...k,
     matchType: p.matchType ?? k.matchType,
     onUpdate: p.onUpdate ?? k.onUpdate,
@@ -252,4 +271,53 @@ export function unsupportedKind(entry: string): UnsupportedKind {
   if (entry.startsWith("WITH (")) return "storage";
   if (entry.startsWith("OF ")) return "typed";
   return "other";
+}
+
+// ---- kendine-başvuran FK konum anlık görüntüsü (SelfSnap)
+//
+// SelfSnap: düzenleme başlarken `selfRefs(d)` ile alınan, tabloyu hedefleyen FK'lerin TASLAKTAKİ kısıt indeksleri.
+// Tablo adı/şeması yazılırken `renameTable(d, patch, snap)` yalnızca bu indekslere yazar; ad bazlı yeniden tespit
+// YAPILMAZ (ara ad başka tablonun FK'sini çalardı). Kısıt ekle/sil/geri al indeksleri kaydırır: aşağıdaki sarmalayıcılar
+// taslağı ve anlık görüntüyü birlikte günceller. Kısıt düzenlemeleri dışında (ör. PK/UNIQUE alanları) indeks değişmez.
+
+export type SelfSnap = readonly number[];
+export interface WithSnap { d: TableDef; snap: SelfSnap }
+
+/** Yeni kısıt sona eklenir; kendine-başvuru değildir (FK hedefi boş) — hedef `pointFkAtSelf` ile açıkça kaydedilir. */
+export function addConstraintSnap(d: TableDef, type: ConstraintType, snap: SelfSnap): WithSnap {
+  return { d: addConstraint(d, type), snap };
+}
+
+/** i. kısıtı siler; sonrasındaki indeksler bir azalır. */
+export function removeConstraintSnap(d: TableDef, i: number, snap: SelfSnap): WithSnap {
+  const next = removeConstraint(d, i);
+  if (next === d) return { d, snap };
+  return { d: next, snap: snap.filter((k) => k !== i).map((k) => (k > i ? k - 1 : k)) };
+}
+
+/** Silinen yüklü kısıtı geri koyar; yerleştiği indeks ve sonrası bir artar. Özgün kısıt kendine-başvuruysa kaydedilir. */
+export function restoreConstraintSnap(d: TableDef, original: TableDef, oid: number, snap: SelfSnap): WithSnap {
+  const next = restoreConstraint(d, original, oid);
+  if (next === d) return { d, snap };
+  const at = next.constraints.findIndex((c) => c.oid === oid);
+  const o = original.constraints.find((c) => c.oid === oid)!;
+  const shifted = snap.map((k) => (k >= at ? k + 1 : k));
+  const wasSelf = o.kind.type === "foreign_key" && o.kind.refSchema === original.schema && o.kind.refTable === original.name;
+  if (!wasSelf) return { d: next, snap: shifted };
+  // Geri alınan FK yüklenen tanımdaki (özgün ad/şema) hedefi taşır; taslağın güncel adına hizalanır.
+  const fixed = updateConstraint(next, at, (c) => (c.kind.type === "foreign_key" ? { ...c, kind: { ...c.kind, refSchema: next.schema, refTable: next.name } } : c));
+  return { d: fixed, snap: [...shifted, at].sort((a, b) => a - b) };
+}
+
+/** i. FK'yi tablonun kendisine yöneltir (hedef taslağın şema/adı, ref adları boşalır) ve anlık görüntüye açıkça kaydeder. */
+export function pointFkAtSelf(d: TableDef, i: number, snap: SelfSnap): WithSnap {
+  const next = updateConstraint(d, i, (c) => withFkTarget(c, { refSchema: d.schema, refTable: d.name }));
+  if (next === d || next.constraints[i]!.kind.type !== "foreign_key") return { d, snap };
+  return { d: next, snap: snap.includes(i) ? snap : [...snap, i].sort((a, b) => a - b) };
+}
+
+/** i. FK'yi başka bir tabloya yöneltir ve anlık görüntüden çıkarır. */
+export function pointFkAtOther(d: TableDef, i: number, target: { refSchema?: string; refTable?: string }, snap: SelfSnap): WithSnap {
+  const next = updateConstraint(d, i, (c) => withFkTarget(c, target));
+  return { d: next, snap: snap.filter((k) => k !== i) };
 }
