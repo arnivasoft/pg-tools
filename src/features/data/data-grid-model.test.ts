@@ -185,11 +185,16 @@ describe("data-grid-model", () => {
   });
 
   it("commitText: değişmeyen NULL/DEFAULT boş metne dönmez; metin seçimi", () => {
-    expect(commitText(NULL, "", "")).toBeNull();
-    expect(commitText(DEF, "", "")).toBeNull();
-    expect(commitText(NULL, "", "x")).toEqual(T("x"));
-    expect(commitText(T("a"), "a", "a")).toEqual(T("a"));
-    expect(commitText(T("a"), "a", "")).toEqual(T(""));
+    // Dokunulmamış NULL/DEFAULT: işlem yok.
+    expect(commitText(NULL, "", "", false)).toBeNull();
+    expect(commitText(DEF, "", "", false)).toBeNull();
+    // Yazıp silinmiş: '' yazılır (NULL ≠ '').
+    expect(commitText(NULL, "", "", true)).toEqual(T(""));
+    expect(commitText(DEF, "", "", true)).toEqual(T(""));
+    expect(commitText(NULL, "", "x", true)).toEqual(T("x"));
+    // Metin hücresi: setCell özgüne eşit değeri zaten no-op sayar.
+    expect(commitText(T("a"), "a", "a", false)).toEqual(T("a"));
+    expect(commitText(T("a"), "a", "", true)).toEqual(T(""));
     expect(useTextarea("a\nb")).toBe(true);
     expect(useTextarea("x".repeat(121))).toBe(true);
     expect(useTextarea("x".repeat(120))).toBe(false);

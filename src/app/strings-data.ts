@@ -152,6 +152,7 @@ export const tdata = {
     unknown: "Sonuç belirsiz; önce yeniden yükleyin",
     readOnly: "Kaynak salt okunur",
     noCell: "Önce bir hücre seçin",
+    cellReadOnly: "Bu hücre düzenlenemez",
   },
   conflict: {
     updateDelete: "Satır başka bir oturumca değiştirilmiş ya da silinmiş (ya da tetikleyici/RLS süzdü).",
@@ -183,5 +184,8 @@ export const tdata = {
     error: "hata",
     null: "NULL",
     default: "DEFAULT",
+    conflict: "çakışma",
+    nullValue: "boş değer (NULL)",
+    defaultValue: "varsayılan değer (DEFAULT)",
   },
 } as const;

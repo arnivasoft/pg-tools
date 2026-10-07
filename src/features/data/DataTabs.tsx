@@ -83,14 +83,22 @@ function AskDialog(props: { view: AskView }) {
     }
   };
   return (
-    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+    // Tuş ve fare kaplamada: arka plana ya da metne tıklamak odağı diyalogdan (body'ye) düşürmez.
+    <div
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onKeyDown={onKeyDown}
+      onMouseDown={(e) => {
+        if ((e.target as HTMLElement).closest("button")) return;
+        e.preventDefault();
+        if (e.target === e.currentTarget) cancelEl.focus();
+      }}
+    >
       <div
         role="alertdialog"
         aria-modal="true"
         aria-labelledby={`${uid}-t`}
         aria-describedby={`${uid}-m`}
         class="flex w-[400px] max-w-full flex-col rounded-md border border-border bg-bg text-[13px] text-fg shadow-xl"
-        onKeyDown={onKeyDown}
       >
         <h2 id={`${uid}-t`} class="border-b border-border px-4 py-2.5 font-semibold">
           {props.view.title}
@@ -185,6 +193,15 @@ function DataView(props: { data: DataController; m: DataModel; onAsk: (a: Ask) =
     return s?.kind === "row" && props.m.edit.deleted.has(s.rowIndex);
   };
 
+  /** Etkin hücrenin yazılabilirliği (NULL/DEFAULT düğmeleri). */
+  const activeEdit = createMemo(() => {
+    const p = active();
+    const l = props.m.loaded;
+    const s = p && l ? slotAt(l, props.m.edit, p.r) : null;
+    const col = p && l ? l.source.columns[p.c] : undefined;
+    return s && l && col ? editableAt(l, props.m.edit, s, col.name) : { editable: false, defaultOnly: false };
+  });
+
   const reload = () => void data.reloadNow(id());
 
   return (
@@ -195,6 +212,8 @@ function DataView(props: { data: DataController; m: DataModel; onAsk: (a: Ask) =
         blocked={blocked()}
         activeDeleted={activeDeleted()}
         hasActive={active() !== null}
+        activeNull={activeEdit().editable}
+        activeDefault={activeEdit().editable || activeEdit().defaultOnly}
         dirty={dirty()}
         saveReason={saveReason()}
         cmd={cmd}

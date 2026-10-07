@@ -199,11 +199,12 @@ export function cellKind(l: Loaded, e: EditState, s: GridSlot, column: string, e
 
 // ---- Düzenleyici ----
 /**
- * Düzenleyici sonucu → yazılacak değer; `null` = işlem yok. NULL/DEFAULT hücre düzenleyicide yazı değişmeden
- * onaylanırsa boş metne dönüşmez (NULL ≠ '').
+ * Düzenleyici sonucu → yazılacak değer; `null` = işlem yok. NULL/DEFAULT hücre düzenleyicide hiç yazılmadan
+ * (`touched = false`) onaylanırsa boş metne dönüşmez; yazılıp silinmişse '' yazılır (NULL ≠ ''). Metin hücresinde
+ * özgüne eşit değer `setCell`'de no-op'tur. `initial` yalnızca belge amaçlı (düzenleyicinin başlangıç metni).
  */
-export function commitText(current: CellValue, initial: string, text: string): CellValue | null {
-  if (current.kind !== "text" && text === initial) return null;
+export function commitText(current: CellValue, _initial: string, text: string, touched: boolean): CellValue | null {
+  if (current.kind !== "text" && !touched) return null;
   return { kind: "text", value: text };
 }
 

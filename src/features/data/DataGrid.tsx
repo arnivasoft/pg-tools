@@ -66,6 +66,8 @@ interface Editing {
   c: number;
   initial: string;
   multi: boolean;
+  /** Kullanıcı en az bir kez yazdı (yazıp silinen NULL/DEFAULT '' olur; hiç yazılmamışsa işlem yok). */
+  touched: boolean;
   /** Düzenlenen yuva/kolon ve (var olan satırda) özgün satır nesnesi: arada yeniden yükleme/uygulama olduysa yazılmaz. */
   slot: GridSlot;
   column: string;
@@ -181,6 +183,12 @@ export function DataGrid(props: {
   // ---- Satır içi düzenleyici ----
   const [editing, setEditing] = createSignal<Editing | null>(null);
   const [draft, setDraft] = createSignal("");
+  /** Her iki düzenleyicinin `onInput`'u: taslak + `touched` (yeniden çizim gerekmez; düz alan). */
+  const onDraft = (text: string) => {
+    const ed = editing();
+    if (ed) ed.touched = true;
+    setDraft(text);
+  };
 
   const cellAt = (r: number, c: number) => {
     const x = l();
@@ -213,7 +221,7 @@ export function DataGrid(props: {
     reveal(p);
     setDraft(text);
     setEditing({
-      r: p.r, c: p.c, initial: text, multi: useTextarea(text), slot: at.s, column: at.col.name,
+      r: p.r, c: p.c, initial: text, multi: useTextarea(text), touched: false, slot: at.s, column: at.col.name,
       rowRef: at.s.kind === "row" ? at.l.rows[at.s.rowIndex] : null,
     });
     queueMicrotask(() => {
@@ -230,7 +238,7 @@ export function DataGrid(props: {
     const x = l();
     const s = ed.slot;
     if (commit && x && stillValid(ed)) {
-      const next = commitText(valueAt(x, e(), s, ed.column).value, ed.initial, draft());
+      const next = commitText(valueAt(x, e(), s, ed.column).value, ed.initial, draft(), ed.touched);
       if (next) props.data.edit(props.m.tabId, (lx, ex) => setValue(lx, ex, s, ed.column, next));
     }
     const p = move ? moveFocus({ r: ed.r, c: ed.c }, move, count(), columns().length, 1) : { r: ed.r, c: ed.c };
@@ -257,6 +265,8 @@ export function DataGrid(props: {
 
   const onEditorKey = (ev: KeyboardEvent) => {
     ev.stopPropagation();
+    // IME birleştirmesi sürerken Enter/Esc onaylamaz/vazgeçmez.
+    if (ev.isComposing || ev.keyCode === 229) return;
     const ed = editing();
     if (!ed) return;
     if (ev.key === "Escape") {
@@ -498,7 +508,7 @@ export function DataGrid(props: {
                 return s ? props.errors.row.get(slotKey(s)) ?? null : null;
               };
               const rowState = () =>
-                [deleted() ? tdata.sr.deleted : "", isNew() ? tdata.sr.new : "", rowErr() ? tdata.sr.error : ""].filter(Boolean).join(", ");
+                [deleted() ? tdata.sr.deleted : "", isNew() ? tdata.sr.new : "", rowErr() ? tdata.sr.error : "", conflict() ? tdata.sr.conflict : ""].filter(Boolean).join(", ");
               return (
                 <Show when={slot()}>
                   {(s) => (
@@ -586,7 +596,12 @@ export function DataGrid(props: {
                                 >
                                   <Show
                                     when={v().value.kind === "text"}
-                                    fallback={<span class="italic text-muted">{placeholder(v().value)}</span>}
+                                    fallback={
+                                      <>
+                                        <span aria-hidden="true" class="italic text-muted">{placeholder(v().value)}</span>
+                                        <span class="sr-only">{v().value.kind === "null" ? tdata.sr.nullValue : tdata.sr.defaultValue}</span>
+                                      </>
+                                    }
                                   >
                                     {shown().text}
                                   </Show>
@@ -635,7 +650,7 @@ export function DataGrid(props: {
                       class={cls}
                       style={{ ...box(), font: FONT }}
                       value={draft()}
-                      onInput={(ev) => setDraft(ev.currentTarget.value)}
+                      onInput={(ev) => onDraft(ev.currentTarget.value)}
                       onKeyDown={onEditorKey}
                       onBlur={() => finishEdit(true, undefined, false)}
                     />
@@ -649,7 +664,7 @@ export function DataGrid(props: {
                     class={`${cls} resize py-1`}
                     style={{ ...box(), font: FONT }}
                     value={draft()}
-                    onInput={(ev) => setDraft(ev.currentTarget.value)}
+                    onInput={(ev) => onDraft(ev.currentTarget.value)}
                     onKeyDown={onEditorKey}
                     onBlur={() => finishEdit(true, undefined, false)}
                   />

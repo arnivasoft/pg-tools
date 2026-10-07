@@ -21,6 +21,9 @@ export function DataToolbar(props: {
   /** Etkin hücrenin satırı silinecek mi (düğme metni). */
   activeDeleted: boolean;
   hasActive: boolean;
+  /** Etkin hücreye NULL / DEFAULT yazılabilir mi (`editableAt`; ALWAYS kimlikli yeni satır hücresi yalnız DEFAULT). */
+  activeNull: boolean;
+  activeDefault: boolean;
   dirty: boolean;
   /** Kaydet kapalıysa gerekçesi. */
   saveReason: string | null;
@@ -39,6 +42,8 @@ export function DataToolbar(props: {
 
   const busy = () => props.m.applying || props.m.loadingMore || props.m.status === "loading" || props.m.status === "gone";
   const cellReason = () => props.blocked ?? (props.hasActive ? null : tdata.blocked.noCell);
+  const nullReason = () => cellReason() ?? (props.activeNull ? null : tdata.blocked.cellReadOnly);
+  const defaultReason = () => cellReason() ?? (props.activeDefault ? null : tdata.blocked.cellReadOnly);
   const insertReason = () => props.blocked ?? (props.m.loaded?.source.canInsert ? null : tdata.blocked.readOnly);
   const deleteReason = () => cellReason() ?? (props.m.loaded?.source.canDelete ? null : tdata.blocked.readOnly);
   const filterErr = () => props.m.selectErrors.filter;
@@ -75,8 +80,8 @@ export function DataToolbar(props: {
         <button
           type="button"
           class={BTN}
-          title={cellReason() ?? tdata.toolbar.setNullTitle}
-          disabled={cellReason() !== null}
+          title={nullReason() ?? tdata.toolbar.setNullTitle}
+          disabled={nullReason() !== null}
           onClick={() => props.cmd.setNull()}
         >
           {tdata.toolbar.setNull}
@@ -84,8 +89,8 @@ export function DataToolbar(props: {
         <button
           type="button"
           class={BTN}
-          title={cellReason() ?? tdata.toolbar.setDefaultTitle}
-          disabled={cellReason() !== null}
+          title={defaultReason() ?? tdata.toolbar.setDefaultTitle}
+          disabled={defaultReason() !== null}
           onClick={() => props.cmd.setDefault()}
         >
           {tdata.toolbar.setDefault}
