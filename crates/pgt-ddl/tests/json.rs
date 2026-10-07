@@ -1,6 +1,7 @@
 //! Arayüzün göndereceği birebir JSON (camelCase alanlar, `op`/`kind` etiketleri) ayrıştırılır ve geri yazılınca
 //! aynı JSON çıkar: ts-rs tipleriyle serde şekli ayrışırsa bu test kırılır.
 
+use pgt_core::ErrorPayload;
 use pgt_ddl::*;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -141,16 +142,57 @@ fn supporting_requests_parse() {
     let _: LookupRequest = roundtrip(json!({"kind": "types", "query": null}));
     let c: LookupRequest = roundtrip(json!({"kind": "collations"}));
     assert_eq!(c, LookupRequest::Collations);
+    let l: LookupRequest = roundtrip(json!({"kind": "locales", "provider": "icu"}));
+    assert_eq!(l, LookupRequest::Locales { provider: LocaleProvider::Icu });
+    for kind in ["grantable_roles", "encodings", "template_databases", "settings"] {
+        let r: LookupRequest = roundtrip(json!({ "kind": kind }));
+        assert!(r.server_wide(), "{kind}");
+    }
+    assert!(serde_json::from_value::<LookupRequest>(json!({"kind": "locales", "provider": "nope"})).is_err());
     let _: ObjectRef = roundtrip(json!({"kind": "table", "oid": 16385}));
 }
 
 #[test]
 fn outcomes_serialize_as_the_frontend_expects() {
-    let a = serde_json::to_value(ApplyOutcome::Applied { statements: 2, elapsed_ms: 7, created: Some(ObjectRef { kind: ObjectKind::Schema, oid: 9 }) })
-        .unwrap();
+    let created = Some(ObjectRef { kind: ObjectKind::Schema, oid: 9 });
+    let a = serde_json::to_value(ApplyOutcome::Applied { statements: 2, elapsed_ms: 7, created, warnings: None }).unwrap();
     assert_eq!(a, json!({"outcome": "applied", "statements": 2, "elapsedMs": 7, "created": {"kind": "schema", "oid": 9}}));
-    let a = serde_json::to_value(ApplyOutcome::Applied { statements: 1, elapsed_ms: 1, created: None }).unwrap();
+    let a = serde_json::to_value(ApplyOutcome::Applied { statements: 1, elapsed_ms: 1, created: None, warnings: Some(vec!["w".into()]) }).unwrap();
     assert!(a["created"].is_null());
+    assert_eq!(a["warnings"], json!(["w"]));
+    // Kısmi uygulama: `created` yalnızca doluysa yazılır.
+    let error = ErrorPayload { code: "query".into(), message: "m".into(), detail: None, hint: None };
+    let f = ApplyOutcome::Failed { failed_index: 1, committed: 1, sqlstate: Some("42704".into()), position: None, error: error.clone(), created: None };
+    let v = serde_json::to_value(f).unwrap();
+    assert!(v.get("created").is_none() && v["position"].is_null());
+    let f = ApplyOutcome::Failed {
+        failed_index: 1,
+        committed: 1,
+        sqlstate: None,
+        position: None,
+        error,
+        created: Some(ObjectRef { kind: ObjectKind::Database, oid: 16390 }),
+    };
+    assert_eq!(serde_json::to_value(f).unwrap()["created"], json!({"kind": "database", "oid": 16390}));
+}
+
+#[test]
+fn role_password_intent_and_secret_shapes() {
+    // `set`/`clear` niyeti tanımda; değer hiçbir zaman.
+    for intent in ["keep", "set", "clear"] {
+        let mut v = defs()[8].1.clone();
+        v["password"] = json!(intent);
+        let d: ObjectDef = roundtrip(v);
+        assert!(!serde_json::to_string(&d).unwrap().contains("********"));
+    }
+    // Girdi dizge, çıktı maskeli; Debug değer yazmaz.
+    let o: ApplyOptions = serde_json::from_value(json!({
+        "applyId": "3f2a6d1e-8a4b-4c2e-9f00-0123456789ab", "lockTimeoutMs": 0, "expectedHash": "h",
+        "confirmed": false, "confirmedProduction": false, "password": "gizli-Q1"
+    }))
+    .unwrap();
+    assert_eq!(serde_json::to_value(&o).unwrap()["password"], json!("********"));
+    assert!(!format!("{o:?}").contains("gizli-Q1"));
 }
 
 #[test]
@@ -211,4 +253,17 @@ fn ddl_target_with_focus_serializes_as_the_frontend_expects() {
                "focus": null, "refreshNodeId": format!("srv:{u}/db:5/sch:2200/tables")})
     );
     assert_eq!(serde_json::to_value(DdlFocus::Column { id: 1 }).unwrap(), json!({"kind": "column", "id": 1}));
+    // Sunucu kapsamlı: `databaseOid` null (yol `db:N` olsa bile).
+    let v = serde_json::to_value(target_of(&format!("srv:{u}/db:5")).unwrap()).unwrap();
+    assert_eq!(
+        v,
+        json!({"serverId": u, "databaseOid": null, "object": {"kind": "database", "oid": 5}, "create": null,
+               "focus": null, "refreshNodeId": format!("srv:{u}/dbs")})
+    );
+    let v = serde_json::to_value(target_of(&format!("srv:{u}/roles")).unwrap()).unwrap();
+    assert_eq!(v["create"], json!({"kind": "role", "context": {"schemaOid": null, "tableOid": null}}));
+    assert!(v["databaseOid"].is_null());
+    let v = serde_json::to_value(target_of(&format!("srv:{u}/db:5/sch:2200/view:30")).unwrap()).unwrap();
+    assert_eq!((v["object"].clone(), v["databaseOid"].clone()), (json!({"kind": "view", "oid": 30}), json!(5)));
+    assert_eq!(v["refreshNodeId"], format!("srv:{u}/db:5/sch:2200/views"));
 }

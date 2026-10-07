@@ -3,7 +3,9 @@
 //!
 //! Tablo düğümleri: `…/sch:S/tbl:T` (bölümler `…/tbl:P/tbl:C`, koleksiyon parçası atlanır), kolon `…/tbl:T/col:A`,
 //! kısıt `…/tbl:T/con:K`. Kolon/kısıt düğümü tablonun kendisini hedefler ve `focus` ile diyaloğun açılacağı satırı
-//! bildirir; görünüm/materialized view kolonları ve diğer her düğüm boştur.
+//! bildirir. Görünüm `…/sch:S/view:V`, materialized view `…/sch:S/mv:M` (koleksiyonları `views`/`matviews`).
+//! Sunucu kapsamlı: veritabanı `db:N` (koleksiyon `dbs`), rol `role:N` (koleksiyon `roles`) — `databaseOid` `null`.
+//! Görünüm/materialized view kolonları ve diğer her düğüm boştur.
 
 use pgt_catalog::node::{Coll, NodeId, Seg};
 use pgt_core::{Error, Result};
@@ -110,6 +112,18 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
                 t.create = create(ObjectKind::Sequence, Some(s), None);
             }
         }
+        Some(Seg::View(oid)) if matches!(prev, Some(Seg::Schema(_))) => t.object = obj(ObjectKind::View, oid),
+        Some(Seg::MatView(oid)) if matches!(prev, Some(Seg::Schema(_))) => t.object = obj(ObjectKind::MaterializedView, oid),
+        Some(Seg::Coll(Coll::Views)) => {
+            if let Some(Seg::Schema(s)) = prev {
+                t.create = create(ObjectKind::View, Some(s), None);
+            }
+        }
+        Some(Seg::Coll(Coll::MatViews)) => {
+            if let Some(Seg::Schema(s)) = prev {
+                t.create = create(ObjectKind::MaterializedView, Some(s), None);
+            }
+        }
         Some(Seg::Coll(Coll::Indexes)) => {
             // Şema, yoldaki en yakın `Schema` parçasıdır; tablo koleksiyonun hemen üstündeki parçadır.
             if let Some(Seg::Table(tbl)) = prev
@@ -120,8 +134,23 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
         }
         _ => {}
     }
-    // Veritabanı dışındaki düğümde (ör. sunucu düzeyi rol) nesne/oluşturma anlamsızdır.
-    if t.database_oid.is_none() {
+    // Sunucu kapsamlı türler (Database/Role): yalnızca sunucunun hemen altındaki düğüm (`dbs`, `db:N`, `roles`,
+    // `role:N`); bakım veritabanında çalışırlar → `database_oid` her zaman `None` (yol `Db` içerse bile).
+    if path.len() == 1 {
+        // Tek parçalı yolda veritabanı kapsamlı bir hedef olamaz (ör. `sch:2200`, `tables`).
+        (t.object, t.create, t.focus) = (None, None, None);
+        match path[0] {
+            Seg::Coll(Coll::Databases) => t.create = create(ObjectKind::Database, None, None),
+            Seg::Coll(Coll::Roles) => t.create = create(ObjectKind::Role, None, None),
+            Seg::Db(oid) => t.object = obj(ObjectKind::Database, oid),
+            Seg::Role(oid) => t.object = obj(ObjectKind::Role, oid),
+            _ => {}
+        }
+        if t.object.is_some() || t.create.is_some() {
+            t.database_oid = None;
+        }
+    } else if t.database_oid.is_none() {
+        // Veritabanı dışındaki düğümde veritabanı kapsamlı nesne/oluşturma anlamsızdır.
         t.object = None;
         t.create = None;
         t.focus = None;
@@ -142,8 +171,10 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
             // Bölüm tablosu üst tablonun `partitions` koleksiyonunda listelenir.
             ObjectKind::Table if matches!(prev, Some(Seg::Table(_))) => Coll::Partitions,
             ObjectKind::Table => Coll::Tables,
-            // Yer tutucu (Plan 14 Task 7 düğümlerini ekler): `target_of` bu türleri henüz üretmez.
-            ObjectKind::View | ObjectKind::MaterializedView | ObjectKind::Database | ObjectKind::Role => return Ok(t),
+            ObjectKind::View => Coll::Views,
+            ObjectKind::MaterializedView => Coll::MatViews,
+            ObjectKind::Database => Coll::Databases,
+            ObjectKind::Role => Coll::Roles,
         };
         t.refresh_node_id = Some(id.parent().child(Seg::Coll(coll)).to_string());
     }
@@ -224,13 +255,40 @@ mod tests {
         assert_eq!(r("db:5/sch:2200/tables"), s("db:5/sch:2200/tables"));
         assert_eq!(r("db:5/extensions"), s("db:5/extensions"));
         assert_eq!(r("db:5/sch:2200/tbl:24576/indexes"), s("db:5/sch:2200/tbl:24576/indexes"));
-        for p in ["", "db:5", "role:10", "db:5/sch:2200/tbl:24576/columns", "db:5/sch:2200/tbl:24576/partitions"] {
+        assert_eq!(r("dbs"), s("dbs"));
+        assert_eq!(r("db:5"), s("dbs"));
+        assert_eq!(r("roles"), s("roles"));
+        assert_eq!(r("role:10"), s("roles"));
+        assert_eq!(r("db:5/sch:2200/views"), s("db:5/sch:2200/views"));
+        assert_eq!(r("db:5/sch:2200/view:30"), s("db:5/sch:2200/views"));
+        assert_eq!(r("db:5/sch:2200/matviews"), s("db:5/sch:2200/matviews"));
+        assert_eq!(r("db:5/sch:2200/mv:31"), s("db:5/sch:2200/matviews"));
+        for p in ["", "db:5/sch:2200/tbl:24576/columns", "db:5/sch:2200/tbl:24576/partitions", "tablespaces", "ts:1663"] {
             assert_eq!(r(p), None, "{p}");
         }
         // Üretilen kimlik gerçekten ayrıştırılıp aynen geri yazılabilir.
-        for p in ["db:5/sch:2200/seq:35", "db:5/sch:2200/tbl:24576/tbl:24580", "db:5/sch:2200/tbl:24576/col:3"] {
+        for p in ["db:5/sch:2200/seq:35", "db:5/sch:2200/tbl:24576/tbl:24580", "db:5/sch:2200/tbl:24576/col:3", "db:5", "role:10", "db:5/sch:2200/mv:31"] {
             let id = r(p).unwrap();
             assert_eq!(NodeId::parse(&id).unwrap().to_string(), id);
+        }
+    }
+
+    #[test]
+    fn view_database_and_role_nodes() {
+        // (düğüm, nesne, oluşturma, databaseOid)
+        let cases = [
+            ("dbs", None, cr(ObjectKind::Database, None, None), None),
+            ("db:5", obj(ObjectKind::Database, 5), None, None),
+            ("roles", None, cr(ObjectKind::Role, None, None), None),
+            ("role:10", obj(ObjectKind::Role, 10), None, None),
+            ("db:5/sch:2200/views", None, cr(ObjectKind::View, Some(2200), None), Some(5)),
+            ("db:5/sch:2200/view:30", obj(ObjectKind::View, 30), None, Some(5)),
+            ("db:5/sch:2200/matviews", None, cr(ObjectKind::MaterializedView, Some(2200), None), Some(5)),
+            ("db:5/sch:2200/mv:31", obj(ObjectKind::MaterializedView, 31), None, Some(5)),
+        ];
+        for (p, object, create, db) in cases {
+            let x = t(p);
+            assert_eq!((x.object, x.create, x.database_oid, x.focus), (object, create, db, None), "{p}");
         }
     }
 
@@ -251,10 +309,6 @@ mod tests {
     fn other_nodes_are_empty() {
         for p in [
             "",
-            "dbs",
-            "db:5",
-            "roles",
-            "role:10",
             "tablespaces",
             "ts:1663",
             "db:5/sch:2200/tbl:24576/columns",
@@ -265,12 +319,32 @@ mod tests {
             "db:5/sch:2200/tbl:24576/trg:42",
             "db:5/sch:2200/tbl:24576/pol:43",
             // Görünüm / materialized view kolonları tablo diyaloğu açmaz.
-            "db:5/sch:2200/view:30",
             "db:5/sch:2200/view:30/columns",
             "db:5/sch:2200/view:30/col:1",
             "db:5/sch:2200/mv:31/col:1",
-            "db:5/sch:2200/views",
+            "db:5/sch:2200/mv:31/columns",
             "db:5/sch:2200/fn:32",
+            // Sunucu kapsamlı düğümler yalnızca sunucunun hemen altında; görünümler yalnızca şema altında.
+            "db:5/roles",
+            "db:5/role:10",
+            "db:5/dbs",
+            "db:5/db:6",
+            "db:5/views",
+            "db:5/view:30",
+            "db:5/matviews",
+            "db:5/mv:31",
+            "sch:2200",
+            "seq:35",
+            "ext:9",
+            "tables",
+            "views",
+            "view:30",
+            "sch:2200/views",
+            "sch:2200/view:30",
+            "sch:2200/mv:31",
+            "db:5/sch:2200/tbl:1/views",
+            "db:5/sch:2200/tbl:1/view:30",
+            "db:5/sch:2200/view:30/view:31",
             // Sistem kolonları (attnum ≤ 0).
             "db:5/sch:2200/tbl:24576/col:0",
             "db:5/sch:2200/tbl:24576/col:-1",
@@ -333,6 +407,17 @@ mod tests {
         assert_eq!(v["focus"], serde_json::json!({"kind": "column", "id": 3}));
         let v = serde_json::to_value(t("db:5/sch:2200/tbl:24576/con:40")).unwrap();
         assert_eq!(v["focus"], serde_json::json!({"kind": "constraint", "id": 40}));
+        for p in ["db:5", "dbs", "roles", "role:10"] {
+            let v = serde_json::to_value(t(p)).unwrap();
+            assert!(v["databaseOid"].is_null(), "{p}");
+        }
+        let v = serde_json::to_value(t("db:5")).unwrap();
+        assert_eq!(v["object"], serde_json::json!({"kind": "database", "oid": 5}));
+        let v = serde_json::to_value(t("roles")).unwrap();
+        assert_eq!(v["create"], serde_json::json!({"kind": "role", "context": {"schemaOid": null, "tableOid": null}}));
+        let v = serde_json::to_value(t("db:5/sch:2200/matviews")).unwrap();
+        assert_eq!(v["create"]["kind"], "materialized_view");
+        assert_eq!(v["databaseOid"], 5);
         let v = serde_json::to_value(t("db:5/sch:2200/tables")).unwrap();
         assert_eq!(v["create"], serde_json::json!({"kind": "table", "context": {"schemaOid": 2200, "tableOid": null}}));
     }

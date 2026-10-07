@@ -67,7 +67,6 @@ pub(crate) fn password_redacted(role: &str) -> Statement {
 /// sayılır: `Debug` maskelidir, düşerken baytlar sıfırlanır (en iyi çaba), `Statement`'e hiç konmaz, günlüğe yazılmaz.
 pub(crate) struct PasswordStatement(String);
 
-#[cfg_attr(not(test), allow(dead_code))] // Task 8 (uygulayıcı) çağırır.
 impl PasswordStatement {
     /// Yalnızca sürücüye vermek için (çalıştırma listesinde; hata yükünde/günlükte kullanılmaz).
     pub(crate) fn sql(&self) -> &str {
@@ -101,7 +100,6 @@ pub const MAX_SECRET_BYTES: usize = 1024;
 /// özetlenir (rastgele tuz, 4096 tur, SASLprep); sunucuya, `log_min_error_statement` günlüğüne, `pg_stat_statements`'a
 /// ya da hata metnine düz metin hiç gitmez. Sunucunun `password_encryption` ayarından bağımsızdır (PG 10+ SCRAM
 /// doğrulayıcısını olduğu gibi saklar). Hata iletileri sabittir.
-#[cfg_attr(not(test), allow(dead_code))] // Task 8 (uygulayıcı) çağırır.
 pub(crate) fn materialize_password(role: &str, secret: &Secret) -> Result<PasswordStatement, &'static str> {
     check_secret(secret)?;
     let verifier = postgres_protocol::password::scram_sha_256(secret.expose().as_bytes());

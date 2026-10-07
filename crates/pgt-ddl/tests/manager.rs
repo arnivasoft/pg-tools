@@ -1233,3 +1233,656 @@ async fn table_protect_body(ts: TestServer) {
     assert_eq!(created_of(f.apply(&req).await), Some(object));
     assert_eq!(f.reload(object).await, new);
 }
+
+// ================================================================================================================
+// Plan 14: View / MatView / Database / Role yönetici entegrasyonu (kapsam, parola kapısı, bakım veritabanı)
+// ================================================================================================================
+
+use common::{cleanup_cluster, cluster_name};
+use pgt_ddl::manager::{DATABASE_IN_USE_HINT, MEMBERSHIP_WARNING, PARTIAL_APPLY_HINT, PRIVILEGE_HINT, VIEW_COLUMNS_HINT};
+
+/// Bu bölümün testleri birbirini bekler: her biri birkaç bağlantı açar (bakım/hedef veritabanı, havuz, ayrı oturum);
+/// paralel test ikilisinde sunucunun `max_connections` (100) sınırı aşılmasın.
+static SERIAL: std::sync::LazyLock<tokio::sync::Mutex<()>> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Test parolası: süreç içinde rastgele; hiçbir yere yazdırılmaz.
+fn random_password() -> String {
+    format!("Pw{}", Uuid::new_v4().simple())
+}
+
+/// `Secret` yalnızca IPC'den (JSON dizge) gelir; testte de aynı yol.
+fn secret(s: &str) -> Secret {
+    serde_json::from_value(serde_json::json!(s)).unwrap()
+}
+
+fn invalid_message(r: &Result<ApplyOutcome>) -> String {
+    match r {
+        Err(Error::Invalid(m)) => m.clone(),
+        other => panic!("Invalid bekleniyordu: {other:?}"),
+    }
+}
+
+fn view_def(name: &str, query: &str) -> ViewDef {
+    ViewDef {
+        schema: "public".into(),
+        name: name.into(),
+        owner: None,
+        query: query.into(),
+        check_option: None,
+        security_barrier: false,
+        security_invoker: false,
+        comment: None,
+        recreate: false,
+        columns: vec![],
+        unsupported: vec![],
+    }
+}
+
+fn database_def(name: &str) -> DatabaseDef {
+    DatabaseDef {
+        name: name.into(),
+        owner: None,
+        template: Some("template0".into()),
+        encoding: None,
+        locale_provider: None,
+        lc_collate: None,
+        lc_ctype: None,
+        provider_locale: None,
+        tablespace: None,
+        connection_limit: -1,
+        is_template: false,
+        allow_connections: true,
+        settings: vec![],
+        comment: None,
+    }
+}
+
+fn role_def(name: &str) -> RoleDef {
+    RoleDef {
+        name: name.into(),
+        login: true,
+        superuser: false,
+        createdb: false,
+        createrole: false,
+        inherit: true,
+        replication: false,
+        bypassrls: false,
+        connection_limit: -1,
+        valid_until: None,
+        password: PasswordChange::Keep,
+        member_of: vec![],
+        settings: vec![],
+        comment: None,
+        unsupported: vec![],
+    }
+}
+
+impl Fx {
+    async fn load_def(&self, object: ObjectRef) -> ObjectDef {
+        self.dm.load(self.server, self.db, object).await.unwrap_or_else(|e| panic!("{:?} yüklenemedi: {e:?}", object.kind))
+    }
+
+    async fn load_view(&self, object: ObjectRef) -> ViewDef {
+        let ObjectDef::View(v) = self.load_def(object).await else { panic!("görünüm bekleniyordu") };
+        v
+    }
+
+    /// Sunucu kapsamlı: veritabanı oid'i verilmeden yüklenir.
+    async fn load_database(&self, oid: u32) -> DatabaseDef {
+        match self.dm.load(self.server, None, ObjectRef { kind: ObjectKind::Database, oid }).await {
+            Ok(ObjectDef::Database(d)) => d,
+            other => panic!("veritabanı yüklenemedi: {other:?}"),
+        }
+    }
+
+    async fn load_role(&self, oid: u32) -> RoleDef {
+        match self.dm.load(self.server, None, ObjectRef { kind: ObjectKind::Role, oid }).await {
+            Ok(ObjectDef::Role(r)) => r,
+            other => panic!("rol yüklenemedi: {other:?}"),
+        }
+    }
+}
+
+async fn database_oid(admin: &tokio_postgres::Client, name: &str) -> Option<u32> {
+    admin.query_opt("SELECT oid FROM pg_database WHERE datname = $1::text", &[&name]).await.unwrap().map(|r| r.get(0))
+}
+
+async fn role_oid(admin: &tokio_postgres::Client, name: &str) -> Option<u32> {
+    admin.query_opt("SELECT oid FROM pg_roles WHERE rolname = $1::text", &[&name]).await.unwrap().map(|r| r.get(0))
+}
+
+/// Ortak temizlik: test veritabanı + etiketin küme nesneleri.
+async fn cleanup_both(ts: TestServer, tag: &'static str, cluster_tag: &'static str) {
+    cleanup(&ts, tag).await;
+    cleanup_cluster(&ts, cluster_tag).await;
+}
+
+// ---- View / MatView ----
+
+#[tokio::test]
+async fn view_lifecycle_through_manager() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(view_life_body(ts.clone()), cleanup(&ts, "m_view")).await;
+    }
+}
+
+async fn view_life_body(ts: TestServer) {
+    let env = setup(&ts, "m_view").await;
+    let f = fx(&env, &ts, false, None);
+    let prod = fx(&env, &ts, false, Some("Üretim"));
+    env.sql("CREATE TABLE public.vt (a int, b text)").await;
+    let public = env.schema_oid("public").await;
+    // Varsayılanlar: şema bağlamı zorunlu, tablo bağlamı yasak, veritabanı gerekli.
+    let ctx = CreateContext { schema_oid: Some(public), table_oid: None };
+    let ObjectDef::View(mut def) = f.dm.defaults(f.server, f.db, ObjectKind::View, ctx).await.unwrap() else { panic!() };
+    assert_eq!((def.schema.as_str(), def.query.as_str(), def.check_option, def.security_barrier), ("public", "", None, false));
+    let bad = CreateContext { schema_oid: Some(public), table_oid: Some(1) };
+    assert!(matches!(f.dm.defaults(f.server, f.db, ObjectKind::View, bad).await, Err(Error::Invalid(_))));
+    assert!(matches!(f.dm.defaults(f.server, None, ObjectKind::View, ctx).await, Err(Error::Invalid(_))));
+    def.name = "mv_v".into();
+    def.query = "SELECT a, b FROM public.vt".into();
+    let object = created_of(f.apply(&create(ObjectDef::View(def.clone()))).await).expect("created");
+    assert_eq!((object.kind, object.oid), (ObjectKind::View, env.class_oid("public", "mv_v").await));
+    let loaded = f.load_view(object).await;
+    assert_eq!((loaded.name.as_str(), loaded.owner.as_deref(), loaded.columns.len()), ("mv_v", Some(env.me.as_str()), 2));
+    let noop = PlanRequest::Alter { object, old: ObjectDef::View(loaded.clone()), new: ObjectDef::View(loaded.clone()) };
+    assert!(f.preview(&noop).await.empty, "yüklenen tanım sabit nokta olmalı");
+
+    // CREATE OR REPLACE: sona kolon eklemek serbest, oid korunur.
+    let mut wider = loaded.clone();
+    wider.query = "SELECT a, b, 1 AS c FROM public.vt".into();
+    let alter = PlanRequest::Alter { object, old: ObjectDef::View(loaded.clone()), new: ObjectDef::View(wider) };
+    assert_eq!(f.preview(&alter).await.risk, Risk::Safe);
+    assert_eq!(created_of(f.apply(&alter).await), None, "C-O-R kimliği değiştirmez");
+    let loaded = f.load_view(object).await;
+    assert_eq!(loaded.columns.len(), 3);
+
+    // Uyumsuz C-O-R (kolon düşürme): 42P16 + Karar 1 ipucu, değişiklik yok.
+    let mut narrow = loaded.clone();
+    narrow.query = "SELECT a FROM public.vt".into();
+    let alter = PlanRequest::Alter { object, old: ObjectDef::View(loaded.clone()), new: ObjectDef::View(narrow.clone()) };
+    let (_, committed, sqlstate, error) = failed(f.apply(&alter).await);
+    assert_eq!((committed, sqlstate.as_deref()), (0, Some("42P16")));
+    assert_eq!(error.hint.as_deref(), Some(VIEW_COLUMNS_HINT));
+    assert_eq!(f.load_view(object).await, loaded);
+
+    // Açık yeniden kurma: DataLoss → onay, üretimde ad onayı; yeni oid.
+    narrow.recreate = true;
+    let recreate = PlanRequest::Alter { object, old: ObjectDef::View(loaded.clone()), new: ObjectDef::View(narrow) };
+    assert_eq!(f.preview(&recreate).await.risk, Risk::DataLoss);
+    assert_eq!(code(&f.apply(&recreate).await), "confirmation_required");
+    assert_eq!(code(&prod.apply_with(&recreate, |o| o.confirmed = true).await), "production_confirmation_required");
+    assert_eq!(f.load_view(object).await, loaded, "reddedilen plan hiçbir şey yazmamalı");
+    let rebuilt = created_of(prod.apply_with(&recreate, |o| (o.confirmed, o.confirmed_production) = (true, true)).await).expect("created");
+    assert_eq!(rebuilt.kind, ObjectKind::View);
+    assert_ne!(rebuilt.oid, object.oid, "yeniden kurma yeni oid verir");
+    let rebuilt_def = f.load_view(rebuilt).await;
+    assert_eq!(rebuilt_def.columns.len(), 1);
+
+    // Silme Destructive: onaysız red.
+    let drop = PlanRequest::Drop { object: rebuilt, def: ObjectDef::View(rebuilt_def), cascade: false, force: false };
+    assert_eq!(f.preview(&drop).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&drop).await), "confirmation_required");
+    assert!(exists(&env, "public.mv_v").await);
+    applied(f.apply_with(&drop, |o| o.confirmed = true).await);
+    assert!(!exists(&env, "public.mv_v").await);
+}
+
+#[tokio::test]
+async fn matview_refresh_needs_confirmation() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(matview_refresh_body(ts.clone()), cleanup(&ts, "m_mvref")).await;
+    }
+}
+
+async fn matview_refresh_body(ts: TestServer) {
+    let env = setup(&ts, "m_mvref").await;
+    let f = fx(&env, &ts, false, None);
+    env.sql("CREATE TABLE public.mt (a int); INSERT INTO public.mt VALUES (1); CREATE MATERIALIZED VIEW public.mm AS SELECT a FROM public.mt")
+        .await;
+    let object = ObjectRef { kind: ObjectKind::MaterializedView, oid: env.class_oid("public", "mm").await };
+    let ObjectDef::MaterializedView(loaded) = f.load_def(object).await else { panic!() };
+    assert_eq!(loaded.refresh, None);
+    let refresh = |mode| {
+        let mut new = loaded.clone();
+        new.refresh = Some(mode);
+        PlanRequest::Alter { object, old: ObjectDef::MaterializedView(loaded.clone()), new: ObjectDef::MaterializedView(new) }
+    };
+    let normal = refresh(MatViewRefresh::Normal);
+    assert_eq!(f.preview(&normal).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&normal).await), "confirmation_required");
+    env.sql("INSERT INTO public.mt VALUES (2)").await;
+    applied(f.apply_with(&normal, |o| o.confirmed = true).await);
+    let n: i64 = env.admin.query_one("SELECT count(*) FROM public.mm", &[]).await.unwrap().get(0);
+    assert_eq!(n, 2, "REFRESH çalışmalı");
+    // CONCURRENTLY unique indeks ister: 55000, ipucu (PG'nin ya da bizim) dolu.
+    let (_, _, sqlstate, error) = failed(f.apply_with(&refresh(MatViewRefresh::Concurrently), |o| o.confirmed = true).await);
+    assert_eq!(sqlstate.as_deref(), Some("55000"));
+    assert!(error.hint.is_some(), "{error:?}");
+}
+
+// ---- Database ----
+
+#[tokio::test]
+async fn database_lifecycle_on_maintenance() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(database_life_body(ts.clone()), cleanup_both(ts.clone(), "m_dblife", "mdblife")).await;
+    }
+}
+
+async fn database_life_body(ts: TestServer) {
+    let env = setup(&ts, "m_dblife").await;
+    let f = fx(&env, &ts, false, None);
+    let prod = fx(&env, &ts, false, Some("Üretim"));
+    let maint = &env.admin;
+    let base = cluster_name(&ts, ObjectKind::Database, "mdblife").await;
+    // Varsayılanlar: bağlam boş olmalı; veritabanı oid'i gerekmez.
+    let ObjectDef::Database(mut def) = f.dm.defaults(f.server, None, ObjectKind::Database, CreateContext::default()).await.unwrap() else {
+        panic!()
+    };
+    assert_eq!((def.connection_limit, def.allow_connections, def.is_template, def.tablespace.clone()), (-1, true, false, None));
+    let schema_ctx = CreateContext { schema_oid: Some(1), table_oid: None };
+    assert!(matches!(f.dm.defaults(f.server, None, ObjectKind::Database, schema_ctx).await, Err(Error::Invalid(_))));
+    def.name = base.clone();
+    def.template = Some("template0".into());
+    def.comment = Some("dblife".into());
+    // `database_oid` = başka bir veritabanı (Fx.db) verilse de CREATE bakım veritabanında çalışır.
+    let created = created_of(f.apply(&create(ObjectDef::Database(def.clone()))).await).expect("created");
+    assert_eq!((created.kind, Some(created.oid)), (ObjectKind::Database, database_oid(maint, &base).await));
+    let loaded = f.load_database(created.oid).await;
+    assert_eq!(
+        (loaded.name.as_str(), loaded.owner.as_deref(), loaded.comment.as_deref()),
+        (base.as_str(), Some(env.me.as_str()), Some("dblife"))
+    );
+    assert_eq!(loaded.tablespace.as_deref(), Some("pg_default"));
+    assert_eq!(f.dm.load(f.server, Some(env.db_oid), created).await.unwrap(), ObjectDef::Database(loaded.clone()), "database_oid yok sayılır");
+    let noop = PlanRequest::Alter { object: created, old: ObjectDef::Database(loaded.clone()), new: ObjectDef::Database(loaded.clone()) };
+    assert!(f.preview(&noop).await.empty);
+
+    // Yöneticinin havuzu hedef veritabanına bağlıyken (açılır liste çalıştı) RENAME başarılı: havuz bağlantısı bırakılır.
+    let schemas = f.dm.lookup(f.server, Some(created.oid), LookupRequest::Schemas).await.unwrap();
+    assert!(schemas.iter().any(|s| s.value == "public"));
+    let renamed = format!("{base}_r");
+    let mut new = loaded.clone();
+    new.name = renamed.clone();
+    let rename = PlanRequest::Alter { object: created, old: ObjectDef::Database(loaded.clone()), new: ObjectDef::Database(new) };
+    let r = created_of(f.apply(&rename).await).expect("created");
+    assert_eq!(r, created, "yeniden adlandırma oid'i korur");
+    assert_eq!(database_oid(maint, &renamed).await, Some(created.oid));
+    // Yeni adla havuz yeniden bağlanır (ad önbelleği temizlendi).
+    assert!(!f.dm.lookup(f.server, Some(created.oid), LookupRequest::Schemas).await.unwrap().is_empty());
+    let loaded = f.load_database(created.oid).await;
+
+    // Başka bir oturum bağlıyken DROP → 55006 + Karar 8 ipucu; DataLoss üretim kapısı.
+    let other = admin_client(&ts, &renamed).await;
+    let drop = PlanRequest::Drop { object: created, def: ObjectDef::Database(loaded.clone()), cascade: false, force: false };
+    assert_eq!(f.preview(&drop).await.risk, Risk::DataLoss);
+    assert_eq!(code(&f.apply(&drop).await), "confirmation_required");
+    assert_eq!(code(&prod.apply_with(&drop, |o| o.confirmed = true).await), "production_confirmation_required");
+    let (idx, committed, sqlstate, error) = failed(f.apply_with(&drop, |o| o.confirmed = true).await);
+    assert_eq!((idx, committed, sqlstate.as_deref()), (0, 0, Some("55006")));
+    assert_eq!(error.hint.as_deref(), Some(DATABASE_IN_USE_HINT));
+    assert!(database_oid(maint, &renamed).await.is_some());
+    if env.version >= 130000 {
+        let force = PlanRequest::Drop { object: created, def: ObjectDef::Database(loaded), cascade: false, force: true };
+        applied(prod.apply_with(&force, |o| (o.confirmed, o.confirmed_production) = (true, true)).await);
+        assert!(database_oid(maint, &renamed).await.is_none());
+        assert!(other.simple_query("SELECT 1").await.is_err(), "FORCE öteki oturumu sonlandırmalı");
+    } else {
+        eprintln!("PG {}: WITH (FORCE) yok, atlandı", env.version / 10_000);
+    }
+}
+
+#[tokio::test]
+async fn maintenance_database_is_protected() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        let maint = admin_client(&ts, &ts.config.maintenance_db).await;
+        let q = quote_ident(&ts.config.maintenance_db);
+        let original: Option<String> = maint
+            .query_one("SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = $1::text", &[&ts.config.maintenance_db])
+            .await
+            .unwrap()
+            .get(0);
+        let restore = format!("COMMENT ON DATABASE {q} IS {}", original.as_deref().map_or("NULL".to_string(), quote_literal));
+        drop(maint);
+        let t = ts.clone();
+        let cleanup_all = async move {
+            admin_client(&t, &t.config.maintenance_db).await.batch_execute(&restore).await.unwrap();
+            cleanup(&t, "m_maint").await;
+        };
+        guarded(maintenance_body(ts.clone()), cleanup_all).await;
+    }
+}
+
+async fn maintenance_body(ts: TestServer) {
+    let env = setup(&ts, "m_maint").await;
+    let f = fx(&env, &ts, false, None);
+    let maint = &env.admin;
+    let oid = database_oid(maint, &ts.config.maintenance_db).await.unwrap();
+    let object = ObjectRef { kind: ObjectKind::Database, oid };
+    let loaded = f.load_database(oid).await;
+    let alter = |edit: &dyn Fn(&mut DatabaseDef)| {
+        let mut new = loaded.clone();
+        edit(&mut new);
+        PlanRequest::Alter { object, old: ObjectDef::Database(loaded.clone()), new: ObjectDef::Database(new) }
+    };
+    let refused = [
+        alter(&|n| n.name = format!("{}_x", n.name)),
+        alter(&|n| n.tablespace = Some("pgt_yok_ts".into())),
+        alter(&|n| n.allow_connections = false),
+        PlanRequest::Drop { object, def: ObjectDef::Database(loaded.clone()), cascade: false, force: false },
+    ];
+    for req in &refused {
+        let r = f.apply_with(req, |o| (o.confirmed, o.confirmed_production) = (true, true)).await;
+        assert_eq!(invalid_message(&r), error_codes::MAINTENANCE_DATABASE, "{req:?}");
+    }
+    assert_eq!(database_oid(maint, &ts.config.maintenance_db).await, Some(oid));
+    // Yorum değişikliği serbest (temizlik özgün yorumu geri yazar).
+    let comment = alter(&|n| n.comment = Some("pgt-ddl bakım testi".into()));
+    applied(f.apply(&comment).await);
+    assert_eq!(f.load_database(oid).await.comment.as_deref(), Some("pgt-ddl bakım testi"));
+}
+
+#[tokio::test]
+async fn database_partial_apply_reports_committed() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(database_partial_body(ts.clone()), cleanup_both(ts.clone(), "m_dbpart", "mdbpart")).await;
+    }
+}
+
+async fn database_partial_body(ts: TestServer) {
+    let env = setup(&ts, "m_dbpart").await;
+    let f = fx(&env, &ts, false, None);
+    let maint = &env.admin;
+    let base = cluster_name(&ts, ObjectKind::Database, "mdbpart").await;
+    // Kısmi create: CREATE DATABASE kalıcı, sonraki SET (tanınmayan parametre) başarısız.
+    let mut def = database_def(&base);
+    def.settings = vec![ConfigSetting { name: "pgt_no_such_param".into(), value: "x".into() }];
+    let out = f.apply(&create(ObjectDef::Database(def))).await;
+    let Ok(ApplyOutcome::Failed { failed_index, committed, sqlstate, error, created, .. }) = out else { panic!("{out:?}") };
+    assert_eq!((failed_index, committed), (1, 1), "{error:?}");
+    assert!(sqlstate.is_some(), "{error:?}");
+    let oid = database_oid(maint, &base).await.expect("CREATE DATABASE kalıcı olmalı");
+    assert_eq!(created, Some(ObjectRef { kind: ObjectKind::Database, oid }), "kısmi create yine de bulunur");
+    assert!(error.hint.is_some(), "kısmi uygulama ipucu (ya da PG ipucu) bekleniyordu: {error:?}");
+    // Rename + var olmayan sahip: RENAME kalıcı (transaction dışı), OWNER TO (en sonda) başarısız.
+    let loaded = f.load_database(oid).await;
+    let mut new = loaded.clone();
+    new.name = format!("{base}_r");
+    new.owner = Some("pgt_yok_sahip".into());
+    let object = ObjectRef { kind: ObjectKind::Database, oid };
+    let req = PlanRequest::Alter { object, old: ObjectDef::Database(loaded), new: ObjectDef::Database(new) };
+    let out = f.apply(&req).await;
+    let Ok(ApplyOutcome::Failed { failed_index, committed, sqlstate, error, created, .. }) = out else { panic!("{out:?}") };
+    assert_eq!((failed_index, committed, sqlstate.as_deref()), (1, 1, Some("42704")));
+    assert_eq!(error.hint.as_deref(), Some(PARTIAL_APPLY_HINT));
+    assert_eq!(created, Some(object));
+    assert_eq!(database_oid(maint, &format!("{base}_r")).await, Some(oid), "ad değişmiş olmalı (transaction dışı)");
+}
+
+// ---- Role ----
+
+#[tokio::test]
+async fn role_lifecycle_and_password() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(role_life_body(ts.clone()), cleanup_both(ts.clone(), "m_rolelife", "mrolelife")).await;
+    }
+}
+
+async fn role_life_body(ts: TestServer) {
+    let env = setup(&ts, "m_rolelife").await;
+    let f = fx(&env, &ts, false, None);
+    let maint = &env.admin;
+    let name = cluster_name(&ts, ObjectKind::Role, "mrolelife").await;
+    let ObjectDef::Role(mut def) = f.dm.defaults(f.server, None, ObjectKind::Role, CreateContext::default()).await.unwrap() else { panic!() };
+    assert_eq!((def.login, def.inherit, def.superuser, def.connection_limit, def.password), (false, true, false, -1, PasswordChange::Keep));
+    def.name = name.clone();
+    def.login = true;
+    def.password = PasswordChange::Set;
+    let req = create(ObjectDef::Role(def.clone()));
+    // Parolasız: kodlu red, hiçbir şey yazılmaz.
+    assert_eq!(code(&f.apply(&req).await), "role_password_missing");
+    assert_eq!(role_oid(maint, &name).await, None);
+    // Boş parola: kabul kuralı (değer yankılanmaz).
+    let r = f.apply_with(&req, |o| o.password = Some(secret(""))).await;
+    assert_eq!(invalid_message(&r), build::role::SECRET_EMPTY_MSG);
+    assert_eq!(role_oid(maint, &name).await, None);
+    let pw = random_password();
+    let created = created_of(f.apply_with(&req, |o| o.password = Some(secret(&pw))).await).expect("created");
+    assert_eq!((created.kind, Some(created.oid)), (ObjectKind::Role, role_oid(maint, &name).await));
+    let mut cfg = ts.config.clone();
+    cfg.id = Uuid::new_v4();
+    cfg.username = name.clone();
+    assert!(ConnectionManager::test(&cfg, Some(&pw)).await.is_ok(), "doğru parola ile giriş");
+    assert!(ConnectionManager::test(&cfg, Some("yanlis-parola")).await.is_err(), "yanlış parola reddedilmeli");
+    let stored: String = maint.query_one("SELECT rolpassword FROM pg_authid WHERE rolname = $1::text", &[&name]).await.unwrap().get(0);
+    assert!(stored.starts_with("SCRAM-SHA-256$") && !stored.contains(&pw), "istemci tarafı SCRAM doğrulayıcısı saklanmalı");
+
+    // keep planına parola → PASSWORD_NOT_USED.
+    let loaded = f.load_role(created.oid).await;
+    assert_eq!(loaded.password, PasswordChange::Keep);
+    let mut commented = loaded.clone();
+    commented.comment = Some("c".into());
+    let keep = PlanRequest::Alter { object: created, old: ObjectDef::Role(loaded.clone()), new: ObjectDef::Role(commented) };
+    let r = f.apply_with(&keep, |o| o.password = Some(secret(&pw))).await;
+    assert_eq!(invalid_message(&r), error_codes::PASSWORD_NOT_USED);
+    applied(f.apply(&keep).await);
+    let loaded = f.load_role(created.oid).await;
+
+    // clear → giriş başarısız.
+    let mut cleared = loaded.clone();
+    cleared.password = PasswordChange::Clear;
+    applied(f.apply(&PlanRequest::Alter { object: created, old: ObjectDef::Role(loaded), new: ObjectDef::Role(cleared) }).await);
+    assert!(ConnectionManager::test(&cfg, Some(&pw)).await.is_err(), "parola temizlenince giriş başarısız");
+
+    // REVOKE Destructive → onay; süper kullanıcının REVOKE'u etkili (uyarı yok).
+    let group = format!("{name}_g");
+    maint.batch_execute(&format!("CREATE ROLE {group}; GRANT {group} TO {name}")).await.unwrap();
+    let loaded = f.load_role(created.oid).await;
+    assert_eq!(loaded.member_of.len(), 1);
+    let mut revoked = loaded.clone();
+    revoked.member_of.clear();
+    let revoke = PlanRequest::Alter { object: created, old: ObjectDef::Role(loaded), new: ObjectDef::Role(revoked) };
+    assert_eq!(f.preview(&revoke).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&revoke).await), "confirmation_required");
+    let out = f.apply_with(&revoke, |o| o.confirmed = true).await;
+    let Ok(ApplyOutcome::Applied { warnings, .. }) = out else { panic!("{out:?}") };
+    assert_eq!(warnings, None);
+    assert!(f.load_role(created.oid).await.member_of.is_empty());
+}
+
+#[tokio::test]
+async fn role_insufficient_privilege_is_reported() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(role_priv_body(ts.clone()), cleanup_both(ts.clone(), "m_rolepriv", "mrolepriv")).await;
+    }
+}
+
+async fn role_priv_body(ts: TestServer) {
+    let env = setup(&ts, "m_rolepriv").await;
+    let maint = &env.admin;
+    let base = cluster_name(&ts, ObjectKind::Role, "mrolepriv").await;
+    let (creator, group, member) = (format!("{base}_c"), format!("{base}_g"), format!("{base}_m"));
+    let pw = random_password();
+    maint
+        .batch_execute(&format!(
+            "CREATE ROLE {creator} LOGIN CREATEROLE PASSWORD {}; CREATE ROLE {group}; CREATE ROLE {member}; \
+             GRANT {group} TO {member}; GRANT {group} TO {creator} WITH ADMIN OPTION",
+            quote_literal(&pw)
+        ))
+        .await
+        .unwrap();
+    let mut config = ts.config.clone();
+    config.id = Uuid::new_v4();
+    config.username = creator.clone();
+    let mgr = Arc::new(ConnectionManager::new());
+    if mgr.connect(config.clone(), Some(pw)).await.is_err() {
+        panic!("CREATEROLE rolüyle bağlanılamadı");
+    }
+    let (dm, dir) = manager(mgr.clone(), &config, false, None);
+    let f = Fx { dm, server: config.id, db: env.db_oid, _dir: dir };
+    // SUPERUSER yalnızca süper kullanıcı verebilir: 42501 + Karar 9 ipucu.
+    let mut sup = role_def(&format!("{base}_s"));
+    sup.superuser = true;
+    let (_, committed, sqlstate, error) = failed(f.apply(&create(ObjectDef::Role(sup))).await);
+    assert_eq!((committed, sqlstate.as_deref()), (0, Some("42501")));
+    assert_eq!(error.hint.as_deref(), Some(PRIVILEGE_HINT));
+    assert_eq!(role_oid(maint, &format!("{base}_s")).await, None);
+    // REVOKE (GRANTED BY'sız) süper kullanıcının verdiği üyeliği PG 16+'da kaldırmayabilir (WARNING, etkisiz):
+    // yönetici yeniden yükleyip farkı uyarı olarak bildirir. Uyarı ancak ve ancak üyelik gerçekten kaldıysa vardır.
+    let member_oid = role_oid(maint, &member).await.unwrap();
+    let loaded = f.load_role(member_oid).await;
+    assert_eq!(loaded.member_of.len(), 1, "{loaded:?}");
+    let mut revoked = loaded.clone();
+    revoked.member_of.clear();
+    let object = ObjectRef { kind: ObjectKind::Role, oid: member_oid };
+    let req = PlanRequest::Alter { object, old: ObjectDef::Role(loaded), new: ObjectDef::Role(revoked) };
+    let out = f.apply_with(&req, |o| o.confirmed = true).await;
+    let Ok(ApplyOutcome::Applied { warnings, .. }) = out else { panic!("{out:?}") };
+    let still: bool = maint
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid JOIN pg_roles u ON u.oid = m.member \
+             WHERE r.rolname = $1::text AND u.rolname = $2::text)",
+            &[&group, &member],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(warnings.is_some(), still, "uyarı = üyelik kaldı (PG {}): {warnings:?}", env.version / 10_000);
+    if let Some(w) = warnings {
+        assert_eq!(w, [MEMBERSHIP_WARNING]);
+        eprintln!("PG {}: GRANTED BY'sız REVOKE etkisiz kaldı, uyarı verildi", env.version / 10_000);
+    }
+    mgr.disconnect(config.id);
+}
+
+// ---- tahrifat / kapsam / kilit ----
+
+#[tokio::test]
+async fn tampered_requests_are_refused() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(tamper_body(ts.clone()), cleanup_both(ts.clone(), "m_tamper", "mtamper")).await;
+    }
+}
+
+async fn tamper_body(ts: TestServer) {
+    let env = setup(&ts, "m_tamper").await;
+    let f = fx(&env, &ts, false, None);
+    let maint = &env.admin;
+    let role = cluster_name(&ts, ObjectKind::Role, "mtamper").await;
+    let db = cluster_name(&ts, ObjectKind::Database, "mtamper").await;
+    maint.batch_execute(&format!("CREATE ROLE {role}")).await.unwrap();
+    maint.batch_execute(&format!("CREATE DATABASE {db} TEMPLATE template0")).await.unwrap();
+    let robj = ObjectRef { kind: ObjectKind::Role, oid: role_oid(maint, &role).await.unwrap() };
+    let dobj = ObjectRef { kind: ObjectKind::Database, oid: database_oid(maint, &db).await.unwrap() };
+    let loaded = f.load_role(robj.oid).await;
+
+    // Eski tarafta parola niyeti `keep` dışında: yüklenen tanımla eşleşmez → plan_changed (parola gönderilse bile).
+    let mut forged_old = loaded.clone();
+    forged_old.password = PasswordChange::Set;
+    let mut new = loaded.clone();
+    new.comment = Some("x".into());
+    let req = PlanRequest::Alter { object: robj, old: ObjectDef::Role(forged_old), new: ObjectDef::Role(new.clone()) };
+    assert_eq!(code(&f.apply(&req).await), "plan_changed");
+    assert_eq!(code(&f.apply_with(&req, |o| o.password = Some(secret("p"))).await), "plan_changed");
+    // Bayat `old`: başka oturum yorumu değiştirdi.
+    let stale = PlanRequest::Alter { object: robj, old: ObjectDef::Role(loaded.clone()), new: ObjectDef::Role(new.clone()) };
+    let hash = f.preview(&stale).await.hash;
+    maint.batch_execute(&format!("COMMENT ON ROLE {role} IS 'başka oturum'")).await.unwrap();
+    assert_eq!(code(&f.dm.apply(f.server, None, &stale, opts(&hash)).await), "plan_changed");
+    let loaded = f.load_role(robj.oid).await;
+    // Parola niyeti sahte hash'le: keep planının hash'i set planına verilemez.
+    let mut set = loaded.clone();
+    set.password = PasswordChange::Set;
+    let keep_req = PlanRequest::Alter { object: robj, old: ObjectDef::Role(loaded.clone()), new: ObjectDef::Role(new) };
+    let set_req = PlanRequest::Alter { object: robj, old: ObjectDef::Role(loaded.clone()), new: ObjectDef::Role(set) };
+    let keep_hash = f.preview(&keep_req).await.hash;
+    let mut o = opts(&keep_hash);
+    o.password = Some(secret(&random_password()));
+    assert_eq!(code(&f.dm.apply(f.server, None, &set_req, o).await), "plan_changed");
+    // Tür uyuşmazlığı: nesne rol, tanım veritabanı → invalid_def.
+    let dloaded = f.load_database(dobj.oid).await;
+    let mixed = PlanRequest::Drop { object: robj, def: ObjectDef::Database(dloaded.clone()), cascade: false, force: false };
+    assert_eq!(code(&f.apply_with(&mixed, |o| o.confirmed = true).await), "invalid_def");
+    // Database drop: def.name ≠ yüklenen → plan_changed; veritabanı yerinde.
+    let mut renamed = dloaded.clone();
+    renamed.name = format!("{db}_x");
+    let drop = PlanRequest::Drop { object: dobj, def: ObjectDef::Database(renamed), cascade: false, force: false };
+    assert_eq!(code(&f.apply_with(&drop, |o| o.confirmed = true).await), "plan_changed");
+    assert!(database_oid(maint, &db).await.is_some());
+    // View: oynanmış hash → plan_changed; veritabanısız → NEEDS_DATABASE.
+    let view = create(ObjectDef::View(view_def("mt_v", "SELECT 1 AS x")));
+    assert_eq!(code(&f.dm.apply(f.server, f.db, &view, opts("bogus")).await), "plan_changed");
+    let hash = f.preview(&view).await.hash;
+    let r = f.dm.apply(f.server, None, &view, opts(&hash)).await;
+    assert_eq!(invalid_message(&r), error_codes::NEEDS_DATABASE);
+    assert!(!exists(&env, "public.mt_v").await);
+    // Kapsam: veritabanı kapsamlı yükleme/açılır liste `None` ile reddedilir; sunucu geneli serbest.
+    let schema = ObjectRef { kind: ObjectKind::Schema, oid: env.schema_oid("public").await };
+    assert!(matches!(f.dm.load(f.server, None, schema).await, Err(Error::Invalid(m)) if m == error_codes::NEEDS_DATABASE));
+    assert!(matches!(f.dm.lookup(f.server, None, LookupRequest::Schemas).await, Err(Error::Invalid(_))));
+    let roles = f.dm.lookup(f.server, None, LookupRequest::GrantableRoles).await.unwrap();
+    assert!(roles.iter().any(|r| r.value == role));
+}
+
+#[tokio::test]
+async fn locked_server_refuses_all_new_kinds() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(locked_new_body(ts.clone()), cleanup_both(ts.clone(), "m_lockednew", "mlockednew")).await;
+    }
+}
+
+async fn locked_new_body(ts: TestServer) {
+    let env = setup(&ts, "m_lockednew").await;
+    let f = fx(&env, &ts, true, None);
+    let maint = &env.admin;
+    let role = cluster_name(&ts, ObjectKind::Role, "mlockednew").await;
+    let db = cluster_name(&ts, ObjectKind::Database, "mlockednew").await;
+    let mv = MatViewDef {
+        schema: "public".into(),
+        name: "ml_m".into(),
+        owner: None,
+        query: "SELECT 1 AS x".into(),
+        tablespace: None,
+        fillfactor: None,
+        with_data: true,
+        comment: None,
+        refresh: None,
+        columns: vec![],
+        unsupported: vec![],
+    };
+    let mut r = role_def(&role);
+    r.password = PasswordChange::Set;
+    for def in [
+        ObjectDef::View(view_def("ml_v", "SELECT 1 AS x")),
+        ObjectDef::MaterializedView(mv),
+        ObjectDef::Database(database_def(&db)),
+        ObjectDef::Role(r),
+    ] {
+        let req = create(def.clone());
+        let r = f
+            .apply_with(&req, |o| {
+                (o.confirmed, o.confirmed_production) = (true, true);
+                o.password = Some(secret("p"));
+            })
+            .await;
+        assert_eq!(code(&r), "locked", "{:?}", def.kind());
+        assert!(!f.preview(&req).await.empty, "önizleme serbest");
+    }
+    assert!(!exists(&env, "public.ml_v").await && !exists(&env, "public.ml_m").await);
+    assert_eq!((role_oid(maint, &role).await, database_oid(maint, &db).await), (None, None));
+    // Yükleme ve açılır listeler serbest.
+    let moid = database_oid(maint, &ts.config.maintenance_db).await.unwrap();
+    assert_eq!(f.load_database(moid).await.name, ts.config.maintenance_db);
+    assert!(!f.dm.lookup(f.server, None, LookupRequest::Settings).await.unwrap().is_empty());
+    assert!(!f.dm.lookup(f.server, f.db, LookupRequest::Schemas).await.unwrap().is_empty());
+}

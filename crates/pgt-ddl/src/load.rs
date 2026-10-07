@@ -98,8 +98,14 @@ fn not_found(what: &str) -> Error {
     Error::NotFound(what.to_string())
 }
 
-/// Katalogdan tanım okur; yok ise `Error::NotFound`, sistem nesnesi ise `Error::Invalid`.
-pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: u32, obj: ObjectRef) -> Result<ObjectDef> {
+/// Katalogdan tanım okur; yok ise `Error::NotFound`, sistem nesnesi ise `Error::Invalid`. Sunucu kapsamlı türlerde
+/// (Database/Role) `database_oid` yok sayılır (bakım bağlantısı); diğerlerinde `None` → `Invalid(NEEDS_DATABASE)`.
+pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into<Option<u32>> + Send, obj: ObjectRef) -> Result<ObjectDef> {
+    let database_oid = match (obj.kind.server_scoped(), database_oid.into()) {
+        (true, _) => 0,
+        (false, Some(db)) => db,
+        (false, None) => return Err(Error::Invalid(crate::error_codes::NEEDS_DATABASE.to_string())),
+    };
     match obj.kind {
         ObjectKind::Schema => load_schema(mgr, server, database_oid, obj.oid).await,
         ObjectKind::Sequence => load_sequence(mgr, server, database_oid, obj.oid).await,

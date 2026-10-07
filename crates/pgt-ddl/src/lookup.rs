@@ -2,7 +2,7 @@
 //! kolon tipi, collation; Database/Role diyalogları için üyelik rolleri, kodlama, şablon, yerel ayar, ayar adı).
 //!
 //! Kapsam: `LookupRequest::server_wide` istekleri paylaşılan kataloglardan (ya da sabitten) okur ve veritabanı
-//! gerektirmez (Task 8: `database_oid = None` → bakım veritabanı); diğerleri bir veritabanı bağlantısı ister.
+//! gerektirmez (`database_oid = None` → bakım veritabanı); diğerleri bir veritabanı bağlantısı ister.
 
 use pgt_catalog::version::{PgVersion, VersionedSql};
 use pgt_core::Result;
@@ -130,11 +130,23 @@ fn encodings() -> Vec<LookupItem> {
     SERVER_ENCODINGS.iter().map(|e| LookupItem { value: (*e).to_string(), detail: None }).collect()
 }
 
-pub async fn lookup(mgr: &ConnectionManager, server: Uuid, database_oid: u32, req: LookupRequest) -> Result<Vec<LookupItem>> {
-    lookup_at(mgr, server, Target::Database(database_oid), req).await
+/// Kapsam kuralı: `database_oid = Some(oid)` → o veritabanı; `None` → `server_wide` istekler bakım veritabanında,
+/// diğerleri `Invalid(NEEDS_DATABASE)`.
+pub async fn lookup(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into<Option<u32>> + Send, req: LookupRequest) -> Result<Vec<LookupItem>> {
+    let target = lookup_target(&req, database_oid.into())?;
+    lookup_at(mgr, server, target, req).await
 }
 
-/// `lookup`'ın hedefli biçimi (Task 8 kapsam kuralı: `server_wide` istekler `Target::Maintenance` ile çağrılır).
+/// `lookup`'ın hedef çözümü (saf).
+pub(crate) fn lookup_target(req: &LookupRequest, database_oid: Option<u32>) -> Result<Target> {
+    match database_oid {
+        Some(db) => Ok(Target::Database(db)),
+        None if req.server_wide() => Ok(Target::Maintenance),
+        None => Err(pgt_core::Error::Invalid(crate::error_codes::NEEDS_DATABASE.to_string())),
+    }
+}
+
+/// `lookup`'ın hedefli biçimi (`lookup_target` kuralıyla çağrılır).
 pub(crate) async fn lookup_at(mgr: &ConnectionManager, server: Uuid, target: Target, req: LookupRequest) -> Result<Vec<LookupItem>> {
     let db = target;
     Ok(match req {
@@ -242,6 +254,16 @@ mod tests {
             LookupRequest::Collations,
         ];
         assert!(!per_db.iter().any(LookupRequest::server_wide));
+    }
+
+    #[test]
+    fn lookup_target_follows_scope() {
+        assert_eq!(lookup_target(&LookupRequest::Schemas, Some(5)).unwrap(), Target::Database(5));
+        assert_eq!(lookup_target(&LookupRequest::Roles, Some(5)).unwrap(), Target::Database(5));
+        assert_eq!(lookup_target(&LookupRequest::GrantableRoles, None).unwrap(), Target::Maintenance);
+        assert_eq!(lookup_target(&LookupRequest::Locales { provider: LocaleProvider::Icu }, None).unwrap(), Target::Maintenance);
+        let e = lookup_target(&LookupRequest::Schemas, None).unwrap_err();
+        assert!(matches!(e, pgt_core::Error::Invalid(m) if m == crate::error_codes::NEEDS_DATABASE));
     }
 
     #[test]

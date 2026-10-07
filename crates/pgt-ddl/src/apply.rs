@@ -15,6 +15,7 @@ use pgt_core::{Error, ErrorPayload, Result};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
+use crate::build::role::PasswordStatement;
 use crate::error_codes::APPLY_ID_IN_USE;
 use crate::plan::Statement;
 
@@ -46,11 +47,51 @@ pub(crate) async fn prepare_session(client: &Client, lock_timeout_ms: u32) -> Re
     client.batch_execute(&sets).await.map_err(Error::from_query)
 }
 
-/// Uygulama bağlantısı: `Ddl` profiliyle ayrı bağlantı + açık `SET`'ler.
-pub(crate) async fn open_apply_conn(mgr: &ConnectionManager, server: Uuid, database_oid: u32, lock_timeout_ms: u32) -> Result<DedicatedConn> {
-    let conn = mgr.open_dedicated(server, Target::Database(database_oid), SessionProfile::Ddl { lock_timeout_ms }).await?;
+/// Uygulama bağlantısı: `Ddl` profiliyle ayrı bağlantı + açık `SET`'ler. Sunucu kapsamlı türler (Database/Role)
+/// `Target::Maintenance`'ta, diğerleri `Target::Database(oid)`'de.
+pub(crate) async fn open_apply_conn(mgr: &ConnectionManager, server: Uuid, target: Target, lock_timeout_ms: u32) -> Result<DedicatedConn> {
+    let conn = mgr.open_dedicated(server, target, SessionProfile::Ddl { lock_timeout_ms }).await?;
     prepare_session(&conn.client, lock_timeout_ms).await?;
     Ok(conn)
+}
+
+/// Çalıştırma listesindeki ifade metni: plandaki ifade (ödünç) ya da gizlenmiş parola ifadesinin somutlaşmış hâli.
+/// İkincisi yalnızca bu listede yaşar (`PlanView`'e/özete/günlüğe girmez), düşerken sıfırlanır.
+pub(crate) enum ExecSql<'a> {
+    Plan(&'a str),
+    Password(PasswordStatement),
+}
+
+/// Çalıştırılacak tek ifade. `Debug` gizlenmiş ifadenin metnini yazmaz.
+pub(crate) struct ExecStatement<'a> {
+    pub(crate) sql: ExecSql<'a>,
+    pub(crate) transactional: bool,
+    /// Planda gizlenmiş (`Statement.redacted`): başarısızlıkta hata konumu verilmez.
+    pub(crate) redacted: bool,
+}
+
+impl<'a> ExecStatement<'a> {
+    /// Plandaki ifadeyi olduğu gibi çalıştırır.
+    pub(crate) fn plain(s: &'a Statement) -> Self {
+        ExecStatement { sql: ExecSql::Plan(&s.sql), transactional: s.transactional, redacted: s.redacted }
+    }
+
+    fn text(&self) -> &str {
+        match &self.sql {
+            ExecSql::Plan(s) => s,
+            ExecSql::Password(p) => p.sql(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ExecStatement<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sql = match &self.sql {
+            ExecSql::Plan(s) if !self.redacted => s,
+            _ => crate::plan::REDACTED,
+        };
+        f.debug_struct("ExecStatement").field("sql", &sql).field("transactional", &self.transactional).finish()
+    }
 }
 
 #[derive(Default)]
@@ -181,7 +222,12 @@ fn idx(i: usize) -> u32 {
 
 /// Hata ifadenin çalışması sırasında geldiyse ve iptal istendiyse iptal hatasına çevirir.
 fn statement_error(e: tokio_postgres::Error, reg: &Registration<'_>) -> (Error, Option<u32>) {
-    let position = error_position(&e);
+    statement_error_at(e, reg, false)
+}
+
+/// `statement_error`; `redacted` ifadede konum hiç verilmez (somutlaşmış metnin uzunluğu/biçimi sızmasın).
+fn statement_error_at(e: tokio_postgres::Error, reg: &Registration<'_>, redacted: bool) -> (Error, Option<u32>) {
+    let position = if redacted { None } else { error_position(&e) };
     let e = Error::from_query(e);
     match &e {
         Error::Query { sqlstate: Some(s), .. } if s == CANCELED_SQLSTATE && reg.cancelled() => (cancelled_error(), None),
@@ -207,7 +253,7 @@ async fn rollback(client: &Client) {
 
 /// İfadeleri blok blok çalıştırır. `committed`: hatadan önce kalıcılaşan ifade sayısı (önceki bloklar ve
 /// transaction dışı ifadeler); hatalı blok tümüyle geri alınır.
-pub(crate) async fn run_statements(client: &Client, statements: &[Statement], reg: &Registration<'_>) -> RunResult {
+pub(crate) async fn run_statements(client: &Client, statements: &[ExecStatement<'_>], reg: &Registration<'_>) -> RunResult {
     let mut committed = 0u32;
     let mut i = 0;
     while i < statements.len() {
@@ -219,8 +265,8 @@ pub(crate) async fn run_statements(client: &Client, statements: &[Statement], re
                 let (error, position) = statement_error(e, reg);
                 return RunResult::Failed { failed_index: idx(i), committed, error, outcome_unknown: false, position };
             }
-            if let Err(e) = client.batch_execute(&statements[i].sql).await {
-                let (error, position) = statement_error(e, reg);
+            if let Err(e) = client.batch_execute(statements[i].text()).await {
+                let (error, position) = statement_error_at(e, reg, statements[i].redacted);
                 return RunResult::Failed { failed_index: idx(i), committed, error, outcome_unknown: false, position };
             }
             committed += 1;
@@ -247,8 +293,8 @@ pub(crate) async fn run_statements(client: &Client, statements: &[Statement], re
                 rollback(client).await;
                 return RunResult::Failed { failed_index: idx(k), committed, error, outcome_unknown: false, position };
             }
-            if let Err(e) = client.batch_execute(&s.sql).await {
-                let (error, position) = statement_error(e, reg);
+            if let Err(e) = client.batch_execute(s.text()).await {
+                let (error, position) = statement_error_at(e, reg, s.redacted);
                 rollback(client).await;
                 return RunResult::Failed { failed_index: idx(k), committed, error, outcome_unknown: false, position };
             }

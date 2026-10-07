@@ -6,4 +6,14 @@ export type ApplyOutcome = { "outcome": "applied", statements: number, elapsedMs
 /**
  * Create (ve kimliği değişen alter/yeniden kurma) sonrası yeni nesne; en iyi çaba, bulunamazsa `None`.
  */
-created: ObjectRef | null, } | { "outcome": "failed", failedIndex: number, committed: number, sqlstate: string | null, position: number | null, error: ErrorPayload, };
+created: ObjectRef | null, 
+/**
+ * Uygulama sonrası denetim uyarıları (ör. PG 16+ etkisiz REVOKE: yeniden yüklenen üyelikler beklenenden
+ * farklı). Yoksa alan yazılmaz.
+ */
+warnings?: Array<string>, } | { "outcome": "failed", failedIndex: number, committed: number, sqlstate: string | null, position: number | null, error: ErrorPayload, 
+/**
+ * Kısmi uygulama (`committed > 0`; ör. CREATE DATABASE başarılı, sonraki ayar/yorum başarısız): oluşturulan ya
+ * da yeniden adlandırılan nesne. En iyi çaba; yoksa alan yazılmaz.
+ */
+created?: ObjectRef, };
