@@ -11,6 +11,8 @@
 //!   `partition_text` ile salt okunur gösterilir; modellenmeyen kısıt/özellikler `unsupported` listesindedir).
 //! - View/MatView: bkz. `load_view`/`load_matview` (`query` = `pg_get_viewdef` sondaki `;` soyulmuş; MV `refresh`
 //!   her zaman `None`; yeniden kurmada kaybolacak ekler `unsupported` listesinde).
+//! - Database/Role (sunucu kapsamlı): bakım bağlantısında okunur (`Target::Maintenance`, `database_oid` yok sayılır);
+//!   bkz. `load_database`/`load_role` (ayar adları küçük harf, ada göre sıralı; rol parolası hiç okunmaz).
 //!
 //! Okuma salt okunur katalog bağlantısındandır; SQL/değerler günlüğe yazılmaz.
 
@@ -23,6 +25,7 @@ use tokio_postgres::types::ToSql;
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::build::database::canonical_encoding;
 use crate::model::*;
 
 /// Yüklenecek nesne: tür + oid (şema için `pg_namespace`, sequence/indeks için `pg_class`, eklenti için `pg_extension`).
@@ -61,6 +64,19 @@ static TABLE_CONSTRAINTS_SQL: VersionedSql = VersionedSql(&[
 static VIEW_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_view.sql"))]);
 static MATVIEW_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_matview.sql"))]);
 const RELATION_COLUMNS_SQL: &str = include_str!("sql/load_relation_columns.sql");
+/// PG 15: `datlocprovider`, `daticulocale`; PG 17: `datlocale` (icu ve builtin).
+static DATABASE_SQL: VersionedSql = VersionedSql(&[
+    (10, include_str!("sql/load_database.pg10.sql")),
+    (15, include_str!("sql/load_database.pg15.sql")),
+    (17, include_str!("sql/load_database.sql")),
+]);
+static ROLE_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_role.sql"))]);
+/// PG 16: üyelik başına `inherit_option`/`set_option` ve birden çok grantor.
+static ROLE_MEMBERS_SQL: VersionedSql = VersionedSql(&[
+    (10, include_str!("sql/load_role_members.pg10.sql")),
+    (16, include_str!("sql/load_role_members.sql")),
+]);
+const ROLE_SETTINGS_SQL: &str = include_str!("sql/load_db_role_settings.sql");
 
 const SYSTEM_ERROR: &str = "sistem nesnesi düzenlenemez";
 
@@ -92,10 +108,9 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: u32, obj:
         ObjectKind::Table => load_table(mgr, server, database_oid, obj.oid).await,
         ObjectKind::View => load_view(mgr, server, database_oid, obj.oid).await,
         ObjectKind::MaterializedView => load_matview(mgr, server, database_oid, obj.oid).await,
-        // Yer tutucu: yükleyiciler Plan 14 Task 7'de.
-        ObjectKind::Database | ObjectKind::Role => {
-            Err(Error::Invalid("Bu tür henüz desteklenmiyor.".into()))
-        }
+        // Sunucu kapsamlı türler: bakım veritabanında (veritabanı oid'i yok sayılır).
+        ObjectKind::Database => load_database(mgr, server, Target::Maintenance, obj.oid).await,
+        ObjectKind::Role => load_role(mgr, server, Target::Maintenance, obj.oid).await,
     }
 }
 
@@ -615,9 +630,171 @@ async fn load_matview(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) 
     }))
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Database / Role (sunucu kapsamlı)
+// ---------------------------------------------------------------------------------------------------------------
+
+/// `setconfig` öğeleri (`ad=değer`, ilk `=`'den bölünür) → ayarlar: ad küçük harf (GUC adı harfe duyarsızdır; PG
+/// `TimeZone`/`DateStyle` gibi kanonik adı saklar, üretici dilbilgisi küçük harftir), ada göre sıralı (üreticinin
+/// `diff_settings` sırası). `=` içermeyen öğe (beklenmez) boş değerli ayar olur.
+fn config_settings(items: &[String]) -> Vec<ConfigSetting> {
+    let mut out: Vec<ConfigSetting> = items
+        .iter()
+        .map(|i| {
+            let (k, v) = i.split_once('=').unwrap_or((i.as_str(), ""));
+            ConfigSetting { name: k.to_lowercase(), value: v.to_string() }
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+fn locale_provider(c: &str) -> Option<LocaleProvider> {
+    match c {
+        "c" => Some(LocaleProvider::Libc),
+        "i" => Some(LocaleProvider::Icu),
+        "b" => Some(LocaleProvider::Builtin),
+        _ => None,
+    }
+}
+
+/// Database yükleyicisi (`target` = bakım bağlantısı). Normalleştirme: sahip `Some`; `template = None` (katalogda
+/// yok); `encoding` = `SERVER_ENCODINGS` kanonik yazımı (`pg_encoding_to_char`); `localeProvider` PG 15+ `Some`, öncesi
+/// `None`; `providerLocale` yalnızca icu/builtin'de (PG 15–16 `daticulocale`, 17+ `datlocale`), libc'de `None`;
+/// `tablespace` her zaman `Some`; ayarlar `config_settings` ile; boş yorum `None`.
+async fn load_database(mgr: &ConnectionManager, server: Uuid, target: Target, oid: u32) -> Result<ObjectDef> {
+    let rows = mgr
+        .run(server, target, move |c| async move {
+            let params: [&(dyn ToSql + Sync); 1] = [&oid];
+            c.client.query(DATABASE_SQL.pick(PgVersion(c.version_num())), &params).await
+        })
+        .await?;
+    let r = rows.first().ok_or_else(|| not_found("veritabanı"))?;
+    let encoding: String = r.get("encoding");
+    let locale_provider = r.get::<_, Option<String>>("locale_provider").as_deref().and_then(locale_provider);
+    let provider_locale = match locale_provider {
+        Some(LocaleProvider::Icu | LocaleProvider::Builtin) => {
+            r.get::<_, Option<String>>("provider_locale").filter(|v| !v.is_empty())
+        }
+        _ => None,
+    };
+    Ok(ObjectDef::Database(DatabaseDef {
+        name: r.get("name"),
+        owner: Some(r.get("owner")),
+        template: None,
+        encoding: Some(canonical_encoding(&encoding).map_or(encoding.clone(), str::to_string)),
+        locale_provider,
+        lc_collate: Some(r.get("lc_collate")),
+        lc_ctype: Some(r.get("lc_ctype")),
+        provider_locale,
+        tablespace: Some(r.get("tablespace")),
+        connection_limit: r.get("connection_limit"),
+        is_template: r.get("is_template"),
+        allow_connections: r.get("allow_connections"),
+        settings: config_settings(&r.get::<_, Vec<String>>("settings")),
+        comment: r.get::<_, Option<String>>("comment").filter(|c| !c.is_empty()),
+    }))
+}
+
+/// Üyelik satırları → (üyelikler, desteklenmeyen). PG 16+'da aynı rol için birden çok grantor satırı → `MEMBER r
+/// (birden çok grantor)` (düzenlenmez); tek satırda `inheritOption`/`setOption` dolu (PG < 16 SQL'i NULL döndürür).
+fn memberships(rows: &[Row]) -> (Vec<RoleMembership>, Vec<String>) {
+    let (mut list, mut unsupported) = (vec![], vec![]);
+    for r in rows {
+        let role: String = r.get("role");
+        if r.get::<_, i32>("grants") > 1 {
+            unsupported.push(format!("MEMBER {role} (birden çok grantor)"));
+            continue;
+        }
+        list.push(RoleMembership {
+            role,
+            admin: r.get("admin"),
+            inherit_option: r.get("inherit_option"),
+            set_option: r.get("set_option"),
+        });
+    }
+    // Üreticinin BTreeMap (bayt) sırası.
+    list.sort_by(|a, b| a.role.cmp(&b.role));
+    (list, unsupported)
+}
+
+/// Role yükleyicisi (`target` = bakım bağlantısı; `pg_roles`, süper kullanıcı gerekmez, parola sütunu hiç seçilmez).
+/// Normalleştirme: `pg_` önekli rol → `Invalid`; `password = keep`; `validUntil` sabit UTC biçimi (SQL'de) ya da
+/// `infinity`; üyelikler rol adı sırasıyla (`memberships`); ayarlar yalnızca tüm veritabanları için olanlar
+/// (`config_settings`), `IN DATABASE d` ayarları `unsupported` ("IN DATABASE d: k=v", veritabanı ve ad sırasıyla);
+/// boş yorum `None`; sahip yok (Karar 5).
+async fn load_role(mgr: &ConnectionManager, server: Uuid, target: Target, oid: u32) -> Result<ObjectDef> {
+    let (head, members, settings) = mgr
+        .run(server, target, move |c| async move {
+            let params: [&(dyn ToSql + Sync); 1] = [&oid];
+            let v = PgVersion(c.version_num());
+            let head = c.client.query(ROLE_SQL.pick(v), &params).await?;
+            if head.is_empty() {
+                return Ok((head, vec![], vec![]));
+            }
+            let members = c.client.query(ROLE_MEMBERS_SQL.pick(v), &params).await?;
+            let settings = c.client.query(ROLE_SETTINGS_SQL, &params).await?;
+            Ok((head, members, settings))
+        })
+        .await?;
+    let h = head.first().ok_or_else(|| not_found("rol"))?;
+    if h.get::<_, bool>("is_system") {
+        return Err(Error::Invalid("sistem rolü düzenlenemez".to_string()));
+    }
+    let (member_of, mut unsupported) = memberships(&members);
+    let mut global = vec![];
+    let mut per_db: Vec<(String, ConfigSetting)> = vec![];
+    for r in &settings {
+        let items = config_settings(&r.get::<_, Vec<String>>("settings"));
+        match r.get::<_, Option<String>>("database") {
+            None => global.extend(items),
+            Some(db) => per_db.extend(items.into_iter().map(|s| (db.clone(), s))),
+        }
+    }
+    global.sort_by(|a, b| a.name.cmp(&b.name));
+    per_db.sort_by(|a, b| (&a.0, &a.1.name).cmp(&(&b.0, &b.1.name)));
+    unsupported.extend(per_db.into_iter().map(|(db, s)| format!("IN DATABASE {db}: {}={}", s.name, s.value)));
+    Ok(ObjectDef::Role(RoleDef {
+        name: h.get("name"),
+        login: h.get("login"),
+        superuser: h.get("superuser"),
+        createdb: h.get("createdb"),
+        createrole: h.get("createrole"),
+        inherit: h.get("inherit"),
+        replication: h.get("replication"),
+        bypassrls: h.get("bypassrls"),
+        connection_limit: h.get("connection_limit"),
+        valid_until: h.get("valid_until"),
+        password: PasswordChange::Keep,
+        member_of,
+        settings: global,
+        comment: h.get::<_, Option<String>>("comment").filter(|c| !c.is_empty()),
+        unsupported,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_settings_split_lowercase_and_sort() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let got = config_settings(&s(&["work_mem=64MB", "TimeZone=UTC", "search_path=\"$user\", public", "x.y=a=b", "odd"]));
+        let pairs: Vec<(&str, &str)> = got.iter().map(|c| (c.name.as_str(), c.value.as_str())).collect();
+        assert_eq!(
+            pairs,
+            [("odd", ""), ("search_path", "\"$user\", public"), ("timezone", "UTC"), ("work_mem", "64MB"), ("x.y", "a=b")]
+        );
+    }
+
+    #[test]
+    fn locale_provider_codes() {
+        assert_eq!(locale_provider("c"), Some(LocaleProvider::Libc));
+        assert_eq!(locale_provider("i"), Some(LocaleProvider::Icu));
+        assert_eq!(locale_provider("b"), Some(LocaleProvider::Builtin));
+        assert_eq!(locale_provider("d"), None);
+    }
 
     #[test]
     fn view_query_strips_one_trailing_semicolon_only() {

@@ -1,5 +1,8 @@
 //! Diyalogların açılır listeleri için salt okunur katalog sorguları (rol, şema, tablespace, eklenti, yöntem, tablo, kolon,
-//! kolon tipi, collation).
+//! kolon tipi, collation; Database/Role diyalogları için üyelik rolleri, kodlama, şablon, yerel ayar, ayar adı).
+//!
+//! Kapsam: `LookupRequest::server_wide` istekleri paylaşılan kataloglardan (ya da sabitten) okur ve veritabanı
+//! gerektirmez (Task 8: `database_oid = None` → bakım veritabanı); diğerleri bir veritabanı bağlantısı ister.
 
 use pgt_catalog::version::{PgVersion, VersionedSql};
 use pgt_core::Result;
@@ -9,6 +12,9 @@ use tokio_postgres::Row;
 use tokio_postgres::types::ToSql;
 use ts_rs::TS;
 use uuid::Uuid;
+
+use crate::build::database::SERVER_ENCODINGS;
+use crate::model::LocaleProvider;
 
 /// İndeks erişim yöntemleri: arayüzde gösterilen sabit sıra (sunucuda var olanlarla kesişir).
 const INDEX_METHODS: [&str; 6] = ["btree", "hash", "gin", "gist", "brin", "spgist"];
@@ -33,6 +39,34 @@ pub enum LookupRequest {
     /// Kolon collation'ları (pg_catalog + kullanıcı şemaları): value = niteliksiz ad (üretici tek tanımlayıcı yazar;
     /// birden fazla şemada bulunan adlar listelenmez), detail = sağlayıcı · locale [· şema].
     Collations,
+    /// Üyelik için tüm roller (önceden tanımlı `pg_*` dahil): detail = "önceden tanımlı" | "superuser" | null.
+    GrantableRoles,
+    /// Sunucu kodlamaları (`SERVER_ENCODINGS`, sabit; sunucuya gidilmez).
+    Encodings,
+    /// Şablon olarak kullanılabilecek veritabanları (`datistemplate OR datallowconn`); detail = "şablon" | null.
+    TemplateDatabases,
+    /// Yerel ayar adları: libc → collcollate (+ C, POSIX), icu → ICU yerel ayarları (PG 15+), builtin (PG 17+) →
+    /// yerleşik; sürümde sağlayıcı yoksa boş. detail = yerel ayarın bağlı olduğu kodlamalar | null.
+    Locales { provider: LocaleProvider },
+    /// `ALTER … SET` ile ayarlanabilen parametreler (`pg_settings.context IN ('user','superuser')`), ad küçük harfle:
+    /// detail = "tip · kısa açıklama".
+    Settings,
+}
+
+impl LookupRequest {
+    /// `database_oid = None` ile (bakım veritabanında) çalışabilen istekler: paylaşılan kataloglar ya da sabit.
+    pub fn server_wide(&self) -> bool {
+        matches!(
+            self,
+            LookupRequest::Roles
+                | LookupRequest::GrantableRoles
+                | LookupRequest::Tablespaces
+                | LookupRequest::Encodings
+                | LookupRequest::TemplateDatabases
+                | LookupRequest::Locales { .. }
+                | LookupRequest::Settings
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -58,10 +92,19 @@ static COLLATIONS: VersionedSql = VersionedSql(&[
     (15, include_str!("sql/lookup_collations.pg15.sql")),
     (17, include_str!("sql/lookup_collations.sql")),
 ]);
+static GRANTABLE_ROLES: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_grantable_roles.sql"))]);
+static TEMPLATE_DATABASES: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_template_databases.sql"))]);
+/// Veritabanı sağlayıcısı: PG 10–14 yalnızca libc; PG 15 ICU (`colliculocale`); PG 17 builtin (`colllocale`).
+static LOCALES: VersionedSql = VersionedSql(&[
+    (10, include_str!("sql/lookup_locales.pg10.sql")),
+    (15, include_str!("sql/lookup_locales.pg15.sql")),
+    (17, include_str!("sql/lookup_locales.sql")),
+]);
+static SETTINGS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_settings.sql"))]);
 
 /// Metin parametreleriyle (`$1`, `$2`…; `None` = NULL) çalıştırır.
-async fn fetch(mgr: &ConnectionManager, server: Uuid, db: u32, sql: &'static VersionedSql, params: Vec<Option<String>>) -> Result<Vec<Row>> {
-    mgr.run(server, Target::Database(db), move |c| {
+async fn fetch(mgr: &ConnectionManager, server: Uuid, target: Target, sql: &'static VersionedSql, params: Vec<Option<String>>) -> Result<Vec<Row>> {
+    mgr.run(server, target, move |c| {
         let params = params.clone();
         async move {
             let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
@@ -75,8 +118,25 @@ fn items(rows: &[Row]) -> Vec<LookupItem> {
     rows.iter().map(|r| LookupItem { value: r.get("value"), detail: r.get("detail") }).collect()
 }
 
+fn provider_param(p: LocaleProvider) -> &'static str {
+    match p {
+        LocaleProvider::Libc => "libc",
+        LocaleProvider::Icu => "icu",
+        LocaleProvider::Builtin => "builtin",
+    }
+}
+
+fn encodings() -> Vec<LookupItem> {
+    SERVER_ENCODINGS.iter().map(|e| LookupItem { value: (*e).to_string(), detail: None }).collect()
+}
+
 pub async fn lookup(mgr: &ConnectionManager, server: Uuid, database_oid: u32, req: LookupRequest) -> Result<Vec<LookupItem>> {
-    let db = database_oid;
+    lookup_at(mgr, server, Target::Database(database_oid), req).await
+}
+
+/// `lookup`'ın hedefli biçimi (Task 8 kapsam kuralı: `server_wide` istekler `Target::Maintenance` ile çağrılır).
+pub(crate) async fn lookup_at(mgr: &ConnectionManager, server: Uuid, target: Target, req: LookupRequest) -> Result<Vec<LookupItem>> {
+    let db = target;
     Ok(match req {
         LookupRequest::Roles => items(&fetch(mgr, server, db, &ROLES, vec![]).await?),
         LookupRequest::Schemas => items(&fetch(mgr, server, db, &SCHEMAS, vec![]).await?),
@@ -116,6 +176,14 @@ pub async fn lookup(mgr: &ConnectionManager, server: Uuid, database_oid: u32, re
             items(&fetch(mgr, server, db, &TYPES, vec![q]).await?)
         }
         LookupRequest::Collations => items(&fetch(mgr, server, db, &COLLATIONS, vec![]).await?),
+        LookupRequest::GrantableRoles => items(&fetch(mgr, server, db, &GRANTABLE_ROLES, vec![]).await?),
+        // Sabit küme: sunucuya gidilmez.
+        LookupRequest::Encodings => encodings(),
+        LookupRequest::TemplateDatabases => items(&fetch(mgr, server, db, &TEMPLATE_DATABASES, vec![]).await?),
+        LookupRequest::Locales { provider } => {
+            items(&fetch(mgr, server, db, &LOCALES, vec![Some(provider_param(provider).to_string())]).await?)
+        }
+        LookupRequest::Settings => items(&fetch(mgr, server, db, &SETTINGS, vec![]).await?),
     })
 }
 
@@ -139,5 +207,47 @@ mod tests {
         assert_eq!(r, LookupRequest::Types { query: None });
         let r: LookupRequest = serde_json::from_value(serde_json::json!({"kind": "collations"})).unwrap();
         assert_eq!(r, LookupRequest::Collations);
+        let r: LookupRequest = serde_json::from_value(serde_json::json!({"kind": "locales", "provider": "icu"})).unwrap();
+        assert_eq!(r, LookupRequest::Locales { provider: LocaleProvider::Icu });
+        for (kind, req) in [
+            ("grantable_roles", LookupRequest::GrantableRoles),
+            ("encodings", LookupRequest::Encodings),
+            ("template_databases", LookupRequest::TemplateDatabases),
+            ("settings", LookupRequest::Settings),
+        ] {
+            assert_eq!(serde_json::to_value(&req).unwrap(), serde_json::json!({ "kind": kind }));
+        }
+    }
+
+    #[test]
+    fn server_wide_requests() {
+        let wide = [
+            LookupRequest::Roles,
+            LookupRequest::GrantableRoles,
+            LookupRequest::Tablespaces,
+            LookupRequest::Encodings,
+            LookupRequest::TemplateDatabases,
+            LookupRequest::Locales { provider: LocaleProvider::Libc },
+            LookupRequest::Settings,
+        ];
+        assert!(wide.iter().all(LookupRequest::server_wide));
+        let per_db = [
+            LookupRequest::Schemas,
+            LookupRequest::AvailableExtensions,
+            LookupRequest::ExtensionVersions { name: "x".into() },
+            LookupRequest::IndexMethods,
+            LookupRequest::Tables { schema: None },
+            LookupRequest::TableColumns { schema: "a".into(), table: "t".into() },
+            LookupRequest::Types { query: None },
+            LookupRequest::Collations,
+        ];
+        assert!(!per_db.iter().any(LookupRequest::server_wide));
+    }
+
+    #[test]
+    fn encodings_are_server_encodings_without_round_trip() {
+        let v: Vec<String> = encodings().into_iter().map(|i| i.value).collect();
+        assert!(v.iter().any(|e| e == "UTF8") && !v.iter().any(|e| e == "SJIS"));
+        assert_eq!(v.len(), SERVER_ENCODINGS.len());
     }
 }
