@@ -10,8 +10,9 @@ import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { PlanRequest } from "../../ipc/bindings/PlanRequest";
 import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { CreateContext } from "../../ipc/bindings/CreateContext";
+import type { TableDef } from "../../ipc/bindings/TableDef";
 import type { Risk } from "../../ipc/bindings/Risk";
-import { createDesignerController, planRequest, type DesignerControllerDeps } from "./designer-controller";
+import { createDesignerController, planRequest, type AppliedInfo, type DesignerControllerDeps } from "./designer-controller";
 import { failedText } from "./errors";
 
 const schema = (p: Partial<{ name: string; owner: string | null; comment: string | null }> = {}): ObjectDef =>
@@ -32,7 +33,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function setup() {
+function setup(extra: Partial<DesignerControllerDeps> = {}) {
   let ids = 0;
   let clock = 1_000_000;
   const servers: Record<string, { name: string; locked: boolean; production: boolean }> = {
@@ -56,6 +57,7 @@ function setup() {
     refreshNode,
     newId: () => `A${++ids}`,
     now: () => clock,
+    ...extra,
   };
   const ctl = createDesignerController(deps);
   return { ctl, api, notify, refreshNode, servers, tick: (ms: number) => { clock += ms; } };
@@ -947,5 +949,123 @@ describe("designer-controller yerel engel (sequence sayıları)", () => {
     await settle();
     expect(s.api.ddlPreview).not.toHaveBeenCalled();
     expect(s.ctl.model(id)!).toMatchObject({ pending: false, previewError: tdes.sequence.fixNumbers, view: null });
+  });
+});
+
+const tbl = (p: Partial<TableDef> = {}): ObjectDef => ({
+  kind: "table", schema: "public", name: "orders", owner: null, tablespace: null, persistence: "permanent", columns: [], constraints: [],
+  partitionBy: null, fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false, unsupported: [], ...p,
+});
+const TOBJ: ObjectRef = { kind: "table", oid: 500 };
+
+describe("designer-controller Task 4: findAlter, onApplied, Table", () => {
+  it("findAlter: alter sekmesini bulur; create başarısı (created) sonrası aynı sekme; gone sekme bulunmaz", async () => {
+    const s = setup();
+    const id = await openAlter(s);
+    expect(s.ctl.findAlter("S1", 5, OBJ)).toBe(id);
+    expect(s.ctl.findAlter("S2", 5, OBJ)).toBeNull();
+    expect(s.ctl.findAlter("S1", 6, OBJ)).toBeNull();
+    expect(s.ctl.findAlter("S1", 5, { kind: "schema", oid: 101 })).toBeNull();
+    const c = await openCreate(s);
+    expect(s.ctl.findAlter("S1", 5, { kind: "schema", oid: 300 })).toBeNull();
+    s.ctl.edit(c, rename("yeni"));
+    await settle();
+    s.api.ddlApply.mockResolvedValueOnce(applied({ kind: "schema", oid: 300 }));
+    s.ctl.setConfirm(c, { checked: true });
+    await s.ctl.apply(c);
+    await flush();
+    expect(s.ctl.findAlter("S1", 5, { kind: "schema", oid: 300 })).toBe(c);
+    s.ctl.objectDropped("S1", 5, { kind: "schema", oid: 300 });
+    expect(s.ctl.findAlter("S1", 5, { kind: "schema", oid: 300 })).toBeNull();
+  });
+
+  it("onApplied: alter'da before=original kopyası, after=uygulanan taslak, object=created ?? object; create'te created null ise çağrılmaz", async () => {
+    const calls: AppliedInfo[] = [];
+    const s = setup({ onApplied: (i) => void calls.push(i) });
+    const id = await readyToApply(s);
+    await s.ctl.apply(id);
+    await flush();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ tabId: id, kind: "schema", mode: "alter", before: schema(), after: schema({ name: "yeni" }), object: OBJ });
+    // create, created null → çağrılmaz
+    const c = await openCreate(s);
+    s.ctl.edit(c, rename("x"));
+    await settle();
+    s.ctl.setConfirm(c, { checked: true });
+    await s.ctl.apply(c);
+    await flush();
+    expect(calls).toHaveLength(1);
+    // create, created dolu
+    const c2 = await openCreate(s, "C2");
+    s.ctl.edit(c2, rename("y"));
+    await settle();
+    s.api.ddlApply.mockResolvedValueOnce(applied({ kind: "schema", oid: 9 }));
+    s.ctl.setConfirm(c2, { checked: true });
+    await s.ctl.apply(c2);
+    await flush();
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).toMatchObject({ tabId: "C2", mode: "create", before: null, after: schema({ name: "y", owner: null }), object: { kind: "schema", oid: 9 } });
+  });
+
+  it("onApplied hatası uygulamayı bozmaz (yeniden yükleme yine yapılır, toast tek)", async () => {
+    const s = setup({ onApplied: () => { throw new Error("başlık"); } });
+    const id = await readyToApply(s);
+    await s.ctl.apply(id);
+    await flush();
+    expect(s.api.ddlLoad).toHaveBeenCalledTimes(2);
+    expect(s.ctl.model(id)).toMatchObject({ status: "ready", dirty: false });
+    expect(s.notify.mock.calls.filter((c) => c[1] === "success")).toHaveLength(1);
+  });
+
+  it("Table alter kimliği aynı kalır (rename: created.oid = eski oid): yeniden yükleme aynı oid ile; model.object değişmez", async () => {
+    const s = setup();
+    s.api.ddlLoad.mockResolvedValue(tbl());
+    await s.ctl.openAlter({ tabId: "T1", serverId: "S1", databaseOid: 5, object: TOBJ, refreshNodeId: "N" });
+    s.ctl.edit("T1", (d) => ({ ...d, name: "orders2" }));
+    await settle();
+    s.api.ddlApply.mockResolvedValueOnce(applied({ kind: "table", oid: 500 }));
+    s.api.ddlLoad.mockResolvedValue(tbl({ name: "orders2" }));
+    s.ctl.setConfirm("T1", { checked: true });
+    await s.ctl.apply("T1");
+    await flush();
+    expect(s.api.ddlLoad).toHaveBeenLastCalledWith("S1", 5, { kind: "table", oid: 500 });
+    expect(s.ctl.model("T1")!.object).toEqual(TOBJ);
+    expect(s.ctl.findAlter("S1", 5, TOBJ)).toBe("T1");
+  });
+
+  it("Table DataLoss planı (DROP COLUMN) üretimde ad yazılmadan gönderilmez; Err confirmation_required → gateError + önizleme yeniden istenir", async () => {
+    const s = setup();
+    s.servers.S1!.production = true;
+    const col = { name: "a", attnum: 1 };
+    s.api.ddlLoad.mockResolvedValue(tbl({ columns: [col as never] }));
+    await s.ctl.openAlter({ tabId: "T1", serverId: "S1", databaseOid: 5, object: TOBJ, refreshNodeId: "N" });
+    s.api.ddlPreview.mockResolvedValue(risky("data_loss", "hd"));
+    s.ctl.edit("T1", (d) => (d.kind === "table" ? { ...d, columns: [] } : d));
+    await settle();
+    expect(s.ctl.peekApplyGate("T1")).toEqual({ kind: "needsProductionName", expected: "prod-1" });
+    s.ctl.setConfirm("T1", { checked: true });
+    await s.ctl.apply("T1");
+    expect(s.api.ddlApply).not.toHaveBeenCalled();
+    s.ctl.setConfirm("T1", { checked: true, typedName: "prod-1" });
+    s.api.ddlApply.mockRejectedValueOnce(err("confirmation_required"));
+    const before = s.api.ddlPreview.mock.calls.length;
+    await s.ctl.apply("T1");
+    await settle();
+    expect(s.ctl.model("T1")!.gateError).toContain(tdes.gate.confirmationRequired);
+    expect(s.ctl.model("T1")!.gateError).not.toBeNull();
+    expect(s.api.ddlPreview.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it("lookup önbelleği: collations oturum boyunca (TTL sonrası yeni istek yok); types{query} 30 sn", async () => {
+    const s = setup();
+    const id = await openAlter(s);
+    await s.ctl.lookup(id, { kind: "collations" });
+    await s.ctl.lookup(id, { kind: "types", query: "int" } as LookupRequest);
+    expect(s.api.ddlLookup).toHaveBeenCalledTimes(2);
+    s.tick(3_600_000);
+    await s.ctl.lookup(id, { kind: "collations" });
+    expect(s.api.ddlLookup).toHaveBeenCalledTimes(2);
+    await s.ctl.lookup(id, { kind: "types", query: "int" } as LookupRequest);
+    expect(s.api.ddlLookup).toHaveBeenCalledTimes(3);
   });
 });

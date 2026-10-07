@@ -26,6 +26,12 @@ function tree(): TreeState {
   add("db", "srv", "database", "app");
   add("coll-seq", "db", "sequenceCollection", "Sequences");
   add("seq", "coll-seq", "sequence", "orders_id_seq");
+  add("coll-sch", "db", "schemaCollection", "Schemas");
+  add("sch", "coll-sch", "schema", "public");
+  add("coll-tbl", "sch", "tableCollection", "Tables");
+  add("tbl", "coll-tbl", "table", "orders");
+  add("coll-col", "tbl", "columnCollection", "Columns");
+  add("col", "coll-col", "column", "id");
   return s;
 }
 
@@ -48,10 +54,14 @@ function setup(target: DdlTarget | ((id: string) => Promise<DdlTarget>), cfg: Se
       log.push(`tab:${r.id}:${r.created}`);
       return r;
     }),
+    activate: vi.fn((id: string) => store.activate(id)),
+    rename: vi.fn((id: string, title: string) => store.rename(id, title)),
   };
   const designer = {
     openCreate: vi.fn(async (i: { tabId: string }) => void log.push(`create:${i.tabId}`)),
     openAlter: vi.fn(async (i: { tabId: string }) => void log.push(`alter:${i.tabId}`)),
+    findAlter: vi.fn((): string | null => null),
+    ids: vi.fn((): string[] => []),
     requestFocus: vi.fn((tabId: string, field: string) => void log.push(`focus:${tabId}:${field}`)),
   };
   const deps = {
@@ -138,7 +148,7 @@ describe("designer-open", () => {
     for (const mode of ["drop", "rename"] as const) {
       const { opener, deps, store } = setup(focused);
       await opener.open("seq", mode);
-      expect(deps.notify).toHaveBeenCalledWith(tdes.open.none, "info");
+      expect(deps.notify).toHaveBeenCalledWith(tdes.open.rowInTable, "info");
       expect(deps.openDrop).not.toHaveBeenCalled();
       expect(deps.connect).not.toHaveBeenCalled();
       expect(store.state.designers).toHaveLength(0);
@@ -224,5 +234,61 @@ describe("designer-open", () => {
     expect(opener.databaseName("S1", 5)).toBeNull();
     await opener.open("seq", "edit");
     expect(opener.databaseName("S1", 5)).toBe("app");
+  });
+});
+
+const tableTarget = (focus: DdlTarget["focus"]): DdlTarget => ({
+  serverId: "S1", databaseOid: 5, object: { kind: "table", oid: 500 }, create: null, focus, refreshNodeId: "tbl",
+});
+
+describe("designer-open Task 4", () => {
+  it("kolon düğümünden edit: tablo sekmesi açılır ve requestFocus(id, 'column:3')", async () => {
+    const { opener, store, designer } = setup(tableTarget({ kind: "column", id: 3 }));
+    await opener.open("col", "edit");
+    const tab = store.state.designers[0];
+    expect(designer.openAlter).toHaveBeenCalledTimes(1);
+    expect(designer.requestFocus).toHaveBeenCalledExactlyOnceWith(tab.id, "column:3");
+  });
+
+  it("kısıt odağı mevcut sekmede: yeni sekme açmadan activate + requestFocus('constraint:40')", async () => {
+    const { opener, store, designer, tabs } = setup(tableTarget({ kind: "constraint", id: 40 }));
+    designer.findAlter.mockReturnValue("D9");
+    await opener.open("tbl", "edit");
+    expect(tabs.activate).toHaveBeenCalledExactlyOnceWith("D9");
+    expect(designer.requestFocus).toHaveBeenCalledExactlyOnceWith("D9", "constraint:40");
+    expect(tabs.openDesigner).not.toHaveBeenCalled();
+    expect(store.state.designers).toHaveLength(0);
+  });
+
+  it("findAlter eşleşirse (create'ten dönüşen sekme) openDesigner çağrılmaz, activate edilir", async () => {
+    const { opener, designer, tabs } = setup(objectTarget);
+    designer.findAlter.mockReturnValue("D1");
+    await opener.open("seq", "edit");
+    expect(designer.findAlter).toHaveBeenCalledWith("S1", 5, objectTarget.object);
+    expect(tabs.activate).toHaveBeenCalledWith("D1");
+    expect(tabs.openDesigner).not.toHaveBeenCalled();
+    expect(designer.openAlter).not.toHaveBeenCalled();
+  });
+
+  it("focus hedefinde drop/rename: tdes.open.rowInTable bildirimi, bağlanma yok, sekme yok", async () => {
+    for (const mode of ["drop", "rename"] as const) {
+      const { opener, deps, store } = setup(tableTarget({ kind: "column", id: 1 }));
+      await opener.open("col", mode);
+      expect(deps.notify).toHaveBeenCalledWith(tdes.open.rowInTable, "info");
+      expect(deps.connect).not.toHaveBeenCalled();
+      expect(store.state.designers).toHaveLength(0);
+    }
+  });
+
+  it("context: tablo düğümünden ve kolon düğümünden açılışta tableNodeId = tablo düğümü; databaseNodeId = db", async () => {
+    for (const nodeId of ["tbl", "col"]) {
+      const { opener, store } = setup(tableTarget(nodeId === "col" ? { kind: "column", id: 3 } : null));
+      await opener.open(nodeId, "edit");
+      expect(opener.context(store.state.designers[0].id)).toEqual({ databaseNodeId: "db", tableNodeId: "tbl" });
+    }
+    const { opener, store } = setup(objectTarget);
+    await opener.open("seq", "edit");
+    expect(opener.context(store.state.designers[0].id)).toEqual({ databaseNodeId: "db", tableNodeId: null });
+    expect(opener.context("yok")).toBeNull();
   });
 });
