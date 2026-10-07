@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 6: Veri Düzenleyici (View/Edit Data) Tasarımı
 
 - **Tarih:** 2026-10-07
-- **Durum:** Taslak (Plan 16 arka ucu yazıldı; Plan 17 ön yüzü kalan)
+- **Durum:** Plan 16 arka ucu uygulandı; Plan 17 ön yüzü kalan
 - **Kapsam:** Object Explorer'dan bir tablonun/görünümün verisini ızgarada açma; hücre düzenleme, satır ekleme ve silme; değişikliklerin **birincil anahtara (ya da benzersiz indekse)** göre `INSERT`/`UPDATE`/`DELETE` ifadelerine çevrilip **kaydetmeden önce gösterilmesi**; korumalı, tek transaction'lı, bayat-veri denetimli uygulama.
 - **Önceki alt projeler:** Object Explorer (Plan 1–4), Query Tool (5–6), Editör zekâsı (7), Dashboard (8–9), Nesne diyalogları (10–15) — hepsi `main`'de. Query Tool spec'i §1.4: "Sonuç ızgarasında hücre düzenleme (veri düzenleyici ayrı alt proje)".
 - **Teslim planları:** Plan 16 (arka uç: kaynak yükleme, SELECT üretici, değişiklik planlayıcı, kapılı uygulama, Tauri komutları) → Plan 17 (ön yüz: veri sekmesi, düzenlenebilir ızgara, değişiklik paneli, Explorer eylemi).
@@ -110,3 +110,29 @@ Hedef çözümü için mevcut `ddl_target_of` (nesne düğümü → `ObjectRef` 
 
 - **Plan 16 (arka uç):** model + hata kodları + `SessionProfile::Data` → kaynak yükleyici → SELECT üretici → plan üretici → yönetici/uygulama → Tauri komutları → Docker matrisi/belgeler.
 - **Plan 17 (ön yüz):** sekme türü ve Explorer eylemi (ana paket telafisiyle) → düzenleme modeli (saf) → ızgara düzenleme katmanı → değişiklik paneli/uygulama akışı → çakışma/hata durumları → smoke listesi.
+
+---
+
+## 7. Plan 16 sözleşme notları (Plan 17 için)
+
+Teslim edilen arka uç davranışı (kodla doğrulanmış); Plan 17 bunlara göre yazılır.
+
+**Kaynak ve salt okunurluk.** `DataSource` (`data_load`) kolonları (`insertable`/`updatable`/`generated`/`identity`), seçilen anahtarı (`DataKey.columns` sırası belirleyicidir), yetkileri ve `fingerprint`'i taşır. `editable` yazmaya izin verilip verilmediğidir; `false` ise `readOnlyReason` gerekçedir (anahtar yok, yetki yok, görünüm/MV/yabancı tablo, sistem nesnesi). `locked` sunucu kilidinin durumunu yansıtır; kilitli sunucuda yazma `locked` hatasıyla reddedilir (kilit koruma, güvenlik sınırı değil). `fingerprint` süreç içidir (`DefaultHasher`, derlemeler arasında kararlı değil): asla kalıcılaştırılmaz.
+
+**Okuma.** `data_select` SELECT SQL'ini elde etmenin tek yoludur (istemci SQL üretmez). `DataSelect.versionIndex` sürüm kolonunun indeksidir ve sürüm kolonu **son kolondur**; `hasVersion` view/matview/foreign tabloda `false`'tur (sürüm kolonu yok). Sürüm kolonu `xmin::pg_catalog.text`'tir (search_path'e dayanıklılık için her yerde nitelikli). Filtre/sıralama hataları `DataSelectResult::Invalid` olarak döner (alan hatası olarak gösterilir). Filtrede `\` için `E'…'` gerekir.
+
+**Değişiklik anahtarı ve sürüm.** `RowChange` anahtarı `DataKey.columns` sırasıyla ve **özgün okunan** (düzenlemeden önceki) değerlerle verilir. `version` = okunan `xmin` metnidir (Update/Delete). Çakışma (`row_conflict`) sonrasında arayüz satırı/ızgarayı **yeniden yükler**; sessizce yeniden denemez. Aynı değerle eşzamanlı yazma da çakışma sayılır (xmin değişir).
+
+**Uygulama sonucu.** `DataOutcome.results[i].returned` yazılan satırın RETURNING değerleridir (kolonlar + **son eleman `xmin`**); arayüz ızgarayı bununla tazeler, yeniden sorgulamaz. İstisna: **bölümlü ana tabloya INSERT** PG 12–18'de `RETURNING xmin` veremez (0A000); bu durumda sürüm yalnızca bu durum için `(txid_current() % 4294967296)::text` olur (başarısızlıkta güvenli tarafta kalır: sonraki UPDATE çakışma verir ve yeniden yükleme ister). `CellValue::Default` UPDATE'te de serbesttir (`SET c = DEFAULT`), üretilmiş/ALWAYS-kimlik/güncellenemez kolonlar hariç.
+
+**Önizleme.** `PlanView.statements[].sql` **değer içerir**; arayüz uzun değerleri kısaltarak göstermelidir. Önizleme değerleri olduğu gibi çizer: bidi ve denetim karakterleri **görünür** gösterilmelidir (Plan 17). Önizleme hücre değerlerini günlüğe yazmaz.
+
+**Hata kodları.** `locked`, `confirmation_required`, `plan_changed`, `invalid_def`, `row_conflict`; ayrıca PG hataları olduğu gibi geçer (42501 için özel ipucu eklenmedi). `invalid_def` yol alanları: `changes`, `changes[i].key`, `changes[i]…` ve `order` (8'den fazla sıralama anahtarı); Plan 17 bunları eşlemelidir. Salt okunur kaynakta boş değişiklik listesi `object` hatası verir. SQLSTATE'siz COMMIT hatası `unknown_outcome` olarak bildirilir (sonuç bilinmiyor; kullanıcı yeniden yüklemelidir).
+
+**Yaşam döngüsü.** `data_cancel` → `DataManager::cancel` **async** ve `Result` döner (komut await eder). Üretimde Safe plan bile `confirmed` ister; `expectedHash` plan değişirse `plan_changed`.
+
+**Bilinen sınırlar.** Float anahtar + PG 10–11'de `extra_float_digits` (anahtar metni yuvarlanabilir); yalnız kolon düzeyi UPDATE yetkisi `NoPrivilege` sayılır (tablo düzeyi `has_table_privilege`); PG 18 `NOT NULL NOT VALID` sınanmadı (satır sayısı korumasıyla güvenli tarafta); `unknown_outcome` yolu Docker'da sınanmadı; src-tauri testkit `fixture()` yalnız ilk `PGT_TEST_URLS` adresini kullanır.
+
+**Ana paket bütçesi.** Ana `index-*.js` tavanı **232,805 B**. Veri sekmesi kodu tembel parçadadır; ana pakete yalnızca sekme türü, eylem kimliği ve menü metni girer; her bayt başka yerden telafi edilir (Plan 15'teki `strings-editor.ts` kalıbı).
+
+**Backlog.** Anahtarsız düzenleme, kullanıcı seçimli anahtar, güncellenebilir view, `OVERRIDING` (kimlik), büyük nesne düzenleyici.

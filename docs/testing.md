@@ -355,3 +355,15 @@ ile erişilir (bu CodeMirror sürümünde `cmView` değil `cmTile`); büyük bel
 `Input.insertText` çok satırlı metni satır satır işler ve belge boyutunun karesiyle yavaşlar (293 KB için 23 sn). `window.__TAURI_INTERNALS__.invoke`
 sarmalanamaz (Tauri'ye yazılamaz görünüyor); IPC sürelerini `window.fetch` (`ipc.localhost/<komut>`) sarmalayarak ölçün. Ctrl+Shift+F için
 `Input.dispatchKeyEvent` `modifiers: 10` (Ctrl 2 + Shift 8), `key: "F"`. Ölçüm betikleri depoda değildir.
+
+## Veri düzenleyici testleri (Plan 16)
+
+Arka uç `crates/pgt-ddl/src/data` altındadır; saf testler (insta anlık görüntüleri: `src/data/snapshots`) sunucusuzdur, Docker testleri `PGT_TEST_URLS` ister ve `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf` ile PG 10–18'de koşar (sürüme bağlı adımlar atlanır: üretilmiş kolon PG 12+, bölümlü PK PG 11+).
+
+| Dosya | Kapsam |
+|---|---|
+| `crates/pgt-ddl/src/data/{plan,select,source,model}.rs` (birim) | Plan üretici (INSERT/UPDATE/DELETE, DEFAULT/NULL, hostile değerler, risk), SELECT üretici, anahtar seçimi, model JSON/özel `Debug` |
+| `crates/pgt-ddl/tests/data_roundtrip.rs` | Kaynak yükleme (PK/benzersiz/anahtarsız/bölümlü/üretilmiş/kimlik/yetkisiz rol) ve tür gidiş-dönüşleri |
+| `crates/pgt-ddl/tests/data_manager.rs` | `DataManager`: bayat `xmin` -> `row_conflict`, kısıt/tetikleyici -> tam geri alma, kilit zaman aşımı, iptal, üretim/kilit kapıları, bölümlü INSERT sürümü |
+| `crates/pgt-ddl/tests/logging.rs` | Hücre/anahtar değerlerinin günlüğe düşmediği (yakalama testi) |
+| `src-tauri` (data komutları) | `data_load/select/preview/apply/cancel` uçtan uca (testkit `fixture()` yalnız ilk URL'yi kullanır) |
