@@ -372,7 +372,8 @@ kullanıcı işaretlemeli. Dashboard bağlantıları sunucuda `application_name 
 
 Plan 13 Task 1: index-*.js = 233088 B (taban 233733 B; tavan 233088 B)
 
-Plan 13 sonu: index-*.js = 233.088 B; TableForm-*.js = 81.467 B (index.html yalnızca solid/web/Icon parçalarını önyükler; Table metinleri ana pakette yok).
+Plan 13 sonu: index-*.js = 233088 B; TableForm-*.js = 81467 B (index.html yalnızca solid/web/Icon parçalarını önyükler; Table metinleri ana pakette yok).
+
 Notlar: Birimler — Plan 2, Plan 6 ve Plan 7 satırlarının bellek ve exe/paket değerleri `measure.ps1`/bayt sayısından geldiği için başlıktaki "MB" orada MiB'dir (Plan 6: 3,56 / 76,1 / 109,1 / 7,4 MiB; Plan 7: exe 14,19 / 77,5 / 113,2 / 7,4 MiB) (1 MiB = 1.048.576 bayt); Plan 1 satırının birimi belirsiz kaynaktandır (bkz. `docs/performance.md` "Birimler"). Plan 2 satırı `scripts/measure.ps1 -Runs 5` ile ölçüldü (8 sn boşta, sunucu yok, seçilen WebView2/tokio ayarlarıyla); yöntem ve denenen ayarlar `docs/performance.md`'de. Plan 1 satırı: ölçüm `target/release/pg-tools.exe` doğrudan çalıştırılarak yapıldı (kurulum yapılmadı); boşta 5 sn, sunucu bağlı değil. Toplam bellek, WebView2 alt süreçleri dahil 7 sürecin çalışma kümesi toplamıdır (paylaşılan sayfalar tekrar sayıldığından özel bellek ≈191 MB). Açılış süresi `MainWindowHandle` oluşana kadar geçen süredir; içerik çizimi dahil olmayabilir. Yukarıdaki kutucuklar GUI üzerinden elle uygulanmadı; sürüm öncesi işaretlenmelidir.
 
 ## Nesne diyalogları: Table arka ucu (Plan 12)
@@ -410,7 +411,7 @@ Not: serbest SQL alanlarında (CHECK, DEFAULT, indeks koşulu vb.) sıradan `'�
 - [ ] Kolon ekle: nullable → Güvenli; NOT NULL varsayılansız → Yıkıcı notu; boş durum metni görünür. **[—]**
 - [ ] Kolon yeniden adlandır → PK/UNIQUE/FK/bölüm anahtarı kolon listeleri birlikte güncellenir; önizlemede `RENAME COLUMN`, kısıt DROP+ADD yok; yazarken başka kolonun adına geçici denk gelmek (ve Tab ile çıkıp dönüp yazmaya devam etmek) o kolonun kısıt başvurularını taşımaz. **[—]**
 - [ ] Tip değişimi → Ayrıntılar açılır, USING alanı + "tablo yeniden yazılır" notu, risk "Veri kaybı olabilir"; tip geri alınınca USING gizlenir ve temizlenir. Dokunulmamış yüklü egzotik tip (`geometry(Point,4326)`, tırnaklı tip) uyarı vermez; düzenlenince dilbilgisi uyarısı çıkar. **[—]**
-- [ ] Kolon sil → "Silinecek kolonlar" + Geri ekle (özgün konumuna döner, önizleme "Değişiklik yok"; yeniden adlandırılıp silinip geri alınan kolonda da); üretimde ad yazma onayı. Silinen kolona başvuran kısıtta uyarı rengiyle sarkan başvuru metni (kolon geri gelince kalkar) + önizleme uyarısı. **[—]**
+- [ ] Kolon sil → "Silinecek kolonlar" + Geri al (özgün konumuna döner, önizleme "Değişiklik yok"; yeniden adlandırılıp silinip geri alınan kolonda da); üretimde ad yazma onayı. Silinen kolona başvuran kısıtta uyarı rengiyle sarkan başvuru metni (kolon geri gelince kalkar) + önizleme uyarısı. **[—]**
 - [ ] Değer kaynağı `<select>` satır kayması: üretilmiş kolonu ve ardındaki sıradan kolonu olan tabloda üretilmiş kolonu sil → alttaki kolon yalnızca yok/default/identity seçeneklerini listeler ve doğru değeri gösterir; tersi (üstteki sıradan kolonu silmek) de. **[—]**
 - [ ] Yüklü kolonda GENERATED seçeneği sunulmaz (ipucu); yüklü üretilmiş kolonda yalnızca "Yok" (DROP EXPRESSION notu); NOT NULL aç/kapa; DEFAULT/IDENTITY değişimleri. **[—]**
 - [ ] Ayrıntılarda collation/yorum/USING hatası sunucudan gelince o satırın ayrıntıları kendiliğinden açılır. **[—]**
@@ -419,7 +420,8 @@ Not: serbest SQL alanlarında (CHECK, DEFAULT, indeks koşulu vb.) sıradan `'�
 - [ ] Yüklü kartta tür sabit + ipucu. Kısıt ekle (Yıkıcı değil, "tabloyu tarar" notu); yeni FK/CHECK için NOT VALID + ipucu (işaretlenince tarama notu gizlenir). **[—]**
 - [ ] Doğrulanmamış yüklü FK/CHECK: "doğrulanmamış" rozeti; Doğrula işaretlenince önizleme `VALIDATE CONSTRAINT`; yapısı da değiştiyse ipucu "yeniden eklenecek (işaretliyse doğrulanmış)". **[—]**
 - [ ] Kısıt yeniden adlandır → `RENAME CONSTRAINT`; yapısal değişiklik → DROP+ADD. **[—]**
-- [ ] Yüklü kısıt sil → "Silinecek kısıtlar", geri ekle → önizleme "Değişiklik yok"; yeni PK varken yüklü PK'yi geri ekle düğmesi tooltip'li kapalı; yüklü PK kolonu yeniden adlandırılıp PK silinip geri alınınca "Değişiklik yok" ve sarkan uyarı yok. **[—]**
+- [ ] Yüklü kısıt sil → "Silinecek kısıtlar", Geri al → önizleme "Değişiklik yok"; yeni PK varken yüklü PK'nin Geri al düğmesi tooltip'li kapalı; yüklü PK kolonu yeniden adlandırılıp PK silinip geri alınınca "Değişiklik yok" ve sarkan uyarı yok. **[—]**
+- [ ] PK'dan çıkan kolonun NOT NULL'ı geri döner: yüklü PK'ya nullable `code` kolonunu çip olarak ekle (Kolonlar'da NOT NULL işaretli + kilitli) → çipi çıkar → önizleme "Değişiklik yok" (`SET NOT NULL` yok). Ayrıca: PK'yı sil, yeni PK(code) ekle, çipi çıkar, yeni PK'yı sil, yüklü PK'yı Geri al → "Değişiklik yok". Kullanıcının kendi işaretlediği NOT NULL PK'dan çıkınca korunur. **[—]**
 - [ ] Sunucu hatası `constraints[i].columns[j]` ilgili çip/çiftin altında; satır silinince eski hatalar liste düzeyinde görünür. **[—]**
 - [ ] PG 18'de özel NOT NULL kısıtı ve EXCLUDE "Düzenlenmeyen kısıt ve özellikler" listesinde açıklamalarıyla; başka değişiklik uygulanınca korunur. **[—]**
 
@@ -427,6 +429,8 @@ Not: serbest SQL alanlarında (CHECK, DEFAULT, indeks koşulu vb.) sıradan `'�
 - [ ] Yeniden adlandır (başlık güncellenir, Tables yenilenir); kendine-başvuran FK'li tabloda yeniden adlandırma/şema taşıma FK hedefini önizlemede günceller (aradaki yazım adımları başka FK'nin hedefini değiştirmez). **[—]**
 - [ ] Şema taşı: eski ve — yüklüyse — yeni şemanın Tables koleksiyonu yenilenir; sahip; UNLOGGED ↔ LOGGED (yeniden yazma uyarısı); fillfactor set/boş; yorum; alter'da PARTITION BY salt okunur metin. **[—]**
 - [ ] Tablespace: yüklü değer yokken boş seçenek var, varken yok; `pg_default` seçilebilir; temizlenemez. **[—]**
+- [ ] Bölümlenmiş üst tablo (alter): kalıcılık ve fillfactor kapalı + ipucu ("kendi depolaması yoktur"); tablespace değişimi yalnızca yeni bölümlerin varsayılanı ipucuyla serbest. **[—]**
+- [ ] Bölümlenmiş create (Bölümleme yöntemi seçili): fillfactor boşken kapalı + ipucu (doluysa temizlenebilsin diye açık); tablespace listesinde `pg_default` kapalı + ipucu; UNLOGGED seçilebilir ama "PG 18+ hata" ipucu görünür. **[—]**
 - [ ] Uygulama sonrası tablonun açık Columns/Constraints/Indexes koleksiyonları yenilenir (yeni kolon Gezgin'de görünür). **[—]**
 
 ### Bölüm tablosu ve INHERITS
@@ -434,7 +438,7 @@ Not: serbest SQL alanlarında (CHECK, DEFAULT, indeks koşulu vb.) sıradan `'�
 
 ### Hata ve kilit durumları
 - [ ] `plan_changed`: sekme açıkken başka oturumda kolon ekle → Uygula → "Nesne değişti; yeniden yükleyin."; `lock table … access exclusive` + 1 sn lock_timeout → "Kilit beklerken zaman aşımı". **[—]**
-- [ ] Kilitli sunucu: form ve Uygula kapalı, önizleme serbest; kısıtlarda ekle/sil/geri ekle gizli, Düzenlenmeyenler listesi görünür; bağlantı kesilince salt okunur. **[—]**
+- [ ] Kilitli sunucu: form ve Uygula kapalı, önizleme serbest; kısıtlarda ekle/sil/Geri al gizli, Düzenlenmeyenler listesi görünür; bağlantı kesilince salt okunur. **[—]**
 
 ### Erişilebilirlik ve yerleşim
 - [ ] Kolonlar ızgarasında Tab sırası (ad → tip → NOT NULL → kaynak → ifade → Ayrıntılar → Sil); Ayrıntılar `aria-expanded`; çip çıkar düğmeleri etiketli; ekran okuyucu satır/kart adlarını okur. **[—]**
