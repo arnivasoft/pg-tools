@@ -45,7 +45,8 @@ export function defsEqual(a: ObjectDef, b: ObjectDef): boolean {
 
 // ---- Hata eşleme ----
 
-export interface FieldIssues { byPath: Map<string, string[]>; general: string[] }
+/** `generalPaths[i]`: `general[i]` iletisinin özgün yolu (ör. üst düzey `columns`; bölüm rozeti için). */
+export interface FieldIssues { byPath: Map<string, string[]>; general: string[]; generalPaths: string[] }
 
 /** `path` bu kökün kendisi ya da altı mı (`columns` ⊃ `columns[1].key`; `name` ⊅ `nameX`). */
 function under(path: string, root: string): boolean {
@@ -56,16 +57,18 @@ function under(path: string, root: string): boolean {
 export function groupIssues(errors: readonly FieldError[], knownPaths?: ReadonlySet<string>): FieldIssues {
   const byPath = new Map<string, string[]>();
   const general: string[] = [];
+  const generalPaths: string[] = [];
   for (const e of errors) {
     const known = !knownPaths || [...knownPaths].some((k) => under(e.path, k));
     if (e.path.startsWith("old.") || e.path === "columns" || !known) {
       general.push(e.message);
+      generalPaths.push(e.path);
       continue;
     }
     const list = byPath.get(e.path);
     if (list) list.push(e.message); else byPath.set(e.path, [e.message]);
   }
-  return { byPath, general };
+  return { byPath, general, generalPaths };
 }
 
 /** Tam yol + `path.`/`path[` altı (ör. `columns` → `columns[1].key` dahil); girdi sırası korunur. */

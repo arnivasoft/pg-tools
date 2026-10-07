@@ -7,7 +7,7 @@ import { defsEqual, groupIssues } from "./designer-model";
 import {
   addPartitionKey, addTableColumn, applySerialFix, columnDetailsHaveIssues, columnLockGate, removeColumnRestoringName, columnTypeWarning, primaryKeyMember, partitionColumnChoices, partitionKeyLabel, allowedValueSources, asTable, columnRefs, newColumn, originalColumn, removePartitionKey, removeTableColumn,
   removedColumns, renameTable, renameTableColumn, restoreColumn, rowOfFocus, sectionHasIssues, selfRefs, serialFix, storageGate, structureLocked,
-  switchPartitionKeyKind, tableEditPatch, tableSections, typeQueryOf, typeTextWarning, updatePartitionKey, updateTableColumn, usingVisible,
+  switchPartitionKeyKind, tableSections, typeQueryOf, typeTextWarning, updatePartitionKey, updateTableColumn, usingVisible,
   valueExpr, valueSourceOf, withCollation, withDataType, withPartitionStrategy, withValueExpr, withValueSource,
 } from "./table-model";
 
@@ -249,6 +249,13 @@ describe("odak / bölümler / genel", () => {
     // Üst-düzey `constraints` (ör. bölüm/kalıtımlı tablo kısıt farkı) Kısıtlar sekmesini işaretler, Genel'i değil.
     const top = groupIssues([{ path: "constraints", message: "m" }], new Set(["name", "constraints"]));
     expect([sectionHasIssues(top, "constraints"), sectionHasIssues(top, "general")]).toEqual([true, false]);
+    // m-4: üst-düzey `columns` (create'te kolon yok) genel şeride düşer ama Kolonlar sekmesini işaretler, Genel'i değil.
+    const cols = groupIssues([{ path: "columns", message: "En az bir kolon gerekli." }], new Set(["name", "columns"]));
+    expect(cols.general).toEqual(["En az bir kolon gerekli."]);
+    expect([sectionHasIssues(cols, "columns"), sectionHasIssues(cols, "general")]).toEqual([true, false]);
+    // Bilinmeyen yol / old. → Genel.
+    const unk = groupIssues([{ path: "old.name", message: "m" }, { path: "columns", message: "c" }], new Set(["name", "columns"]));
+    expect([sectionHasIssues(unk, "columns"), sectionHasIssues(unk, "general")]).toEqual([true, true]);
   });
   it("structureLocked: isPartition ya da inherits → true; create (original null) → false", () => {
     expect(structureLocked(T({ isPartition: true }))).toBe(true);
@@ -256,14 +263,12 @@ describe("odak / bölümler / genel", () => {
     expect(structureLocked(T())).toBe(false);
     expect(structureLocked(null)).toBe(false);
   });
-  it("asTable/tableEditPatch tür uyuşmazlığında değişmez", () => {
+  it("asTable tür uyuşmazlığında null", () => {
     const t = { kind: "table" as const, ...T() };
     expect(asTable(t)).toBe(t);
     expect(asTable(null)).toBeNull();
-    expect(tableEditPatch(t, { name: "x" })).toMatchObject({ kind: "table", name: "x" });
     const s = { kind: "schema" as const, name: "s", owner: null, comment: null };
     expect(asTable(s)).toBeNull();
-    expect(tableEditPatch(s, { name: "x" })).toBe(s);
   });
 });
 

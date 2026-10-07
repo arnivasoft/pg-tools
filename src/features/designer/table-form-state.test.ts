@@ -268,4 +268,77 @@ describe("createTableFormState", () => {
     expect(defsEqual(d as ObjectDef, loaded)).toBe(true);
     dispose();
   });
+  // Final inceleme I-1: PK'nın zorladığı NOT NULL, kolon PK'dan çıkınca eski değerine döner (dene-geri al = değişiklik yok).
+  async function pkSetup(loaded: ObjectDef) {
+    const s = await setup(loaded);
+    const K = await import("./table-constraints");
+    const M = await import("./table-model");
+    const { defsEqual } = await import("./designer-model");
+    const [st, dispose] = s.solid.createRoot((d) => [s.createTableFormState(s.props), d] as const);
+    const editC = (i: number, f: (c: ConstraintDef) => ConstraintDef) => st.editor.edit((x) => K.withPrimaryKeyNotNull(K.updateConstraint(x, i, f)));
+    const notNull = () => (s.draft() as TableDef).columns.map((c) => c.notNull);
+    return { s, K, M, st, dispose, editC, notNull, same: () => defsEqual(s.draft()!, loaded) };
+  }
+  const orders = () => T({ name: "orders", columns: [{ ...col("id", 1), notNull: true }, col("code", 2)], constraints: [pkC(["id"], 100), uqC(["code"], 101)] });
+
+  it("final I-1 S44: yüklü PK'ya nullable kolon ekle-çıkar → NOT NULL geri döner, taslak yüklenenle aynı", async () => {
+    const loaded = orders();
+    const t = await pkSetup(loaded);
+    t.editC(0, (c) => t.K.addConstraintColumn(c, "columns", "code"));
+    expect(t.notNull()).toEqual([true, true]);
+    t.editC(0, (c) => t.K.removeConstraintColumn(c, "columns", 1));
+    expect(t.notNull()).toEqual([true, false]);
+    expect(t.same()).toBe(true);
+    t.dispose();
+  });
+
+  it("final I-1 S42: PK sil, yeni PK(code), çipi çıkar, yeni PK'yı sil, yüklü PK'yı geri al → değişiklik yok", async () => {
+    const loaded = orders();
+    const original = structuredClone(loaded) as TableDef;
+    const t = await pkSetup(loaded);
+    t.st.editor.editSnap((d, snap) => t.K.removeConstraintSnap(d, 0, snap));
+    t.st.editor.editSnap((d, snap) => t.K.addConstraintSnap(d, "primary_key", snap));
+    t.editC(1, (c) => t.K.addConstraintColumn(c, "columns", "code"));
+    expect(t.notNull()).toEqual([true, true]);
+    t.editC(1, (c) => t.K.removeConstraintColumn(c, "columns", 0));
+    expect(t.notNull()).toEqual([true, false]);
+    t.editC(1, (c) => t.K.addConstraintColumn(c, "columns", "code")); // yeniden ekle → kart silinince de geri dönmeli
+    t.st.editor.editSnap((d, snap) => t.K.removeConstraintSnap(d, 1, snap));
+    expect(t.notNull()).toEqual([true, false]);
+    t.st.editor.editSnap((d, snap) => t.K.restoreConstraintWithPk(d, original, 100, snap));
+    expect(t.same()).toBe(true);
+    t.dispose();
+  });
+
+  it("final I-1: yeni kolon PK'ya eklenip çıkarılınca NOT NULL false'a döner; kullanıcının işaretlediği NOT NULL korunur", async () => {
+    const t = await pkSetup(T({ name: "n", columns: [col("a", 1)], constraints: [] }));
+    t.st.editor.edit(t.M.addTableColumn);
+    t.st.editor.edit((x) => t.M.updateTableColumn(x, 1, (c) => ({ ...c, name: "n1", dataType: "integer" })));
+    t.st.editor.edit(t.M.addTableColumn);
+    t.st.editor.edit((x) => t.M.updateTableColumn(x, 2, (c) => ({ ...c, name: "n2", dataType: "integer", notNull: true }))); // kullanıcı seçimi
+    t.st.editor.editSnap((d, snap) => t.K.addConstraintSnap(d, "primary_key", snap));
+    for (const n of ["n1", "n2", "a"]) t.editC(0, (c) => t.K.addConstraintColumn(c, "columns", n));
+    expect(t.notNull()).toEqual([true, true, true]);
+    t.editC(0, (c) => t.K.removeConstraintColumn(c, "columns", 0)); // n1 çıkar
+    expect(t.notNull()).toEqual([true, false, true]);
+    t.st.editor.editSnap((d, snap) => t.K.removeConstraintSnap(d, 0, snap)); // PK sil: a (yüklü, zorlanmış) false'a, n2 (kullanıcı) true kalır
+    expect(t.notNull()).toEqual([false, false, true]);
+    // Yeni kolon silinince sıralar kayar: n2 zorlanmış değil, n1 silinirse kayıt yine doğru kolona ait.
+    t.st.editor.editSnap((d, snap) => t.K.addConstraintSnap(d, "primary_key", snap));
+    t.editC(0, (c) => t.K.addConstraintColumn(c, "columns", "n1"));
+    t.st.editor.edit((x) => t.M.removeTableColumn(x, 2)); // n2 silinir (n1 zorlanmış kalır)
+    t.editC(0, (c) => t.K.removeConstraintColumn(c, "columns", 0));
+    expect(t.notNull()).toEqual([false, false]);
+    t.dispose();
+  });
+
+  it("final I-1: yeniden yükleme zorlanmış kaydını sıfırlar (yüklenen NOT NULL kolon PK'dan çıkınca NOT NULL kalır)", async () => {
+    const t = await pkSetup(orders());
+    t.editC(0, (c) => t.K.addConstraintColumn(c, "columns", "code"));
+    // Uygulama sonrası yeniden yükleme: code artık yüklü NOT NULL.
+    t.s.setDraft(T({ name: "orders", columns: [{ ...col("id", 1), notNull: true }, { ...col("code", 2), notNull: true }], constraints: [pkC(["id", "code"], 100)] }));
+    t.editC(0, (c) => t.K.removeConstraintColumn(c, "columns", 1));
+    expect(t.notNull()).toEqual([true, true]);
+    t.dispose();
+  });
 });

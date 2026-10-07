@@ -7,7 +7,7 @@ import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import type { DesignerController, DesignerModel } from "./designer-controller";
 import type { FormProps } from "./FormParts";
-import { createSnapTracker, type SelfSnap, type WithSnap } from "./table-constraints";
+import { NO_PK_FORCED, createSnapTracker, reconcilePrimaryKeyNotNull, type PkForced, type SelfSnap, type WithSnap } from "./table-constraints";
 import { asTable, columnRefs, removeColumnRestoringName, renameTableColumn, rowOfFocus, type ColumnRef, type TableDraft, type TableSection } from "./table-model";
 
 /** Kolon/kısıt bölümüne odak: `index === null` → satır bulunamadı (şerit gösterilir). `seq` her istekte değişir. */
@@ -77,19 +77,29 @@ export function createTableFormState(props: StateProps): TableFormState {
     return epochCount;
   };
 
+  // PRIMARY KEY'in zorladığı NOT NULL kaydı: her düzenlemeden sonra uzlaştırılır (PK'dan çıkan kolon eski değerine
+  // döner); taslak dışarıdan değiştiyse (yükleme/yeniden yükleme) sıfırlanır.
+  let forced: PkForced = NO_PK_FORCED;
   const editSnap = (fn: (d: TableDef, snap: SelfSnap) => WithSnap) => {
     let next: SelfSnap | null = null;
+    let nextForced: PkForced = NO_PK_FORCED;
     epoch();
+    if (!tracker.isOwn(current())) forced = NO_PK_FORCED;
     // Toplu: taslak ve anlık görüntü birlikte kaydedilmeden etkiler (odak dağıtıcının "dış değişim" denetimi) çalışmasın.
     batch(() => {
       props.designer.edit(props.tabId, (d: ObjectDef) => {
         if (d.kind !== "table") return d;
         const r = fn(d, tracker.snap());
+        const pk = reconcilePrimaryKeyNotNull(d, r.d, forced);
         next = r.snap;
-        return { ...r.d, kind: "table" };
+        nextForced = pk.forced;
+        return { ...pk.d, kind: "table" };
       });
       // Düzenleme reddedildiyse (salt okunur) geri çağrı çalışmaz: anlık görüntü değişmez.
-      if (next !== null) tracker.commit(next, current());
+      if (next !== null) {
+        tracker.commit(next, current());
+        forced = nextForced;
+      }
     });
   };
   const edit = (fn: (d: TableDef) => TableDef) =>

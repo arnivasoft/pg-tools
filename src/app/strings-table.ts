@@ -82,7 +82,6 @@ export const ttbl = {
     detailsToggle: (i: number, name: string) => `${i + 1}. kolonun ayrıntıları${name ? ` (${name})` : ""}`,
     collation: "Collation",
     collationPlaceholder: "varsayılan",
-    comment: "Yorum (COMMENT)",
     using: "Dönüşüm ifadesi (USING)",
     usingPlaceholder: "ör. amount::numeric",
     usingHint: "Tip değişimi tabloyu yeniden yazar; otomatik dönüşüm yoksa USING ifadesi gerekir. Boş = örtük dönüşüm.",

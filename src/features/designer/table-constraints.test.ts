@@ -4,11 +4,11 @@ import type { TableDef } from "../../ipc/bindings/TableDef";
 import { defsEqual } from "./designer-model";
 import {
   addConstraint, addConstraintColumn, addConstraintSnap, createSnapTracker, canRestoreConstraint, pointFkAtOther, pointFkAtSelf, removeConstraintSnap, restoreConstraintSnap, addFkPair, availableColumns, canAddPrimaryKey, constraintColumns, constraintLabel, danglingColumns,
-  newConstraint, notValidMode, originalConstraint, primaryKeyNullable, removeConstraint, removeConstraintColumn, removeFkPair,
+  newConstraint, notValidMode, originalConstraint, removeConstraint, removeConstraintColumn, removeFkPair,
   removedConstraints, restoreConstraint, supportsDeferrable, supportsNotValid, switchConstraintType, unsupportedKind, updateConstraint,
   updateFkPair, withDeferrable, withFkActions, withFkTarget, withInitiallyDeferred, withPrimaryKeyNotNull,
   columnChoices, constraintStructureChanged, fkRefColumnSource, switchConstraintTypeSnap, withFkTargetSnap,
-  fkSelfNameOnly, noInheritBlocked, restoreConstraintWithPk, scanNoteVisible, stableAddType,
+  fkSelfNameOnly, noInheritBlocked, restoreConstraintWithPk, scanNoteVisible, stableAddType, reconcilePrimaryKeyNotNull, NO_PK_FORCED,
 } from "./table-constraints";
 import type { SelfSnap } from "./table-constraints";
 import { columnRefs, newColumn, renameTable, renameTableColumn, selfRefs } from "./table-model";
@@ -195,9 +195,7 @@ describe("PRIMARY KEY notNull yardımcısı", () => {
     expect(e.columns.map((c) => c.notNull)).toEqual([true, false, true]);
     expect(e.columns[2]).toBe(d.columns[2]);
     expect(d.columns[0]!.notNull).toBe(false);
-    expect(primaryKeyNullable(d)).toEqual(["a"]);
     expect(withPrimaryKeyNotNull(e)).toBe(e);
-    expect(primaryKeyNullable(e)).toEqual([]);
     const none = T({ columns: [col("a")] });
     expect(withPrimaryKeyNotNull(none)).toBe(none);
     const blank = T({ columns: [col("")], constraints: [pk([""])] });
@@ -514,5 +512,38 @@ describe("Task 7 inceleme düzeltmeleri", () => {
     expect(scanNoteVisible("alter", uq(["a"]))).toBe(true);
     expect(scanNoteVisible("create", chk())).toBe(false);
     expect(scanNoteVisible("alter", chk(5))).toBe(false);
+  });
+});
+
+describe("reconcilePrimaryKeyNotNull (final inceleme I-1)", () => {
+  it("S44 bileşimi: PK'ya ekle (zorlanır, kaydedilir) → çıkar (false'a döner) → yüklenenle aynı", () => {
+    const o = T({ columns: [col("id", 1, true), col("code", 2)], constraints: [pk(["id"], 100)] });
+    const step = (before: TableDef, f: (c: ConstraintDef) => ConstraintDef, forced = NO_PK_FORCED) =>
+      reconcilePrimaryKeyNotNull(before, withPrimaryKeyNotNull(updateConstraint(before, 0, f)), forced);
+    const a = step(o, (c) => addConstraintColumn(c, "columns", "code"));
+    expect(a.d.columns.map((c) => c.notNull)).toEqual([true, true]);
+    expect(a.forced).toEqual({ loaded: [2], fresh: [] });
+    const b = step(a.d, (c) => removeConstraintColumn(c, "columns", 1), a.forced);
+    expect(defsEqual({ ...b.d, kind: "table" }, { ...o, kind: "table" })).toBe(true);
+    expect(b.forced).toEqual({ loaded: [], fresh: [] });
+    // Kayıt olmadan (ör. yüklenen NOT NULL) çıkarılan kolon NOT NULL kalır; kimlik kolonu hiç zorlanmış sayılmaz.
+    const c = step(o, (k) => removeConstraintColumn(k, "columns", 0));
+    expect(c.d.columns[0]!.notNull).toBe(true);
+    const ident = T({ columns: [{ ...col("i", 1, true), identity: "always" }], constraints: [pk(["i"], 1)] });
+    expect(reconcilePrimaryKeyNotNull(ident, ident, { loaded: [1], fresh: [] }).forced.loaded).toEqual([]);
+  });
+  it("değişiklik yoksa aynı nesne; yeni kolon sıraları silmede hizalanır", () => {
+    const d = T({ columns: [col("a"), col("b"), col("c")], constraints: [pk(["c"])] });
+    const r = reconcilePrimaryKeyNotNull(d, d, NO_PK_FORCED);
+    expect(r.d.columns.map((x) => x.notNull)).toEqual([false, false, true]);
+    expect(r.forced.fresh).toEqual([false, false, true]);
+    const same = reconcilePrimaryKeyNotNull(r.d, r.d, r.forced);
+    expect(same.d).toBe(r.d);
+    // a silinir: c'nin kaydı yeni sırasına (1) kayar; PK'dan çıkınca false.
+    const removed = { ...r.d, columns: r.d.columns.slice(1) };
+    const k = reconcilePrimaryKeyNotNull(r.d, removed, r.forced);
+    expect(k.forced.fresh).toEqual([false, true]);
+    const out = reconcilePrimaryKeyNotNull(k.d, { ...k.d, constraints: [] }, k.forced);
+    expect(out.d.columns.map((x) => x.notNull)).toEqual([false, false]);
   });
 });

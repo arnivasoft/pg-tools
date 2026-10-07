@@ -3,6 +3,7 @@
 // hepsi değişmezdir (girdi nesnesi değiştirilmez, sınır dışı indeks → aynı nesne). `oid` yalnızca yükleme kimliğidir:
 // istemci asla üretmez/değiştirmez.
 import { ttbl } from "../../app/strings-table";
+import type { ColumnDef } from "../../ipc/bindings/ColumnDef";
 import type { ConstraintDef } from "../../ipc/bindings/ConstraintDef";
 import type { ConstraintKind } from "../../ipc/bindings/ConstraintKind";
 import type { FkAction } from "../../ipc/bindings/FkAction";
@@ -162,22 +163,91 @@ export function restoreConstraint(d: TableDef, original: TableDef, oid: number):
 
 // ---- PRIMARY KEY üyelerinin NOT NULL'ı
 
+const pkMembers = (d: TableDef) => {
+  const out = new Set<string>();
+  for (const c of d.constraints) if (c.kind.type === "primary_key") for (const n of c.kind.columns) if (n !== "") out.add(n);
+  return out;
+};
+
+
 /**
  * PRIMARY KEY üyesi kolonları notNull=true yapar (arka uç aksi halde hata verir). Yalnızca değişen kolonlar yeni nesne
  * olur; değişen yoksa aynı nesne döner. Ad eşleşmesi çağrı anındaki adlarla yapılır (Task 5/6 ilgili düzenleme
  * sonrasında çağırır).
  */
 export function withPrimaryKeyNotNull(d: TableDef): TableDef {
-  const members = new Set<string>();
-  for (const c of d.constraints) if (c.kind.type === "primary_key") for (const n of c.kind.columns) if (n !== "") members.add(n);
+  const members = pkMembers(d);
   if (!d.columns.some((col) => !col.notNull && members.has(col.name))) return d;
   return { ...d, columns: d.columns.map((col) => (!col.notNull && members.has(col.name) ? { ...col, notNull: true } : col)) };
 }
 
-/** PRIMARY KEY üyesi olup notNull olmayan kolon adları (arayüz ipucu için). */
-export function primaryKeyNullable(d: TableDef): string[] {
-  const fixed = withPrimaryKeyNotNull(d);
-  return fixed === d ? [] : d.columns.filter((col, i) => !col.notNull && fixed.columns[i]!.notNull).map((col) => col.name);
+/**
+ * PRIMARY KEY'in zorladığı NOT NULL kaydı (formun düzenleyicisi tutar): yüklü kolonlar `attnum`, yeni kolonlar yeni
+ * kolonlar arasındaki sıralarıyla (yeni kolonlar yalnızca sona eklenir; sıraları silme dışında kaymaz). Zorlanan kolonun
+ * zorlamadan önceki değeri tanım gereği `false`'tur.
+ */
+export interface PkForced {
+  loaded: readonly number[];
+  fresh: readonly boolean[];
+}
+export const NO_PK_FORCED: PkForced = { loaded: [], fresh: [] };
+
+/** Yeni kolonların önceki → sonraki sıra eşlemesi: `from[k]` = sonraki k. yeni kolonun önceki sırası (eklenen → -1). */
+function alignFresh(before: TableDef, after: TableDef): number[] {
+  const b = before.columns.filter((c) => c.attnum === null);
+  const a = after.columns.filter((c) => c.attnum === null);
+  if (a.length >= b.length) return a.map((_, k) => (k < b.length ? k : -1));
+  // Silme: ilk ad farkından başlayarak (b.length - a.length) kolon düşmüştür.
+  const gone = b.length - a.length;
+  let at = 0;
+  while (at < a.length && a[at]!.name === b[at]!.name) at++;
+  return a.map((_, k) => (k < at ? k : k + gone));
+}
+
+/**
+ * Bir düzenlemenin ardından PRIMARY KEY üyelerinin NOT NULL'ını uzlaştırır:
+ * - üye olup NOT NULL olmayan kolon NOT NULL yapılır ve "zorlanmış" kaydedilir (düzenleme içinde `withPrimaryKeyNotNull`
+ *   ile zorlanmış — önceki değeri false, şimdi üye ve true — kolon da kaydedilir);
+ * - zorlanmış kolon artık üye değilse NOT NULL eski değerine (false) döner (kimlik kolonu hariç: hep NOT NULL);
+ *   böylece PK'ya ekle-çıkar ya da sil-geri al "değişiklik yok" planına döner.
+ * Kullanıcının kendi işaretlediği NOT NULL (üye değilken) zorlanmış sayılmaz. Değişen yoksa `after` aynen döner.
+ */
+export function reconcilePrimaryKeyNotNull(before: TableDef, after: TableDef, forced: PkForced): { d: TableDef; forced: PkForced } {
+  const members = pkMembers(after);
+  const from = alignFresh(before, after);
+  const beforeFresh = before.columns.filter((c) => c.attnum === null);
+  const loaded = new Set(forced.loaded);
+  const fresh: boolean[] = [];
+  const nextLoaded: number[] = [];
+  let ordinal = 0;
+  let changed = false;
+  const columns = after.columns.map((col) => {
+    let wasForced: boolean;
+    let prev: ColumnDef | undefined;
+    if (col.attnum === null) {
+      const k = from[ordinal++]!;
+      wasForced = k >= 0 && forced.fresh[k] === true;
+      prev = k >= 0 ? beforeFresh[k] : undefined;
+    } else {
+      const attnum = col.attnum;
+      wasForced = loaded.has(attnum);
+      prev = before.columns.find((c) => c.attnum === attnum);
+    }
+    let out = col;
+    let isForced = false;
+    if (col.identity !== null) isForced = false;
+    else if (members.has(col.name)) {
+      if (!col.notNull) {
+        out = { ...col, notNull: true };
+        isForced = true;
+      } else isForced = wasForced || (prev !== undefined && !prev.notNull);
+    } else if (wasForced && col.notNull) out = { ...col, notNull: false };
+    if (out !== col) changed = true;
+    if (col.attnum === null) fresh.push(isForced);
+    else if (isForced) nextLoaded.push(col.attnum);
+    return out;
+  });
+  return { d: changed ? { ...after, columns } : after, forced: { loaded: nextLoaded, fresh } };
 }
 
 // ---- kolon listeleri (PK/UNIQUE columns + include)

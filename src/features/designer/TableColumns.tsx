@@ -188,7 +188,10 @@ function ColumnRow(
   const exprNote = createUniqueId();
   const exprEscape = createUniqueId();
   const usingNote = createUniqueId();
+  const usingEscape = createUniqueId();
   const typeChangedId = createUniqueId();
+  const rowErrId = createUniqueId();
+  const notNullErr = () => exactIssues(props.issues, p("notNull")).length > 0;
 
   const [open, setOpen] = createSignal(false);
   // Hatası olan satırın ayrıntıları ve tipi yeni değişen yüklü kolonun USING alanı kendiliğinden açılır.
@@ -213,7 +216,7 @@ function ColumnRow(
       class="rounded border border-border p-2 outline-none focus:border-accent"
       classList={{ "bg-accent/10": selected() }}
     >
-      <fieldset class="flex min-w-0 flex-col gap-2">
+      <fieldset class="flex min-w-0 flex-col gap-2" aria-describedby={rowErrors().length > 0 ? rowErrId : undefined}>
         <legend class="sr-only">
           {t.row(i, c().name)}
         </legend>
@@ -301,7 +304,8 @@ function ColumnRow(
             <label class="inline-flex items-center gap-1.5 text-[13px]">
               <input
                 type="checkbox"
-                aria-describedby={c().identity !== null || pkMember() ? notNullHint : undefined}
+                aria-describedby={[c().identity !== null || pkMember() ? notNullHint : "", notNullErr() ? rowErrId : ""].filter(Boolean).join(" ") || undefined}
+                aria-invalid={notNullErr()}
                 disabled={ro() || c().identity !== null || pkMember()}
                 checked={c().notNull}
                 onChange={(ev) => {
@@ -371,7 +375,9 @@ function ColumnRow(
           </FieldRow>
         </Show>
         <Show when={rowErrors().length > 0}>
-          <span class="text-xs text-danger">{rowErrors().join(" ")}</span>
+          <span id={rowErrId} class="text-xs text-danger">
+            {rowErrors().join(" ")}
+          </span>
         </Show>
         <div id={detailsId} hidden={!open()} class="flex flex-col gap-2 border-t border-border pt-2">
           <FieldRow label={t.collation} path={p("collation")} issues={props.issues}>
@@ -412,7 +418,7 @@ function ColumnRow(
                     autocomplete="off"
                     spellcheck={false}
                     placeholder={t.usingPlaceholder}
-                    aria-describedby={[a.describedBy, usingNote].filter(Boolean).join(" ")}
+                    aria-describedby={[a.describedBy, usingNote, usingEscape].filter(Boolean).join(" ")}
                     aria-invalid={a.invalid}
                     disabled={ro()}
                     value={c().using ?? ""}
@@ -422,6 +428,9 @@ function ColumnRow(
                     }}
                   />
                   <FreeSqlNote id={usingNote} />
+                  <p id={usingEscape} class="text-xs text-muted">
+                    {t.escapeHint}
+                  </p>
                 </>
               )}
             </FieldRow>

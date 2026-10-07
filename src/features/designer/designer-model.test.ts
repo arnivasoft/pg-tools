@@ -123,7 +123,7 @@ describe("groupIssues / issuesFor", () => {
     expect(g.general).toEqual(["c"]);
   });
   it("groupIssues: boş giriş; girdiyi değiştirmez", () => {
-    expect(groupIssues([])).toEqual({ byPath: new Map(), general: [] });
+    expect(groupIssues([])).toEqual({ byPath: new Map(), general: [], generalPaths: [] });
     const input = [fe("name")];
     groupIssues(input, new Set());
     expect(input).toEqual([fe("name")]);

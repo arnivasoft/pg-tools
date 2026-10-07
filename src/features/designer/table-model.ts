@@ -18,10 +18,6 @@ export function asTable(d: ObjectDef | null): TableDraft | null {
   return d && d.kind === "table" ? d : null;
 }
 
-export function tableEditPatch(d: ObjectDef, patch: Partial<TableDef>): ObjectDef {
-  return d.kind === "table" ? { ...d, ...patch } : d;
-}
-
 /** Kolon/kısıt yapısı salt okunur mu (yüklenen tanıma göre): bölüm ya da kalıtımlı. */
 export function structureLocked(original: TableDef | null): boolean {
   return !!original && (original.isPartition || original.inherits);
@@ -398,7 +394,9 @@ export function tableSections(mode: "create" | "alter"): TableSection[] {
 export function sectionHasIssues(issues: FieldIssues, section: TableSection): boolean {
   const sec = (p: string): TableSection =>
     p.startsWith("columns[") ? "columns" : p === "constraints" || p.startsWith("constraints[") ? "constraints" : p.startsWith("partitionBy") ? "partitioning" : "general";
-  if (section === "general" && issues.general.length > 0) return true;
+  // Genel şeritteki iletiler: üst düzey `columns` (ör. create'te hiç kolon yok) Kolonlar sekmesini işaretler, ötekiler Genel'i.
+  if (section === "general" && issues.generalPaths.some((p) => p !== "columns")) return true;
+  if (section === "columns" && issues.generalPaths.includes("columns")) return true;
   return [...issues.byPath.keys()].some((p) => sec(p) === section);
 }
 

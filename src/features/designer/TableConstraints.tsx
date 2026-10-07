@@ -284,6 +284,9 @@ function ConstraintCard(props: CardProps) {
   const flagHintId = createUniqueId();
   const scanId = createUniqueId();
   const dangId = createUniqueId();
+  const cardErrId = createUniqueId();
+  /** Bayrak (onay kutusu) yolunda hata var mı; varsa kutu kart hata metnine bağlanır. */
+  const flagErr = (f: string) => exactIssues(props.issues, p(f)).length > 0;
   /** Kartta alanı görünmeyen yollar (kart, kimlik, bayraklar). */
   const cardErrors = () =>
     [`constraints[${i}]`, p("oid"), p("deferrable"), p("initiallyDeferred"), p("notValid"), p("nullsNotDistinct"), p("noInherit")].flatMap((x) =>
@@ -294,7 +297,7 @@ function ConstraintCard(props: CardProps) {
     <section
       ref={props.cardRef}
       aria-label={t.card(i, label())}
-      aria-describedby={dangling().length > 0 ? dangId : undefined}
+      aria-describedby={join(dangling().length > 0 && dangId, cardErrors().length > 0 && cardErrId)}
       tabIndex={-1}
       class="flex min-w-0 flex-col gap-2 rounded border border-border p-2 outline-none focus:border-accent"
       classList={{ "bg-accent/10": selected() }}
@@ -359,6 +362,7 @@ function ConstraintCard(props: CardProps) {
                 id={a.id}
                 class={inputClass + invalidClass(a.invalid)}
                 aria-describedby={a.describedBy}
+                aria-invalid={a.invalid}
                 disabled={ro()}
                 value={c().kind.type}
                 onChange={(ev) => {
@@ -388,6 +392,8 @@ function ConstraintCard(props: CardProps) {
           <label class="inline-flex items-center gap-1.5 text-[13px]">
             <input
               type="checkbox"
+              aria-invalid={flagErr("nullsNotDistinct")}
+              aria-describedby={flagErr("nullsNotDistinct") ? cardErrId : undefined}
               disabled={ro()}
               checked={c().kind.type === "unique" && (c().kind as { nullsNotDistinct: boolean }).nullsNotDistinct}
               onChange={(ev) => {
@@ -400,7 +406,7 @@ function ConstraintCard(props: CardProps) {
         </Show>
       </Show>
       <Show when={c().kind.type === "check"}>
-        <CheckBody {...props} c={c()} onEdit={editC} />
+        <CheckBody {...props} c={c()} onEdit={editC} errId={flagErr("noInherit") ? cardErrId : undefined} />
       </Show>
       <Show when={c().kind.type === "foreign_key"}>
         <FkBody {...props} c={c()} onEdit={editC} setTarget={setTarget} />
@@ -411,6 +417,8 @@ function ConstraintCard(props: CardProps) {
             <label class="inline-flex items-center gap-1.5 text-[13px]">
               <input
                 type="checkbox"
+                aria-invalid={flagErr("deferrable")}
+                aria-describedby={flagErr("deferrable") ? cardErrId : undefined}
                 disabled={ro()}
                 checked={c().deferrable}
                 onChange={(ev) => {
@@ -423,6 +431,8 @@ function ConstraintCard(props: CardProps) {
             <label class="inline-flex items-center gap-1.5 text-[13px]">
               <input
                 type="checkbox"
+                aria-invalid={flagErr("initiallyDeferred")}
+                aria-describedby={flagErr("initiallyDeferred") ? cardErrId : undefined}
                 disabled={ro() || !c().deferrable}
                 checked={c().initiallyDeferred}
                 onChange={(ev) => {
@@ -438,7 +448,8 @@ function ConstraintCard(props: CardProps) {
           <label class="inline-flex items-center gap-1.5 text-[13px]">
             <input
               type="checkbox"
-              aria-describedby={flagHintId}
+              aria-describedby={join(flagHintId, flagErr("notValid") && cardErrId)}
+              aria-invalid={flagErr("notValid")}
               disabled={ro()}
               checked={c().notValid}
               onChange={(ev) => {
@@ -456,7 +467,8 @@ function ConstraintCard(props: CardProps) {
           <label class="inline-flex items-center gap-1.5 text-[13px]">
             <input
               type="checkbox"
-              aria-describedby={flagHintId}
+              aria-describedby={join(flagHintId, flagErr("notValid") && cardErrId)}
+              aria-invalid={flagErr("notValid")}
               disabled={ro()}
               checked={!c().notValid}
               onChange={(ev) => {
@@ -482,7 +494,9 @@ function ConstraintCard(props: CardProps) {
         </p>
       </Show>
       <Show when={cardErrors().length > 0}>
-        <span class="text-xs text-danger">{cardErrors().join(" ")}</span>
+        <span id={cardErrId} class="text-xs text-danger">
+          {cardErrors().join(" ")}
+        </span>
       </Show>
     </section>
   );
@@ -578,7 +592,7 @@ function ColumnList(props: CardProps & { c: ConstraintDef; list: ColumnListName;
   );
 }
 
-function CheckBody(props: CardProps & { c: ConstraintDef; onEdit: (f: (k: ConstraintDef) => ConstraintDef) => void }) {
+function CheckBody(props: CardProps & { c: ConstraintDef; onEdit: (f: (k: ConstraintDef) => ConstraintDef) => void; errId: string | undefined }) {
   const t = ttbl.constraints;
   const i = props.index;
   const note = createUniqueId();
@@ -617,7 +631,8 @@ function CheckBody(props: CardProps & { c: ConstraintDef; onEdit: (f: (k: Constr
       <label class="inline-flex items-center gap-1.5 text-[13px]">
         <input
           type="checkbox"
-          aria-describedby={blocked() ? noInheritHint : undefined}
+          aria-describedby={join(blocked() && noInheritHint, props.errId)}
+          aria-invalid={props.errId !== undefined}
           disabled={ro() || blocked()}
           checked={k().noInherit}
           onChange={(ev) => {

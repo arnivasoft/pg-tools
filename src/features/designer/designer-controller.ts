@@ -145,7 +145,7 @@ interface Entry {
   setFocus: Setter<FocusRequest | null>;
 }
 
-interface LookupSlot { promise: Promise<LookupItem[]>; at: number | null }
+interface LookupSlot { promise: Promise<LookupItem[]>; at: number | null; session: boolean }
 
 /** Başarılı uygulama sonrası (create'te yalnızca `created` doluysa): açıcı başlığı ve ek ağaç yenilemelerini yapar. */
 export interface AppliedInfo {
@@ -634,7 +634,10 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const key = lookupKey(m.serverId, m.databaseOid, request);
     const hit = lookups.get(key);
     if (hit && (hit.at === null || SESSION_LOOKUPS.has(request.kind) || now() - hit.at < LOOKUP_TTL_MS)) return hit.promise;
-    const slot: LookupSlot = { promise: Promise.resolve([]), at: null };
+    // Süresi dolmuş kısa ömürlü girdiler (ör. her yazılan tip öneki, hedef tablo/kolon) eklemede atılır: harita büyümez.
+    const t = now();
+    for (const [k, v] of lookups) if (!v.session && v.at !== null && t - v.at >= LOOKUP_TTL_MS) lookups.delete(k);
+    const slot: LookupSlot = { promise: Promise.resolve([]), at: null, session: SESSION_LOOKUPS.has(request.kind) };
     slot.promise = api.ddlLookup(m.serverId, m.databaseOid, request).then(
       (items) => {
         slot.at = now();
@@ -680,6 +683,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     cancelApply,
     reload,
     lookup,
+    /** Önbellekteki lookup girdisi sayısı (test/teşhis). */
+    lookupCacheSize: () => lookups.size,
     serverChanged,
     serverSessionsClosed,
     objectDropped,

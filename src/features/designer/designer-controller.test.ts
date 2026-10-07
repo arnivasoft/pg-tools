@@ -1077,4 +1077,25 @@ describe("designer-controller Task 4: findAlter, onApplied, Table", () => {
     await s.ctl.lookup(id, { kind: "types", query: "int" } as LookupRequest);
     expect(s.api.ddlLookup).toHaveBeenCalledTimes(3);
   });
+
+  it("m-2: süresi dolmuş kısa ömürlü girdiler yeni eklemede atılır (yazılan önekler birikmez); oturum boyu girdiler kalır", async () => {
+    const s = setup();
+    const id = await openAlter(s);
+    await s.ctl.lookup(id, { kind: "roles" });
+    for (const q of ["i", "in", "int"]) await s.ctl.lookup(id, { kind: "types", query: q } as LookupRequest);
+    await s.ctl.lookup(id, { kind: "table_columns", schema: "public", table: "t" });
+    expect(s.ctl.lookupCacheSize()).toBe(5);
+    s.tick(29_999);
+    await s.ctl.lookup(id, { kind: "types", query: "inte" } as LookupRequest);
+    expect(s.ctl.lookupCacheSize()).toBe(6); // henüz süresi dolan yok
+    s.tick(1);
+    await s.ctl.lookup(id, { kind: "types", query: "integ" } as LookupRequest);
+    // i/in/int/table_columns düştü; roles (oturum), inte (taze) ve integ kaldı.
+    expect(s.ctl.lookupCacheSize()).toBe(3);
+    s.tick(3_600_000);
+    await s.ctl.lookup(id, { kind: "roles" }); // önbellekten: ekleme yok, temizlik yok
+    expect(s.ctl.lookupCacheSize()).toBe(3);
+    await s.ctl.lookup(id, { kind: "tables", schema: "public" });
+    expect(s.ctl.lookupCacheSize()).toBe(2); // roles + tables
+  });
 });
