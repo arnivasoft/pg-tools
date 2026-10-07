@@ -1,0 +1,15 @@
+---
+source: crates/pgt-ddl/src/build/role.rs
+expression: out
+---
+[Safe] CREATE ROLE app WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1 VALID UNTIL 'infinity'
+[Safe] ALTER ROLE app PASSWORD ********  -- Parola gizlendi; uygulamada girilen değer kullanılır.
+[Safe] GRANT "Alpha" TO app WITH ADMIN OPTION
+[Safe] GRANT pg_read_all_data TO app
+[Safe] GRANT zeta TO app
+[Safe] ALTER ROLE app SET search_path = '$user', 'public'
+[Safe] ALTER ROLE app SET work_mem = '64MB'
+[Safe] COMMENT ON ROLE app IS 'it''s'
+WARN: Parola sunucuya düz metin gider; log_statement ve pg_stat_statements açıksa sunucu günlüğüne düşebilir
+
+[Safe] CREATE ROLE r WITH NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1

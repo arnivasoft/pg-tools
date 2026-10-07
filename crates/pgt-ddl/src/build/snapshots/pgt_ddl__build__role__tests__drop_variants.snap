@@ -1,0 +1,5 @@
+---
+source: crates/pgt-ddl/src/build/role.rs
+expression: "render(&drop_with(&o(&role(\"r\")), DropOptions::default(), &ctx()).unwrap())"
+---
+[Destructive] DROP ROLE r  -- Rolün sahip olduğu nesne ya da yetki varsa başarısız olur (REASSIGN OWNED / DROP OWNED gerekir)

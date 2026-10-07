@@ -1,0 +1,17 @@
+---
+source: crates/pgt-ddl/src/build/role.rs
+expression: render(&p)
+---
+[Safe] ALTER ROLE app RENAME TO "Select"  -- MD5 ile saklanan parola ad değişince temizlenir (SCRAM etkilenmez)
+[Safe] ALTER ROLE "Select" WITH NOLOGIN CREATEDB CONNECTION LIMIT 10 VALID UNTIL 'infinity'  -- Mevcut oturumlar sürer; yeni girişler reddedilir
+[Safe] ALTER ROLE "Select" PASSWORD ********  -- Parola gizlendi; uygulamada girilen değer kullanılır.
+[Destructive] REVOKE ADMIN OPTION FOR adm FROM "Select"
+[Destructive] REVOKE old_grp FROM "Select"  -- Bu rolün yetkileri kaybolur
+[Safe] GRANT "keep" TO "Select" WITH ADMIN OPTION
+[Safe] GRANT new_grp TO "Select"
+[Safe] ALTER ROLE "Select" RESET timezone
+[Safe] ALTER ROLE "Select" SET app."user" = 'x'
+[Safe] ALTER ROLE "Select" SET work_mem = '2MB'
+[Safe] COMMENT ON ROLE "Select" IS 'yeni'
+WARN: MD5 ile saklanan parola ad değişince temizlenir (SCRAM etkilenmez)
+WARN: Parola sunucuya düz metin gider; log_statement ve pg_stat_statements açıksa sunucu günlüğüne düşebilir

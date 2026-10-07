@@ -12,6 +12,7 @@ pub mod extension;
 pub mod freesql;
 pub mod index;
 pub mod matview;
+pub mod role;
 pub mod schema;
 pub mod sequence;
 pub mod settings;
@@ -169,11 +170,6 @@ pub struct DropOptions {
     pub force: bool,
 }
 
-/// Task 4–5'in üreticileri gelene kadar yeni türlerin tek yer tutucu hatası.
-fn unsupported_kind() -> Vec<FieldError> {
-    vec![err("kind", "Bu tür henüz desteklenmiyor.")]
-}
-
 fn mismatch(old: &ObjectDef, new: &ObjectDef) -> Vec<FieldError> {
     vec![err(
         "kind",
@@ -192,7 +188,7 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::View(d) => view::validate(d, ctx),
         ObjectDef::MaterializedView(d) => matview::validate(d, ctx),
         ObjectDef::Database(d) => database::validate(d, ctx),
-        ObjectDef::Role(_) => unsupported_kind(),
+        ObjectDef::Role(d) => role::validate(d, ctx),
     }
 }
 
@@ -230,7 +226,9 @@ pub(crate) fn validate_identity(def: &ObjectDef) -> Vec<FieldError> {
         }
         // Veritabanı: görünümle aynı gerekçe (yüklü ad yalnızca `quote_ident` ile yerleşir; gevşek eski taraf).
         ObjectDef::Database(d) => check_old_ident("name", &d.name, &mut e),
-        ObjectDef::Role(d) => check_ident("name", &d.name, &mut e),
+        // Rol: görünümle aynı gerekçe (yüklü ad yalnızca `quote_ident` ile yerleşir; gevşek eski taraf). Yeni ad (create,
+        // rename hedefi) katıdır ve ayrılmış adlar (`public`, `none`, `pg_*`) reddedilir (`role::validate`/`alter`).
+        ObjectDef::Role(d) => check_old_ident("name", &d.name, &mut e),
     }
     e
 }
@@ -258,7 +256,7 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::View(d) => Ok(view::create(d)),
         ObjectDef::MaterializedView(d) => Ok(matview::create(d)),
         ObjectDef::Database(d) => Ok(database::create(d)),
-        ObjectDef::Role(_) => Err(unsupported_kind()),
+        ObjectDef::Role(d) => Ok(role::create(d)),
     }
 }
 
@@ -287,6 +285,11 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         // eski taraf ayar adları (RESET hedefi) gevşek.
         return database::alter(o, n, ctx);
     }
+    if let (ObjectDef::Role(o), ObjectDef::Role(n)) = (old, new) {
+        // Rol kendi doğrulamasını yapar: yalnızca değişen/yazılan alanlar (üyelik, ayar, süre sınırı) katı, eski taraf
+        // (ad, RESET hedefi ayar adları, REVOKE hedefi üyelik adları) gevşek.
+        return role::alter(o, n, ctx);
+    }
     checked(new, ctx)?;
     // Eski tanımdaki ad/şema da SQL'e girer (RENAME/ALTER hedefi); yalnızca kimlik alanları doğrulanır.
     let mut old_errs = validate_identity(old);
@@ -301,7 +304,6 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         (ObjectDef::Sequence(o), ObjectDef::Sequence(n)) => Ok(sequence::alter(o, n)),
         (ObjectDef::Extension(o), ObjectDef::Extension(n)) => extension::alter(o, n),
         (ObjectDef::Index(o), ObjectDef::Index(n)) => index::alter(o, n),
-        (ObjectDef::Role(_), ObjectDef::Role(_)) => Err(unsupported_kind()),
         _ => Err(mismatch(old, new)),
     }
 }
@@ -334,7 +336,8 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::MaterializedView(d) => Ok(matview::drop(d, cascade)),
         // Bağlı/bakım veritabanı koruması yöneticide (Task 8); şablon ve FORCE sürüm kapısı üreticide.
         ObjectDef::Database(d) => database::drop(d, o.force, ctx),
-        ObjectDef::Role(_) => Err(unsupported_kind()),
+        // DROP OWNED / REASSIGN OWNED otomatikleştirilmez (Karar 9).
+        ObjectDef::Role(d) => Ok(role::drop(d)),
     }
 }
 
@@ -545,14 +548,19 @@ mod tests {
     }
 
     #[test]
-    fn role_is_placeholder_for_now() {
+    fn role_is_wired() {
         let d = role("r");
-        let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
-        assert_eq!(validate(&d, &ctx())[0].path, "kind", "{d:?}");
-        assert_eq!(kind(create(&d, &ctx())), "kind");
-        assert_eq!(kind(alter(&d, &d, &ctx())), "kind");
-        assert_eq!(kind(drop(&d, false, &ctx())), "kind");
+        assert!(validate(&d, &ctx()).is_empty(), "{d:?}");
+        let p = create(&d, &ctx()).unwrap();
+        assert!(p.statements[0].sql.starts_with("CREATE ROLE r WITH NOLOGIN"));
+        assert!(p.statements[0].transactional);
+        assert!(alter(&d, &d, &ctx()).unwrap().statements.is_empty());
+        assert_eq!(drop(&d, false, &ctx()).unwrap().statements[0].sql, "DROP ROLE r");
         assert!(validate_identity(&d).is_empty(), "{d:?}");
+        // Ayrılmış ad yeni tarafta reddedilir; eski taraf boş adı `old.` önekiyle raporlar.
+        assert_eq!(validate(&role("pg_x"), &ctx())[0].path, "name");
+        assert_eq!(alter(&role(""), &d, &ctx()).unwrap_err()[0].path, "old.name");
+        assert_eq!(alter(&d, &database(), &ctx()).unwrap_err()[0].path, "kind");
         // Yeni tür ile mevcut tür arasındaki alter yine tür uyuşmazlığıdır.
         let e = alter(&view("public"), &matview(), &ctx()).unwrap_err();
         assert!(e[0].message.contains("uyuşmazlığı"), "{e:?}");
@@ -617,15 +625,17 @@ mod tests {
         m.schema = "information_schema".into();
         m.name = String::new();
         assert_eq!(paths(&ObjectDef::MaterializedView(m)), ["schema", "name"]);
-        assert_eq!(paths(&role("x\n")), ["name"]);
+        // Rol eski tarafı gevşek (veritabanı gibi): denetim karakteri serbest, NUL/boş red.
+        assert!(paths(&role("x\n")).is_empty());
+        assert_eq!(paths(&role("x\0")), ["name"]);
         // Veritabanı eski tarafı gevşek (görünüm gibi): yalnızca boş/NUL reddedilir.
         let ObjectDef::Database(mut d) = database() else { unreachable!() };
         d.name = "a".repeat(64);
         assert!(paths(&ObjectDef::Database(d.clone())).is_empty());
         d.name = "a\0".into();
         assert_eq!(paths(&ObjectDef::Database(d)), ["name"]);
-        // Kimlik hatası drop'ta yer tutucudan önce döner.
-        assert_eq!(drop(&role("x\n"), false, &ctx()).unwrap_err()[0].path, "name");
+        // Kimlik hatası drop'ta döner.
+        assert_eq!(drop(&role(""), false, &ctx()).unwrap_err()[0].path, "name");
     }
 
     #[test]
@@ -670,7 +680,9 @@ mod tests {
             t.columns = vec![col(h)];
             let ce = validate(&ObjectDef::Table(t), &ctx());
             assert_eq!(ce.iter().any(|e| e.path.starts_with("columns[0]")), bad, "column {h:?}: {ce:?}");
-            assert_eq!(paths(&role(h)), want, "role {h:?}");
+            // Rol: eski taraf (kimlik/drop) gevşek, YENİ ad (create) katı.
+            assert!(paths(&role(h)).is_empty(), "role identity {h:?}");
+            assert_eq!(validate(&role(h), &ctx()).is_empty(), !bad, "role {h:?}");
             // Veritabanı: eski taraf (kimlik/drop) gevşek, YENİ ad (create) katı.
             let ObjectDef::Database(mut d) = database() else { unreachable!() };
             d.name = h.into();
