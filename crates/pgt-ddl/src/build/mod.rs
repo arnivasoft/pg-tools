@@ -170,6 +170,11 @@ pub struct DropOptions {
     pub force: bool,
 }
 
+/// Plan 18 Task 2–5'in üreticileri gelene kadar Function/Procedure/Trigger/Type/Domain'in tek yer tutucu hatası.
+fn unsupported_kind() -> Vec<FieldError> {
+    vec![err("kind", "Bu tür henüz desteklenmiyor.")]
+}
+
 fn mismatch(old: &ObjectDef, new: &ObjectDef) -> Vec<FieldError> {
     vec![err(
         "kind",
@@ -189,6 +194,9 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::MaterializedView(d) => matview::validate(d, ctx),
         ObjectDef::Database(d) => database::validate(d, ctx),
         ObjectDef::Role(d) => role::validate(d, ctx),
+        ObjectDef::Function(_) | ObjectDef::Procedure(_) | ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => {
+            unsupported_kind()
+        }
     }
 }
 
@@ -229,6 +237,26 @@ pub(crate) fn validate_identity(def: &ObjectDef) -> Vec<FieldError> {
         // Rol: görünümle aynı gerekçe (yüklü ad yalnızca `quote_ident` ile yerleşir; gevşek eski taraf). Yeni ad (create,
         // rename hedefi) katıdır ve ayrılmış adlar (`public`, `none`, `pg_*`) reddedilir (`role::validate`/`alter`).
         ObjectDef::Role(d) => check_old_ident("name", &d.name, &mut e),
+        // Function/Procedure/Type/Domain: görünümle aynı gerekçe (yüklü ad yalnızca `quote_ident`/`qualified` ile
+        // yerleşir; gevşek eski taraf, sistem şeması yasak).
+        ObjectDef::Function(d) | ObjectDef::Procedure(d) => {
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("name", &d.name, &mut e);
+        }
+        // Trigger: tablo kapsamlı; tablo adı da ifadeye girer (`ON schema.table`).
+        ObjectDef::Trigger(d) => {
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("table", &d.table, &mut e);
+            check_old_ident("name", &d.name, &mut e);
+        }
+        ObjectDef::Type(d) => {
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("name", &d.name, &mut e);
+        }
+        ObjectDef::Domain(d) => {
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("name", &d.name, &mut e);
+        }
     }
     e
 }
@@ -257,6 +285,10 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::MaterializedView(d) => Ok(matview::create(d)),
         ObjectDef::Database(d) => Ok(database::create(d)),
         ObjectDef::Role(d) => Ok(role::create(d)),
+        // `validate` yer tutucu hatası yukarıda döner; buraya ulaşılmaz.
+        ObjectDef::Function(_) | ObjectDef::Procedure(_) | ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => {
+            Err(unsupported_kind())
+        }
     }
 }
 
@@ -338,6 +370,9 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Database(d) => database::drop(d, o.force, ctx),
         // DROP OWNED / REASSIGN OWNED otomatikleştirilmez (Karar 9).
         ObjectDef::Role(d) => role::drop(d),
+        ObjectDef::Function(_) | ObjectDef::Procedure(_) | ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => {
+            Err(unsupported_kind())
+        }
     }
 }
 
@@ -636,6 +671,101 @@ mod tests {
         assert_eq!(paths(&ObjectDef::Database(d)), ["name"]);
         // Kimlik hatası drop'ta döner.
         assert_eq!(drop(&role(""), false, &ctx()).unwrap_err()[0].path, "name");
+    }
+
+    fn routine(schema: &str) -> FunctionDef {
+        FunctionDef {
+            schema: schema.into(),
+            name: "f".into(),
+            owner: None,
+            comment: None,
+            language: "sql".into(),
+            args: vec![],
+            returns: Some(FunctionReturn::Void),
+            body: "SELECT 1".into(),
+            volatility: Volatility::Volatile,
+            strict: false,
+            security_definer: false,
+            leakproof: false,
+            parallel: Parallel::Unsafe,
+            cost: None,
+            rows: None,
+            settings: vec![],
+            recreate: false,
+            editable: true,
+            unsupported: vec![],
+        }
+    }
+
+    fn new_kind_defs(schema: &str) -> Vec<ObjectDef> {
+        vec![
+            ObjectDef::Function(routine(schema)),
+            ObjectDef::Procedure(FunctionDef { returns: None, ..routine(schema) }),
+            ObjectDef::Trigger(TriggerDef {
+                schema: schema.into(),
+                table: "t".into(),
+                name: "tr".into(),
+                timing: TriggerTiming::Before,
+                events: TriggerEvents { insert: true, update: false, update_columns: vec![], delete: false, truncate: false },
+                level: TriggerLevel::Row,
+                when: None,
+                function_schema: "public".into(),
+                function_name: "tf".into(),
+                args: vec![],
+                old_table: None,
+                new_table: None,
+                constraint: false,
+                deferrable: false,
+                initially_deferred: false,
+                enabled: TriggerEnabled::Origin,
+                comment: None,
+                editable: true,
+                unsupported: vec![],
+            }),
+            ObjectDef::Type(TypeDef {
+                schema: schema.into(),
+                name: "ty".into(),
+                owner: None,
+                comment: None,
+                body: TypeBody::Enum { values: vec![EnumValue { label: "a".into(), original: None }] },
+                editable: true,
+                unsupported: vec![],
+            }),
+            ObjectDef::Domain(DomainDef {
+                schema: schema.into(),
+                name: "d".into(),
+                owner: None,
+                comment: None,
+                base_type: "integer".into(),
+                collation: None,
+                default: None,
+                not_null: false,
+                constraints: vec![],
+                editable: true,
+                unsupported: vec![],
+            }),
+        ]
+    }
+
+    #[test]
+    fn routine_trigger_type_domain_are_placeholders_until_their_builders() {
+        // Task 2–5'in üreticileri gelene kadar: create/alter/drop/validate yer tutucu "kind" hatası; kimlik kolları gerçek.
+        let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
+        for d in new_kind_defs("public") {
+            assert_eq!(validate(&d, &ctx())[0].path, "kind", "{d:?}");
+            assert_eq!(kind(create(&d, &ctx())), "kind", "{d:?}");
+            assert_eq!(kind(alter(&d, &d, &ctx())), "kind", "{d:?}");
+            assert_eq!(kind(drop(&d, false, &ctx())), "kind", "{d:?}");
+            assert!(validate_identity(&d).is_empty(), "{d:?}");
+        }
+        // Eski taraf/drop kimliği: sistem şeması reddedilir (yer tutucudan önce).
+        for d in new_kind_defs("pg_catalog") {
+            assert_eq!(validate_identity(&d).into_iter().map(|e| e.path).collect::<Vec<_>>(), ["schema"], "{d:?}");
+            assert_eq!(kind(drop(&d, false, &ctx())), "schema", "{d:?}");
+        }
+        // Function ↔ Procedure ayrı türlerdir: alter tür uyuşmazlığı.
+        let defs = new_kind_defs("public");
+        assert!(alter(&defs[0], &defs[1], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
     }
 
     #[test]

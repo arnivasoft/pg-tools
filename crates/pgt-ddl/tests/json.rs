@@ -56,7 +56,76 @@ fn defs() -> Vec<(ObjectKind, Value)> {
                    "password": "keep", "memberOf": [{"role": "g", "admin": false, "inheritOption": null, "setOption": null}],
                    "settings": [], "comment": null, "unsupported": []}),
         ),
+        (
+            ObjectKind::Function,
+            json!({"kind": "function", "schema": "public", "name": "f", "owner": "me", "comment": null, "language": "plpgsql",
+                   "args": [{"mode": "in", "name": "a", "typeName": "integer", "default": "0"}, {"mode": "out", "name": "b", "typeName": "text", "default": null}],
+                   "returns": {"kind": "table", "columns": [{"name": "b", "typeName": "text"}]},
+                   "body": "BEGIN\n  RETURN QUERY SELECT 'x';\nEND", "volatility": "volatile", "strict": false, "securityDefiner": false,
+                   "leakproof": false, "parallel": "unsafe", "cost": "100", "rows": "1000", "settings": [], "recreate": false,
+                   "editable": true, "unsupported": []}),
+        ),
+        (
+            ObjectKind::Procedure,
+            json!({"kind": "procedure", "schema": "public", "name": "p", "owner": "me", "comment": "c", "language": "sql",
+                   "args": [], "returns": null, "body": "SELECT 1", "volatility": "volatile", "strict": false, "securityDefiner": true,
+                   "leakproof": false, "parallel": "unsafe", "cost": null, "rows": null,
+                   "settings": [{"name": "search_path", "value": "public"}], "recreate": false, "editable": true, "unsupported": []}),
+        ),
+        (
+            ObjectKind::Trigger,
+            json!({"kind": "trigger", "schema": "public", "table": "t", "name": "tr", "timing": "after",
+                   "events": {"insert": true, "update": false, "updateColumns": [], "delete": true, "truncate": false},
+                   "level": "statement", "when": null, "functionSchema": "public", "functionName": "tf", "args": [],
+                   "oldTable": "o", "newTable": null, "constraint": false, "deferrable": false, "initiallyDeferred": false,
+                   "enabled": "origin", "comment": null, "editable": true, "unsupported": []}),
+        ),
+        (
+            ObjectKind::Type,
+            json!({"kind": "type", "schema": "public", "name": "mood", "owner": "me", "comment": null,
+                   "body": {"variant": "enum", "values": [{"label": "sad", "original": "sad"}, {"label": "ok", "original": null}]},
+                   "editable": true, "unsupported": []}),
+        ),
+        (
+            ObjectKind::Domain,
+            json!({"kind": "domain", "schema": "public", "name": "posint", "owner": "me", "comment": null, "baseType": "integer",
+                   "collation": null, "default": null, "notNull": false,
+                   "constraints": [{"name": null, "expression": "VALUE > 0", "notValid": true, "validated": false, "original": null, "validate": false}],
+                   "editable": true, "unsupported": []}),
+        ),
     ]
+}
+
+#[test]
+fn every_object_kind_has_a_json_fixture() {
+    let kinds: Vec<ObjectKind> = defs().into_iter().map(|(k, _)| k).collect();
+    assert_eq!(kinds.len(), 14);
+    for k in [ObjectKind::Function, ObjectKind::Procedure, ObjectKind::Trigger, ObjectKind::Type, ObjectKind::Domain] {
+        assert!(kinds.contains(&k), "{k:?}");
+    }
+}
+
+#[test]
+fn type_bodies_parse_in_every_variant() {
+    for body in [
+        json!({"variant": "composite", "attributes": [{"name": "a", "typeName": "integer", "collation": null, "original": "a"}]}),
+        json!({"variant": "range", "subtype": "numeric", "subtypeOpclass": "numeric_ops", "collation": null, "canonical": null,
+               "subtypeDiff": null, "multirangeTypeName": null}),
+    ] {
+        let mut v = defs()[12].1.clone();
+        v["body"] = body;
+        let _: ObjectDef = roundtrip(v);
+    }
+}
+
+#[test]
+fn trigger_function_target_carries_preset() {
+    let u = "3f2a6d1e-8a4b-4c2e-9f00-0123456789ab";
+    let v = serde_json::to_value(target_of(&format!("srv:{u}/db:5/sch:2200/trigfuncs")).unwrap()).unwrap();
+    assert_eq!(v["create"], json!({"kind": "function", "context": {"schemaOid": 2200, "tableOid": null}, "preset": "trigger_function"}));
+    let v = serde_json::to_value(target_of(&format!("srv:{u}/db:5/sch:2200/tbl:24576/trg:9")).unwrap()).unwrap();
+    assert_eq!(v["object"], json!({"kind": "trigger", "oid": 9}));
+    assert_eq!(v["refreshNodeId"], format!("srv:{u}/db:5/sch:2200/tbl:24576/triggers"));
 }
 
 /// Yüklenmiş biçimde tablo (attnum/oid ve yükleme alanları dolu); dört kısıt türünün etiketli biçimleriyle.
@@ -251,7 +320,7 @@ fn ddl_target_with_focus_serializes_as_the_frontend_expects() {
     let v = serde_json::to_value(target_of(&format!("srv:{u}/db:5/sch:2200/tables")).unwrap()).unwrap();
     assert_eq!(
         v,
-        json!({"serverId": u, "databaseOid": 5, "object": null, "create": {"kind": "table", "context": {"schemaOid": 2200, "tableOid": null}},
+        json!({"serverId": u, "databaseOid": 5, "object": null, "create": {"kind": "table", "context": {"schemaOid": 2200, "tableOid": null}, "preset": null},
                "focus": null, "refreshNodeId": format!("srv:{u}/db:5/sch:2200/tables")})
     );
     assert_eq!(serde_json::to_value(DdlFocus::Column { id: 1 }).unwrap(), json!({"kind": "column", "id": 1}));
@@ -263,7 +332,7 @@ fn ddl_target_with_focus_serializes_as_the_frontend_expects() {
                "focus": null, "refreshNodeId": format!("srv:{u}/dbs")})
     );
     let v = serde_json::to_value(target_of(&format!("srv:{u}/roles")).unwrap()).unwrap();
-    assert_eq!(v["create"], json!({"kind": "role", "context": {"schemaOid": null, "tableOid": null}}));
+    assert_eq!(v["create"], json!({"kind": "role", "context": {"schemaOid": null, "tableOid": null}, "preset": null}));
     assert!(v["databaseOid"].is_null());
     let v = serde_json::to_value(target_of(&format!("srv:{u}/db:5/sch:2200/view:30")).unwrap()).unwrap();
     assert_eq!((v["object"].clone(), v["databaseOid"].clone()), (json!({"kind": "view", "oid": 30}), json!(5)));

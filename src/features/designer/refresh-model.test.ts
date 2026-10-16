@@ -130,6 +130,30 @@ describe("refresh-model", () => {
     expect(extraRefreshIds(viewTree(["oth-v"]), ctx, info({ before: vw(), after: vw({ name: "v2" }) }), null)).toEqual([]);
   });
 
+  it("extraRefreshIds: Plan 18 şema kapsamlı türler şema taşımada kendi koleksiyonu; trigger fonksiyonu trigfuncs; trigger yok", () => {
+    const ctx: OpenContext = { databaseNodeId: "db", tableNodeId: null };
+    const s = viewTree([]);
+    const add = (id: string, kind: NodeKind, label: string) => {
+      s.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, color: null, tag: null } as TreeNode);
+      s.parent.set(id, "oth");
+      s.children.set("oth", [...(s.children.get("oth") ?? []), id]);
+      s.children.set(id, []);
+    };
+    add("oth-fn", "functionCollection", "Functions");
+    add("oth-proc", "procedureCollection", "Procedures");
+    add("oth-tfn", "triggerFunctionCollection", "Trigger Functions");
+    add("oth-typ", "typeCollection", "Types");
+    add("oth-dom", "domainCollection", "Domains");
+    const def = (kind: string, p: Record<string, unknown> = {}): ObjectDef => ({ kind, schema: "public", name: "x", ...p }) as unknown as ObjectDef;
+    const move = (d: (p?: Record<string, unknown>) => ObjectDef) => extraRefreshIds(s, ctx, info({ before: d(), after: d({ schema: "other" }) }), null);
+    expect(move((p) => def("function", { returns: { kind: "void" }, ...p }))).toEqual(["oth-fn"]);
+    expect(move((p) => def("function", { returns: { kind: "trigger" }, ...p }))).toEqual(["oth-tfn"]);
+    expect(move((p) => def("procedure", { returns: null, ...p }))).toEqual(["oth-proc"]);
+    expect(move((p) => def("type", p))).toEqual(["oth-typ"]);
+    expect(move((p) => def("domain", p))).toEqual(["oth-dom"]);
+    expect(move((p) => def("trigger", { table: "t", ...p }))).toEqual([]);
+  });
+
   it("extraRefreshIds: Database/Role için ek yenileme yok", () => {
     const ctx: OpenContext = { databaseNodeId: "db", tableNodeId: null };
     const t = viewTree(["oth-v", "oth-m", "oth-t", "oth-s"]);

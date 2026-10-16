@@ -75,6 +75,15 @@ pub enum ObjectKind {
     MaterializedView,
     Database,
     Role,
+    /// Trigger fonksiyonları dahil (dönüşü `trigger` olan Function).
+    Function,
+    /// PG 11+.
+    Procedure,
+    /// Tablo kapsamlı (bölüm tablosu dahil).
+    Trigger,
+    /// Enum / composite / range.
+    Type,
+    Domain,
 }
 
 impl ObjectKind {
@@ -568,6 +577,282 @@ pub struct RoleDef {
     pub unsupported: Vec<String>,
 }
 
+/// Fonksiyon/procedure argüman modu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum ArgMode {
+    In,
+    Out,
+    Inout,
+    Variadic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct FunctionArg {
+    pub mode: ArgMode,
+    /// `None` = adsız argüman.
+    pub name: Option<String>,
+    /// Tip ifadesi (`type_syntax` dilbilgisi); `SETOF` ya da `TABLE` içermez.
+    pub type_name: String,
+    /// Serbest SQL (`DEFAULT` ifadesi).
+    pub default: Option<String>,
+}
+
+/// `RETURNS TABLE (…)` kolonu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ReturnColumn {
+    pub name: String,
+    pub type_name: String,
+}
+
+/// Fonksiyon dönüşü (`kind` etiketi; alanlar camelCase). Procedure'de `FunctionDef.returns = None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[ts(export)]
+pub enum FunctionReturn {
+    /// `RETURNS [SETOF] tip`.
+    Type { type_name: String, setof: bool },
+    /// `RETURNS TABLE (ad tip, …)`.
+    Table { columns: Vec<ReturnColumn> },
+    /// `RETURNS trigger` (trigger fonksiyonu).
+    Trigger,
+    /// `RETURNS void`.
+    Void,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum Volatility {
+    Volatile,
+    Stable,
+    Immutable,
+}
+
+/// `PARALLEL UNSAFE | RESTRICTED | SAFE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum Parallel {
+    Unsafe,
+    Restricted,
+    Safe,
+}
+
+/// Function ve Procedure tanımı (`ObjectDef::Function` / `ObjectDef::Procedure` ayrı varyantlardır).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct FunctionDef {
+    pub schema: String,
+    pub name: String,
+    pub owner: Option<String>,
+    pub comment: Option<String>,
+    pub language: String,
+    pub args: Vec<FunctionArg>,
+    /// Procedure'de `None`.
+    pub returns: Option<FunctionReturn>,
+    /// Gövde: arka uçta üretilen dolar tırnağıyla sarılır; içeriği taranmaz.
+    pub body: String,
+    pub volatility: Volatility,
+    pub strict: bool,
+    pub security_definer: bool,
+    pub leakproof: bool,
+    pub parallel: Parallel,
+    /// Sayısal metin (> 0).
+    pub cost: Option<String>,
+    /// Sayısal metin (> 0); yalnız set dönen fonksiyonda.
+    pub rows: Option<String>,
+    /// `SET name = value` listesi.
+    pub settings: Vec<ConfigSetting>,
+    /// Yalnızca alter, kalıcı değil: `OR REPLACE`'in yapamadığı değişiklikte DROP + CREATE (Karar 2). Yüklemede `false`.
+    #[serde(default)]
+    pub recreate: bool,
+    /// Yükleyici: desteklenmeyen (C/internal dil, `BEGIN ATOMIC`, aggregate/pencere, eklenti, sistem) → `false` (Karar 4).
+    pub editable: bool,
+    /// Salt okunurluk gerekçeleri (insan okunur).
+    pub unsupported: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum TriggerTiming {
+    Before,
+    After,
+    InsteadOf,
+}
+
+/// `FOR EACH ROW | STATEMENT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum TriggerLevel {
+    Row,
+    Statement,
+}
+
+/// `pg_trigger.tgenabled`: O = origin, R = replica, A = always, D = disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum TriggerEnabled {
+    Origin,
+    Replica,
+    Always,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TriggerEvents {
+    pub insert: bool,
+    pub update: bool,
+    /// `UPDATE OF kolonlar` (boş = tüm kolonlar).
+    pub update_columns: Vec<String>,
+    pub delete: bool,
+    pub truncate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TriggerDef {
+    pub schema: String,
+    /// Bağlamdan gelir; alter'da değiştirilemez.
+    pub table: String,
+    pub name: String,
+    pub timing: TriggerTiming,
+    pub events: TriggerEvents,
+    pub level: TriggerLevel,
+    /// Serbest SQL (`WHEN (…)` koşulu).
+    pub when: Option<String>,
+    /// Trigger fonksiyonu (dönüşü `trigger`).
+    pub function_schema: String,
+    pub function_name: String,
+    /// Sabit argümanlar (her biri `quote_literal`).
+    pub args: Vec<String>,
+    /// `REFERENCING OLD TABLE AS …` (yalnız AFTER).
+    pub old_table: Option<String>,
+    /// `REFERENCING NEW TABLE AS …` (yalnız AFTER).
+    pub new_table: Option<String>,
+    /// `CREATE CONSTRAINT TRIGGER`.
+    pub constraint: bool,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
+    pub enabled: TriggerEnabled,
+    pub comment: Option<String>,
+    /// Yükleyici: iç (`tgisinternal`) ve klonlanmış (`tgparentid`, PG 13+) trigger → `false`.
+    pub editable: bool,
+    pub unsupported: Vec<String>,
+}
+
+/// Enum etiketi.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct EnumValue {
+    pub label: String,
+    /// Yüklü etiket (yeniden adlandırma eşlemesi); yeni değerde `None`.
+    pub original: Option<String>,
+}
+
+/// Composite öznitelik.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct CompositeAttr {
+    pub name: String,
+    pub type_name: String,
+    pub collation: Option<String>,
+    /// Yüklü öznitelik adı (yeniden adlandırma eşlemesi); yeni öznitelikte `None`.
+    pub original: Option<String>,
+}
+
+/// Tip gövdesi (`variant` etiketi; `kind` `ObjectDef`'indir).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "variant", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[ts(export)]
+pub enum TypeBody {
+    Enum {
+        values: Vec<EnumValue>,
+    },
+    Composite {
+        attributes: Vec<CompositeAttr>,
+    },
+    /// Yalnızca create (Karar 8).
+    Range {
+        subtype: String,
+        subtype_opclass: Option<String>,
+        collation: Option<String>,
+        canonical: Option<String>,
+        subtype_diff: Option<String>,
+        /// PG 14+.
+        multirange_type_name: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TypeDef {
+    pub schema: String,
+    pub name: String,
+    pub owner: Option<String>,
+    pub comment: Option<String>,
+    pub body: TypeBody,
+    /// Yükleyici: base type, multirange, eklenti, sistem → `false`.
+    pub editable: bool,
+    pub unsupported: Vec<String>,
+}
+
+/// Domain `CHECK` kısıtı.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DomainCheck {
+    /// `None` → adı sunucu verir.
+    pub name: Option<String>,
+    /// Serbest SQL.
+    pub expression: String,
+    /// Yalnız yeni kısıtta anlamlı (`NOT VALID`).
+    pub not_valid: bool,
+    /// Yükleme: `convalidated`.
+    pub validated: bool,
+    /// Yüklü kısıt adı (eşleme); yeni kısıtta `None`.
+    pub original: Option<String>,
+    /// Yalnızca alter, kalıcı değil: yüklü doğrulanmamış kısıtta `VALIDATE CONSTRAINT`.
+    #[serde(default)]
+    pub validate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DomainDef {
+    pub schema: String,
+    pub name: String,
+    pub owner: Option<String>,
+    pub comment: Option<String>,
+    /// Yalnızca create.
+    pub base_type: String,
+    /// Yalnızca create.
+    pub collation: Option<String>,
+    /// Serbest SQL.
+    pub default: Option<String>,
+    pub not_null: bool,
+    pub constraints: Vec<DomainCheck>,
+    /// Yükleyici: eklenti, sistem → `false`.
+    pub editable: bool,
+    pub unsupported: Vec<String>,
+}
+
 /// Arayüz ile arka uç arasındaki nesne tanımı (`kind` etiketi nesne türüdür).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -582,6 +867,11 @@ pub enum ObjectDef {
     MaterializedView(MatViewDef),
     Database(DatabaseDef),
     Role(RoleDef),
+    Function(FunctionDef),
+    Procedure(FunctionDef),
+    Trigger(TriggerDef),
+    Type(TypeDef),
+    Domain(DomainDef),
 }
 
 impl ObjectDef {
@@ -596,6 +886,11 @@ impl ObjectDef {
             ObjectDef::MaterializedView(_) => ObjectKind::MaterializedView,
             ObjectDef::Database(_) => ObjectKind::Database,
             ObjectDef::Role(_) => ObjectKind::Role,
+            ObjectDef::Function(_) => ObjectKind::Function,
+            ObjectDef::Procedure(_) => ObjectKind::Procedure,
+            ObjectDef::Trigger(_) => ObjectKind::Trigger,
+            ObjectDef::Type(_) => ObjectKind::Type,
+            ObjectDef::Domain(_) => ObjectKind::Domain,
         }
     }
 
@@ -611,6 +906,10 @@ impl ObjectDef {
             ObjectDef::MaterializedView(d) => &d.name,
             ObjectDef::Database(d) => &d.name,
             ObjectDef::Role(d) => &d.name,
+            ObjectDef::Function(d) | ObjectDef::Procedure(d) => &d.name,
+            ObjectDef::Trigger(d) => &d.name,
+            ObjectDef::Type(d) => &d.name,
+            ObjectDef::Domain(d) => &d.name,
         }
     }
 }
@@ -973,6 +1272,159 @@ mod tests {
         bad(role_json(), "connectionLimit", json!(1.5));
     }
 
+    fn function_json() -> serde_json::Value {
+        json!({
+            "kind": "function", "schema": "public", "name": "f", "owner": "o", "comment": null, "language": "plpgsql",
+            "args": [
+                {"mode": "in", "name": "a", "typeName": "integer", "default": "1"},
+                {"mode": "variadic", "name": null, "typeName": "text[]", "default": null}
+            ],
+            "returns": {"kind": "type", "typeName": "integer", "setof": true},
+            "body": "BEGIN RETURN a; END", "volatility": "stable", "strict": true, "securityDefiner": false,
+            "leakproof": false, "parallel": "restricted", "cost": "100", "rows": "1000",
+            "settings": [{"name": "search_path", "value": "public"}], "recreate": true, "editable": true, "unsupported": []
+        })
+    }
+
+    fn procedure_json() -> serde_json::Value {
+        json!({
+            "kind": "procedure", "schema": "s", "name": "p", "owner": null, "comment": "c", "language": "sql",
+            "args": [{"mode": "inout", "name": "x", "typeName": "bigint", "default": null}],
+            "returns": null, "body": "SELECT 1", "volatility": "volatile", "strict": false, "securityDefiner": true,
+            "leakproof": false, "parallel": "unsafe", "cost": null, "rows": null, "settings": [], "recreate": false,
+            "editable": false, "unsupported": ["BEGIN ATOMIC"]
+        })
+    }
+
+    fn trigger_json() -> serde_json::Value {
+        json!({
+            "kind": "trigger", "schema": "public", "table": "t", "name": "trg", "timing": "instead_of",
+            "events": {"insert": true, "update": true, "updateColumns": ["a", "b"], "delete": false, "truncate": false},
+            "level": "row", "when": "NEW.a > 0", "functionSchema": "public", "functionName": "tf", "args": ["x", "y"],
+            "oldTable": null, "newTable": "nt", "constraint": true, "deferrable": true, "initiallyDeferred": false,
+            "enabled": "replica", "comment": null, "editable": true, "unsupported": []
+        })
+    }
+
+    fn type_json(body: serde_json::Value) -> serde_json::Value {
+        json!({"kind": "type", "schema": "public", "name": "ty", "owner": "o", "comment": null, "body": body, "editable": true, "unsupported": []})
+    }
+
+    fn domain_json() -> serde_json::Value {
+        json!({
+            "kind": "domain", "schema": "public", "name": "d", "owner": null, "comment": "c", "baseType": "text",
+            "collation": "C", "default": "'x'", "notNull": true,
+            "constraints": [{"name": "d_check", "expression": "VALUE <> ''", "notValid": false, "validated": true, "original": "d_check", "validate": false}],
+            "editable": true, "unsupported": []
+        })
+    }
+
+    #[test]
+    fn routine_trigger_type_domain_round_trip_tagged_camel_case() {
+        let enum_body = json!({"variant": "enum", "values": [{"label": "a", "original": "a"}, {"label": "b", "original": null}]});
+        let composite_body = json!({"variant": "composite", "attributes": [
+            {"name": "x", "typeName": "integer", "collation": null, "original": "x"},
+            {"name": "y", "typeName": "text", "collation": "C", "original": null}
+        ]});
+        let range_body = json!({"variant": "range", "subtype": "integer", "subtypeOpclass": null, "collation": null,
+            "canonical": null, "subtypeDiff": "int4range_subdiff", "multirangeTypeName": "ty_multi"});
+        for (v, kind, name) in [
+            (function_json(), ObjectKind::Function, "f"),
+            (procedure_json(), ObjectKind::Procedure, "p"),
+            (trigger_json(), ObjectKind::Trigger, "trg"),
+            (type_json(enum_body), ObjectKind::Type, "ty"),
+            (type_json(composite_body), ObjectKind::Type, "ty"),
+            (type_json(range_body), ObjectKind::Type, "ty"),
+            (domain_json(), ObjectKind::Domain, "d"),
+        ] {
+            let d: ObjectDef = serde_json::from_value(v.clone()).unwrap_or_else(|e| panic!("{e}: {v}"));
+            assert_eq!(serde_json::to_value(&d).unwrap(), v);
+            assert_eq!((d.kind(), d.name()), (kind, name));
+        }
+        // Function ve Procedure aynı tanım tipini paylaşır ama ayrı varyantlardır.
+        let ObjectDef::Function(f) = serde_json::from_value(function_json()).unwrap() else { panic!() };
+        assert_eq!(f.returns, Some(FunctionReturn::Type { type_name: "integer".into(), setof: true }));
+        assert_eq!((f.args[1].mode, f.volatility, f.parallel), (ArgMode::Variadic, Volatility::Stable, Parallel::Restricted));
+        let ObjectDef::Procedure(p) = serde_json::from_value(procedure_json()).unwrap() else { panic!() };
+        assert_eq!((p.returns, p.editable, p.args[0].mode), (None, false, ArgMode::Inout));
+        let ObjectDef::Trigger(t) = serde_json::from_value(trigger_json()).unwrap() else { panic!() };
+        assert_eq!((t.timing, t.level, t.enabled), (TriggerTiming::InsteadOf, TriggerLevel::Row, TriggerEnabled::Replica));
+        assert_eq!(t.events.update_columns, ["a", "b"]);
+        // Dönüş biçimleri: dört `kind` etiketi.
+        for (r, j) in [
+            (FunctionReturn::Type { type_name: "text".into(), setof: false }, json!({"kind": "type", "typeName": "text", "setof": false})),
+            (
+                FunctionReturn::Table { columns: vec![ReturnColumn { name: "a".into(), type_name: "int".into() }] },
+                json!({"kind": "table", "columns": [{"name": "a", "typeName": "int"}]}),
+            ),
+            (FunctionReturn::Trigger, json!({"kind": "trigger"})),
+            (FunctionReturn::Void, json!({"kind": "void"})),
+        ] {
+            assert_eq!(serde_json::to_value(&r).unwrap(), j);
+            assert_eq!(serde_json::from_value::<FunctionReturn>(j).unwrap(), r);
+        }
+        for (k, j) in [
+            (ObjectKind::Function, "function"),
+            (ObjectKind::Procedure, "procedure"),
+            (ObjectKind::Trigger, "trigger"),
+            (ObjectKind::Type, "type"),
+            (ObjectKind::Domain, "domain"),
+        ] {
+            assert_eq!(serde_json::to_value(k).unwrap(), j);
+            assert!(!k.server_scoped(), "{k:?}");
+        }
+        for (m, j) in [(ArgMode::In, "in"), (ArgMode::Out, "out"), (ArgMode::Inout, "inout"), (ArgMode::Variadic, "variadic")] {
+            assert_eq!(serde_json::to_value(m).unwrap(), j);
+        }
+        assert_eq!(serde_json::to_value(Volatility::Immutable).unwrap(), "immutable");
+        assert_eq!(serde_json::to_value(Parallel::Safe).unwrap(), "safe");
+        assert_eq!(serde_json::to_value(TriggerTiming::Before).unwrap(), "before");
+        assert_eq!(serde_json::to_value(TriggerLevel::Statement).unwrap(), "statement");
+        assert_eq!(serde_json::to_value(TriggerEnabled::Origin).unwrap(), "origin");
+        assert_eq!(serde_json::to_value(TriggerEnabled::Always).unwrap(), "always");
+        assert_eq!(serde_json::to_value(TriggerEnabled::Disabled).unwrap(), "disabled");
+    }
+
+    #[test]
+    fn routine_and_domain_alter_only_fields_default_when_absent() {
+        let mut v = function_json();
+        v.as_object_mut().unwrap().remove("recreate");
+        let ObjectDef::Function(f) = serde_json::from_value(v).unwrap() else { panic!() };
+        assert!(!f.recreate);
+        let mut v = domain_json();
+        v["constraints"][0].as_object_mut().unwrap().remove("validate");
+        let ObjectDef::Domain(d) = serde_json::from_value(v).unwrap() else { panic!() };
+        assert!(!d.constraints[0].validate);
+        assert_eq!(d.constraints[0].original.as_deref(), Some("d_check"));
+    }
+
+    #[test]
+    fn routine_trigger_type_domain_reject_invalid_tags() {
+        let bad = |mut v: serde_json::Value, path: &[&str], val: serde_json::Value| {
+            let mut cur = &mut v;
+            for p in &path[..path.len() - 1] {
+                cur = match p.parse::<usize>() {
+                    Ok(i) => &mut cur[i],
+                    Err(_) => &mut cur[*p],
+                };
+            }
+            cur[path[path.len() - 1]] = val;
+            assert!(serde_json::from_value::<ObjectDef>(v).is_err(), "{path:?}");
+        };
+        bad(function_json(), &["returns", "kind"], json!("setof"));
+        bad(function_json(), &["returns", "kind"], json!("Type"));
+        bad(function_json(), &["args", "0", "mode"], json!("IN"));
+        bad(function_json(), &["volatility"], json!("STABLE"));
+        bad(function_json(), &["parallel"], json!("parallel_safe"));
+        bad(trigger_json(), &["timing"], json!("insteadOf"));
+        bad(trigger_json(), &["level"], json!("each_row"));
+        bad(trigger_json(), &["enabled"], json!("enabled"));
+        bad(type_json(json!({"variant": "base"})), &["name"], json!("x"));
+        bad(type_json(json!({"variant": "enum", "values": []})), &["body", "variant"], json!("Enum"));
+        // Tip gövdesi `variant` etiketi taşır (`kind` ObjectDef'indir).
+        assert!(serde_json::from_value::<ObjectDef>(type_json(json!({"kind": "enum", "values": []}))).is_err());
+    }
+
     #[test]
     fn only_database_and_role_are_server_scoped() {
         for (k, scoped) in [
@@ -985,6 +1437,11 @@ mod tests {
             (ObjectKind::MaterializedView, false),
             (ObjectKind::Database, true),
             (ObjectKind::Role, true),
+            (ObjectKind::Function, false),
+            (ObjectKind::Procedure, false),
+            (ObjectKind::Trigger, false),
+            (ObjectKind::Type, false),
+            (ObjectKind::Domain, false),
         ] {
             assert_eq!(k.server_scoped(), scoped, "{k:?}");
         }

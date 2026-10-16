@@ -718,6 +718,10 @@ impl DdlManager {
             ObjectDef::MaterializedView(d) => (ObjectKind::MaterializedView, FIND_MATVIEW_SQL, Some(d.schema.clone()), d.name.clone()),
             ObjectDef::Database(d) => (ObjectKind::Database, FIND_DATABASE_SQL, None, d.name.clone()),
             ObjectDef::Role(d) => (ObjectKind::Role, FIND_ROLE_SQL, None, d.name.clone()),
+            // Yer tutucu (Plan 18 Task 8): üreticiler henüz plan üretmediği için buraya ulaşılmaz.
+            ObjectDef::Function(_) | ObjectDef::Procedure(_) | ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => {
+                return None;
+            }
         };
         let row = self
             .mgr
@@ -905,6 +909,10 @@ impl DdlManager {
                 comment: None,
                 unsupported: vec![],
             }),
+            // Yer tutucu (Plan 18 Task 8; trigger fonksiyonu ön ayarı dahil).
+            ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Trigger | ObjectKind::Type | ObjectKind::Domain => {
+                return invalid("Bu tür henüz desteklenmiyor.");
+            }
         })
     }
 
@@ -1117,6 +1125,11 @@ mod tests {
             ObjectKind::MaterializedView,
             ObjectKind::Database,
             ObjectKind::Role,
+            ObjectKind::Function,
+            ObjectKind::Procedure,
+            ObjectKind::Trigger,
+            ObjectKind::Type,
+            ObjectKind::Domain,
         ];
         for k in kinds {
             for db in [None, Some(5)] {
@@ -1147,6 +1160,11 @@ mod tests {
             ObjectKind::Table,
             ObjectKind::View,
             ObjectKind::MaterializedView,
+            ObjectKind::Function,
+            ObjectKind::Procedure,
+            ObjectKind::Trigger,
+            ObjectKind::Type,
+            ObjectKind::Domain,
         ] {
             assert_eq!(target_for(k, Some(5)).unwrap(), Target::Database(5), "{k:?}");
             assert!(matches!(target_for(k, None), Err(Error::Invalid(m)) if m == NEEDS_DATABASE), "{k:?}");

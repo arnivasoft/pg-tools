@@ -1,5 +1,6 @@
 //! Diyalogların açılır listeleri için salt okunur katalog sorguları (rol, şema, tablespace, eklenti, yöntem, tablo, kolon,
-//! kolon tipi, collation; Database/Role diyalogları için üyelik rolleri, kodlama, şablon, yerel ayar, ayar adı).
+//! kolon tipi, collation; Database/Role diyalogları için üyelik rolleri, kodlama, şablon, yerel ayar, ayar adı;
+//! Function/Trigger diyalogları için diller ve trigger fonksiyonları).
 //!
 //! Kapsam: `LookupRequest::server_wide` istekleri paylaşılan kataloglardan (ya da sabitten) okur ve veritabanı
 //! gerektirmez (`database_oid = None` → bakım veritabanı); diğerleri bir veritabanı bağlantısı ister.
@@ -51,6 +52,13 @@ pub enum LookupRequest {
     /// `ALTER … SET` ile ayarlanabilen parametreler (`pg_settings.context IN ('user','superuser')`), ad küçük harfle:
     /// detail = "tip · kısa açıklama".
     Settings,
+    /// Fonksiyon dilleri (`pg_language`: prosedürel diller + `sql`; `c`/`internal` hariç): value = dil adı, detail =
+    /// "güvenilir" | "güvenilmez". Veritabanı kapsamlı.
+    Languages,
+    /// Trigger fonksiyonları (dönüşü `trigger`, argümansız): value = fonksiyon adı, detail = şema (ayrı alanlar:
+    /// `TriggerDef.function_schema/function_name`; ad noktalı olabilir, birleşik metin ayrıştırılmaz). `schema`: yalnız o
+    /// şema; `None` → kullanıcı şemaları + `pg_catalog` (kullanıcı şemaları önce). En çok 5000.
+    TriggerFunctions { schema: Option<String> },
 }
 
 impl LookupRequest {
@@ -101,6 +109,9 @@ static LOCALES: VersionedSql = VersionedSql(&[
     (17, include_str!("sql/lookup_locales.sql")),
 ]);
 static SETTINGS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_settings.sql"))]);
+static LANGUAGES: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_languages.sql"))]);
+/// `prokind` (PG 11+) kullanılmaz: dönüş tipi `trigger` ve argümansızlık aggregate/procedure'ü zaten dışlar.
+static TRIGGER_FUNCTIONS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_trigger_functions.sql"))]);
 
 /// Metin parametreleriyle (`$1`, `$2`…; `None` = NULL) çalıştırır.
 async fn fetch(mgr: &ConnectionManager, server: Uuid, target: Target, sql: &'static VersionedSql, params: Vec<Option<String>>) -> Result<Vec<Row>> {
@@ -196,6 +207,8 @@ pub(crate) async fn lookup_at(mgr: &ConnectionManager, server: Uuid, target: Tar
             items(&fetch(mgr, server, db, &LOCALES, vec![Some(provider_param(provider).to_string())]).await?)
         }
         LookupRequest::Settings => items(&fetch(mgr, server, db, &SETTINGS, vec![]).await?),
+        LookupRequest::Languages => items(&fetch(mgr, server, db, &LANGUAGES, vec![]).await?),
+        LookupRequest::TriggerFunctions { schema } => items(&fetch(mgr, server, db, &TRIGGER_FUNCTIONS, vec![schema]).await?),
     })
 }
 
@@ -252,6 +265,9 @@ mod tests {
             LookupRequest::TableColumns { schema: "a".into(), table: "t".into() },
             LookupRequest::Types { query: None },
             LookupRequest::Collations,
+            LookupRequest::Languages,
+            LookupRequest::TriggerFunctions { schema: None },
+            LookupRequest::TriggerFunctions { schema: Some("app".into()) },
         ];
         assert!(!per_db.iter().any(LookupRequest::server_wide));
     }
@@ -264,6 +280,34 @@ mod tests {
         assert_eq!(lookup_target(&LookupRequest::Locales { provider: LocaleProvider::Icu }, None).unwrap(), Target::Maintenance);
         let e = lookup_target(&LookupRequest::Schemas, None).unwrap_err();
         assert!(matches!(e, pgt_core::Error::Invalid(m) if m == crate::error_codes::NEEDS_DATABASE));
+        // Diller ve trigger fonksiyonları veritabanı kapsamlıdır.
+        for req in [LookupRequest::Languages, LookupRequest::TriggerFunctions { schema: None }] {
+            assert_eq!(lookup_target(&req, Some(7)).unwrap(), Target::Database(7));
+            let e = lookup_target(&req, None).unwrap_err();
+            assert!(matches!(e, pgt_core::Error::Invalid(m) if m == crate::error_codes::NEEDS_DATABASE), "{req:?}");
+        }
+    }
+
+    #[test]
+    fn language_and_trigger_function_requests_json_shape() {
+        assert_eq!(serde_json::to_value(LookupRequest::Languages).unwrap(), serde_json::json!({"kind": "languages"}));
+        let v = serde_json::to_value(LookupRequest::TriggerFunctions { schema: Some("app".into()) }).unwrap();
+        assert_eq!(v, serde_json::json!({"kind": "trigger_functions", "schema": "app"}));
+        let r: LookupRequest = serde_json::from_value(serde_json::json!({"kind": "trigger_functions", "schema": null})).unwrap();
+        assert_eq!(r, LookupRequest::TriggerFunctions { schema: None });
+    }
+
+    #[test]
+    fn new_lookup_sql_is_static_and_parameterized() {
+        // Tek ifade, `$1` dışında yerleştirme yok; diller c/internal'ı dışlar, trigger fonksiyonları argümansız.
+        for sql in [LANGUAGES.pick(PgVersion(100000)), TRIGGER_FUNCTIONS.pick(PgVersion(180000))] {
+            assert!(crate::build::scan_semicolons(sql).is_clean(), "{sql}");
+            assert!(!sql.contains("format("), "{sql}");
+        }
+        let langs = LANGUAGES.pick(PgVersion(160000));
+        assert!(langs.contains("'c'") && langs.contains("'internal'") && !langs.contains("$1"));
+        let trig = TRIGGER_FUNCTIONS.pick(PgVersion(160000));
+        assert!(trig.contains("$1::text") && trig.contains("'trigger'::regtype") && trig.contains("pronargs = 0"));
     }
 
     #[test]

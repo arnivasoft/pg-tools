@@ -189,7 +189,7 @@ describe("tabs-store designer sekmeleri", () => {
     return openDesigner(s, { serverId, databaseOid, title: `Düzenle: ${oid}`, key: designerTabKey(s.designers, t) });
   };
   const create = (s: TabsState, schemaOid: number | null = 3, tableOid: number | null = null) => {
-    const t = { serverId: "s1", databaseOid: 5, create: { kind: "index" as const, context: { schemaOid, tableOid } } };
+    const t = { serverId: "s1", databaseOid: 5, create: { kind: "index" as const, context: { schemaOid, tableOid }, preset: null } };
     return openDesigner(s, { serverId: "s1", databaseOid: 5, title: "Oluştur: Index", key: designerTabKey(s.designers, t) });
   };
 

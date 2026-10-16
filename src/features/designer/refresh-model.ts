@@ -30,19 +30,32 @@ export function titleAfterApply(info: AppliedInfo): string | null {
   return info.before.name !== name || schemaOf(info.before) !== schemaOf(info.after) ? title : null;
 }
 
-/** Şema taşımada yeni şemanın altında yenilenecek koleksiyon (Database/Role sunucu kapsamlı: ek yenileme yok). */
+/**
+ * Şema taşımada yeni şemanın altında yenilenecek koleksiyon (Database/Role sunucu kapsamlı, Trigger tablo kapsamlı: ek
+ * yenileme yok). Dönüşü `trigger` olan Function "Trigger Functions" koleksiyonundadır (`moveCollection`).
+ */
 const SCHEMA_MOVE_COLLECTION: Partial<Record<ObjectKind, NodeKind>> = {
   table: "tableCollection",
   sequence: "sequenceCollection",
   view: "viewCollection",
   materialized_view: "materializedViewCollection",
+  function: "functionCollection",
+  procedure: "procedureCollection",
+  type: "typeCollection",
+  domain: "domainCollection",
 };
+
+function moveCollection(info: AppliedInfo): NodeKind | undefined {
+  if (info.after.kind === "function" && info.after.returns?.kind === "trigger") return "triggerFunctionCollection";
+  return SCHEMA_MOVE_COLLECTION[info.kind];
+}
 
 /**
  * `refreshNodeId` dışındaki yenilemeler (yalnızca yüklü — `tree.children.has(id)` — düğümler, tekrarsız, `primary` hariç):
  * (1) table: tablo düğümünün yüklü columnCollection/constraintCollection/indexCollection çocukları;
- * (2) sequence/table/view/materialized_view şema değişimi: veritabanı düğümünün schemaCollection'ındaki `after.schema`
- *     etiketli şemanın `SCHEMA_MOVE_COLLECTION[kind]` çocuğu. Düğüm bulunamazsa hiçbir şey eklenmez.
+ * (2) sequence/table/view/materialized_view/function/procedure/type/domain şema değişimi: veritabanı düğümünün
+ *     schemaCollection'ındaki `after.schema` etiketli şemanın `moveCollection(info)` çocuğu. Düğüm bulunamazsa hiçbir şey
+ *     eklenmez.
  */
 export function extraRefreshIds(tree: TreeState, ctx: OpenContext | null, info: AppliedInfo, primary: string | null): string[] {
   const out: string[] = [];
@@ -67,7 +80,7 @@ export function extraRefreshIds(tree: TreeState, ctx: OpenContext | null, info: 
     }
   }
 
-  const target = SCHEMA_MOVE_COLLECTION[info.kind];
+  const target = moveCollection(info);
   if (target && info.mode === "alter" && info.before) {
     const to = schemaOf(info.after);
     if (to !== null && to !== schemaOf(info.before) && ctx?.databaseNodeId) {

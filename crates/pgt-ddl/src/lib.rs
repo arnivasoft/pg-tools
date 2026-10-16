@@ -22,5 +22,5 @@ pub use manager::{ApplyOptions, ApplyOutcome, CreateContext, DdlManager, PlanReq
 pub use model::*;
 pub use plan::{Plan, PlanView, REDACTED, Risk, Statement, plan_hash};
 pub use secret::Secret;
-pub use target::{DdlCreate, DdlFocus, DdlTarget, target_of};
+pub use target::{CreatePreset, DdlCreate, DdlFocus, DdlTarget, target_of};
 pub use quote::{qualified, quote_ident, quote_literal};

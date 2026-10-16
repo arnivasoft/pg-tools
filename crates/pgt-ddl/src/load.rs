@@ -127,6 +127,10 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into
         // Sunucu kapsamlı türler: bakım veritabanında (veritabanı oid'i yok sayılır).
         ObjectKind::Database => load_database(mgr, server, Target::Maintenance, obj.oid).await,
         ObjectKind::Role => load_role(mgr, server, Target::Maintenance, obj.oid).await,
+        // Yer tutucu: yükleyiciler Plan 18 Task 6–7'de.
+        ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Trigger | ObjectKind::Type | ObjectKind::Domain => {
+            Err(Error::Invalid("Bu tür henüz desteklenmiyor.".into()))
+        }
     }
 }
 

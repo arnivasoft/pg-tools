@@ -79,7 +79,7 @@ async function openAlter(s: S, tabId = "T1", serverId = "S1", object: ObjectRef 
 }
 async function openCreate(s: S, tabId = "C1") {
   await s.ctl.openCreate({
-    tabId, serverId: "S1", databaseOid: 5, create: { kind: "schema", context: { schemaOid: null, tableOid: null } }, refreshNodeId: "N-coll",
+    tabId, serverId: "S1", databaseOid: 5, create: { kind: "schema", context: { schemaOid: null, tableOid: null }, preset: null }, refreshNodeId: "N-coll",
   });
   return tabId;
 }
@@ -814,7 +814,7 @@ describe("designer-controller ayarlar ve istekler", () => {
       tablespace: null, fillfactor: null, whereClause: null, comment: null, constraint: null, valid: true,
     } as unknown as ObjectDef;
     s.api.ddlDefaults.mockResolvedValueOnce(idx);
-    await s.ctl.openCreate({ tabId: "I", serverId: "S1", databaseOid: 5, create: { kind: "index", context: { schemaOid: 1, tableOid: 2 } }, refreshNodeId: null });
+    await s.ctl.openCreate({ tabId: "I", serverId: "S1", databaseOid: 5, create: { kind: "index", context: { schemaOid: 1, tableOid: 2 }, preset: null }, refreshNodeId: null });
     expect(s.ctl.isDirty("I")).toBe(false);
     s.ctl.setConcurrently("I", true);
     expect(s.ctl.isDirty("I")).toBe(true); // varsayılandan farklı (edit ile tutarlı)
@@ -1162,7 +1162,7 @@ const setPassword = (v: RoleDef["password"]) => (d: ObjectDef) => {
 async function openRoleCreate(s: S, tabId = "R1") {
   s.api.ddlDefaults.mockResolvedValue(role({ name: "" }));
   await s.ctl.openCreate({
-    tabId, serverId: "S1", databaseOid: null, create: { kind: "role", context: { schemaOid: null, tableOid: null } }, refreshNodeId: "roles",
+    tabId, serverId: "S1", databaseOid: null, create: { kind: "role", context: { schemaOid: null, tableOid: null }, preset: null }, refreshNodeId: "roles",
   });
   return tabId;
 }
@@ -1409,7 +1409,7 @@ describe("designer-controller Plan 15: sunucu kapsamı", () => {
       kind: "database", name: "", owner: null, template: null, encoding: null, localeProvider: null, lcCollate: null, lcCtype: null,
       providerLocale: null, tablespace: null, connectionLimit: -1, isTemplate: false, allowConnections: true, settings: [], comment: null,
     });
-    await s.ctl.openCreate({ tabId: "D1", serverId: "S1", databaseOid: null, create: { kind: "database", context: { schemaOid: null, tableOid: null } }, refreshNodeId: "dbs" });
+    await s.ctl.openCreate({ tabId: "D1", serverId: "S1", databaseOid: null, create: { kind: "database", context: { schemaOid: null, tableOid: null }, preset: null }, refreshNodeId: "dbs" });
     expect(s.api.ddlDefaults).toHaveBeenLastCalledWith("S1", null, "database", { schemaOid: null, tableOid: null });
     // objectDropped null ile eşleşir
     s.ctl.objectDropped("S1", null, ROLE);
