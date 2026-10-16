@@ -166,7 +166,9 @@ const FIND_DATABASE_SQL: &str = "SELECT oid FROM pg_database WHERE datname = $1"
 const FIND_ROLE_SQL: &str = "SELECT oid FROM pg_roles WHERE rolname = $1";
 /// Fonksiyon: şema + ad + giriş tipleri (`proargtypes`, OUT hariç). `to_regprocedure` kullanılmaz: tipler tek tek
 /// `regtype` ile çözülür ve oid listesi (`oidvector` metni: boşlukla ayrık) karşılaştırılır; aşırı yüklemede doğru
-/// nesne. `{kind}` sürüme göre tür süzgeci (PG 11+ `prokind`).
+/// nesne. `{kind}` sürüme göre tür süzgeci (PG 11+ `prokind`). `::regtype` çözümü havuzdaki katalog bağlantısının
+/// `search_path`'ine dayanır (uygulama bağlantısıyla aynı varsayılan); niteliksiz bir tip orada farklı çözülür ya da
+/// bulunamazsa sorgu boş/hatalı döner ve `created = None` olur (en iyi çaba; yanlış nesne değil, oid'ler eşleşmez).
 const FIND_FUNCTION_SQL: &str = "WITH a AS (SELECT coalesce(string_agg(t::regtype::oid::text, ' ' ORDER BY i), '') AS sig \
      FROM unnest($3::text[]) WITH ORDINALITY AS u(t, i)) \
      SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, a \
@@ -524,6 +526,8 @@ fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> 
         ("42809", _) if routine => ROUTINE_KIND_HINT,
         ("0A000", ObjectKind::Type) if sql.starts_with("ALTER TYPE ") && sql.contains(" ALTER ATTRIBUTE ") => TYPE_COLUMN_RETYPE_HINT,
         // Fonksiyon tanımı (CREATE [OR REPLACE]) LEAKPROOF isterken yetki hatası; sahip/yorum ifadeleri genel ipucu alır.
+        // Ödünleşim: aynı CREATE ifadesindeki başka bir 42501 (ör. şemada CREATE yetkisi yok, dil USAGE yok) da
+        // LEAKPROOF istendiğinde bu ipucunu alır; PG iletisi asıl nedeni yine söyler, ipucu yalnızca ek açıklamadır.
         ("42501", ObjectKind::Function) if ctx.leakproof && sql.starts_with("CREATE ") => LEAKPROOF_HINT,
         ("42P16" | "42804", ObjectKind::View) if sql.starts_with("CREATE OR REPLACE VIEW ") => VIEW_COLUMNS_HINT,
         ("55000", ObjectKind::MaterializedView) if sql.starts_with("REFRESH MATERIALIZED VIEW CONCURRENTLY ") => {
@@ -542,15 +546,19 @@ fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> 
 }
 
 /// PG'nin kendi ipucunun YERİNE geçen ipuçları: PG bu durumlarda arayüzün sunmadığı bir eylemi (CASCADE ya da SQL ile
-/// önce DROP) önerir; bunun yerine arayüzdeki karşılığı söylenir.
-fn override_hint_for(kind: ObjectKind, op: &str, sql: &str, code: &str) -> Option<&'static str> {
+/// önce DROP) önerir; bunun yerine arayüzdeki karşılığı söylenir. `pg_hint`: PG yükünde ipucu var mı.
+///
+/// 42P13 yalnızca PG ipucu varken: gerçek OR REPLACE sınırı hataları ("cannot change return type …" vb.) her zaman
+/// "Use DROP FUNCTION … first." ipucu taşır; aynı kodu gövde doğrulaması da verir (ör. sql fonksiyonunda dönüş tipi
+/// uyuşmazlığı) ve orada ipucu yoktur — oraya "Yeniden oluştur" önerisi eklenmez.
+fn override_hint_for(kind: ObjectKind, op: &str, sql: &str, code: &str, pg_hint: bool) -> Option<&'static str> {
     let routine = matches!(kind, ObjectKind::Function | ObjectKind::Procedure);
     Some(match (code, kind) {
         ("2BP01", _) if routine && op == "alter" && (sql.starts_with("DROP FUNCTION ") || sql.starts_with("DROP PROCEDURE ")) => {
             ROUTINE_REBUILD_DEPENDENTS_HINT
         }
         ("2BP01", ObjectKind::Type) if op == "alter" && sql.starts_with("ALTER TYPE ") && sql.contains(" ATTRIBUTE ") => TYPED_TABLE_HINT,
-        ("42P13", _) if routine && sql.starts_with("CREATE OR REPLACE ") => OR_REPLACE_HINT,
+        ("42P13", _) if routine && pg_hint && sql.starts_with("CREATE OR REPLACE ") => OR_REPLACE_HINT,
         _ => return None,
     })
 }
@@ -582,7 +590,7 @@ pub(crate) fn failure_payload_with(
         }
     }
     if let (Some(s), Some(code)) = (failed, apply::sqlstate(e)) {
-        if let Some(h) = override_hint_for(kind, op, &s.sql, code) {
+        if let Some(h) = override_hint_for(kind, op, &s.sql, code, p.hint.is_some()) {
             p.hint = Some(h.to_string());
         } else if p.hint.is_none() {
             p.hint = hint_for(kind, op, ctx, &s.sql, code).map(str::to_string);
@@ -2006,8 +2014,9 @@ mod tests {
             (ObjectKind::Function, "alter", "DROP FUNCTION public.f(integer)", "2BP01", none, Some(ROUTINE_REBUILD_DEPENDENTS_HINT)),
             (ObjectKind::Procedure, "alter", "DROP PROCEDURE public.p(IN integer)", "2BP01", none, Some(ROUTINE_REBUILD_DEPENDENTS_HINT)),
             // OR REPLACE sınırı.
-            (ObjectKind::Function, "alter", "CREATE OR REPLACE FUNCTION public.f() RETURNS void", "42P13", none, Some(OR_REPLACE_HINT)),
-            (ObjectKind::Procedure, "alter", "CREATE OR REPLACE PROCEDURE public.p()", "42P13", none, Some(OR_REPLACE_HINT)),
+            // PG ipucu yoksa (gövde doğrulaması, ör. sql fonksiyonunda dönüş tipi uyuşmazlığı) OR REPLACE ipucu eklenmez.
+            (ObjectKind::Function, "alter", "CREATE OR REPLACE FUNCTION public.f() RETURNS void", "42P13", none, None),
+            (ObjectKind::Procedure, "alter", "CREATE OR REPLACE PROCEDURE public.p()", "42P13", none, None),
             (ObjectKind::Function, "create", "CREATE FUNCTION public.f() RETURNS void", "42P13", none, None),
             // Function ↔ Procedure.
             (ObjectKind::Function, "alter", "CREATE OR REPLACE FUNCTION public.f() RETURNS void", "42809", none, Some(ROUTINE_KIND_HINT)),
@@ -2035,6 +2044,7 @@ mod tests {
             (ObjectKind::Function, "alter", "DROP FUNCTION public.f(integer)", "2BP01", ROUTINE_REBUILD_DEPENDENTS_HINT),
             (ObjectKind::Type, "alter", "ALTER TYPE public.c DROP ATTRIBUTE a", "2BP01", TYPED_TABLE_HINT),
             (ObjectKind::Function, "alter", "CREATE OR REPLACE FUNCTION public.f() RETURNS void", "42P13", OR_REPLACE_HINT),
+            (ObjectKind::Procedure, "alter", "CREATE OR REPLACE PROCEDURE public.p()", "42P13", OR_REPLACE_HINT),
         ] {
             let p = failure_payload_with(kind, op, none, Some(&stmt(sql, false)), 0, &q(code, Some("Use CASCADE")));
             assert_eq!(p.hint.as_deref(), Some(want), "{kind:?} {code}");

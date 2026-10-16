@@ -2042,7 +2042,7 @@ async fn gate_session_body(ts: TestServer) {
 // ---- Plan 18: Function / Procedure / Trigger / Type / Domain ----
 
 use pgt_ddl::manager::{
-    LEAKPROOF_HINT, READ_ONLY_PREFIX, ROUTINE_REBUILD_DEPENDENTS_HINT, TYPE_COLUMN_RETYPE_HINT, TYPED_TABLE_HINT,
+    LEAKPROOF_HINT, OR_REPLACE_HINT, READ_ONLY_PREFIX, ROUTINE_REBUILD_DEPENDENTS_HINT, TYPE_COLUMN_RETYPE_HINT, TYPED_TABLE_HINT,
 };
 
 fn rfunc(name: &str, args: &[(&str, &str)]) -> FunctionDef {
@@ -2492,12 +2492,34 @@ async fn read_only_body(ts: TestServer) {
         .unwrap()
         .get(0);
     let dom: u32 = env.admin.query_one("SELECT 'information_schema.cardinal_number'::regtype::oid", &[]).await.unwrap().get(0);
-    for object in [
-        lower,
-        ObjectRef { kind: ObjectKind::Type, oid: int4 },
-        ObjectRef { kind: ObjectKind::Trigger, oid: fk_trigger },
-        ObjectRef { kind: ObjectKind::Domain, oid: dom },
-    ] {
+    // Kullanıcı şemasındaki salt okunur nesneler (üretici sistem şeması kuralına takılmaz; sahte `editable` yalnızca
+    // yeniden yükleme eşitliğiyle yakalanır): internal dilli fonksiyon, tablo satır tipi, PG 13+ klonlanmış trigger.
+    env.sql(
+        "CREATE FUNCTION public.ro_int(text) RETURNS text LANGUAGE internal STRICT IMMUTABLE AS 'lower';
+         CREATE FUNCTION public.ro_tf() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';",
+    )
+    .await;
+    let row_type: u32 = env.admin.query_one("SELECT 'public.ro_p'::regtype::oid", &[]).await.unwrap().get(0);
+    let mut objects = vec![
+        (lower, false),
+        (ObjectRef { kind: ObjectKind::Type, oid: int4 }, false),
+        (ObjectRef { kind: ObjectKind::Trigger, oid: fk_trigger }, false),
+        (ObjectRef { kind: ObjectKind::Domain, oid: dom }, false),
+        (ObjectRef { kind: ObjectKind::Function, oid: env.proc_oid("public", "ro_int", "text").await }, true),
+        (ObjectRef { kind: ObjectKind::Type, oid: row_type }, true),
+    ];
+    if env.version >= 130000 {
+        env.sql(
+            "CREATE TABLE public.ro_pt (id int) PARTITION BY RANGE (id);
+             CREATE TABLE public.ro_pt1 PARTITION OF public.ro_pt FOR VALUES FROM (0) TO (10);
+             CREATE TRIGGER ro_tr AFTER INSERT ON public.ro_pt FOR EACH ROW EXECUTE PROCEDURE public.ro_tf();",
+        )
+        .await;
+        objects.push((ObjectRef { kind: ObjectKind::Trigger, oid: trigger_oid(&env, "ro_pt1", "ro_tr").await.unwrap() }, true));
+    } else {
+        eprintln!("PG {}: klonlanmış trigger atlandı (PG 13+)", env.version / 10_000);
+    }
+    for (object, user_schema) in objects {
         let loaded = f.load_def(object).await;
         let (editable, names) = match &loaded {
             ObjectDef::Function(d) => (d.editable, vec![d.name.clone(), d.schema.clone()]),
@@ -2518,8 +2540,37 @@ async fn read_only_body(ts: TestServer) {
                 assert!(!m.contains(n.as_str()), "ad iletide: {m}");
             }
         }
+        // İstemci tarafında kapıyı atlatma girişimi: `editable = true` ve boş `unsupported` ile gönderilen eski tanım
+        // yüklenen tanıma eşit değildir → yeniden yükleme eşitliği (4) `plan_changed` ile kapatır.
+        let mut spoofed = loaded.clone();
+        set_editable(&mut spoofed);
+        let mut new = spoofed.clone();
+        set_comment(&mut new, "x");
+        let alter = PlanRequest::Alter { object, old: spoofed.clone(), new };
+        let drop = PlanRequest::Drop { object, def: spoofed, cascade: true, force: false };
+        for req in [&alter, &drop] {
+            let r = f.apply_with(req, |o| (o.confirmed, o.confirmed_production) = (true, true)).await;
+            // Sistem nesnesinde üretici (3) zaten reddeder (sistem şeması/fonksiyonu → `invalid_def`); kullanıcı
+            // şemasında plan üretilir ve nesne denetimi (4) sahteliği yakalar.
+            let c = code(&r);
+            if user_schema {
+                assert_eq!(c, "plan_changed", "{:?} {req:?}", object.kind);
+            } else {
+                assert!(c == "plan_changed" || c == "invalid_def", "{:?}: {c}", object.kind);
+            }
+        }
         // Nesne yerinde ve değişmedi.
         assert_eq!(f.load_def(object).await, loaded);
+    }
+}
+
+fn set_editable(d: &mut ObjectDef) {
+    match d {
+        ObjectDef::Function(x) | ObjectDef::Procedure(x) => (x.editable, x.unsupported) = (true, vec![]),
+        ObjectDef::Trigger(x) => (x.editable, x.unsupported) = (true, vec![]),
+        ObjectDef::Type(x) => (x.editable, x.unsupported) = (true, vec![]),
+        ObjectDef::Domain(x) => (x.editable, x.unsupported) = (true, vec![]),
+        other => panic!("{other:?}"),
     }
 }
 
@@ -2654,6 +2705,13 @@ async fn new_hints_body(ts: TestServer) {
     let retype = f.alter_loaded(kobj, |d| composite_attrs(d)[0].type_name = "bigint".into()).await;
     let (sqlstate, hint) = hint_of(f.apply_with(&retype, |o| o.confirmed = true).await);
     assert_eq!((sqlstate.as_str(), hint.as_deref()), ("0A000", Some(TYPE_COLUMN_RETYPE_HINT)));
+
+    // Gövde doğrulaması da 42P13 verir (sql fonksiyonunda dönüş tipi uyuşmazlığı; PG ipucu yok): OR REPLACE ipucu
+    // eklenmez (yalnızca PG'nin "önce DROP" ipucunun yerine geçer).
+    let bad_body = f.alter_loaded(fobj, |d| routine_def(d).body = "SELECT 'x'".into()).await;
+    let (sqlstate, hint) = hint_of(f.apply(&bad_body).await);
+    assert_eq!(sqlstate, "42P13");
+    assert_ne!(hint.as_deref(), Some(OR_REPLACE_HINT));
 
     // LEAKPROOF: süper kullanıcı olmayan rol → 42501, LEAKPROOF ipucu (create ve OR REPLACE).
     let role = cluster_name(&ts, ObjectKind::Role, "mnewhint").await;

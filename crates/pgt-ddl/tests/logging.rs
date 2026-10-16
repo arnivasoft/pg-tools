@@ -230,7 +230,10 @@ async fn routine_type_logging_is_body_name_value_free() {
         for marker in ["DDL uygulandı", "DDL uygulanamadı", "42723", "42710", "Function", "Trigger", "Type", "Domain"] {
             assert!(out.contains(marker), "günlükte {marker:?} yok: {out}");
         }
-        for secret in R_SECRETS.iter().copied().chain(["zr_gizli", "FUNCTION", "TRIGGER", "DOMAIN", "$pgt", "plpgsql", "already exists", "BEGIN"]) {
+        if common::version_num(&ts).await >= 110000 {
+            assert!(out.contains("Procedure"), "günlükte Procedure yok: {out}");
+        }
+        for secret in R_SECRETS.iter().copied().chain(["zr_gizli", "FUNCTION", "PROCEDURE", "TRIGGER", "DOMAIN", "$pgt", "plpgsql", "already exists", "BEGIN"]) {
             assert!(!out.contains(secret), "günlükte {secret:?} var: {out}");
         }
         if let Some(p) = ts.password.as_deref().filter(|p| !p.is_empty()) {
@@ -280,6 +283,15 @@ async fn routine_logging_body(ts: TestServer) {
     let r = apply(&dm, server, db, &create(ObjectDef::Function(void.clone()))).await;
     let Ok(ApplyOutcome::Failed { sqlstate, .. }) = r else { panic!("{r:?}") };
     assert_eq!(sqlstate.as_deref(), Some("42723"));
+    // Procedure (PG 11+): oluşturma + aynı imzayla tekrar (42723).
+    if env.version >= 110000 {
+        let p = FunctionDef { name: "zr_gizli_proc".into(), returns: None, ..void.clone() };
+        let r = apply(&dm, server, db, &create(ObjectDef::Procedure(p.clone()))).await;
+        assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
+        let r = apply(&dm, server, db, &create(ObjectDef::Procedure(p))).await;
+        let Ok(ApplyOutcome::Failed { sqlstate, .. }) = r else { panic!("{r:?}") };
+        assert_eq!(sqlstate.as_deref(), Some("42723"));
+    }
 
     env.sql("CREATE TABLE public.zr_gizli_tablo (id int)").await;
     let trigger = TriggerDef {
