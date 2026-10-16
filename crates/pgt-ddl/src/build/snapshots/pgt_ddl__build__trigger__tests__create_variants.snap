@@ -1,0 +1,51 @@
+---
+source: crates/pgt-ddl/src/build/trigger.rs
+expression: out
+---
+# before row insert or update of
+[Safe] CREATE TRIGGER tr BEFORE INSERT OR UPDATE OF a, "Kolon B" ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf()
+
+# after statement truncate
+[Safe] CREATE TRIGGER tr AFTER TRUNCATE ON public.t FOR EACH STATEMENT EXECUTE FUNCTION public.tf()
+
+# tüm olaylar statement
+[Safe] CREATE TRIGGER tr BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON public.t FOR EACH STATEMENT EXECUTE FUNCTION public.tf()
+
+# when
+[Safe] CREATE TRIGGER tr BEFORE UPDATE ON public.t FOR EACH ROW WHEN (OLD.x IS DISTINCT FROM NEW.x -- yorum
+
+) EXECUTE FUNCTION public.tf()
+
+# argümanlı
+[Safe] CREATE TRIGGER tr BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf('a', 'it''s', E'c:\\yol', 'ş 日本', '')
+
+# referencing statement
+[Safe] CREATE TRIGGER tr AFTER UPDATE ON public.t REFERENCING OLD TABLE AS eski NEW TABLE AS "Yeni" FOR EACH STATEMENT EXECUTE FUNCTION public.tf()
+
+# referencing row
+[Safe] CREATE TRIGGER tr AFTER INSERT ON public.t REFERENCING NEW TABLE AS n FOR EACH ROW EXECUTE FUNCTION public.tf()
+
+# constraint not deferrable
+[Safe] CREATE CONSTRAINT TRIGGER tr AFTER INSERT ON public.t NOT DEFERRABLE FOR EACH ROW EXECUTE FUNCTION public.tf()
+
+# constraint deferrable
+[Safe] CREATE CONSTRAINT TRIGGER tr AFTER INSERT ON public.t DEFERRABLE FOR EACH ROW EXECUTE FUNCTION public.tf()
+
+# constraint deferrable initially deferred
+[Safe] CREATE CONSTRAINT TRIGGER tr AFTER UPDATE OF a OR DELETE ON public.t DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.tf()
+
+# disabled + yorum
+[Safe] CREATE TRIGGER tr BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf()
+[Safe] ALTER TABLE public.t DISABLE TRIGGER tr
+[Safe] COMMENT ON TRIGGER tr ON public.t IS 'it''s'
+
+# replica
+[Safe] CREATE TRIGGER tr BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf()
+[Safe] ALTER TABLE public.t ENABLE REPLICA TRIGGER tr
+
+# always
+[Safe] CREATE TRIGGER tr BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf()
+[Safe] ALTER TABLE public.t ENABLE ALWAYS TRIGGER tr
+
+# fonksiyon pg_catalog
+[Safe] CREATE TRIGGER tr BEFORE UPDATE ON public.t FOR EACH ROW EXECUTE FUNCTION pg_catalog.suppress_redundant_updates_trigger()

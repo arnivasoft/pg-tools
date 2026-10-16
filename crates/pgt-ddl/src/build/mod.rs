@@ -21,6 +21,7 @@ mod sqlscan;
 pub mod table;
 pub mod table_alter;
 pub mod table_constraint;
+pub mod trigger;
 pub mod type_canon;
 pub mod type_syntax;
 pub mod view;
@@ -171,7 +172,7 @@ pub struct DropOptions {
     pub force: bool,
 }
 
-/// Plan 18 Task 3–5'in üreticileri gelene kadar Trigger/Type/Domain'in tek yer tutucu hatası.
+/// Plan 18 Task 4–5'in üreticileri gelene kadar Type/Domain'in tek yer tutucu hatası.
 fn unsupported_kind() -> Vec<FieldError> {
     vec![err("kind", "Bu tür henüz desteklenmiyor.")]
 }
@@ -197,7 +198,8 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Role(d) => role::validate(d, ctx),
         ObjectDef::Function(d) => routine::validate(ctx, ObjectKind::Function, d),
         ObjectDef::Procedure(d) => routine::validate(ctx, ObjectKind::Procedure, d),
-        ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => unsupported_kind(),
+        ObjectDef::Trigger(d) => trigger::validate(ctx, d),
+        ObjectDef::Type(_) | ObjectDef::Domain(_) => unsupported_kind(),
     }
 }
 
@@ -288,8 +290,9 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Role(d) => Ok(role::create(d)),
         ObjectDef::Function(d) => routine::create(ctx, ObjectKind::Function, d),
         ObjectDef::Procedure(d) => routine::create(ctx, ObjectKind::Procedure, d),
+        ObjectDef::Trigger(d) => trigger::create(ctx, d),
         // `validate` yer tutucu hatası yukarıda döner; buraya ulaşılmaz.
-        ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => Err(unsupported_kind()),
+        ObjectDef::Type(_) | ObjectDef::Domain(_) => Err(unsupported_kind()),
     }
 }
 
@@ -328,6 +331,9 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
     match (old, new) {
         (ObjectDef::Function(o), ObjectDef::Function(n)) => return routine::alter(ctx, ObjectKind::Function, o, n),
         (ObjectDef::Procedure(o), ObjectDef::Procedure(n)) => return routine::alter(ctx, ObjectKind::Procedure, o, n),
+        // Trigger kendi doğrulamasını yapar: tablo değiştirilemez, yalnızca değişen/yazılan alanlar, salt okunur kapısı;
+        // yapı değişimi PG 14+'da OR REPLACE, aksi hâlde aynı transaction'da yeniden kurma (Karar 5).
+        (ObjectDef::Trigger(o), ObjectDef::Trigger(n)) => return trigger::alter(ctx, o, n),
         _ => {}
     }
     checked(new, ctx)?;
@@ -380,7 +386,8 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Role(d) => role::drop(d),
         ObjectDef::Function(d) => routine::drop(ObjectKind::Function, d, cascade),
         ObjectDef::Procedure(d) => routine::drop(ObjectKind::Procedure, d, cascade),
-        ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => Err(unsupported_kind()),
+        ObjectDef::Trigger(d) => trigger::drop(d, cascade),
+        ObjectDef::Type(_) | ObjectDef::Domain(_) => Err(unsupported_kind()),
     }
 }
 
@@ -756,10 +763,10 @@ mod tests {
     }
 
     #[test]
-    fn routine_trigger_type_domain_are_placeholders_until_their_builders() {
-        // Task 3–5'in üreticileri gelene kadar: create/alter/drop/validate yer tutucu "kind" hatası; kimlik kolları gerçek.
+    fn type_domain_are_placeholders_until_their_builders() {
+        // Task 4–5'in üreticileri gelene kadar: create/alter/drop/validate yer tutucu "kind" hatası; kimlik kolları gerçek.
         let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
-        for d in new_kind_defs("public").into_iter().skip(2) {
+        for d in new_kind_defs("public").into_iter().skip(3) {
             assert_eq!(validate(&d, &ctx())[0].path, "kind", "{d:?}");
             assert_eq!(kind(create(&d, &ctx())), "kind", "{d:?}");
             assert_eq!(kind(alter(&d, &d, &ctx())), "kind", "{d:?}");
@@ -774,6 +781,27 @@ mod tests {
         // Function ↔ Procedure ayrı türlerdir: alter tür uyuşmazlığı.
         let defs = new_kind_defs("public");
         assert!(alter(&defs[0], &defs[1], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
+    }
+
+    #[test]
+    fn trigger_is_wired() {
+        let defs = new_kind_defs("public");
+        let trg = &defs[2];
+        assert!(validate(trg, &ctx()).is_empty());
+        assert_eq!(
+            create(trg, &ctx()).unwrap().statements[0].sql,
+            "CREATE TRIGGER tr BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf()"
+        );
+        assert!(alter(trg, trg, &ctx()).unwrap().statements.is_empty());
+        assert_eq!(drop(trg, false, &ctx()).unwrap().statements[0].sql, "DROP TRIGGER tr ON public.t");
+        assert_eq!(drop(trg, true, &ctx()).unwrap().statements[0].sql, "DROP TRIGGER tr ON public.t CASCADE");
+        // Sürüm kapısı dağıtıcıdan geçer (PG 10: EXECUTE PROCEDURE); eski taraf `old.` önekiyle; tür uyuşmazlığı.
+        let v10 = BuildCtx { version_num: 100000, ..Default::default() };
+        assert!(create(trg, &v10).unwrap().statements[0].sql.ends_with("EXECUTE PROCEDURE public.tf()"));
+        let sys = &new_kind_defs("pg_catalog")[2];
+        assert_eq!(alter(sys, trg, &ctx()).unwrap_err()[0].path, "old.schema");
+        assert!(alter(trg, &defs[0], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
+        assert_eq!(drop_with(trg, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
     }
 
     #[test]

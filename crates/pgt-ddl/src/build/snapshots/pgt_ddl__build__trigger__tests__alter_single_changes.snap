@@ -1,0 +1,42 @@
+---
+source: crates/pgt-ddl/src/build/trigger.rs
+expression: out
+---
+# ad
+[Safe] ALTER TRIGGER tr ON public.t RENAME TO "Yeni Ad"
+
+# disabled
+[Safe] ALTER TABLE public.t DISABLE TRIGGER tr
+
+# replica
+[Safe] ALTER TABLE public.t ENABLE REPLICA TRIGGER tr
+
+# always
+[Safe] ALTER TABLE public.t ENABLE ALWAYS TRIGGER tr
+
+# yorum
+[Safe] COMMENT ON TRIGGER tr ON public.t IS 'd'
+
+# yorum None
+[Safe] COMMENT ON TRIGGER tr ON public.t IS NULL
+
+# zamanlama (PG 14+ OR REPLACE)
+[Safe] CREATE OR REPLACE TRIGGER tr AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf()
+
+# olay
+[Safe] CREATE OR REPLACE TRIGGER tr BEFORE INSERT OR DELETE ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf()
+
+# WHEN
+[Safe] CREATE OR REPLACE TRIGGER tr BEFORE INSERT ON public.t FOR EACH ROW WHEN (NEW.a > 1
+) EXECUTE FUNCTION public.tf()
+
+# argüman
+[Safe] CREATE OR REPLACE TRIGGER tr BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf('z')
+
+# fonksiyon
+[Safe] CREATE OR REPLACE TRIGGER tr BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION app.g()
+
+# düzey
+[Safe] CREATE OR REPLACE TRIGGER tr BEFORE INSERT ON public.t FOR EACH STATEMENT EXECUTE FUNCTION public.tf()
+
+# değişmez

@@ -1,0 +1,39 @@
+---
+source: crates/pgt-ddl/src/build/trigger.rs
+expression: out
+---
+olay yok: events
+UPDATE OF olmadan UPDATE: events.updateColumns
+UPDATE OF kolon boş: events.updateColumns[0]
+UPDATE OF kolon satır sonu: events.updateColumns[1]
+UPDATE OF kolon tekrar: events.updateColumns[1]
+TRUNCATE ROW: events.truncate
+INSTEAD OF: timing
+constraint BEFORE: timing
+constraint INSTEAD OF: timing
+constraint STATEMENT: level
+DEFERRABLE constraint değil: deferrable
+INITIALLY DEFERRED DEFERRABLE değil: initiallyDeferred
+REFERENCING BEFORE: newTable
+REFERENCING constraint: newTable
+REFERENCING UPDATE OF: oldTable
+REFERENCING çok olay: newTable
+REFERENCING TRUNCATE: newTable
+OLD TABLE INSERT: oldTable
+NEW TABLE DELETE: newTable
+OLD = NEW adı: newTable
+OLD TABLE adı boş: oldTable
+WHEN enjeksiyon: when
+WHEN ;: when
+WHEN boş: when
+WHEN \ sıradan dizede: when
+fonksiyon şeması boş: functionSchema
+fonksiyon adı boş: functionName
+fonksiyon adı NUL: functionName
+argüman NUL: args[1]
+argüman uzun: args[0]
+ad boş: name
+ad 64 bayt: name
+şema sistem: schema
+tablo boş: table
+yorum NUL: comment
