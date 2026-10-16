@@ -1,0 +1,37 @@
+---
+source: crates/pgt-ddl/src/build/domain.rs
+expression: out
+---
+# default değiştir
+[Safe] ALTER DOMAIN public.d SET DEFAULT (1 + 1
+)
+
+# default kaldır
+[Safe] ALTER DOMAIN public.d DROP DEFAULT
+
+# not null aç
+[Destructive] ALTER DOMAIN public.d SET NOT NULL  -- kullanan kolonları tarar; NULL değer varsa başarısız olur
+
+# kısıt ekle
+[Safe] ALTER DOMAIN public.d ADD CONSTRAINT yeni CHECK (VALUE <> 5
+)  -- kullanan kolonları tarar
+
+# kısıt ekle NOT VALID
+[Safe] ALTER DOMAIN public.d ADD CONSTRAINT yeni CHECK (VALUE <> 5
+) NOT VALID
+
+# kısıt yeniden adlandır
+[Safe] ALTER DOMAIN public.d RENAME CONSTRAINT pos TO "Pozitif"
+
+# ifade değiştir
+[Destructive] ALTER DOMAIN public.d DROP CONSTRAINT pos  -- ifade değişti: kısıt kaldırılıp yeniden eklenir
+[Safe] ALTER DOMAIN public.d ADD CONSTRAINT pos CHECK (VALUE >= 0
+)  -- kullanan kolonları tarar
+
+# kısıt sil
+[Destructive] ALTER DOMAIN public.d DROP CONSTRAINT pos
+
+# doğrula
+[Safe] ALTER DOMAIN public.d VALIDATE CONSTRAINT kucuk
+
+# kanonik eşit tip

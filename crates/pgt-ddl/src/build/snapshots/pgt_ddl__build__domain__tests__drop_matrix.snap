@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/build/domain.rs
+expression: out
+---
+[Destructive] DROP DOMAIN public.d
+
+[DataLoss] DROP DOMAIN public.d CASCADE  -- Bağımlı nesneler de silinir
+WARN: Bağımlı nesneler de silinir
+
+[Destructive] DROP DOMAIN "Ş"."My ""D"""

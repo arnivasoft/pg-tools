@@ -8,6 +8,7 @@
 //! (alan sınırlarında kapanma/açılma kaymasını yakalamak için). Tarayıcı `standard_conforming_strings = on` varsayar.
 
 pub mod database;
+pub mod domain;
 pub mod extension;
 pub mod freesql;
 pub mod index;
@@ -173,11 +174,6 @@ pub struct DropOptions {
     pub force: bool,
 }
 
-/// Plan 18 Task 5'in üreticisi gelene kadar Domain'in tek yer tutucu hatası.
-fn unsupported_kind() -> Vec<FieldError> {
-    vec![err("kind", "Bu tür henüz desteklenmiyor.")]
-}
-
 fn mismatch(old: &ObjectDef, new: &ObjectDef) -> Vec<FieldError> {
     vec![err(
         "kind",
@@ -201,7 +197,7 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Procedure(d) => routine::validate(ctx, ObjectKind::Procedure, d),
         ObjectDef::Trigger(d) => trigger::validate(ctx, d),
         ObjectDef::Type(d) => pgtype::validate(ctx, d),
-        ObjectDef::Domain(_) => unsupported_kind(),
+        ObjectDef::Domain(d) => domain::validate(ctx, d),
     }
 }
 
@@ -294,8 +290,7 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Procedure(d) => routine::create(ctx, ObjectKind::Procedure, d),
         ObjectDef::Trigger(d) => trigger::create(ctx, d),
         ObjectDef::Type(d) => pgtype::create(ctx, d),
-        // `validate` yer tutucu hatası yukarıda döner; buraya ulaşılmaz.
-        ObjectDef::Domain(_) => Err(unsupported_kind()),
+        ObjectDef::Domain(d) => domain::create(ctx, d),
     }
 }
 
@@ -340,6 +335,9 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         // Type kendi doğrulamasını yapar: yalnızca değişen/yazılan alanlar, enum/composite `original` eşlemesi, range
         // gövdesi sabit, tür (variant) değişmez, salt okunur kapısı.
         (ObjectDef::Type(o), ObjectDef::Type(n)) => return pgtype::alter(ctx, o, n),
+        // Domain kendi doğrulamasını yapar: temel tip/collation create-only, kısıtlar `original` ile eşlenir, yalnızca
+        // değişen/yazılan alanlar, salt okunur kapısı.
+        (ObjectDef::Domain(o), ObjectDef::Domain(n)) => return domain::alter(ctx, o, n),
         _ => {}
     }
     checked(new, ctx)?;
@@ -394,7 +392,7 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Procedure(d) => routine::drop(ObjectKind::Procedure, d, cascade),
         ObjectDef::Trigger(d) => trigger::drop(d, cascade),
         ObjectDef::Type(d) => pgtype::drop(d, cascade),
-        ObjectDef::Domain(_) => Err(unsupported_kind()),
+        ObjectDef::Domain(d) => domain::drop(d, cascade),
     }
 }
 
@@ -771,17 +769,30 @@ mod tests {
     }
 
     #[test]
-    fn domain_is_placeholder_until_its_builder() {
-        // Task 5'in üreticisi gelene kadar: create/alter/drop/validate yer tutucu "kind" hatası; kimlik kolları gerçek.
+    fn domain_is_wired() {
         let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
-        for d in new_kind_defs("public").into_iter().skip(4) {
-            assert_eq!(validate(&d, &ctx())[0].path, "kind", "{d:?}");
-            assert_eq!(kind(create(&d, &ctx())), "kind", "{d:?}");
-            assert_eq!(kind(alter(&d, &d, &ctx())), "kind", "{d:?}");
-            assert_eq!(kind(drop(&d, false, &ctx())), "kind", "{d:?}");
-            assert!(validate_identity(&d).is_empty(), "{d:?}");
-        }
-        // Eski taraf/drop kimliği: sistem şeması reddedilir (yer tutucudan önce).
+        let defs = new_kind_defs("public");
+        let dom = &defs[4];
+        assert!(validate(dom, &ctx()).is_empty());
+        assert!(validate_identity(dom).is_empty());
+        assert_eq!(create(dom, &ctx()).unwrap().statements[0].sql, "CREATE DOMAIN public.d AS integer");
+        assert!(alter(dom, dom, &ctx()).unwrap().statements.is_empty());
+        assert_eq!(drop(dom, false, &ctx()).unwrap().statements[0].sql, "DROP DOMAIN public.d");
+        assert_eq!(drop(dom, true, &ctx()).unwrap().statements[0].sql, "DROP DOMAIN public.d CASCADE");
+        let ObjectDef::Domain(mut nn) = dom.clone() else { unreachable!() };
+        nn.not_null = true;
+        assert_eq!(alter(dom, &ObjectDef::Domain(nn), &ctx()).unwrap().statements[0].sql, "ALTER DOMAIN public.d SET NOT NULL");
+        let sys = &new_kind_defs("pg_catalog")[4];
+        assert_eq!(alter(sys, dom, &ctx()).unwrap_err()[0].path, "old.schema");
+        assert_eq!(kind(create(sys, &ctx())), "schema");
+        assert!(alter(dom, &defs[3], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
+        assert_eq!(drop_with(dom, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
+    }
+
+    #[test]
+    fn new_kinds_identity_and_kind_mismatch() {
+        let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
+        // Eski taraf/drop kimliği: sistem şeması reddedilir.
         for d in new_kind_defs("pg_catalog") {
             assert_eq!(validate_identity(&d).into_iter().map(|e| e.path).collect::<Vec<_>>(), ["schema"], "{d:?}");
             assert_eq!(kind(drop(&d, false, &ctx())), "schema", "{d:?}");

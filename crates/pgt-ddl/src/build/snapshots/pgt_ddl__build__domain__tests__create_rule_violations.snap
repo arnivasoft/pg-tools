@@ -1,0 +1,28 @@
+---
+source: crates/pgt-ddl/src/build/domain.rs
+expression: out
+---
+tip boş: baseType
+tip enjeksiyon: baseType
+tip NOT NULL: baseType
+collation boş: collation
+collation satır sonu: collation
+default boş: default
+default ;: default
+default ): default
+default --: default
+default ters bölü: default
+default NUL: default
+ifade boş: constraints[0].expression
+ifade ;: constraints[1].expression
+ifade ): constraints[0].expression
+ifade --: constraints[0].expression
+ifade kapanmamış: constraints[0].expression
+NOT VALID create'te: constraints[0].notValid
+kısıt adı boş: constraints[0].name
+kısıt adı 64 bayt: constraints[0].name
+kısıt adı tekrar: constraints[2].name
+ad boş: name
+şema sistem: schema
+sahip boş: owner
+yorum NUL: comment
