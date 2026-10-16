@@ -527,3 +527,24 @@ Bilinen sınırlar:
 - [ ] Okuma imleci kilidi: açık veri sekmesinin imleci salt okunur bir transaction tutar (AccessShareLock + anlık görüntü; 5 dk boşta kalınca kapanır) — bu sürede kullanıcının kendi `ALTER TABLE`'ı bekler (Sorgu Aracı ile aynı, bilinen davranış); sekmeyi kapatmak kilidi bırakır. **[—]**
 - [ ] Klavye/erişilebilirlik/tema: ızgara oklar/Home/End/PageUp/PageDown; tüm düzenleme komutları klavyeyle; ekran okuyucuda hücre durumu (değişti/silinecek/yeni/hata); açık/koyu tema; dar pencerede (≈1100 px) araç çubuğu taşmaz; 100k satırda kaydırma akıcı (DOM'da ~100 hücre). **[—]**
 - [ ] Gizlilik: geliştirici konsolunda ve günlükte hücre değeri/SQL yok; `localStorage`'da veri yok. **[—]**
+
+## Nesne diyalogları: Function/Procedure/Trigger/Type/Domain arka ucu (Plan 18)
+
+Plan 18 yalnızca arka uçtur; **GUI maddeleri Plan 19 bölümündedir** (menüde bu türler henüz yok). Arka uç elle sınanmaz; Docker testleriyle (`scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`; kapsayıcılar sonda silinir) kapsanan maddelerin özeti:
+
+- Beş tür için create / alter / drop / load gidiş-dönüşü PG 10–18'de (`routine_roundtrip`, `type_roundtrip`, `manager`): `create → load → eşit`, `alter(loaded, loaded)` boş plan (sabit nokta), `alter(old, new) → load → new`.
+- Sürüm kapıları: Procedure PG 11+, `CREATE OR REPLACE TRIGGER` PG 14+ (altında DROP + CREATE), enum `ADD VALUE` transaction davranışı (PG < 12 transaction dışı), multirange PG 14+, `prosqlbody` (`BEGIN ATOMIC`) PG 14+ salt okunur.
+- Gövde tek ifade ve baytı baytına (üretilmiş dolar etiketi, gövdede `$pgt$` geçse de); düşmanca ad/değerler; `;`/`--`/`\` içeren gövde.
+- Salt okunur nesneler (C/internal dil, aggregate/pencere, eklentiye ait, sistem şeması, iç/klonlanmış trigger, base/array/pseudo/shell/multirange tip): `unsupported` + `editable = false`; alter/drop kodsuz `invalid`; sahte `editable` → `plan_changed`/`invalid_def`.
+- Bağımlı nesne hataları (2BP01), OR REPLACE sınırı (42P13), 42809, typed-table, `LEAKPROOF` 42501 ipuçları; günlükte gövde/ad/değer yok (yakalama testi).
+- Davranışlar: `OR REPLACE TRIGGER` etkinliği ORIGIN'e sıfırlar (yorum ve oid korunur); PG < 14 yeniden kurmada etkinlik + yorum yeniden yazılır; enum `ADD VALUE` zinciri PG 12–18; PG < 12 kısmi uygulama (committed raporlanır); `WHEN` `pg_get_triggerdef`'ten; `COST`/`ROWS` float4 yuvarlaması.
+
+Bilinen sınırlar:
+- `CREATE OR REPLACE` sınırları: imza (giriş argüman tipleri), dönüş tipi, giriş argüman adı, varsayılan kaldırma, OUT argüman değişimi ve Function ↔ Procedure yalnızca açık **yeniden oluştur** (DROP + CREATE, DataLoss: GRANT'lar ve bağımlılar kaybolur) ile; seçilmezse alan hatası.
+- `BEGIN ATOMIC` (PG 14+) gövdeli fonksiyonlar salt okunurdur.
+- Yüklenen düz `\` içeren argüman varsayılanı / `WHEN` / domain `DEFAULT`-`CHECK` ifadesi o ifadenin düzenlenmesini kapıda reddeder (kaçış için `E'…'`).
+- PG < 14 (ve constraint trigger) değişikliği DROP + CREATE ile yeniden kurar (Destructive).
+- PG < 12 enum `ADD VALUE` transaction dışıdır (kısmi uygulama olabilir). Enum değerleri silinemez/yeniden sıralanamaz.
+- Typed table kullanan composite'te öznitelik değişimi (CASCADE) desteklenmez; tablo kolonunda kullanılan composite'in öznitelik tipi değiştirilemez (PG 0A000).
+- Range'in multirange şeması modellenmez; PG 17+ adlı domain `NOT NULL` adı korunmaz; view / `INSTEAD OF` trigger'lar backlog.
+- `LEAKPROOF` yalnızca süper kullanıcı verebilir (42501).

@@ -291,7 +291,8 @@ Bu yöntemle Task 8'de akışlar (onay, transaction, iptal, CSV, geçmiş, 50.00
 kapanışı) ve Task 9'da yayın exe'sinde sorgu sekmesi açılış süresi ile bellek (`docs/performance.md`) doğrulandı.
 
 ## Yayın exe duman testi
-    bun run tauri build --no-bundle                 # dist + ön yüzü gömülü targeteleasepg-tools.exe (NSIS yok)
+    bun run tauri build --no-bundle                 # dist + ön yüzü gömülü target
+eleasepg-tools.exe (NSIS yok)
     ./scripts/smoke-release.ps1                     # varsayılan: target\release\pg-tools.exe, 6 sn
     ./scripts/smoke-release.ps1 -Exe C:\yol\pg-tools.exe -Seconds 10
 
@@ -367,3 +368,16 @@ Arka uç `crates/pgt-ddl/src/data` altındadır; saf testler (insta anlık gör�
 | `crates/pgt-ddl/tests/data_manager.rs` | `DataManager`: bayat `xmin` -> `row_conflict`, kısıt/tetikleyici -> tam geri alma, kilit zaman aşımı, iptal, üretim/kilit kapıları, bölümlü INSERT sürümü |
 | `crates/pgt-ddl/tests/logging.rs` | Hücre/anahtar değerlerinin günlüğe düşmediği (yakalama testi) |
 | `src-tauri` (data komutları) | `data_load/select/preview/apply/cancel` uçtan uca (testkit `fixture()` yalnız ilk URL'yi kullanır) |
+
+## Nesne diyalogları testleri: Function/Procedure/Trigger/Type/Domain (Plan 18)
+
+Arka uç `crates/pgt-ddl` altındadır; saf testler (insta anlık görüntüleri: `src/build/snapshots`) sunucusuzdur, Docker testleri `PGT_TEST_URLS` ister ve `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf` ile PG 10–18'de koşar (sürüme bağlı adımlar atlanır: Procedure PG 11+, `OR REPLACE TRIGGER` PG 14+, multirange PG 14+, `BEGIN ATOMIC` PG 14+).
+
+| Dosya | Kapsam |
+|---|---|
+| `crates/pgt-ddl/src/build/{routine,trigger,pgtype,domain}.rs` (birim) | Saf üreticiler: create/alter/drop anlık görüntüleri, dolar etiketi seçimi, `needs_recreate` tablosu, hostile ad/değerler, sürüm kapıları |
+| `crates/pgt-ddl/tests/routine_roundtrip.rs` | Function/Procedure/Trigger: `create → load → eşit`, sabit nokta, `alter(old, new) → load → new`, OR REPLACE sınırları, yeniden kurma, `OR REPLACE TRIGGER` / PG < 14 yeniden kurma, 2BP01, salt okunur yüklemeler |
+| `crates/pgt-ddl/tests/type_roundtrip.rs` | Type (enum/composite/range/multirange) ve Domain: gidiş-dönüş, sabit nokta, enum `ADD VALUE` zinciri (PG < 12 transaction dışı + kısmi uygulama), CHECK kısıtları, base/array/shell tipin salt okunur yüklenmesi |
+| `crates/pgt-ddl/tests/manager.rs` | Yönetici entegrasyonu: `find_created`, `defaults(…, preset)`, salt okunur kapısı, ipuçları (2BP01/42P13/42809/0A000/42501), sahte `editable` -> `plan_changed` |
+| `crates/pgt-ddl/src/lookup.rs` (birim + DB) | `languages` ve `triggerFunctions` açılır listeleri |
+| `crates/pgt-ddl/tests/logging.rs` | Gövde/ad/değerlerin günlüğe düşmediği (yakalama testi) |
