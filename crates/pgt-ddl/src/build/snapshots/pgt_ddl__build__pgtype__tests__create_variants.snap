@@ -23,7 +23,7 @@ expression: out
 [Safe] CREATE TYPE public.ty AS RANGE (SUBTYPE = float8)
 
 # range tam
-[Safe] CREATE TYPE public.ty AS RANGE (SUBTYPE = text, SUBTYPE_OPCLASS = text_ops, COLLATION = "C", CANONICAL = public.canon, SUBTYPE_DIFF = "My S"."diff.fn", MULTIRANGE_TYPE_NAME = textmultirange)
+[Safe] CREATE TYPE public.ty AS RANGE (SUBTYPE = text, SUBTYPE_OPCLASS = text_ops, COLLATION = "C", CANONICAL = public.canon, SUBTYPE_DIFF = "My S"."diff.fn", MULTIRANGE_TYPE_NAME = public.textmultirange)
 
 # range niteliksiz fonksiyon
 [Safe] CREATE TYPE public.ty AS RANGE (SUBTYPE = int4, CANONICAL = canon)

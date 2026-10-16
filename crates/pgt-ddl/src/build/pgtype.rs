@@ -9,7 +9,8 @@
 //!   (DataLoss), `ALTER ATTRIBUTE … TYPE [COLLATE]` (DataLoss; kanonik tip ya da collation değiştiyse), `ADD ATTRIBUTE`
 //!   (Safe); `CASCADE` yazılmaz. PG öznitelikleri yeniden sıralayamaz ve yeni özniteliği sona ekler: yüklü özniteliklerin
 //!   sırası korunmalı, yeni öznitelikler sonda olmalı (aksi hâlde `alter → load` taslağa eşit olmazdı).
-//! - **Range** (Karar 8): yalnızca create; alter'da gövde alanı değişimi alan hatası. `MULTIRANGE_TYPE_NAME` PG 14+.
+//! - **Range** (Karar 8): yalnızca create; alter'da gövde alanı değişimi alan hatası. `MULTIRANGE_TYPE_NAME` PG 14+,
+//!   range'in şemasıyla nitelenir (niteliksiz ad arama yolunun ilk şemasına kurulur; PG 14–18'de gözlendi).
 //!   `CANONICAL`/`SUBTYPE_DIFF` metni `ad ('.' ad)?` dilbilgisiyle ayrıştırılır (tırnaksız ad küçük harfe katlanır,
 //!   tırnaklı adda `""` kaçışı; `regproc::text` biçimi) ve parçalar `quote_ident`/`qualified` ile yeniden yazılır.
 //! - **Adlar:** öznitelik, collation, opclass, multirange adı tek tanımlayıcı (`check_ident` + `quote_ident`); etiketler
@@ -182,8 +183,9 @@ fn define_sql(d: &TypeDef) -> String {
             if let Some(x) = subtype_diff {
                 opts.push(format!("SUBTYPE_DIFF = {}", func_sql(x)));
             }
+            // Range'in şemasında (otomatik ad gibi); niteliksiz ad arama yolunun ilk şemasına kurulurdu.
             if let Some(x) = multirange_type_name {
-                opts.push(format!("MULTIRANGE_TYPE_NAME = {}", quote_ident(x)));
+                opts.push(format!("MULTIRANGE_TYPE_NAME = {}", qualified(&d.schema, x)));
             }
             format!("CREATE TYPE {ty} AS RANGE ({})", opts.join(", "))
         }
@@ -719,7 +721,9 @@ mod tests {
         let d = with_range(|b| if let TypeBody::Range { multirange_type_name, .. } = b { *multirange_type_name = Some("mr".into()) });
         assert_eq!(paths(bcreate(&o(&d), &ctx_v(130000)).unwrap_err()), ["body.multirangeTypeName"]);
         assert_eq!(paths(bcreate(&o(&d), &ctx_v(139999)).unwrap_err()), ["body.multirangeTypeName"]);
-        assert_eq!(sqls(&create_ok_v(&d, 140000)), ["CREATE TYPE public.ty AS RANGE (SUBTYPE = int4, MULTIRANGE_TYPE_NAME = mr)"]);
+        // Range'in şemasıyla nitelenir: niteliksiz ad arama yolunun ilk şemasına kurulurdu (PG 14–18'de gözlendi);
+        // otomatik ad gibi range'in şemasında olmalı.
+        assert_eq!(sqls(&create_ok_v(&d, 140000)), ["CREATE TYPE public.ty AS RANGE (SUBTYPE = int4, MULTIRANGE_TYPE_NAME = public.mr)"]);
         // Multirange adsız range PG 13'te serbest.
         assert!(bcreate(&o(&base(range("int4"))), &ctx_v(130000)).is_ok());
     }

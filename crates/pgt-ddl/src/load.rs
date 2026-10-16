@@ -16,6 +16,10 @@
 //! - Function/Procedure: bkz. `load_function` (tipler `format_type`, varsayılanlar `pg_get_function_arg_default`, gövde
 //!   `prosrc` baytı baytına, COST/ROWS üstelsiz ondalık metin; salt okunurluk `unsupported` doluysa `editable = false`).
 //!
+//! - Trigger/Type/Domain: bkz. `load_trigger`/`load_type`/`load_domain` (WHEN `pg_get_triggerdef`'ten, enum/composite
+//!   `original = Some(ad)`, domain kısıtları ad sırasıyla `pg_get_constraintdef` gövdesi; `unsupported` doluysa
+//!   `editable = false`).
+//!
 //! Okuma salt okunur katalog bağlantısındandır; SQL/değerler günlüğe yazılmaz.
 
 use pgt_catalog::version::{PgVersion, VersionedSql};
@@ -87,6 +91,21 @@ static FUNCTION_SQL: VersionedSql = VersionedSql(&[
     (14, include_str!("sql/load_function.sql")),
 ]);
 const FUNCTION_ARGS_SQL: &str = include_str!("sql/load_function_args.sql");
+/// PG 13: `tgparentid` (bölüm klonu).
+static TRIGGER_SQL: VersionedSql = VersionedSql(&[
+    (10, include_str!("sql/load_trigger.sql")),
+    (13, include_str!("sql/load_trigger.pg13.sql")),
+]);
+const TYPE_SQL: &str = include_str!("sql/load_type.sql");
+const ENUM_VALUES_SQL: &str = include_str!("sql/load_enum_values.sql");
+const COMPOSITE_ATTRS_SQL: &str = include_str!("sql/load_composite_attrs.sql");
+/// PG 14: `rngmultitypid` (multirange).
+static RANGE_SQL: VersionedSql = VersionedSql(&[
+    (10, include_str!("sql/load_range.sql")),
+    (14, include_str!("sql/load_range.pg14.sql")),
+]);
+const DOMAIN_SQL: &str = include_str!("sql/load_domain.sql");
+const DOMAIN_CHECKS_SQL: &str = include_str!("sql/load_domain_checks.sql");
 
 const SYSTEM_ERROR: &str = "sistem nesnesi düzenlenemez";
 
@@ -138,10 +157,9 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into
         ObjectKind::Database => load_database(mgr, server, Target::Maintenance, obj.oid).await,
         ObjectKind::Role => load_role(mgr, server, Target::Maintenance, obj.oid).await,
         ObjectKind::Function | ObjectKind::Procedure => load_function(mgr, server, database_oid, obj.kind, obj.oid).await,
-        // Yer tutucu: yükleyiciler Plan 18 Task 7'de.
-        ObjectKind::Trigger | ObjectKind::Type | ObjectKind::Domain => {
-            Err(Error::Invalid("Bu tür henüz desteklenmiyor.".into()))
-        }
+        ObjectKind::Trigger => load_trigger(mgr, server, database_oid, obj.oid).await,
+        ObjectKind::Type => load_type(mgr, server, database_oid, obj.oid).await,
+        ObjectKind::Domain => load_domain(mgr, server, database_oid, obj.oid).await,
     }
 }
 
@@ -1045,6 +1063,441 @@ async fn load_function(mgr: &ConnectionManager, server: Uuid, db: u32, kind: Obj
     Ok(if procedure { ObjectDef::Procedure(def) } else { ObjectDef::Function(def) })
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Trigger
+// ---------------------------------------------------------------------------------------------------------------
+
+/// `pg_trigger.tgtype` bitleri (`trigger.h`).
+const TG_ROW: i32 = 1;
+const TG_BEFORE: i32 = 2;
+const TG_INSERT: i32 = 4;
+const TG_DELETE: i32 = 8;
+const TG_UPDATE: i32 = 16;
+const TG_TRUNCATE: i32 = 32;
+const TG_INSTEAD: i32 = 64;
+
+/// `tgtype` → (zamanlama, düzey, olaylar; `update_columns` boş).
+fn trigger_kind(tgtype: i32) -> (TriggerTiming, TriggerLevel, TriggerEvents) {
+    let timing = if tgtype & TG_INSTEAD != 0 {
+        TriggerTiming::InsteadOf
+    } else if tgtype & TG_BEFORE != 0 {
+        TriggerTiming::Before
+    } else {
+        TriggerTiming::After
+    };
+    let level = if tgtype & TG_ROW != 0 { TriggerLevel::Row } else { TriggerLevel::Statement };
+    let events = TriggerEvents {
+        insert: tgtype & TG_INSERT != 0,
+        update: tgtype & TG_UPDATE != 0,
+        update_columns: vec![],
+        delete: tgtype & TG_DELETE != 0,
+        truncate: tgtype & TG_TRUNCATE != 0,
+    };
+    (timing, level, events)
+}
+
+/// `tgargs` (her argüman `\0` ile biter) → `nargs` metin. Bayt kodlaması sunucu kodlamasıdır: UTF8 değilse yalnız ASCII
+/// argümanlar güvenle çözülür. Çözülemezse `None` (salt okunur gerekçesi).
+fn trigger_args(raw: &[u8], nargs: i32, utf8: bool) -> Option<Vec<String>> {
+    let n = usize::try_from(nargs).ok()?;
+    if n == 0 {
+        return Some(vec![]);
+    }
+    // Yalnız `\0` ile SONLANAN parçalar argümandır (son parça sonlandırıcıdan sonraki kalıntı).
+    let parts: Vec<&[u8]> = raw.split(|b| *b == 0).collect();
+    if parts.len() <= n {
+        return None;
+    }
+    parts[..n].iter().map(|p| if utf8 || p.is_ascii() { String::from_utf8(p.to_vec()).ok() } else { None }).collect()
+}
+
+/// `pg_get_triggerdef(oid, true)` metninden `WHEN (…)` koşulunun iç metni (`Ok(None)` = koşul yok). `EXECUTE`'tan önce
+/// yalnız çift tırnaklı tanımlayıcılar bulunabilir (dizge sabiti yok); bunların içi atlanır. Koşul gövdesinde parantez
+/// dengesi `'…'` ve `"…"` içleri sayılmadan izlenir (ruleutils `E'…'` üretmez). Üretici `WHEN (<ifade>\n)` yazar ve PG
+/// ifadeyi yeniden ayrıştırıp yazdırır → yüklü metin sabit noktadır. Biçim beklenmedikse `Err` (salt okunur gerekçesi).
+fn trigger_when(def: &str) -> std::result::Result<Option<String>, ()> {
+    const WHEN: &[u8] = b" WHEN (";
+    const EXECUTE: &[u8] = b" EXECUTE ";
+    let b = def.as_bytes();
+    let mut i = 0;
+    let mut in_ident = false;
+    while i < b.len() {
+        let c = b[i];
+        if in_ident {
+            in_ident = c != b'"';
+            i += 1;
+            continue;
+        }
+        match c {
+            b'"' => in_ident = true,
+            b'\'' => return Err(()),
+            _ if b[i..].starts_with(EXECUTE) => return Ok(None),
+            _ if b[i..].starts_with(WHEN) => {
+                let start = i + WHEN.len();
+                let (mut depth, mut quote, mut j) = (1u32, None::<u8>, start);
+                while j < b.len() {
+                    let c = b[j];
+                    match quote {
+                        Some(q) => {
+                            if c == q {
+                                quote = None;
+                            }
+                        }
+                        None => match c {
+                            b'\'' | b'"' => quote = Some(c),
+                            b'(' => depth += 1,
+                            b')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        },
+                    }
+                    j += 1;
+                }
+                if depth != 0 || !b[j + 1..].starts_with(EXECUTE) {
+                    return Err(());
+                }
+                // `start` ve `j` ASCII baytlarının (`(`/`)`) sınırındadır.
+                return Ok(Some(def[start..j].to_string()));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Err(())
+}
+
+fn trigger_enabled(c: &str) -> Option<TriggerEnabled> {
+    match c {
+        "O" => Some(TriggerEnabled::Origin),
+        "R" => Some(TriggerEnabled::Replica),
+        "A" => Some(TriggerEnabled::Always),
+        "D" => Some(TriggerEnabled::Disabled),
+        _ => None,
+    }
+}
+
+/// Trigger yükleyicisi. Normalleştirme (üreticiyle gidiş-dönüşün ve `alter(yüklü, yüklü)` boş planının dayanağı):
+/// - `tgtype` bitleri → zamanlama/düzey/olaylar; `update_columns` `tgattr` saklandığı sırayla.
+/// - `when`: `pg_get_triggerdef(oid, true)`'deki `WHEN (…)` gövdesi (`trigger_when`); argümanlar `tgargs` baytları.
+/// - Fonksiyon şema + ad (her zaman nitelikli yazılır); transition tablo adları `tgoldtable`/`tgnewtable`.
+/// - `constraint = tgconstraint <> 0`; ertelenebilirlik `pg_constraint`'ten. Boş yorum `None`.
+/// - `unsupported` (R5; doluysa `editable = false`, üretici her değişikliği ve drop'u reddeder): iç trigger
+///   (`tgisinternal`; FK/kısıt, PG 11–12 bölüm klonları), bölüm klonu (PG 13+ `tgparentid`), `FROM` başvurulan tablolu
+///   constraint trigger (`tgconstrrelid`; modellenmez), görünüm/yabancı tablo trigger'ı (üretici yalnız tablo trigger'ı
+///   kurar), sistem şeması, ayrıştırılamayan WHEN, çözülemeyen argümanlar, bilinmeyen `tgenabled`.
+async fn load_trigger(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
+    let rows = fetch(mgr, server, db, &TRIGGER_SQL, oid).await?;
+    let r = rows.first().ok_or_else(|| not_found("trigger"))?;
+    let mut unsupported = vec![];
+    if r.get::<_, bool>("is_internal") {
+        unsupported.push("iç trigger (kısıt ya da sistem tarafından yönetilir)".to_string());
+    }
+    if r.get::<_, bool>("is_clone") {
+        unsupported.push("bölümlenmiş üst tablodan klonlanmış (üst tablodan yönetilir)".to_string());
+    }
+    if let Some(t) = r.get::<_, Option<String>>("from_table") {
+        unsupported.push(format!("FROM {t} (constraint trigger başvurulan tablosu)"));
+    }
+    match r.get::<_, String>("relkind").as_str() {
+        "r" | "p" => {}
+        "v" => unsupported.push("görünüm trigger'ı".to_string()),
+        "f" => unsupported.push("yabancı tablo trigger'ı".to_string()),
+        other => unsupported.push(format!("'{other}' türü ilişkinin trigger'ı")),
+    }
+    if r.get::<_, bool>("is_system") {
+        unsupported.push("sistem şeması".to_string());
+    }
+    let (timing, level, mut events) = trigger_kind(r.get("tgtype"));
+    events.update_columns = r.get("update_columns");
+    let when = match trigger_when(&r.get::<_, String>("def")) {
+        Ok(w) => w,
+        Err(()) => {
+            unsupported.push("WHEN koşulu ayrıştırılamadı".to_string());
+            None
+        }
+    };
+    let raw: Vec<u8> = r.get("args");
+    let utf8 = r.get::<_, String>("encoding").eq_ignore_ascii_case("UTF8");
+    let args = trigger_args(&raw, r.get("nargs"), utf8).unwrap_or_else(|| {
+        unsupported.push("trigger argümanları çözülemedi".to_string());
+        vec![]
+    });
+    let enabled_code: String = r.get("enabled");
+    let enabled = trigger_enabled(&enabled_code).unwrap_or_else(|| {
+        unsupported.push(format!("etkinlik durumu '{enabled_code}'"));
+        TriggerEnabled::Origin
+    });
+    let constraint: bool = r.get("is_constraint");
+    Ok(ObjectDef::Trigger(TriggerDef {
+        schema: r.get("schema"),
+        table: r.get("table_name"),
+        name: r.get("name"),
+        timing,
+        events,
+        level,
+        when,
+        function_schema: r.get("function_schema"),
+        function_name: r.get("function_name"),
+        args,
+        old_table: r.get("old_table"),
+        new_table: r.get("new_table"),
+        constraint,
+        deferrable: constraint && r.get::<_, bool>("deferrable"),
+        initially_deferred: constraint && r.get::<_, bool>("initially_deferred"),
+        enabled,
+        comment: r.get::<_, Option<String>>("comment").filter(|c| !c.is_empty()),
+        editable: unsupported.is_empty(),
+        unsupported,
+    }))
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Type
+// ---------------------------------------------------------------------------------------------------------------
+
+/// `s`'yi en çok `max` bayta, karakter sınırında kırpar.
+fn clip_bytes(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// PG 14+ otomatik multirange adı (`makeMultirangeTypeName`): adda `range` varsa ilk geçişin önüne `multi` eklenir,
+/// yoksa sona `_multirange`; sonuç 63 bayta kırpılır.
+fn default_multirange_name(range: &str) -> String {
+    let s = match range.find("range") {
+        Some(p) => format!("{}multi{}", &range[..p], &range[p..]),
+        None => format!("{}_multirange", clip_bytes(range, 52)),
+    };
+    clip_bytes(&s, 63).to_string()
+}
+
+/// Composite öznitelik satırları → model (`original = Some(ad)`); üreticinin tip dilbilgisinden geçmeyen tip gerekçesi.
+fn composite_attrs(rows: &[Row], unsupported: &mut Vec<String>) -> Vec<CompositeAttr> {
+    rows.iter()
+        .map(|r| {
+            let name: String = r.get("name");
+            let type_name: String = r.get("type_name");
+            if crate::build::type_syntax::validate_type(&type_name).is_err() {
+                unsupported.push(format!("tip {type_name}"));
+            }
+            CompositeAttr { original: Some(name.clone()), name, type_name, collation: r.get("collation") }
+        })
+        .collect()
+}
+
+/// Type yükleyicisi. Normalleştirme:
+/// - Sahip `Some`; boş yorum `None`.
+/// - Enum: etiketler `enumsortorder` sırasıyla, `original = Some(etiket)`.
+/// - Composite: öznitelikler `attnum` sırasıyla (silinmişler hariç), `original = Some(ad)`; tip `format_type`;
+///   collation yalnızca tipin varsayılanından farklıysa.
+/// - Range: alt tip `format_type`; opclass yalnız varsayılan değilse, collation yalnız alt tipin varsayılanından
+///   farklıysa; canonical/subtype_diff `regproc::text`; multirange adı (PG 14+) yalnız otomatik addan farklıysa.
+/// - Domain oid'i → `Invalid` (Domain türüyle yüklenir).
+/// - `unsupported` (R5; doluysa `editable = false`): base/dizi/pseudo/shell/multirange tip (gövdesi modellenmez; boş
+///   composite gövdeyle döner), tablo/görünüm satır tipi (öznitelikleriyle), `EXTENSION e`, `sistem şeması`, üretici
+///   dilbilgisinden geçmeyen tip ya da fonksiyon adı.
+async fn load_type(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
+    let (head, values, attrs, range) = mgr
+        .run(server, Target::Database(db), move |c| async move {
+            let params: [&(dyn ToSql + Sync); 1] = [&oid];
+            let head = c.client.query(TYPE_SQL, &params).await?;
+            let (mut values, mut attrs, mut range) = (vec![], vec![], vec![]);
+            if let Some(h) = head.first() {
+                match h.get::<_, String>("typtype").as_str() {
+                    "e" => values = c.client.query(ENUM_VALUES_SQL, &params).await?,
+                    "c" => attrs = c.client.query(COMPOSITE_ATTRS_SQL, &params).await?,
+                    "r" => range = c.client.query(RANGE_SQL.pick(PgVersion(c.version_num())), &params).await?,
+                    _ => {}
+                }
+            }
+            Ok((head, values, attrs, range))
+        })
+        .await?;
+    let h = head.first().ok_or_else(|| not_found("tip"))?;
+    let mut unsupported = vec![];
+    let name: String = h.get("name");
+    let typtype: String = h.get("typtype");
+    let empty = || TypeBody::Composite { attributes: vec![] };
+    let body = match typtype.as_str() {
+        "d" => return Err(Error::Invalid("nesne bir domain; tip değil".to_string())),
+        "e" => TypeBody::Enum {
+            values: values
+                .iter()
+                .map(|r| {
+                    let label: String = r.get("label");
+                    EnumValue { original: Some(label.clone()), label }
+                })
+                .collect(),
+        },
+        "c" => {
+            match h.get::<_, Option<String>>("relkind").as_deref() {
+                Some("c") => {}
+                Some(k) => unsupported.push(format!("tablo satır tipi (relkind '{k}'; ilişkiden yönetilir)")),
+                None => unsupported.push("ilişkisi bulunamayan composite".to_string()),
+            }
+            TypeBody::Composite { attributes: composite_attrs(&attrs, &mut unsupported) }
+        }
+        "r" => match range.first() {
+            None => {
+                unsupported.push("range bilgisi bulunamadı".to_string());
+                empty()
+            }
+            Some(r) => {
+                let subtype: String = r.get("subtype");
+                if crate::build::type_syntax::validate_type(&subtype).is_err() {
+                    unsupported.push(format!("tip {subtype}"));
+                }
+                let (canonical, subtype_diff): (Option<String>, Option<String>) = (r.get("canonical"), r.get("subtype_diff"));
+                for f in [&canonical, &subtype_diff].into_iter().flatten() {
+                    if crate::build::pgtype::parse_func_name(f).is_err() {
+                        unsupported.push(format!("fonksiyon {f}"));
+                    }
+                }
+                let multirange = r.get::<_, Option<String>>("multirange").filter(|m| *m != default_multirange_name(&name));
+                TypeBody::Range {
+                    subtype,
+                    subtype_opclass: r.get("opclass"),
+                    collation: r.get("collation"),
+                    canonical,
+                    subtype_diff,
+                    multirange_type_name: multirange,
+                }
+            }
+        },
+        "m" => {
+            unsupported.push("MULTIRANGE (range tipinden yönetilir)".to_string());
+            empty()
+        }
+        "b" if h.get::<_, String>("category") == "A" => {
+            unsupported.push("dizi tipi (ARRAY; öğe tipinden yönetilir)".to_string());
+            empty()
+        }
+        "b" => {
+            unsupported.push("BASE TYPE".to_string());
+            empty()
+        }
+        "p" if !h.get::<_, bool>("defined") => {
+            unsupported.push("SHELL TYPE (tanımsız)".to_string());
+            empty()
+        }
+        "p" => {
+            unsupported.push("PSEUDO TYPE".to_string());
+            empty()
+        }
+        other => {
+            unsupported.push(format!("'{other}' türü tip"));
+            empty()
+        }
+    };
+    if let Some(e) = h.get::<_, Option<String>>("extension") {
+        unsupported.push(format!("EXTENSION {e} (eklentiye ait)"));
+    }
+    if h.get::<_, bool>("is_system") {
+        unsupported.push("sistem şeması".to_string());
+    }
+    Ok(ObjectDef::Type(TypeDef {
+        schema: h.get("schema"),
+        name,
+        owner: Some(h.get("owner")),
+        comment: h.get::<_, Option<String>>("comment").filter(|c| !c.is_empty()),
+        body,
+        editable: unsupported.is_empty(),
+        unsupported,
+    }))
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Domain
+// ---------------------------------------------------------------------------------------------------------------
+
+/// `pg_get_constraintdef(oid, true)` CHECK metni (`CHECK (<ifade>)[ NOT VALID]`) → iç ifade. Üretici `CHECK (<ifade>\n)`
+/// yazar ve PG ifadeyi yeniden yazdırır → yüklü metin sabit noktadır. Biçim beklenmedikse `None`.
+fn domain_check_expr(def: &str) -> Option<String> {
+    let d = def.trim();
+    let d = d.strip_suffix(" NOT VALID").unwrap_or(d);
+    Some(d.strip_prefix("CHECK (")?.strip_suffix(')')?.to_string())
+}
+
+/// Domain yükleyicisi. Normalleştirme:
+/// - Sahip `Some`; boş yorum `None`; temel tip `format_type` (değiştiricili); collation yalnız temel tipin
+///   varsayılanından farklıysa; varsayılan `pg_get_expr(typdefaultbin, 0, true)` (tamamını saran dış parantez soyulur);
+///   `not_null = typnotnull`.
+/// - Kısıtlar (yalnız CHECK) ad sırasıyla (bayt): `expression` = `domain_check_expr`, `validated = convalidated`,
+///   `not_valid = false`, `original = Some(ad)`, `validate = false`. PG 17+ `contype = 'n'` NOT NULL satırları listeye
+///   girmez (`not_null` ile modellenir); doğrulanmamış NOT NULL satırı ve tanınmayan kısıt `unsupported`'a.
+/// - Domain olmayan tip oid'i → `Invalid`.
+/// - `unsupported` (R5): `EXTENSION e`, `sistem şeması`, dilbilgisinden geçmeyen temel tip, ayrıştırılamayan kısıt.
+async fn load_domain(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
+    let (head, cons) = mgr
+        .run(server, Target::Database(db), move |c| async move {
+            let params: [&(dyn ToSql + Sync); 1] = [&oid];
+            let head = c.client.query(DOMAIN_SQL, &params).await?;
+            let cons = if head.is_empty() { vec![] } else { c.client.query(DOMAIN_CHECKS_SQL, &params).await? };
+            Ok((head, cons))
+        })
+        .await?;
+    let h = head.first().ok_or_else(|| not_found("domain"))?;
+    if h.get::<_, String>("typtype") != "d" {
+        return Err(Error::Invalid("nesne bir domain değil".to_string()));
+    }
+    let mut unsupported = vec![];
+    let base_type: String = h.get("base_type");
+    if crate::build::type_syntax::validate_type(&base_type).is_err() {
+        unsupported.push(format!("tip {base_type}"));
+    }
+    let mut constraints = vec![];
+    for r in &cons {
+        let name: String = r.get("name");
+        let validated: bool = r.get("validated");
+        match r.get::<_, String>("contype").as_str() {
+            "c" => match domain_check_expr(&r.get::<_, String>("def")) {
+                Some(expression) => constraints.push(DomainCheck {
+                    name: Some(name.clone()),
+                    expression,
+                    not_valid: false,
+                    validated,
+                    original: Some(name),
+                    validate: false,
+                }),
+                None => unsupported.push(format!("CHECK {name} (ayrıştırılamadı)")),
+            },
+            "n" if validated => {}
+            "n" => unsupported.push(format!("NOT NULL {name} (NOT VALID)")),
+            other => unsupported.push(format!("'{other}' türü kısıt {name}")),
+        }
+    }
+    constraints.sort_by(|a, b| a.name.cmp(&b.name));
+    if let Some(e) = h.get::<_, Option<String>>("extension") {
+        unsupported.push(format!("EXTENSION {e} (eklentiye ait)"));
+    }
+    if h.get::<_, bool>("is_system") {
+        unsupported.push("sistem şeması".to_string());
+    }
+    Ok(ObjectDef::Domain(DomainDef {
+        schema: h.get("schema"),
+        name: h.get("name"),
+        owner: Some(h.get("owner")),
+        comment: h.get::<_, Option<String>>("comment").filter(|c| !c.is_empty()),
+        base_type,
+        collation: h.get("collation"),
+        default: h.get::<_, Option<String>>("default").map(|d| strip_outer_parens(&d)),
+        not_null: h.get("not_null"),
+        constraints,
+        editable: unsupported.is_empty(),
+        unsupported,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1197,6 +1650,76 @@ mod tests {
         let s = |n: &str, v: &str| ConfigSetting { name: n.into(), value: v.into() };
         assert!(unsplittable_settings(&[s("search_path", "\"$user\", public"), s("work_mem", "a b"), s("app.x", "\"")]).is_empty());
         assert_eq!(unsplittable_settings(&[s("search_path", "a b")]), ["SET search_path (liste değeri ayrıştırılamıyor)"]);
+    }
+
+    #[test]
+    fn trigger_kind_decodes_tgtype_bits() {
+        // BEFORE ROW INSERT|UPDATE
+        let (t, l, e) = trigger_kind(TG_ROW | TG_BEFORE | TG_INSERT | TG_UPDATE);
+        assert_eq!((t, l), (TriggerTiming::Before, TriggerLevel::Row));
+        assert!(e.insert && e.update && !e.delete && !e.truncate);
+        // AFTER STATEMENT DELETE|TRUNCATE
+        let (t, l, e) = trigger_kind(TG_DELETE | TG_TRUNCATE);
+        assert_eq!((t, l), (TriggerTiming::After, TriggerLevel::Statement));
+        assert!(!e.insert && !e.update && e.delete && e.truncate);
+        // INSTEAD OF ROW INSERT (view)
+        assert_eq!(trigger_kind(TG_ROW | TG_INSTEAD | TG_INSERT).0, TriggerTiming::InsteadOf);
+        // FK iç trigger'ları (gözlenen tgtype: 5, 9, 17).
+        assert_eq!(trigger_kind(9).0, TriggerTiming::After);
+        assert!(trigger_kind(17).2.update && trigger_kind(5).2.insert);
+    }
+
+    #[test]
+    fn trigger_args_split_on_nul_exactly() {
+        let raw = b"a\0it's\0c:\\yol\0\xc5\x9f \xe6\x97\xa5\0\0";
+        assert_eq!(trigger_args(raw, 5, true).unwrap(), ["a", "it's", "c:\\yol", "ş 日", ""]);
+        assert_eq!(trigger_args(b"", 0, true).unwrap(), Vec::<String>::new());
+        assert_eq!(trigger_args(b"x\0", 1, false).unwrap(), ["x"]);
+        // UTF8 olmayan sunucuda ASCII dışı bayt → çözülemez; eksik argüman; geçersiz UTF-8.
+        assert_eq!(trigger_args(b"\xc5\x9f\0", 1, false), None);
+        assert_eq!(trigger_args(b"a\0", 2, true), None);
+        assert_eq!(trigger_args(b"\xff\0", 1, true), None);
+    }
+
+    #[test]
+    fn trigger_when_extracts_condition_body() {
+        let w = |s: &str| trigger_when(s);
+        assert_eq!(w("CREATE TRIGGER tr BEFORE INSERT ON t FOR EACH ROW EXECUTE FUNCTION tf()"), Ok(None));
+        assert_eq!(
+            w("CREATE TRIGGER tr BEFORE UPDATE OF b, a ON t FOR EACH ROW WHEN (new.a > 0 AND old.b IS DISTINCT FROM new.b) EXECUTE FUNCTION tf('x', 'it''s', '')"),
+            Ok(Some("new.a > 0 AND old.b IS DISTINCT FROM new.b".into()))
+        );
+        // Tanımlayıcı içinde " WHEN (" ve " EXECUTE " atlanır; koşulda tırnak içi parantezler sayılmaz.
+        assert_eq!(
+            w(r#"CREATE TRIGGER "Ad ""x"" WHEN (" BEFORE INSERT ON "T EXECUTE x" FOR EACH ROW WHEN (new."Kolon )" IS NOT NULL AND new.b <> 'x) WHEN ('::text) EXECUTE PROCEDURE f()"#),
+            Ok(Some(r#"new."Kolon )" IS NOT NULL AND new.b <> 'x) WHEN ('::text"#.into()))
+        );
+        assert_eq!(w("CREATE TRIGGER tr AFTER INSERT ON t FOR EACH ROW WHEN ((a)) EXECUTE FUNCTION f()"), Ok(Some("(a)".into())));
+        for bad in ["CREATE TRIGGER tr", "CREATE TRIGGER tr ... WHEN (a EXECUTE FUNCTION f()", "X WHEN (a) junk EXECUTE f()", "'x' EXECUTE f()"] {
+            assert_eq!(w(bad), Err(()), "{bad}");
+        }
+    }
+
+    #[test]
+    fn default_multirange_name_follows_pg() {
+        assert_eq!(default_multirange_name("int4range"), "int4multirange");
+        assert_eq!(default_multirange_name("f8r"), "f8r_multirange");
+        assert_eq!(default_multirange_name("My Thing"), "My Thing_multirange");
+        assert_eq!(default_multirange_name("a_range_range"), "a_multirange_range");
+        let long = "x".repeat(60);
+        assert_eq!(default_multirange_name(&long), format!("{}_multirange", "x".repeat(52)));
+        let long_range = format!("{}range", "y".repeat(58));
+        assert_eq!(default_multirange_name(&long_range).len(), 63);
+        // Çok baytlı karakter sınırında kırpma.
+        assert!(default_multirange_name(&"ş".repeat(40)).is_char_boundary(0));
+    }
+
+    #[test]
+    fn domain_check_expr_strips_check_and_not_valid() {
+        assert_eq!(domain_check_expr("CHECK (VALUE::text <> 'y'::text)").as_deref(), Some("VALUE::text <> 'y'::text"));
+        assert_eq!(domain_check_expr("CHECK (VALUE > 'a'::text) NOT VALID").as_deref(), Some("VALUE > 'a'::text"));
+        assert_eq!(domain_check_expr("CHECK ((VALUE > 0) OR (VALUE < -5))").as_deref(), Some("(VALUE > 0) OR (VALUE < -5)"));
+        assert_eq!(domain_check_expr("NOT NULL"), None);
     }
 
     #[test]
