@@ -12,7 +12,7 @@
 
 use pgt_core::ErrorPayload;
 use pgt_ddl::{
-    ApplyOptions, ApplyOutcome, CreateContext, DdlTarget, LookupItem, LookupRequest, ObjectDef, ObjectKind, ObjectRef, PlanRequest, PlanView,
+    ApplyOptions, ApplyOutcome, CreateContext, CreatePreset, DdlTarget, LookupItem, LookupRequest, ObjectDef, ObjectKind, ObjectRef, PlanRequest, PlanView,
     ddl_payload,
 };
 use tauri::State;
@@ -35,8 +35,10 @@ pub async fn ddl_defaults(
     database_oid: Option<u32>,
     kind: ObjectKind,
     ctx: CreateContext,
+    // `DdlTarget.create.preset` (Plan 18: `trigger_function`); arayüz göndermezse `None`.
+    preset: Option<CreatePreset>,
 ) -> CmdResult<ObjectDef> {
-    Box::pin(state.ddl.defaults(server_id, database_oid, kind, ctx)).await.map_err(|e| ddl_payload(&e))
+    Box::pin(state.ddl.defaults(server_id, database_oid, kind, ctx, preset)).await.map_err(|e| ddl_payload(&e))
 }
 
 #[tauri::command]

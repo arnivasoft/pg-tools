@@ -270,7 +270,7 @@ pub fn create(ctx: &BuildCtx, d: &TriggerDef) -> Result<Plan, Vec<FieldError>> {
 }
 
 /// `CREATE` ifadesine yazılan yapı alanlarından biri değişti mi (ad/tablo/etkinlik/yorum hariç)?
-fn structure_changed(o: &TriggerDef, n: &TriggerDef) -> bool {
+pub(crate) fn structure_changed(o: &TriggerDef, n: &TriggerDef) -> bool {
     o.timing != n.timing
         || o.events != n.events
         || o.level != n.level

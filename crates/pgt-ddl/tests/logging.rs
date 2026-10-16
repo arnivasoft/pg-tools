@@ -205,6 +205,155 @@ async fn role_password_statement_failure_is_masked_end_to_end(ts: &TestServer, e
 const MASKED_PASSWORD: &str = "maskeli-parola-K4";
 
 // ================================================================================================================
+// Plan 18: Function / Procedure / Trigger / Type / Domain — günlükte gövde, ad, değer, ifade ve SQL yok
+// ================================================================================================================
+
+/// Ayırt edici izleyici dizgeler: ad, gövde, yorum, varsayılan, etiket, kısıt ifadesi.
+const R_SECRETS: [&str; 9] = [
+    "zr_gizli_fn",
+    "zr_gizli_govde",
+    "zr_gizli_yorum",
+    "zr_gizli_varsayilan",
+    "zr_gizli_tr",
+    "zr_gizli_tablo",
+    "zr_gizli_tip",
+    "zr_gizli_etiket",
+    "zr_gizli_deger",
+];
+
+#[tokio::test]
+async fn routine_type_logging_is_body_name_value_free() {
+    let buf = capture();
+    for ts in servers() {
+        guarded(routine_logging_body(ts.clone()), cleanup(&ts, "m_logr")).await;
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        for marker in ["DDL uygulandı", "DDL uygulanamadı", "42723", "42710", "Function", "Trigger", "Type", "Domain"] {
+            assert!(out.contains(marker), "günlükte {marker:?} yok: {out}");
+        }
+        for secret in R_SECRETS.iter().copied().chain(["zr_gizli", "FUNCTION", "TRIGGER", "DOMAIN", "$pgt", "plpgsql", "already exists", "BEGIN"]) {
+            assert!(!out.contains(secret), "günlükte {secret:?} var: {out}");
+        }
+        if let Some(p) = ts.password.as_deref().filter(|p| !p.is_empty()) {
+            assert!(!out.contains(p), "günlükte parola var");
+        }
+    }
+}
+
+async fn routine_logging_body(ts: TestServer) {
+    let env = setup(&ts, "m_logr").await;
+    let (dm, _dir) = manager(&ts.config, env.mgr.clone());
+    let (server, db) = (env.server, env.db_oid);
+    let f = FunctionDef {
+        schema: "public".into(),
+        name: "zr_gizli_fn".into(),
+        owner: None,
+        comment: Some("zr_gizli_yorum".into()),
+        language: "plpgsql".into(),
+        args: vec![FunctionArg {
+            mode: ArgMode::In,
+            name: Some("a".into()),
+            type_name: "text".into(),
+            default: Some("'zr_gizli_varsayilan'".into()),
+        }],
+        returns: Some(FunctionReturn::Trigger),
+        body: "BEGIN\n  PERFORM 'zr_gizli_govde';\n  RETURN NEW;\nEND;".into(),
+        volatility: Volatility::Volatile,
+        strict: false,
+        security_definer: false,
+        leakproof: false,
+        parallel: Parallel::Unsafe,
+        cost: None,
+        rows: None,
+        settings: vec![],
+        recreate: false,
+        editable: true,
+        unsupported: vec![],
+    };
+    // Trigger fonksiyonu argüman alamaz: argümansız sürüm trigger için; argümanlı (void) sürüm aşırı yükleme.
+    let tf = FunctionDef { args: vec![], ..f.clone() };
+    let void = FunctionDef { returns: Some(FunctionReturn::Void), body: "BEGIN\n  PERFORM 'zr_gizli_govde';\nEND;".into(), ..f };
+    for d in [&tf, &void] {
+        let r = apply(&dm, server, db, &create(ObjectDef::Function(d.clone()))).await;
+        assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
+    }
+    // Aynı imza: 42723 (ileti adı içerir; günlüğe yalnızca kod).
+    let r = apply(&dm, server, db, &create(ObjectDef::Function(void.clone()))).await;
+    let Ok(ApplyOutcome::Failed { sqlstate, .. }) = r else { panic!("{r:?}") };
+    assert_eq!(sqlstate.as_deref(), Some("42723"));
+
+    env.sql("CREATE TABLE public.zr_gizli_tablo (id int)").await;
+    let trigger = TriggerDef {
+        schema: "public".into(),
+        table: "zr_gizli_tablo".into(),
+        name: "zr_gizli_tr".into(),
+        timing: TriggerTiming::After,
+        events: TriggerEvents { insert: true, update: false, update_columns: vec![], delete: false, truncate: false },
+        level: TriggerLevel::Row,
+        when: Some("NEW.id <> 0".into()),
+        function_schema: "public".into(),
+        function_name: "zr_gizli_fn".into(),
+        args: vec![],
+        old_table: None,
+        new_table: None,
+        constraint: false,
+        deferrable: false,
+        initially_deferred: false,
+        enabled: TriggerEnabled::Origin,
+        comment: Some("zr_gizli_yorum".into()),
+        editable: true,
+        unsupported: vec![],
+    };
+    let r = apply(&dm, server, db, &create(ObjectDef::Trigger(trigger))).await;
+    assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
+    let ty = TypeDef {
+        schema: "public".into(),
+        name: "zr_gizli_tip".into(),
+        owner: None,
+        comment: Some("zr_gizli_yorum".into()),
+        body: TypeBody::Enum { values: vec![EnumValue { label: "zr_gizli_etiket".into(), original: None }] },
+        editable: true,
+        unsupported: vec![],
+    };
+    let r = apply(&dm, server, db, &create(ObjectDef::Type(ty.clone()))).await;
+    assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
+    // Aynı ad: 42710.
+    let r = apply(&dm, server, db, &create(ObjectDef::Type(ty))).await;
+    let Ok(ApplyOutcome::Failed { sqlstate, .. }) = r else { panic!("{r:?}") };
+    assert_eq!(sqlstate.as_deref(), Some("42710"));
+    let domain = DomainDef {
+        schema: "public".into(),
+        name: "zr_gizli_dom".into(),
+        owner: None,
+        comment: Some("zr_gizli_yorum".into()),
+        base_type: "text".into(),
+        collation: None,
+        default: Some("'zr_gizli_varsayilan'".into()),
+        not_null: false,
+        constraints: vec![DomainCheck {
+            name: Some("zr_gizli_kisit".into()),
+            expression: "VALUE <> 'zr_gizli_deger'".into(),
+            not_valid: false,
+            validated: true,
+            original: None,
+            validate: false,
+        }],
+        editable: true,
+        unsupported: vec![],
+    };
+    let r = apply(&dm, server, db, &create(ObjectDef::Domain(domain))).await;
+    assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
+    // Salt okunur kapısı reddi de günlüğe değer yazmaz (bağlantı açılmaz).
+    let oid: u32 = env.admin.query_one("SELECT 'zr_gizli_tip'::regtype::oid", &[]).await.unwrap().get(0);
+    let object = ObjectRef { kind: ObjectKind::Type, oid };
+    let ObjectDef::Type(mut loaded) = dm.load(server, db, object).await.unwrap() else { panic!() };
+    loaded.editable = false;
+    loaded.unsupported = vec!["EXTENSION zr_gizli_eklenti (eklentiye ait)".into()];
+    let req = PlanRequest::Drop { object, def: ObjectDef::Type(loaded), cascade: false, force: false };
+    let r = dm.apply(server, db, &req, opts("x")).await;
+    assert!(matches!(&r, Err(pgt_core::Error::Invalid(m)) if !m.contains("zr_gizli")), "{r:?}");
+}
+
+// ================================================================================================================
 // Veri düzenleyici: günlükte hücre değeri, anahtar, sürüm, kolon/tablo adı, SQL parçası ve PG iletisi yok
 // ================================================================================================================
 

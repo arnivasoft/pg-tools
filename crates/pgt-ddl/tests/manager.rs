@@ -339,7 +339,7 @@ async fn applied_body(ts: TestServer) {
     let ctx = |schema_oid, table_oid| CreateContext { schema_oid, table_oid };
 
     // Sequence varsayılanı şema bağlamından.
-    let ObjectDef::Sequence(mut s) = f.dm.defaults(f.server, f.db, ObjectKind::Sequence, ctx(Some(public), None)).await.unwrap() else {
+    let ObjectDef::Sequence(mut s) = f.dm.defaults(f.server, f.db, ObjectKind::Sequence, ctx(Some(public), None), None).await.unwrap() else {
         panic!("sequence bekleniyordu")
     };
     assert_eq!((s.schema.as_str(), s.name.as_str(), s.data_type, s.increment, s.start, s.cache), ("public", "", SeqType::Bigint, 1, 1, 1));
@@ -360,28 +360,28 @@ async fn applied_body(ts: TestServer) {
     // İndeks varsayılanı tablo bağlamından.
     env.sql(r#"CREATE TABLE public."M t" (id int)"#).await;
     let t = env.class_oid("public", "M t").await;
-    let ObjectDef::Index(i) = f.dm.defaults(f.server, f.db, ObjectKind::Index, ctx(None, Some(t))).await.unwrap() else {
+    let ObjectDef::Index(i) = f.dm.defaults(f.server, f.db, ObjectKind::Index, ctx(None, Some(t)), None).await.unwrap() else {
         panic!("indeks bekleniyordu")
     };
     assert_eq!((i.schema.as_str(), i.table.as_str(), i.method.as_str(), i.name.as_str()), ("public", "M t", "btree", ""));
     assert!(i.columns.is_empty() && !i.unique);
-    let ObjectDef::Schema(sd) = f.dm.defaults(f.server, f.db, ObjectKind::Schema, ctx(None, None)).await.unwrap() else { panic!() };
+    let ObjectDef::Schema(sd) = f.dm.defaults(f.server, f.db, ObjectKind::Schema, ctx(None, None), None).await.unwrap() else { panic!() };
     assert!(sd.name.is_empty());
-    let ObjectDef::Extension(e) = f.dm.defaults(f.server, f.db, ObjectKind::Extension, ctx(Some(public), None)).await.unwrap() else {
+    let ObjectDef::Extension(e) = f.dm.defaults(f.server, f.db, ObjectKind::Extension, ctx(Some(public), None), None).await.unwrap() else {
         panic!()
     };
     assert!(e.name.is_empty() && e.schema.is_none());
 
     // Geçersiz bağlamlar.
     let invalid = |r: Result<ObjectDef>| assert!(matches!(r, Err(Error::Invalid(_))), "{r:?}");
-    invalid(f.dm.defaults(f.server, f.db, ObjectKind::Sequence, ctx(None, None)).await);
-    invalid(f.dm.defaults(f.server, f.db, ObjectKind::Sequence, ctx(Some(public), Some(t))).await);
-    invalid(f.dm.defaults(f.server, f.db, ObjectKind::Index, ctx(Some(public), None)).await);
-    invalid(f.dm.defaults(f.server, f.db, ObjectKind::Schema, ctx(None, Some(t))).await);
-    invalid(f.dm.defaults(f.server, f.db, ObjectKind::Extension, ctx(None, Some(t))).await);
-    let missing = f.dm.defaults(f.server, f.db, ObjectKind::Index, ctx(None, Some(u32::MAX - 7))).await;
+    invalid(f.dm.defaults(f.server, f.db, ObjectKind::Sequence, ctx(None, None), None).await);
+    invalid(f.dm.defaults(f.server, f.db, ObjectKind::Sequence, ctx(Some(public), Some(t)), None).await);
+    invalid(f.dm.defaults(f.server, f.db, ObjectKind::Index, ctx(Some(public), None), None).await);
+    invalid(f.dm.defaults(f.server, f.db, ObjectKind::Schema, ctx(None, Some(t)), None).await);
+    invalid(f.dm.defaults(f.server, f.db, ObjectKind::Extension, ctx(None, Some(t)), None).await);
+    let missing = f.dm.defaults(f.server, f.db, ObjectKind::Index, ctx(None, Some(u32::MAX - 7)), None).await;
     assert!(matches!(missing, Err(Error::NotFound(_))), "{missing:?}");
-    let missing = f.dm.defaults(f.server, f.db, ObjectKind::Sequence, ctx(Some(u32::MAX - 7), None)).await;
+    let missing = f.dm.defaults(f.server, f.db, ObjectKind::Sequence, ctx(Some(u32::MAX - 7), None), None).await;
     assert!(matches!(missing, Err(Error::NotFound(_))), "{missing:?}");
 }
 
@@ -925,7 +925,7 @@ async fn table_create_body(ts: TestServer) {
     let ctx = |schema_oid, table_oid| CreateContext { schema_oid, table_oid };
 
     // Varsayılan: şema bağlamından, boş ad/kolon/kısıt, kalıcı; yükleme alanları boş.
-    let ObjectDef::Table(d) = f.dm.defaults(f.server, f.db, ObjectKind::Table, ctx(Some(public), None)).await.unwrap() else {
+    let ObjectDef::Table(d) = f.dm.defaults(f.server, f.db, ObjectKind::Table, ctx(Some(public), None), None).await.unwrap() else {
         panic!("tablo bekleniyordu")
     };
     assert_eq!((d.schema.as_str(), d.name.as_str(), d.persistence), ("public", "", Persistence::Permanent));
@@ -936,10 +936,10 @@ async fn table_create_body(ts: TestServer) {
     env.sql("CREATE TABLE public.other (id int)").await;
     let other = env.class_oid("public", "other").await;
     for c in [ctx(None, None), ctx(Some(public), Some(other)), ctx(None, Some(other))] {
-        let r = f.dm.defaults(f.server, f.db, ObjectKind::Table, c).await;
+        let r = f.dm.defaults(f.server, f.db, ObjectKind::Table, c, None).await;
         assert!(matches!(r, Err(Error::Invalid(_))), "{c:?}: {r:?}");
     }
-    let missing = f.dm.defaults(f.server, f.db, ObjectKind::Table, ctx(Some(u32::MAX - 7), None)).await;
+    let missing = f.dm.defaults(f.server, f.db, ObjectKind::Table, ctx(Some(u32::MAX - 7), None), None).await;
     assert!(matches!(missing, Err(Error::NotFound(_))), "{missing:?}");
 
     // create → apply → created dolu → load eşit.
@@ -1375,11 +1375,11 @@ async fn view_life_body(ts: TestServer) {
     let public = env.schema_oid("public").await;
     // Varsayılanlar: şema bağlamı zorunlu, tablo bağlamı yasak, veritabanı gerekli.
     let ctx = CreateContext { schema_oid: Some(public), table_oid: None };
-    let ObjectDef::View(mut def) = f.dm.defaults(f.server, f.db, ObjectKind::View, ctx).await.unwrap() else { panic!() };
+    let ObjectDef::View(mut def) = f.dm.defaults(f.server, f.db, ObjectKind::View, ctx, None).await.unwrap() else { panic!() };
     assert_eq!((def.schema.as_str(), def.query.as_str(), def.check_option, def.security_barrier), ("public", "", None, false));
     let bad = CreateContext { schema_oid: Some(public), table_oid: Some(1) };
-    assert!(matches!(f.dm.defaults(f.server, f.db, ObjectKind::View, bad).await, Err(Error::Invalid(_))));
-    assert!(matches!(f.dm.defaults(f.server, None, ObjectKind::View, ctx).await, Err(Error::Invalid(_))));
+    assert!(matches!(f.dm.defaults(f.server, f.db, ObjectKind::View, bad, None).await, Err(Error::Invalid(_))));
+    assert!(matches!(f.dm.defaults(f.server, None, ObjectKind::View, ctx, None).await, Err(Error::Invalid(_))));
     def.name = "mv_v".into();
     def.query = "SELECT a, b FROM public.vt".into();
     let object = created_of(f.apply(&create(ObjectDef::View(def.clone()))).await).expect("created");
@@ -1480,12 +1480,12 @@ async fn database_life_body(ts: TestServer) {
     let maint = &env.admin;
     let base = cluster_name(&ts, ObjectKind::Database, "mdblife").await;
     // Varsayılanlar: bağlam boş olmalı; veritabanı oid'i gerekmez.
-    let ObjectDef::Database(mut def) = f.dm.defaults(f.server, None, ObjectKind::Database, CreateContext::default()).await.unwrap() else {
+    let ObjectDef::Database(mut def) = f.dm.defaults(f.server, None, ObjectKind::Database, CreateContext::default(), None).await.unwrap() else {
         panic!()
     };
     assert_eq!((def.connection_limit, def.allow_connections, def.is_template, def.tablespace.clone()), (-1, true, false, None));
     let schema_ctx = CreateContext { schema_oid: Some(1), table_oid: None };
-    assert!(matches!(f.dm.defaults(f.server, None, ObjectKind::Database, schema_ctx).await, Err(Error::Invalid(_))));
+    assert!(matches!(f.dm.defaults(f.server, None, ObjectKind::Database, schema_ctx, None).await, Err(Error::Invalid(_))));
     def.name = base.clone();
     def.template = Some("template0".into());
     def.comment = Some("dblife".into());
@@ -1641,7 +1641,7 @@ async fn role_life_body(ts: TestServer) {
     let f = fx(&env, &ts, false, None);
     let maint = &env.admin;
     let name = cluster_name(&ts, ObjectKind::Role, "mrolelife").await;
-    let ObjectDef::Role(mut def) = f.dm.defaults(f.server, None, ObjectKind::Role, CreateContext::default()).await.unwrap() else { panic!() };
+    let ObjectDef::Role(mut def) = f.dm.defaults(f.server, None, ObjectKind::Role, CreateContext::default(), None).await.unwrap() else { panic!() };
     assert_eq!((def.login, def.inherit, def.superuser, def.connection_limit, def.password), (false, true, false, -1, PasswordChange::Keep));
     def.name = name.clone();
     def.login = true;
@@ -2037,4 +2037,652 @@ async fn gate_session_body(ts: TestServer) {
     let r = f.apply_with(&drop, |o| (o.confirmed, o.confirmed_production) = (true, true)).await;
     assert_eq!(invalid_message(&r), error_codes::MAINTENANCE_DATABASE);
     assert_eq!(database_oid(&env.admin, &ts.config.maintenance_db).await, Some(oid));
+}
+
+// ---- Plan 18: Function / Procedure / Trigger / Type / Domain ----
+
+use pgt_ddl::manager::{
+    LEAKPROOF_HINT, READ_ONLY_PREFIX, ROUTINE_REBUILD_DEPENDENTS_HINT, TYPE_COLUMN_RETYPE_HINT, TYPED_TABLE_HINT,
+};
+
+fn rfunc(name: &str, args: &[(&str, &str)]) -> FunctionDef {
+    FunctionDef {
+        schema: "public".into(),
+        name: name.into(),
+        owner: None,
+        comment: None,
+        language: "plpgsql".into(),
+        args: args.iter().map(|(n, t)| FunctionArg { mode: ArgMode::In, name: Some((*n).into()), type_name: (*t).into(), default: None }).collect(),
+        returns: Some(FunctionReturn::Void),
+        body: "BEGIN\n\nEND;".into(),
+        volatility: Volatility::Volatile,
+        strict: false,
+        security_definer: false,
+        leakproof: false,
+        parallel: Parallel::Unsafe,
+        cost: None,
+        rows: None,
+        settings: vec![],
+        recreate: false,
+        editable: true,
+        unsupported: vec![],
+    }
+}
+
+fn rproc(name: &str, args: &[(&str, &str)]) -> FunctionDef {
+    FunctionDef { returns: None, ..rfunc(name, args) }
+}
+
+fn trigger_fn(name: &str) -> FunctionDef {
+    FunctionDef { returns: Some(FunctionReturn::Trigger), body: "BEGIN\n  RETURN NEW;\nEND;".into(), ..rfunc(name, &[]) }
+}
+
+fn rtrigger(table: &str, name: &str, function: &str) -> TriggerDef {
+    TriggerDef {
+        schema: "public".into(),
+        table: table.into(),
+        name: name.into(),
+        timing: TriggerTiming::After,
+        events: TriggerEvents { insert: true, update: false, update_columns: vec![], delete: false, truncate: false },
+        level: TriggerLevel::Row,
+        when: None,
+        function_schema: "public".into(),
+        function_name: function.into(),
+        args: vec![],
+        old_table: None,
+        new_table: None,
+        constraint: false,
+        deferrable: false,
+        initially_deferred: false,
+        enabled: TriggerEnabled::Origin,
+        comment: None,
+        editable: true,
+        unsupported: vec![],
+    }
+}
+
+fn enum_type(name: &str, labels: &[&str]) -> TypeDef {
+    TypeDef {
+        schema: "public".into(),
+        name: name.into(),
+        owner: None,
+        comment: None,
+        body: TypeBody::Enum { values: labels.iter().map(|l| EnumValue { label: (*l).into(), original: None }).collect() },
+        editable: true,
+        unsupported: vec![],
+    }
+}
+
+fn composite_type(name: &str, attrs: &[(&str, &str)]) -> TypeDef {
+    TypeDef {
+        body: TypeBody::Composite {
+            attributes: attrs
+                .iter()
+                .map(|(n, t)| CompositeAttr { name: (*n).into(), type_name: (*t).into(), collation: None, original: None })
+                .collect(),
+        },
+        ..enum_type(name, &[])
+    }
+}
+
+fn rdomain(name: &str) -> DomainDef {
+    DomainDef {
+        schema: "public".into(),
+        name: name.into(),
+        owner: None,
+        comment: None,
+        base_type: "integer".into(),
+        collation: None,
+        default: None,
+        not_null: false,
+        constraints: vec![DomainCheck {
+            name: Some(format!("{name}_pos")),
+            expression: "VALUE > 0".into(),
+            not_valid: false,
+            validated: true,
+            original: None,
+            validate: false,
+        }],
+        editable: true,
+        unsupported: vec![],
+    }
+}
+
+/// `pg_proc` oid'i: ad + `proargmodes` metni (OUT'lu procedure aşırı yüklemesini `regprocedure` olmadan ayırır).
+async fn proc_oid_by_modes(env: &Env, name: &str, modes: &str) -> u32 {
+    let sql = "SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+         WHERE n.nspname = 'public' AND p.proname = $1::text AND coalesce(p.proargmodes::text, '') = $2::text";
+    env.admin.query_one(sql, &[&name, &modes]).await.unwrap().get(0)
+}
+
+async fn type_oid(env: &Env, name: &str) -> Option<u32> {
+    let sql = "SELECT t.oid FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = 'public' AND t.typname = $1::text";
+    env.admin.query_opt(sql, &[&name]).await.unwrap().map(|r| r.get(0))
+}
+
+async fn trigger_oid(env: &Env, table: &str, name: &str) -> Option<u32> {
+    let sql = "SELECT t.oid FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = 'public' AND c.relname = $1::text AND t.tgname = $2::text";
+    env.admin.query_opt(sql, &[&table, &name]).await.unwrap().map(|r| r.get(0))
+}
+
+fn set_comment(d: &mut ObjectDef, c: &str) {
+    match d {
+        ObjectDef::Function(x) | ObjectDef::Procedure(x) => x.comment = Some(c.into()),
+        ObjectDef::Trigger(x) => x.comment = Some(c.into()),
+        ObjectDef::Type(x) => x.comment = Some(c.into()),
+        ObjectDef::Domain(x) => x.comment = Some(c.into()),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn composite_attrs(d: &mut ObjectDef) -> &mut Vec<CompositeAttr> {
+    match d {
+        ObjectDef::Type(TypeDef { body: TypeBody::Composite { attributes }, .. }) => attributes,
+        other => panic!("composite bekleniyordu: {other:?}"),
+    }
+}
+
+fn routine_def(d: &mut ObjectDef) -> &mut FunctionDef {
+    match d {
+        ObjectDef::Function(x) | ObjectDef::Procedure(x) => x,
+        other => panic!("routine bekleniyordu: {other:?}"),
+    }
+}
+
+impl Fx {
+    async fn alter_loaded(&self, object: ObjectRef, edit: impl FnOnce(&mut ObjectDef)) -> PlanRequest {
+        let old = self.load_def(object).await;
+        let mut new = old.clone();
+        edit(&mut new);
+        PlanRequest::Alter { object, old, new }
+    }
+
+    async fn drop_loaded(&self, object: ObjectRef, cascade: bool) -> PlanRequest {
+        PlanRequest::Drop { object, def: self.load_def(object).await, cascade, force: false }
+    }
+}
+
+#[tokio::test]
+async fn new_kind_defaults_are_prefilled() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(new_defaults_body(ts.clone()), cleanup(&ts, "m_newdef")).await;
+    }
+}
+
+async fn new_defaults_body(ts: TestServer) {
+    let env = setup(&ts, "m_newdef").await;
+    let f = fx(&env, &ts, false, None);
+    env.sql("CREATE SCHEMA nd_s; CREATE TABLE nd_s.nd_t (id int); CREATE MATERIALIZED VIEW nd_s.nd_m AS SELECT 1 AS x").await;
+    let s = Some(env.schema_oid("nd_s").await);
+    let t = env.class_oid("nd_s", "nd_t").await;
+    let m = env.class_oid("nd_s", "nd_m").await;
+    let ctx = |schema_oid, table_oid| CreateContext { schema_oid, table_oid };
+    let dflt = |kind, c, preset| f.dm.defaults(f.server, f.db, kind, c, preset);
+
+    let Ok(ObjectDef::Function(fd)) = dflt(ObjectKind::Function, ctx(s, None), None).await else { panic!("function") };
+    assert_eq!((fd.schema.as_str(), fd.name.as_str(), fd.language.as_str()), ("nd_s", "", "plpgsql"));
+    assert_eq!((fd.returns, fd.body.as_str(), fd.editable, fd.unsupported.len()), (Some(FunctionReturn::Void), "BEGIN\n\nEND;", true, 0));
+    assert!(fd.args.is_empty() && !fd.recreate && fd.cost.is_none() && fd.settings.is_empty());
+    let Ok(ObjectDef::Function(tf)) = dflt(ObjectKind::Function, ctx(s, None), Some(CreatePreset::TriggerFunction)).await else {
+        panic!("trigger function")
+    };
+    assert_eq!((tf.returns, tf.body.as_str(), tf.language.as_str()), (Some(FunctionReturn::Trigger), "BEGIN\n  RETURN NEW;\nEND;", "plpgsql"));
+    let Ok(ObjectDef::Procedure(pd)) = dflt(ObjectKind::Procedure, ctx(s, None), None).await else { panic!("procedure") };
+    assert_eq!((pd.schema.as_str(), pd.language.as_str(), pd.returns.clone(), pd.editable), ("nd_s", "plpgsql", None, true));
+    let Ok(ObjectDef::Trigger(td)) = dflt(ObjectKind::Trigger, ctx(s, Some(t)), None).await else { panic!("trigger") };
+    assert_eq!((td.schema.as_str(), td.table.as_str(), td.name.as_str()), ("nd_s", "nd_t", ""));
+    assert_eq!((td.timing, td.level, td.enabled), (TriggerTiming::After, TriggerLevel::Row, TriggerEnabled::Origin));
+    assert!(td.events.insert && !td.events.update && !td.events.delete && !td.events.truncate);
+    assert!(td.function_schema.is_empty() && td.function_name.is_empty() && td.editable && td.unsupported.is_empty());
+    // Şema bağlamı verilmese de tablo bağlamı yeter.
+    assert!(matches!(dflt(ObjectKind::Trigger, ctx(None, Some(t)), None).await, Ok(ObjectDef::Trigger(_))));
+    let Ok(ObjectDef::Type(ty)) = dflt(ObjectKind::Type, ctx(s, None), None).await else { panic!("type") };
+    assert_eq!((ty.schema.as_str(), ty.body, ty.editable), ("nd_s", TypeBody::Enum { values: vec![] }, true));
+    let Ok(ObjectDef::Domain(dd)) = dflt(ObjectKind::Domain, ctx(s, None), None).await else { panic!("domain") };
+    assert_eq!((dd.schema.as_str(), dd.base_type.as_str(), dd.editable, dd.constraints.len()), ("nd_s", "text", true, 0));
+
+    // Geçersiz bağlamlar.
+    let invalid = |r: Result<ObjectDef>| assert!(matches!(r, Err(Error::Invalid(_))), "{r:?}");
+    for k in [ObjectKind::Function, ObjectKind::Procedure, ObjectKind::Type, ObjectKind::Domain] {
+        invalid(dflt(k, ctx(None, None), None).await);
+        invalid(dflt(k, ctx(s, Some(t)), None).await);
+    }
+    invalid(dflt(ObjectKind::Trigger, ctx(s, None), None).await);
+    // Trigger yalnız tabloda (MV değil).
+    let mv = dflt(ObjectKind::Trigger, ctx(None, Some(m)), None).await;
+    assert!(matches!(mv, Err(Error::NotFound(_))), "{mv:?}");
+    // Ön ayar yalnızca Function'da.
+    for k in [ObjectKind::Procedure, ObjectKind::Type, ObjectKind::Domain] {
+        invalid(dflt(k, ctx(s, None), Some(CreatePreset::TriggerFunction)).await);
+    }
+    invalid(dflt(ObjectKind::Schema, ctx(None, None), Some(CreatePreset::TriggerFunction)).await);
+    invalid(dflt(ObjectKind::Trigger, ctx(s, Some(t)), Some(CreatePreset::TriggerFunction)).await);
+    let missing = dflt(ObjectKind::Trigger, ctx(None, Some(u32::MAX - 7)), None).await;
+    assert!(matches!(missing, Err(Error::NotFound(_))), "{missing:?}");
+    assert!(matches!(f.dm.defaults(f.server, None, ObjectKind::Function, ctx(s, None), None).await, Err(Error::Invalid(_))));
+}
+
+#[tokio::test]
+async fn new_kinds_report_the_created_object() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(new_created_body(ts.clone()), cleanup(&ts, "m_newcr")).await;
+    }
+}
+
+async fn new_created_body(ts: TestServer) {
+    let env = setup(&ts, "m_newcr").await;
+    let f = fx(&env, &ts, false, None);
+    let fref = |oid| Some(ObjectRef { kind: ObjectKind::Function, oid });
+
+    // Aşırı yükleme: aynı ad, farklı giriş tipleri → her biri kendi oid'i.
+    let int = created_of(f.apply(&create(ObjectDef::Function(rfunc("nc_f", &[("a", "integer")])))).await);
+    let text = created_of(f.apply(&create(ObjectDef::Function(rfunc("nc_f", &[("a", "text")])))).await);
+    assert_eq!(int, fref(env.proc_oid("public", "nc_f", "integer").await));
+    assert_eq!(text, fref(env.proc_oid("public", "nc_f", "text").await));
+    assert_ne!(int, text);
+    // Sıfır argüman, OUT'lu ve VARIADIC'li fonksiyon (OUT kimliğe girmez).
+    let zero = created_of(f.apply(&create(ObjectDef::Function(rfunc("nc_f", &[])))).await);
+    assert_eq!(zero, fref(env.proc_oid("public", "nc_f", "").await));
+    let mut outv = rfunc("nc_g", &[("a", "integer")]);
+    outv.returns = Some(FunctionReturn::Type { type_name: "record".into(), setof: false });
+    outv.args.push(FunctionArg { mode: ArgMode::Out, name: Some("o".into()), type_name: "text".into(), default: None });
+    outv.args.push(FunctionArg { mode: ArgMode::Out, name: Some("p".into()), type_name: "integer".into(), default: None });
+    outv.body = "BEGIN o := 'x'; p := a; END;".into();
+    let c = created_of(f.apply(&create(ObjectDef::Function(outv))).await);
+    assert_eq!(c, fref(env.proc_oid("public", "nc_g", "integer").await));
+    let mut var = rfunc("nc_v", &[("a", "integer")]);
+    var.args.push(FunctionArg { mode: ArgMode::Variadic, name: Some("r".into()), type_name: "text[]".into(), default: None });
+    let c = created_of(f.apply(&create(ObjectDef::Function(var))).await);
+    assert_eq!(c, fref(env.proc_oid("public", "nc_v", "integer, text[]").await));
+    // Trigger fonksiyonu.
+    let c = created_of(f.apply(&create(ObjectDef::Function(trigger_fn("nc_tf")))).await);
+    assert_eq!(c, fref(env.proc_oid("public", "nc_tf", "").await));
+
+    // Ad değişimi: alter `created` yeni adla bulunur (oid aynı); imza değişimi (recreate) yeni oid.
+    let object = ObjectRef { kind: ObjectKind::Function, oid: text.unwrap().oid };
+    let rename = f.alter_loaded(object, |d| routine_def(d).name = "nc_f2".into()).await;
+    assert_eq!(created_of(f.apply(&rename).await), Some(object));
+    let comment = f.alter_loaded(object, |d| set_comment(d, "c")).await;
+    assert_eq!(created_of(f.apply(&comment).await), None, "kimlik değişmedi");
+    let retype = f
+        .alter_loaded(object, |d| {
+            let d = routine_def(d);
+            d.args[0].type_name = "bigint".into();
+            d.recreate = true;
+        })
+        .await;
+    let re = created_of(f.apply_with(&retype, |o| o.confirmed = true).await).expect("created");
+    assert_eq!(re, ObjectRef { kind: ObjectKind::Function, oid: env.proc_oid("public", "nc_f2", "bigint").await });
+    assert_ne!(re, object);
+    // Diğer aşırı yüklemeler yerinde.
+    assert_eq!(int, fref(env.proc_oid("public", "nc_f", "integer").await));
+
+    // Procedure (PG 11+): aşırı yükleme; PG 14+ OUT'lu aşırı yükleme (`p(int, text)` / `p(int, OUT text)`).
+    if env.version >= 110000 {
+        let pref = |oid| Some(ObjectRef { kind: ObjectKind::Procedure, oid });
+        let a = created_of(f.apply(&create(ObjectDef::Procedure(rproc("nc_p", &[("a", "integer")])))).await);
+        let b = created_of(f.apply(&create(ObjectDef::Procedure(rproc("nc_p", &[("a", "integer"), ("b", "text")])))).await);
+        assert_eq!(a, pref(env.proc_oid("public", "nc_p", "integer").await));
+        assert_eq!(b, pref(env.proc_oid("public", "nc_p", "integer, text").await));
+        assert_ne!(a, b);
+        let object = a.unwrap();
+        let rename = f.alter_loaded(object, |d| routine_def(d).name = "nc_p2".into()).await;
+        assert_eq!(created_of(f.apply(&rename).await), Some(object));
+        if env.version >= 140000 {
+            let mut out = rproc("nc_p", &[("a", "integer")]);
+            out.args.push(FunctionArg { mode: ArgMode::Out, name: Some("b".into()), type_name: "text".into(), default: None });
+            let c = created_of(f.apply(&create(ObjectDef::Procedure(out))).await);
+            assert_eq!(c, pref(proc_oid_by_modes(&env, "nc_p", "{i,o}").await));
+            assert_ne!(c, b);
+        } else {
+            eprintln!("PG {}: OUT'lu procedure atlandı (PG 14+)", env.version / 10_000);
+        }
+    } else {
+        eprintln!("PG 10: procedure atlandı");
+    }
+
+    // Trigger: tablo + ad.
+    env.sql("CREATE TABLE public.nc_t (id int); CREATE TABLE public.nc_u (id int)").await;
+    let c = created_of(f.apply(&create(ObjectDef::Trigger(rtrigger("nc_t", "nc_tr", "nc_tf")))).await);
+    let tr = ObjectRef { kind: ObjectKind::Trigger, oid: trigger_oid(&env, "nc_t", "nc_tr").await.unwrap() };
+    assert_eq!(c, Some(tr));
+    // Başka tabloda aynı adlı trigger kendi oid'iyle.
+    let c = created_of(f.apply(&create(ObjectDef::Trigger(rtrigger("nc_u", "nc_tr", "nc_tf")))).await);
+    assert_eq!(c.map(|c| c.oid), trigger_oid(&env, "nc_u", "nc_tr").await);
+    assert_ne!(c, Some(tr));
+    let rename = f
+        .alter_loaded(tr, |d| match d {
+            ObjectDef::Trigger(d) => d.name = "nc_tr2".into(),
+            _ => unreachable!(),
+        })
+        .await;
+    assert_eq!(created_of(f.apply(&rename).await), Some(tr));
+
+    // Type / Domain: şema + ad.
+    let c = created_of(f.apply(&create(ObjectDef::Type(enum_type("nc_e", &["a", "b"])))).await);
+    let e = ObjectRef { kind: ObjectKind::Type, oid: type_oid(&env, "nc_e").await.unwrap() };
+    assert_eq!(c, Some(e));
+    let c = created_of(f.apply(&create(ObjectDef::Type(composite_type("nc_c", &[("x", "integer")])))).await);
+    assert_eq!(c.map(|c| c.oid), type_oid(&env, "nc_c").await);
+    let rename = f
+        .alter_loaded(e, |d| match d {
+            ObjectDef::Type(d) => d.name = "nc_e2".into(),
+            _ => unreachable!(),
+        })
+        .await;
+    assert_eq!(created_of(f.apply(&rename).await), Some(e));
+    let c = created_of(f.apply(&create(ObjectDef::Domain(rdomain("nc_d")))).await);
+    let d = ObjectRef { kind: ObjectKind::Domain, oid: type_oid(&env, "nc_d").await.unwrap() };
+    assert_eq!(c, Some(d));
+    let rename = f
+        .alter_loaded(d, |x| match x {
+            ObjectDef::Domain(x) => x.name = "nc_d2".into(),
+            _ => unreachable!(),
+        })
+        .await;
+    assert_eq!(created_of(f.apply(&rename).await), Some(d));
+    // Yeniden yükleme eşitliği: yeni adla yüklenen tanım düzenlemeye hazır (noop boş plan).
+    let noop = f.alter_loaded(d, |_| {}).await;
+    assert!(f.preview(&noop).await.empty);
+}
+
+#[tokio::test]
+async fn new_kinds_pass_the_gates() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(new_gates_body(ts.clone()), cleanup(&ts, "m_newgate")).await;
+    }
+}
+
+async fn new_gates_body(ts: TestServer) {
+    let env = setup(&ts, "m_newgate").await;
+    let prod = fx(&env, &ts, false, Some("Üretim"));
+    let f = fx(&env, &ts, false, None);
+    env.sql(
+        "CREATE FUNCTION public.ng_f(a integer) RETURNS void LANGUAGE plpgsql AS 'BEGIN END';
+         CREATE FUNCTION public.ng_tf() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+         CREATE TABLE public.ng_t (id int);
+         CREATE TRIGGER ng_tr AFTER INSERT ON public.ng_t FOR EACH ROW EXECUTE PROCEDURE public.ng_tf();
+         CREATE TYPE public.ng_c AS (x integer, y text);
+         CREATE TYPE public.ng_e AS ENUM ('a');
+         CREATE DOMAIN public.ng_d AS integer CHECK (VALUE > 0);",
+    )
+    .await;
+    let fobj = ObjectRef { kind: ObjectKind::Function, oid: env.proc_oid("public", "ng_f", "integer").await };
+    let tobj = ObjectRef { kind: ObjectKind::Trigger, oid: trigger_oid(&env, "ng_t", "ng_tr").await.unwrap() };
+    let cobj = ObjectRef { kind: ObjectKind::Type, oid: type_oid(&env, "ng_c").await.unwrap() };
+    let eobj = ObjectRef { kind: ObjectKind::Type, oid: type_oid(&env, "ng_e").await.unwrap() };
+    let dobj = ObjectRef { kind: ObjectKind::Domain, oid: type_oid(&env, "ng_d").await.unwrap() };
+
+    // DataLoss (fonksiyon yeniden kurma, composite DROP ATTRIBUTE): genel onay → üretim onayı → uygulanır.
+    let recreate = f
+        .alter_loaded(fobj, |d| {
+            let d = routine_def(d);
+            d.args[0].type_name = "bigint".into();
+            d.recreate = true;
+        })
+        .await;
+    let drop_attr = f
+        .alter_loaded(cobj, |d| {
+            composite_attrs(d).pop();
+        })
+        .await;
+    for req in [&recreate, &drop_attr] {
+        assert_eq!(prod.preview(req).await.risk, Risk::DataLoss);
+        assert_eq!(code(&prod.apply(req).await), "confirmation_required");
+        assert_eq!(code(&prod.apply_with(req, |o| o.confirmed = true).await), "production_confirmation_required");
+    }
+    assert!(env.proc_exists("public", "ng_f", "integer").await);
+    applied(prod.apply_with(&recreate, |o| (o.confirmed, o.confirmed_production) = (true, true)).await);
+    applied(prod.apply_with(&drop_attr, |o| (o.confirmed, o.confirmed_production) = (true, true)).await);
+    assert!(!env.proc_exists("public", "ng_f", "integer").await && env.proc_exists("public", "ng_f", "bigint").await);
+    let mut loaded = f.load_def(cobj).await;
+    assert_eq!(composite_attrs(&mut loaded).len(), 1);
+    let fobj = ObjectRef { kind: ObjectKind::Function, oid: env.proc_oid("public", "ng_f", "bigint").await };
+
+    // Bayat `old`: başka oturum yorumu değiştirdi → plan_changed (her tür).
+    for (object, sql) in [
+        (fobj, "COMMENT ON FUNCTION public.ng_f(bigint) IS 'başka'"),
+        (tobj, "COMMENT ON TRIGGER ng_tr ON public.ng_t IS 'başka'"),
+        (eobj, "COMMENT ON TYPE public.ng_e IS 'başka'"),
+        (dobj, "COMMENT ON DOMAIN public.ng_d IS 'başka'"),
+    ] {
+        let req = f.alter_loaded(object, |d| set_comment(d, "benim")).await;
+        let hash = f.preview(&req).await.hash;
+        env.sql(sql).await;
+        assert_eq!(code(&f.dm.apply(f.server, f.db, &req, opts(&hash)).await), "plan_changed", "{:?}", object.kind);
+    }
+
+    // Destructive (DROP, CASCADE'siz): onay ister; onayla silinir (üretimde ek onay istenmez).
+    let mut drops = vec![(tobj, "trigger"), (eobj, "type"), (dobj, "domain"), (fobj, "function")];
+    if env.version >= 110000 {
+        env.sql("CREATE PROCEDURE public.ng_p(a integer) LANGUAGE plpgsql AS 'BEGIN END'").await;
+        drops.push((ObjectRef { kind: ObjectKind::Procedure, oid: env.proc_oid("public", "ng_p", "integer").await }, "procedure"));
+    }
+    for (object, label) in drops {
+        let req = f.drop_loaded(object, false).await;
+        assert_eq!(f.preview(&req).await.risk, Risk::Destructive, "{label}");
+        assert_eq!(code(&f.apply(&req).await), "confirmation_required", "{label}");
+        applied(prod.apply_with(&req, |o| o.confirmed = true).await);
+        assert!(matches!(f.dm.load(f.server, f.db, object).await, Err(Error::NotFound(_))), "{label} silinmeliydi");
+    }
+}
+
+#[tokio::test]
+async fn read_only_new_kinds_refuse_alter_and_drop() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(read_only_body(ts.clone()), cleanup(&ts, "m_newro")).await;
+    }
+}
+
+async fn read_only_body(ts: TestServer) {
+    let env = setup(&ts, "m_newro").await;
+    let f = fx(&env, &ts, false, None);
+    env.sql("CREATE TABLE public.ro_p (id int PRIMARY KEY); CREATE TABLE public.ro_c (id int REFERENCES public.ro_p);").await;
+    let lower = ObjectRef { kind: ObjectKind::Function, oid: env.proc_oid("pg_catalog", "lower", "text").await };
+    let int4: u32 = env.admin.query_one("SELECT 'pg_catalog.int4'::regtype::oid", &[]).await.unwrap().get(0);
+    let fk_trigger: u32 = env
+        .admin
+        .query_one("SELECT oid FROM pg_trigger WHERE tgrelid = 'public.ro_c'::regclass AND tgisinternal LIMIT 1", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let dom: u32 = env.admin.query_one("SELECT 'information_schema.cardinal_number'::regtype::oid", &[]).await.unwrap().get(0);
+    for object in [
+        lower,
+        ObjectRef { kind: ObjectKind::Type, oid: int4 },
+        ObjectRef { kind: ObjectKind::Trigger, oid: fk_trigger },
+        ObjectRef { kind: ObjectKind::Domain, oid: dom },
+    ] {
+        let loaded = f.load_def(object).await;
+        let (editable, names) = match &loaded {
+            ObjectDef::Function(d) => (d.editable, vec![d.name.clone(), d.schema.clone()]),
+            ObjectDef::Trigger(d) => (d.editable, vec![d.name.clone(), d.table.clone()]),
+            ObjectDef::Type(d) => (d.editable, vec![d.name.clone()]),
+            ObjectDef::Domain(d) => (d.editable, vec![d.name.clone(), d.schema.clone()]),
+            other => panic!("{other:?}"),
+        };
+        assert!(!editable, "{:?} salt okunur yüklenmeli", object.kind);
+        let alter = f.alter_loaded(object, |d| set_comment(d, "x")).await;
+        let drop = f.drop_loaded(object, true).await;
+        for req in [&alter, &drop] {
+            let r = f.apply_with(req, |o| (o.confirmed, o.confirmed_production) = (true, true)).await;
+            assert_eq!(code(&r), "invalid", "{:?}", object.kind);
+            let m = invalid_message(&r);
+            assert!(m.starts_with(READ_ONLY_PREFIX) && m.len() > READ_ONLY_PREFIX.len(), "{m}");
+            for n in &names {
+                assert!(!m.contains(n.as_str()), "ad iletide: {m}");
+            }
+        }
+        // Nesne yerinde ve değişmedi.
+        assert_eq!(f.load_def(object).await, loaded);
+    }
+}
+
+/// Salt okunur kapısı bağlantıdan önce: bağlı olmayan sunucuda bile kendi iletisi; kilit ondan da önce.
+#[tokio::test]
+async fn read_only_gate_runs_before_any_connection() {
+    let config = ServerConfig::new("x", "127.0.0.1", 1, "u");
+    let (dm, _d) = manager(Arc::new(ConnectionManager::new()), &config, false, None);
+    let mut d = rfunc("f", &[]);
+    d.editable = false;
+    d.unsupported = vec!["sistem şeması".into()];
+    let object = ObjectRef { kind: ObjectKind::Function, oid: 1 };
+    let req = PlanRequest::Drop { object, def: ObjectDef::Function(d), cascade: false, force: false };
+    let r = dm.apply(config.id, 1, &req, opts("x")).await;
+    assert!(matches!(&r, Err(Error::Invalid(m)) if m.starts_with(READ_ONLY_PREFIX)), "{r:?}");
+    assert_eq!(code(&r), "invalid");
+    let (locked, _d2) = manager(Arc::new(ConnectionManager::new()), &config, true, None);
+    assert_eq!(code(&locked.apply(config.id, 1, &req, opts("x")).await), "locked");
+}
+
+#[tokio::test]
+async fn locked_server_refuses_routines_triggers_types_domains() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(locked_routines_body(ts.clone()), cleanup(&ts, "m_newlock")).await;
+    }
+}
+
+async fn locked_routines_body(ts: TestServer) {
+    let env = setup(&ts, "m_newlock").await;
+    let f = fx(&env, &ts, true, None);
+    env.sql(
+        "CREATE FUNCTION public.nl_tf() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END';
+         CREATE TABLE public.nl_t (id int);",
+    )
+    .await;
+    for def in [
+        ObjectDef::Function(rfunc("nl_f", &[])),
+        ObjectDef::Procedure(rproc("nl_p", &[])),
+        ObjectDef::Trigger(rtrigger("nl_t", "nl_tr", "nl_tf")),
+        ObjectDef::Type(enum_type("nl_e", &["a"])),
+        ObjectDef::Domain(rdomain("nl_d")),
+    ] {
+        let req = create(def.clone());
+        let r = f.apply_with(&req, |o| (o.confirmed, o.confirmed_production) = (true, true)).await;
+        assert_eq!(code(&r), "locked", "{:?}", def.kind());
+        if def.kind() != ObjectKind::Procedure || env.version >= 110000 {
+            assert!(!f.preview(&req).await.empty, "önizleme serbest: {:?}", def.kind());
+        }
+    }
+    // Düzenleme ve silme de kilitli; salt okunur kapısından önce.
+    let object = ObjectRef { kind: ObjectKind::Function, oid: env.proc_oid("public", "nl_tf", "").await };
+    let alter = f.alter_loaded(object, |d| set_comment(d, "c")).await;
+    assert_eq!(code(&f.apply(&alter).await), "locked");
+    let lower = ObjectRef { kind: ObjectKind::Function, oid: env.proc_oid("pg_catalog", "lower", "text").await };
+    let drop = f.drop_loaded(lower, false).await;
+    assert_eq!(code(&f.apply_with(&drop, |o| o.confirmed = true).await), "locked");
+    assert!(!env.proc_exists("public", "nl_f", "").await);
+    assert!(type_oid(&env, "nl_e").await.is_none() && type_oid(&env, "nl_d").await.is_none());
+    assert!(trigger_oid(&env, "nl_t", "nl_tr").await.is_none());
+}
+
+#[tokio::test]
+async fn new_kind_failures_carry_hints() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(new_hints_body(ts.clone()), cleanup_both(ts.clone(), "m_newhint", "mnewhint")).await;
+    }
+}
+
+async fn new_hints_body(ts: TestServer) {
+    let env = setup(&ts, "m_newhint").await;
+    let f = fx(&env, &ts, false, None);
+    env.sql(
+        "CREATE FUNCTION public.nh_f(a integer) RETURNS integer LANGUAGE sql AS 'SELECT a';
+         CREATE VIEW public.nh_v AS SELECT public.nh_f(1) AS x;
+         CREATE TYPE public.nh_c AS (x integer, y text);
+         CREATE TABLE public.nh_tt OF public.nh_c;
+         CREATE TYPE public.nh_k AS (x integer, y text);
+         CREATE TABLE public.nh_col (k public.nh_k);
+         CREATE TYPE public.nh_e AS ENUM ('a');
+         CREATE TABLE public.nh_eu (e public.nh_e);
+         CREATE DOMAIN public.nh_d AS integer;
+         CREATE TABLE public.nh_du (d public.nh_d);",
+    )
+    .await;
+    let fobj = ObjectRef { kind: ObjectKind::Function, oid: env.proc_oid("public", "nh_f", "integer").await };
+    let hint_of = |r: Result<ApplyOutcome>| {
+        let (_, _, sqlstate, error) = failed(r);
+        (sqlstate.unwrap_or_default(), error.hint)
+    };
+
+    // Fonksiyon yeniden kurma: bağımlı görünüm → 2BP01, CASCADE önermeyen ipucu (PG'ninki yerine).
+    let recreate = f
+        .alter_loaded(fobj, |d| {
+            let d = routine_def(d);
+            d.args[0].type_name = "bigint".into();
+            d.recreate = true;
+        })
+        .await;
+    let (sqlstate, hint) = hint_of(f.apply_with(&recreate, |o| o.confirmed = true).await);
+    assert_eq!((sqlstate.as_str(), hint.as_deref()), ("2BP01", Some(ROUTINE_REBUILD_DEPENDENTS_HINT)));
+    // Silme (CASCADE'siz): bağımlılar ipucu (PG'nin ya da bizim).
+    for object in [
+        fobj,
+        ObjectRef { kind: ObjectKind::Type, oid: type_oid(&env, "nh_e").await.unwrap() },
+        ObjectRef { kind: ObjectKind::Domain, oid: type_oid(&env, "nh_d").await.unwrap() },
+    ] {
+        let req = f.drop_loaded(object, false).await;
+        let (sqlstate, hint) = hint_of(f.apply_with(&req, |o| o.confirmed = true).await);
+        assert_eq!(sqlstate, "2BP01", "{:?}", object.kind);
+        assert!(hint.is_some(), "{:?}", object.kind);
+    }
+    // Typed table: ADD / DROP ATTRIBUTE → 2BP01, "CASCADE gerekir (desteklenmiyor)".
+    let cobj = ObjectRef { kind: ObjectKind::Type, oid: type_oid(&env, "nh_c").await.unwrap() };
+    let add = f
+        .alter_loaded(cobj, |d| {
+            composite_attrs(d).push(CompositeAttr { name: "z".into(), type_name: "integer".into(), collation: None, original: None });
+        })
+        .await;
+    let drop_attr = f
+        .alter_loaded(cobj, |d| {
+            composite_attrs(d).pop();
+        })
+        .await;
+    for req in [&add, &drop_attr] {
+        let (sqlstate, hint) = hint_of(f.apply_with(req, |o| (o.confirmed, o.confirmed_production) = (true, true)).await);
+        assert_eq!((sqlstate.as_str(), hint.as_deref()), ("2BP01", Some(TYPED_TABLE_HINT)));
+    }
+    // Kolonda kullanılan composite'in öznitelik tipi değişimi → 0A000.
+    let kobj = ObjectRef { kind: ObjectKind::Type, oid: type_oid(&env, "nh_k").await.unwrap() };
+    let retype = f.alter_loaded(kobj, |d| composite_attrs(d)[0].type_name = "bigint".into()).await;
+    let (sqlstate, hint) = hint_of(f.apply_with(&retype, |o| o.confirmed = true).await);
+    assert_eq!((sqlstate.as_str(), hint.as_deref()), ("0A000", Some(TYPE_COLUMN_RETYPE_HINT)));
+
+    // LEAKPROOF: süper kullanıcı olmayan rol → 42501, LEAKPROOF ipucu (create ve OR REPLACE).
+    let role = cluster_name(&ts, ObjectKind::Role, "mnewhint").await;
+    let pw = random_password();
+    env.admin
+        .batch_execute(&format!("CREATE ROLE {role} LOGIN PASSWORD {}; GRANT CREATE, USAGE ON SCHEMA public TO {role}", quote_literal(&pw)))
+        .await
+        .unwrap();
+    let mut config = ts.config.clone();
+    config.id = Uuid::new_v4();
+    config.username = role.clone();
+    let mgr = Arc::new(ConnectionManager::new());
+    if mgr.connect(config.clone(), Some(pw)).await.is_err() {
+        panic!("test rolüyle bağlanılamadı");
+    }
+    let (dm, dir) = manager(mgr.clone(), &config, false, None);
+    let u = Fx { dm, server: config.id, db: env.db_oid, _dir: dir };
+    let mut lp = rfunc("nh_lp", &[("a", "integer")]);
+    lp.language = "sql".into();
+    lp.returns = Some(FunctionReturn::Type { type_name: "integer".into(), setof: false });
+    lp.body = "SELECT a".into();
+    lp.leakproof = true;
+    let (sqlstate, hint) = hint_of(u.apply(&create(ObjectDef::Function(lp.clone()))).await);
+    assert_eq!((sqlstate.as_str(), hint.as_deref()), ("42501", Some(LEAKPROOF_HINT)));
+    lp.leakproof = false;
+    applied(u.apply(&create(ObjectDef::Function(lp))).await);
+    let lobj = ObjectRef { kind: ObjectKind::Function, oid: env.proc_oid("public", "nh_lp", "integer").await };
+    let add_lp = u.alter_loaded(lobj, |d| routine_def(d).leakproof = true).await;
+    let (sqlstate, hint) = hint_of(u.apply(&add_lp).await);
+    assert_eq!((sqlstate.as_str(), hint.as_deref()), ("42501", Some(LEAKPROOF_HINT)));
+    mgr.disconnect(config.id);
 }

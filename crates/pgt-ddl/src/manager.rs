@@ -1,7 +1,8 @@
 //! DDL yöneticisi: önizleme, kapılı uygulama (kilit/geçerlilik/hash/onay), iptal, yükleme, varsayılanlar ve açılır listeler.
 //!
 //! Kapı sırası (`apply`; yalnızca (4) havuzdaki katalog bağlantısında tek gidiş-dönüş yapar, hiçbiri uygulama
-//! bağlantısı açmaz): (1) kayıtsız sunucu, (2) `read_only_lock`, (2a) hedef çözümü (`target_for`: Database/Role →
+//! bağlantısı açmaz): (1) kayıtsız sunucu, (2) `read_only_lock`, (2b) salt okunur nesne (`editable = false`
+//! Function/Procedure/Trigger/Type/Domain'de alter/drop → kodsuz `invalid`, genel gerekçeyle), (2a) hedef çözümü (`target_for`: Database/Role →
 //! bakım veritabanı; veritabanı kapsamlı türde `database_oid` yok → `Invalid`), (3) plan üretimi (geçersiz tanım /
 //! boş plan), (4) nesne denetimi (yalnızca alter/drop: istemcinin `old`/`def`'i, `object`'in sunucudaki güncel
 //! tanımına eşit olmalı; fark → `plan_changed`; yükleme hataları — yok/sistem nesnesi/identity dizisi — olduğu gibi
@@ -37,6 +38,7 @@ use crate::lookup::{self, LookupItem, LookupRequest};
 use crate::model::*;
 use crate::plan::{PlanView, Risk, Statement};
 use crate::secret::Secret;
+use crate::target::CreatePreset;
 
 /// Arayüzün istediği değişiklik; plan arka uçta bu istekten üretilir.
 // Tek seferlik IPC yükü (saklanmaz); varyant boyut farkı önemsiz, `Box` JSON'u değiştirmeden yalnızca kullanımı zorlaştırır.
@@ -162,6 +164,67 @@ const FIND_MATVIEW_SQL: &str = "SELECT c.oid FROM pg_class c JOIN pg_namespace n
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'm'";
 const FIND_DATABASE_SQL: &str = "SELECT oid FROM pg_database WHERE datname = $1";
 const FIND_ROLE_SQL: &str = "SELECT oid FROM pg_roles WHERE rolname = $1";
+/// Fonksiyon: şema + ad + giriş tipleri (`proargtypes`, OUT hariç). `to_regprocedure` kullanılmaz: tipler tek tek
+/// `regtype` ile çözülür ve oid listesi (`oidvector` metni: boşlukla ayrık) karşılaştırılır; aşırı yüklemede doğru
+/// nesne. `{kind}` sürüme göre tür süzgeci (PG 11+ `prokind`).
+const FIND_FUNCTION_SQL: &str = "WITH a AS (SELECT coalesce(string_agg(t::regtype::oid::text, ' ' ORDER BY i), '') AS sig \
+     FROM unnest($3::text[]) WITH ORDINALITY AS u(t, i)) \
+     SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, a \
+     WHERE n.nspname = $1 AND p.proname = $2 AND p.proargtypes::text = a.sig AND {kind}";
+/// Procedure (PG 11+): TÜM argümanlar + modlar (PG 14+ OUT argümanları çağrı imzasına girer; `p(int, text)` ile
+/// `p(int, OUT text)` birlikte var olabilir): tüm argüman tipleri (`proallargtypes`, yoksa `proargtypes`) ve
+/// `proargmodes` metni (hepsi IN ise NULL → `''`).
+const FIND_PROCEDURE_SQL: &str = "WITH a AS (SELECT coalesce(string_agg(t::regtype::oid::text, ' ' ORDER BY i), '') AS sig \
+     FROM unnest($3::text[]) WITH ORDINALITY AS u(t, i)) \
+     SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, a \
+     WHERE n.nspname = $1 AND p.proname = $2 AND p.prokind = 'p' AND coalesce(p.proargmodes::text, '') = $4 \
+     AND CASE WHEN p.proallargtypes IS NULL THEN p.proargtypes::text ELSE array_to_string(p.proallargtypes, ' ') END = a.sig";
+/// Trigger: tablo (şema + ad → oid) + trigger adı.
+const FIND_TRIGGER_SQL: &str = "SELECT t.oid FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
+     JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND t.tgname = $3";
+/// Type/Domain: şema + ad + `typtype` (`$3`: e/c/r/d).
+const FIND_TYPE_SQL: &str = "SELECT t.oid FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace \
+     WHERE n.nspname = $1 AND t.typname = $2 AND t.typtype::text = $3";
+
+/// `find_created` sorgu parametresi.
+#[derive(Clone)]
+enum FindParam {
+    Text(String),
+    List(Vec<String>),
+}
+
+impl FindParam {
+    fn as_sql(&self) -> &(dyn tokio_postgres::types::ToSql + Sync) {
+        match self {
+            FindParam::Text(s) => s,
+            FindParam::List(v) => v,
+        }
+    }
+}
+
+/// `FIND_FUNCTION_SQL`/`FIND_PROCEDURE_SQL` parametreleri: tip listesi ve (procedure) `proargmodes` metni.
+fn routine_find_args(kind: ObjectKind, d: &FunctionDef) -> (Vec<String>, Option<String>) {
+    if kind != ObjectKind::Procedure {
+        return (d.args.iter().filter(|a| a.mode != ArgMode::Out).map(|a| a.type_name.clone()).collect(), None);
+    }
+    let types = d.args.iter().map(|a| a.type_name.clone()).collect();
+    let modes = if d.args.iter().all(|a| a.mode == ArgMode::In) {
+        String::new()
+    } else {
+        let m: Vec<&str> = d
+            .args
+            .iter()
+            .map(|a| match a.mode {
+                ArgMode::In => "i",
+                ArgMode::Out => "o",
+                ArgMode::Inout => "b",
+                ArgMode::Variadic => "v",
+            })
+            .collect();
+        format!("{{{}}}", m.join(","))
+    };
+    (types, Some(modes))
+}
 
 // ---- hata ipuçları (yalnızca PG ipucu yoksa; SQL/ad/değer içermez) ----
 
@@ -191,6 +254,23 @@ pub const VIEW_DEPENDENTS_HINT: &str = "Bağımlı nesneler var; silmek için CA
 /// CASCADE seçeneği yoktur (inceleme M-3).
 pub const REBUILD_DEPENDENTS_HINT: &str = "Bağımlı nesneler (ör. bu görünümü kullanan görünümler) yeniden kurmayı \
      engelliyor: önce bağımlıları kaldırın ya da sorgu değişikliğini kolonları koruyacak biçimde yapın.";
+/// Plan 18: fonksiyon/procedure yeniden kurmasındaki `DROP` bağımlılar yüzünden düşerse (2BP01): bu akışta CASCADE
+/// yoktur; PG'nin "CASCADE kullanın" ipucunun yerine geçer.
+pub const ROUTINE_REBUILD_DEPENDENTS_HINT: &str = "Bağımlı nesneler (ör. bu fonksiyonu kullanan görünümler, trigger'lar ya \
+     da varsayılanlar) yeniden oluşturmayı engelliyor: önce bağımlıları kaldırın ya da değişikliği imzayı koruyacak biçimde yapın.";
+/// Plan 18 Karar 2: `CREATE OR REPLACE` sınırı (42P13; PG'nin SQL öneren ipucunun yerine geçer).
+pub const OR_REPLACE_HINT: &str = "OR REPLACE bu değişikliği yapamaz; 'Yeniden oluştur' seçin.";
+/// Plan 18: Function ↔ Procedure (42809).
+pub const ROUTINE_KIND_HINT: &str = "Function ↔ Procedure dönüşümü yeniden oluşturma ister: nesneyi silip diğer türde yeniden oluşturun.";
+/// Plan 18 Karar 7: typed table kullanan composite'te öznitelik değişimi (2BP01; PG'nin CASCADE ipucunun yerine geçer).
+pub const TYPED_TABLE_HINT: &str = "Bu tip tablolarda kullanılıyor; CASCADE gerekir (desteklenmiyor).";
+/// Plan 18 Karar 7: tablo kolonunda kullanılan composite'in öznitelik tipi değiştirilemez (0A000).
+pub const TYPE_COLUMN_RETYPE_HINT: &str =
+    "Bu tip tablo kolonlarında kullanılıyor; PostgreSQL kullanımdaki bir composite tipin öznitelik tipini değiştiremez.";
+/// Plan 18: `LEAKPROOF` (42501).
+pub const LEAKPROOF_HINT: &str = "LEAKPROOF yalnızca süper kullanıcı verebilir.";
+/// Plan 18 salt okunur kapısı: kodsuz `invalid` iletisinin öneki; ardından genel gerekçe (`read_only_reason`).
+pub const READ_ONLY_PREFIX: &str = "Bu nesne buradan düzenlenemez: ";
 /// Kısmi uygulama (transaction dışı ifadeler): ilk ifadeler kalıcı.
 pub const PARTIAL_APPLY_HINT: &str =
     "Önceki ifadeler uygulandı (transaction dışı); nesneyi yenileyip kalan değişiklikleri yeniden deneyin.";
@@ -235,7 +315,116 @@ fn identity_changed(old: &ObjectDef, new: &ObjectDef) -> bool {
         }
         (ObjectDef::Database(a), ObjectDef::Database(b)) => a.name != b.name,
         (ObjectDef::Role(a), ObjectDef::Role(b)) => a.name != b.name,
+        // İmza değişimi yalnızca yeniden kurmayla olur (DROP + CREATE: yeni oid); gereksiz `recreate` üreticide de yok
+        // sayılır. Ad/şema değişimi oid'i korur, yeni adla arama aynı oid'i döndürür.
+        (ObjectDef::Function(a), ObjectDef::Function(b)) => routine_identity_changed(ObjectKind::Function, a, b),
+        (ObjectDef::Procedure(a), ObjectDef::Procedure(b)) => routine_identity_changed(ObjectKind::Procedure, a, b),
+        // Yeniden kurma PG < 14'te ve constraint trigger'da DROP + CREATE'tir (yeni oid); OR REPLACE'te arama aynı oid'i bulur.
+        (ObjectDef::Trigger(a), ObjectDef::Trigger(b)) => a.name != b.name || build::trigger::structure_changed(a, b),
+        (ObjectDef::Type(a), ObjectDef::Type(b)) => (&a.schema, &a.name) != (&b.schema, &b.name),
+        (ObjectDef::Domain(a), ObjectDef::Domain(b)) => (&a.schema, &a.name) != (&b.schema, &b.name),
         _ => false,
+    }
+}
+
+fn routine_identity_changed(kind: ObjectKind, a: &FunctionDef, b: &FunctionDef) -> bool {
+    (&a.schema, &a.name) != (&b.schema, &b.name) || (b.recreate && !build::routine::needs_recreate(kind, a, b).is_empty())
+}
+
+/// Salt okunur kapısı (Plan 18 Karar 4): `editable = false` nesnede alter/drop, bağlantı açılmadan kodsuz `invalid`.
+/// Gerekçe istemcinin gönderdiği (yüklenmiş) tanımın ilk `unsupported` girdisinden genel metindir; ad/değer içermez.
+/// İstemci `editable`'ı değiştirse bile nesne denetimi (4) yüklenen tanımla eşitliği ister, üretici de reddeder.
+fn read_only_refusal(req: &PlanRequest) -> Option<String> {
+    let def = match req {
+        PlanRequest::Create { .. } => return None,
+        PlanRequest::Alter { old, .. } => old,
+        PlanRequest::Drop { def, .. } => def,
+    };
+    let (editable, unsupported) = match def {
+        ObjectDef::Function(d) | ObjectDef::Procedure(d) => (d.editable, &d.unsupported),
+        ObjectDef::Trigger(d) => (d.editable, &d.unsupported),
+        ObjectDef::Type(d) => (d.editable, &d.unsupported),
+        ObjectDef::Domain(d) => (d.editable, &d.unsupported),
+        _ => return None,
+    };
+    (!editable).then(|| format!("{READ_ONLY_PREFIX}{}", read_only_reason(unsupported.first().map(String::as_str))))
+}
+
+/// Yükleyicinin `unsupported` girdisini (bazıları ad/değer taşır: `EXTENSION <ad>`, `tip <tip>`, `CHECK <ad> …`) ad ve
+/// değer içermeyen sabit gerekçeye indirir. Bilinmeyen biçim → genel gerekçe.
+fn read_only_reason(entry: Option<&str>) -> &'static str {
+    const GENERIC: &str = "desteklenmeyen özellik";
+    let Some(e) = entry else { return GENERIC };
+    // (önek, gerekçe): ilk eşleşen kazanır; sabit girdiler kendi metniyle.
+    const PREFIXES: [(&str, &str); 33] = [
+        ("LANGUAGE ", "desteklenmeyen dil (C/internal)"),
+        ("BEGIN ATOMIC", "BEGIN ATOMIC (SQL standart gövde)"),
+        ("AGGREGATE", "aggregate fonksiyonu"),
+        ("WINDOW", "pencere fonksiyonu"),
+        ("EXTENSION ", "eklentiye ait"),
+        ("sistem şeması", "sistem şeması"),
+        ("SUPPORT ", "SUPPORT fonksiyonu"),
+        ("TRANSFORM", "TRANSFORM FOR TYPE"),
+        ("tip ", "desteklenmeyen tip ifadesi"),
+        ("argüman modu", "desteklenmeyen argüman modu"),
+        ("adsız TABLE kolonu", "adsız TABLE kolonu"),
+        ("COST ", "desteklenmeyen COST değeri"),
+        ("ROWS ", "desteklenmeyen ROWS değeri"),
+        ("iç trigger", "iç trigger (kısıt ya da sistem tarafından yönetilir)"),
+        ("bölümlenmiş üst tablodan", "bölümlenmiş üst tablodan klonlanmış (üst tablodan yönetilir)"),
+        ("FROM ", "constraint trigger başvurulan tablosu"),
+        ("görünüm trigger", "görünüm trigger'ı"),
+        ("yabancı tablo trigger", "yabancı tablo trigger'ı"),
+        ("WHEN koşulu", "WHEN koşulu ayrıştırılamadı"),
+        ("trigger argümanları", "trigger argümanları çözülemedi"),
+        ("etkinlik durumu", "desteklenmeyen etkinlik durumu"),
+        ("tablo satır tipi", "tablo satır tipi (ilişkiden yönetilir)"),
+        ("ilişkisi bulunamayan", "ilişkisi bulunamayan composite"),
+        ("range bilgisi", "range bilgisi bulunamadı"),
+        ("fonksiyon ", "desteklenmeyen range fonksiyonu"),
+        ("MULTIRANGE", "MULTIRANGE (range tipinden yönetilir)"),
+        ("dizi tipi", "dizi tipi (öğe tipinden yönetilir)"),
+        ("BASE TYPE", "BASE TYPE"),
+        ("SHELL TYPE", "SHELL TYPE (tanımsız)"),
+        ("PSEUDO TYPE", "PSEUDO TYPE"),
+        ("CHECK ", "desteklenmeyen CHECK kısıtı"),
+        ("NOT NULL ", "doğrulanmamış NOT NULL kısıtı"),
+        // Yükleyicinin `'<kod>' türü …` biçimleri (ilişki/tip/kısıt türü).
+        ("'", ""),
+    ];
+    for (prefix, reason) in PREFIXES {
+        if e.starts_with(prefix) {
+            if !reason.is_empty() {
+                return reason;
+            }
+            return if e.ends_with("trigger'ı") {
+                "desteklenmeyen ilişki türü"
+            } else if e.ends_with(" türü tip") {
+                "desteklenmeyen tip türü"
+            } else if e.contains(" türü kısıt ") {
+                "desteklenmeyen kısıt türü"
+            } else {
+                GENERIC
+            };
+        }
+    }
+    GENERIC
+}
+
+/// İpucu kararının istekten gelen bağlamı (başarısız ifadenin metni dışında).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct HintCtx {
+    /// İstenen fonksiyon tanımı `LEAKPROOF` (create ya da alter'ın yeni tarafı).
+    pub(crate) leakproof: bool,
+}
+
+impl HintCtx {
+    pub(crate) fn of(req: &PlanRequest) -> Self {
+        let leakproof = match req {
+            PlanRequest::Create { def: ObjectDef::Function(d), .. } | PlanRequest::Alter { new: ObjectDef::Function(d), .. } => d.leakproof,
+            _ => false,
+        };
+        HintCtx { leakproof }
     }
 }
 
@@ -326,8 +515,16 @@ fn materialize_for<'a>(statements: &'a [Statement], role: Option<&str>, secret: 
 }
 
 /// İfadeye ve SQLSTATE'e göre ipucu (Karar 1/8/9, inceleme m-2: kod tek başına yetmez, başarısız ifade de eşleşmeli).
-fn hint_for(kind: ObjectKind, op: &str, sql: &str, code: &str) -> Option<&'static str> {
+fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> Option<&'static str> {
+    let routine = matches!(kind, ObjectKind::Function | ObjectKind::Procedure);
     Some(match (code, kind) {
+        ("2BP01", ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Type | ObjectKind::Domain) if op == "drop" => {
+            VIEW_DEPENDENTS_HINT
+        }
+        ("42809", _) if routine => ROUTINE_KIND_HINT,
+        ("0A000", ObjectKind::Type) if sql.starts_with("ALTER TYPE ") && sql.contains(" ALTER ATTRIBUTE ") => TYPE_COLUMN_RETYPE_HINT,
+        // Fonksiyon tanımı (CREATE [OR REPLACE]) LEAKPROOF isterken yetki hatası; sahip/yorum ifadeleri genel ipucu alır.
+        ("42501", ObjectKind::Function) if ctx.leakproof && sql.starts_with("CREATE ") => LEAKPROOF_HINT,
         ("42P16" | "42804", ObjectKind::View) if sql.starts_with("CREATE OR REPLACE VIEW ") => VIEW_COLUMNS_HINT,
         ("55000", ObjectKind::MaterializedView) if sql.starts_with("REFRESH MATERIALIZED VIEW CONCURRENTLY ") => {
             REFRESH_CONCURRENTLY_HINT
@@ -344,10 +541,37 @@ fn hint_for(kind: ObjectKind, op: &str, sql: &str, code: &str) -> Option<&'stati
     })
 }
 
+/// PG'nin kendi ipucunun YERİNE geçen ipuçları: PG bu durumlarda arayüzün sunmadığı bir eylemi (CASCADE ya da SQL ile
+/// önce DROP) önerir; bunun yerine arayüzdeki karşılığı söylenir.
+fn override_hint_for(kind: ObjectKind, op: &str, sql: &str, code: &str) -> Option<&'static str> {
+    let routine = matches!(kind, ObjectKind::Function | ObjectKind::Procedure);
+    Some(match (code, kind) {
+        ("2BP01", _) if routine && op == "alter" && (sql.starts_with("DROP FUNCTION ") || sql.starts_with("DROP PROCEDURE ")) => {
+            ROUTINE_REBUILD_DEPENDENTS_HINT
+        }
+        ("2BP01", ObjectKind::Type) if op == "alter" && sql.starts_with("ALTER TYPE ") && sql.contains(" ATTRIBUTE ") => TYPED_TABLE_HINT,
+        ("42P13", _) if routine && sql.starts_with("CREATE OR REPLACE ") => OR_REPLACE_HINT,
+        _ => return None,
+    })
+}
+
 /// Başarısız ifadenin arayüz yükü: `apply::failure_payload` + (PG ipucu yoksa) türe/ifadeye göre ipucu; kısmi
 /// uygulamada (`committed > 0`, transaction dışı) ipucu yoksa bunu söyler. Gizlenmiş ifadede sunucu iletisi
 /// doğrulayıcı izi taşıyorsa sabit iletiyle değiştirilir (savunma; konum zaten `None`).
+#[cfg(test)]
 pub(crate) fn failure_payload_for(kind: ObjectKind, op: &str, failed: Option<&Statement>, committed: u32, e: &Error) -> ErrorPayload {
+    failure_payload_with(kind, op, HintCtx::default(), failed, committed, e)
+}
+
+/// `failure_payload_for` + istek bağlamı (`HintCtx`).
+pub(crate) fn failure_payload_with(
+    kind: ObjectKind,
+    op: &str,
+    ctx: HintCtx,
+    failed: Option<&Statement>,
+    committed: u32,
+    e: &Error,
+) -> ErrorPayload {
     let mut p = apply::failure_payload(e);
     if failed.is_some_and(|s| s.redacted) {
         let leaks = |v: &Option<String>| v.as_deref().is_some_and(|t| t.contains("SCRAM-SHA-256$"));
@@ -357,10 +581,12 @@ pub(crate) fn failure_payload_for(kind: ObjectKind, op: &str, failed: Option<&St
             p.hint = None;
         }
     }
-    if p.hint.is_none()
-        && let (Some(s), Some(code)) = (failed, apply::sqlstate(e))
-    {
-        p.hint = hint_for(kind, op, &s.sql, code).map(str::to_string);
+    if let (Some(s), Some(code)) = (failed, apply::sqlstate(e)) {
+        if let Some(h) = override_hint_for(kind, op, &s.sql, code) {
+            p.hint = Some(h.to_string());
+        } else if p.hint.is_none() {
+            p.hint = hint_for(kind, op, ctx, &s.sql, code).map(str::to_string);
+        }
     }
     if p.hint.is_none() && committed > 0 && failed.is_some_and(|s| !s.transactional) {
         p.hint = Some(PARTIAL_APPLY_HINT.into());
@@ -387,6 +613,13 @@ const SCHEMA_NAME_SQL: &str = "SELECT nspname::text AS name FROM pg_namespace WH
 const TABLE_NAME_SQL: &str = "SELECT n.nspname::text AS schema, c.relname::text AS name \
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1 AND c.relkind IN ('r', 'm', 'p')";
 
+const TRIGGER_TABLE_SQL: &str = "SELECT n.nspname::text AS schema, c.relname::text AS name \
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1 AND c.relkind IN ('r', 'p')";
+/// Yeni fonksiyon/procedure gövde şablonu (plpgsql).
+const FUNCTION_BODY: &str = "BEGIN\n\nEND;";
+/// Trigger fonksiyonu gövde şablonu.
+const TRIGGER_FUNCTION_BODY: &str = "BEGIN\n  RETURN NEW;\nEND;";
+
 pub struct DdlManager {
     mgr: Arc<ConnectionManager>,
     registry: Arc<RwLock<Registry>>,
@@ -411,6 +644,8 @@ struct Job {
     release: Vec<u32>,
     /// Uygulama sonrası üyelikleri denetlenecek rol tanımı (Role create/alter).
     verify_role: Option<RoleDef>,
+    /// Hata ipucu bağlamı (istekten).
+    hint: HintCtx,
 }
 
 /// Kayıttan okunan koruma bayrakları.
@@ -453,6 +688,10 @@ impl DdlManager {
         let guard = self.guard(server)?;
         if guard.locked {
             return Err(Error::Invalid(LOCKED_MESSAGE.into()));
+        }
+        // (2b) salt okunur nesne (Plan 18 Karar 4): alter/drop, bağlantı ve plan üretiminden önce kodsuz `invalid`.
+        if let Some(m) = read_only_refusal(req) {
+            return Err(Error::Invalid(m));
         }
         // (2a)
         let target = target_for(req.kind(), database_oid)?;
@@ -519,6 +758,7 @@ impl DdlManager {
             object: object_check(req).map(|(o, _)| o),
             release: self.databases_to_release(server, req).await,
             verify_role,
+            hint: HintCtx::of(req),
         };
         self.execute(server, &view.statements, exec, job).await
     }
@@ -526,7 +766,7 @@ impl DdlManager {
     /// Bağlantı açar, ifadeleri blok blok çalıştırır, sonucu günlüğe (yalnızca tür/sayı/süre/sonuç) yazar.
     /// `statements` plandaki (gizlenmiş) metinlerdir: ipucu/konum kararları bunlara bakar; `exec` çalıştırılan listedir.
     async fn execute(&self, server: Uuid, statements: &[Statement], exec: Vec<ExecStatement<'_>>, job: Job) -> Result<ApplyOutcome> {
-        let Job { op, kind, target, lock_timeout_ms, apply_id, created, object, release, verify_role } = job;
+        let Job { op, kind, target, lock_timeout_ms, apply_id, created, object, release, verify_role, hint } = job;
         let rt = tokio::runtime::Handle::current();
         *self.rt.lock().unwrap_or_else(PoisonError::into_inner) = Some(rt.clone());
         let started = Instant::now();
@@ -603,7 +843,7 @@ impl DdlManager {
                 let error = if outcome_unknown {
                     apply::unknown_outcome_payload(&error)
                 } else {
-                    failure_payload_for(kind, op, failed, committed, &error)
+                    failure_payload_with(kind, op, hint, failed, committed, &error)
                 };
                 // Kısmi uygulama: oluşturulan/yeniden adlandırılan nesne yine de bulunur (ör. CREATE DATABASE kalıcı).
                 let created = match (&created, committed) {
@@ -638,6 +878,7 @@ impl DdlManager {
             object: None,
             release: vec![],
             verify_role: None,
+            hint: HintCtx::default(),
         };
         self.execute(server, statements, exec, job).await
     }
@@ -708,30 +949,51 @@ impl DdlManager {
     /// Yeni nesnenin oid'i (kimlik tür + şema + addan, havuzdaki katalog bağlantısıyla; Database/Role bakım
     /// bağlantısında). En iyi çaba: hata → `None`.
     async fn find_created(&self, server: Uuid, target: Target, def: &ObjectDef) -> Option<ObjectRef> {
-        let (kind, sql, schema, name) = match def {
-            ObjectDef::Schema(d) => (ObjectKind::Schema, FIND_SCHEMA_SQL, None, d.name.clone()),
-            ObjectDef::Extension(d) => (ObjectKind::Extension, FIND_EXTENSION_SQL, None, d.name.clone()),
-            ObjectDef::Sequence(d) => (ObjectKind::Sequence, FIND_SEQUENCE_SQL, Some(d.schema.clone()), d.name.clone()),
-            ObjectDef::Index(d) => (ObjectKind::Index, FIND_INDEX_SQL, Some(d.schema.clone()), d.name.clone()),
-            ObjectDef::Table(d) => (ObjectKind::Table, FIND_TABLE_SQL, Some(d.schema.clone()), d.name.clone()),
-            ObjectDef::View(d) => (ObjectKind::View, FIND_VIEW_SQL, Some(d.schema.clone()), d.name.clone()),
-            ObjectDef::MaterializedView(d) => (ObjectKind::MaterializedView, FIND_MATVIEW_SQL, Some(d.schema.clone()), d.name.clone()),
-            ObjectDef::Database(d) => (ObjectKind::Database, FIND_DATABASE_SQL, None, d.name.clone()),
-            ObjectDef::Role(d) => (ObjectKind::Role, FIND_ROLE_SQL, None, d.name.clone()),
-            // Yer tutucu (Plan 18 Task 8): üreticiler henüz plan üretmediği için buraya ulaşılmaz.
-            ObjectDef::Function(_) | ObjectDef::Procedure(_) | ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => {
-                return None;
+        let text = |v: &[&String]| v.iter().map(|s| FindParam::Text((*s).clone())).collect::<Vec<_>>();
+        let (kind, sql, params): (ObjectKind, std::borrow::Cow<'static, str>, Vec<FindParam>) = match def {
+            ObjectDef::Schema(d) => (ObjectKind::Schema, FIND_SCHEMA_SQL.into(), text(&[&d.name])),
+            ObjectDef::Extension(d) => (ObjectKind::Extension, FIND_EXTENSION_SQL.into(), text(&[&d.name])),
+            ObjectDef::Sequence(d) => (ObjectKind::Sequence, FIND_SEQUENCE_SQL.into(), text(&[&d.schema, &d.name])),
+            ObjectDef::Index(d) => (ObjectKind::Index, FIND_INDEX_SQL.into(), text(&[&d.schema, &d.name])),
+            ObjectDef::Table(d) => (ObjectKind::Table, FIND_TABLE_SQL.into(), text(&[&d.schema, &d.name])),
+            ObjectDef::View(d) => (ObjectKind::View, FIND_VIEW_SQL.into(), text(&[&d.schema, &d.name])),
+            ObjectDef::MaterializedView(d) => (ObjectKind::MaterializedView, FIND_MATVIEW_SQL.into(), text(&[&d.schema, &d.name])),
+            ObjectDef::Database(d) => (ObjectKind::Database, FIND_DATABASE_SQL.into(), text(&[&d.name])),
+            ObjectDef::Role(d) => (ObjectKind::Role, FIND_ROLE_SQL.into(), text(&[&d.name])),
+            ObjectDef::Function(d) => {
+                // Sürüm oturum önbelleğinden (bağlantı açılmaz); PG 10'da `prokind` yok.
+                let version = load::server_version(&self.mgr, server).await.ok()?;
+                let filter = if version >= 110000 { "p.prokind = 'f'" } else { "NOT p.proisagg AND NOT p.proiswindow" };
+                let (types, _) = routine_find_args(ObjectKind::Function, d);
+                let mut p = text(&[&d.schema, &d.name]);
+                p.push(FindParam::List(types));
+                (ObjectKind::Function, FIND_FUNCTION_SQL.replace("{kind}", filter).into(), p)
             }
+            ObjectDef::Procedure(d) => {
+                let (types, modes) = routine_find_args(ObjectKind::Procedure, d);
+                let mut p = text(&[&d.schema, &d.name]);
+                p.push(FindParam::List(types));
+                p.push(FindParam::Text(modes.unwrap_or_default()));
+                (ObjectKind::Procedure, FIND_PROCEDURE_SQL.into(), p)
+            }
+            ObjectDef::Trigger(d) => (ObjectKind::Trigger, FIND_TRIGGER_SQL.into(), text(&[&d.schema, &d.table, &d.name])),
+            ObjectDef::Type(d) => {
+                let typtype = match d.body {
+                    TypeBody::Enum { .. } => "e",
+                    TypeBody::Composite { .. } => "c",
+                    TypeBody::Range { .. } => "r",
+                };
+                (ObjectKind::Type, FIND_TYPE_SQL.into(), text(&[&d.schema, &d.name, &typtype.to_string()]))
+            }
+            ObjectDef::Domain(d) => (ObjectKind::Domain, FIND_TYPE_SQL.into(), text(&[&d.schema, &d.name, &"d".to_string()])),
         };
         let row = self
             .mgr
             .run(server, target, move |c| {
-                let (schema, name) = (schema.clone(), name.clone());
+                let (sql, params) = (sql.clone(), params.clone());
                 async move {
-                    match schema {
-                        Some(s) => c.client.query_opt(sql, &[&s, &name]).await,
-                        None => c.client.query_opt(sql, &[&name]).await,
-                    }
+                    let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params.iter().map(FindParam::as_sql).collect();
+                    c.client.query_opt(sql.as_ref(), &refs).await
                 }
             })
             .await
@@ -754,14 +1016,22 @@ impl DdlManager {
     /// Geçersiz bağlam (sequence/tablo/görünüm için şema yok ya da tablo var, indeks için tablo yok, şema/eklenti için
     /// tablo, veritabanı/rol için herhangi bir bağlam) → `Invalid`; veritabanı kapsamlı türde `database_oid` yok →
     /// `Invalid(NEEDS_DATABASE)`.
+    ///
+    /// Plan 18: Function/Procedure/Type/Domain şema altında; Trigger tablo altında (`table_oid`; şema/tablo adı
+    /// katalogdan). `preset` yalnızca Function'da (`TriggerFunction` → dönüş `trigger`, gövde `RETURN NEW` şablonu);
+    /// başka türde `Invalid`.
     pub async fn defaults(
         &self,
         server: Uuid,
         database_oid: impl Into<Option<u32>> + Send,
         kind: ObjectKind,
         ctx: CreateContext,
+        preset: Option<CreatePreset>,
     ) -> Result<ObjectDef> {
         let invalid = |m: &str| Err(Error::Invalid(m.to_string()));
+        if preset.is_some() && kind != ObjectKind::Function {
+            return invalid("Bu ön ayar yalnızca fonksiyon için geçerlidir.");
+        }
         // Sunucu kapsamlı türlerde kullanılmaz (bakım veritabanı); diğerlerinde zorunlu.
         let database_oid = match target_for(kind, database_oid.into())? {
             Target::Database(db) => db,
@@ -909,9 +1179,91 @@ impl DdlManager {
                 comment: None,
                 unsupported: vec![],
             }),
-            // Yer tutucu (Plan 18 Task 8; trigger fonksiyonu ön ayarı dahil).
-            ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Trigger | ObjectKind::Type | ObjectKind::Domain => {
-                return invalid("Bu tür henüz desteklenmiyor.");
+            ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Type | ObjectKind::Domain => {
+                let (Some(schema_oid), None) = (ctx.schema_oid, ctx.table_oid) else {
+                    return invalid("Bu nesne yalnızca bir şema altında oluşturulabilir.");
+                };
+                let schema = self.schema_name(server, database_oid, schema_oid).await?;
+                match kind {
+                    ObjectKind::Function | ObjectKind::Procedure => {
+                        let trigger = preset == Some(CreatePreset::TriggerFunction);
+                        let def = FunctionDef {
+                            schema,
+                            name: String::new(),
+                            owner: None,
+                            comment: None,
+                            language: "plpgsql".into(),
+                            args: vec![],
+                            returns: match (kind, trigger) {
+                                (ObjectKind::Procedure, _) => None,
+                                (_, true) => Some(FunctionReturn::Trigger),
+                                (_, false) => Some(FunctionReturn::Void),
+                            },
+                            body: if trigger { TRIGGER_FUNCTION_BODY } else { FUNCTION_BODY }.into(),
+                            volatility: Volatility::Volatile,
+                            strict: false,
+                            security_definer: false,
+                            leakproof: false,
+                            parallel: Parallel::Unsafe,
+                            cost: None,
+                            rows: None,
+                            settings: vec![],
+                            recreate: false,
+                            editable: true,
+                            unsupported: vec![],
+                        };
+                        if kind == ObjectKind::Procedure { ObjectDef::Procedure(def) } else { ObjectDef::Function(def) }
+                    }
+                    ObjectKind::Type => ObjectDef::Type(TypeDef {
+                        schema,
+                        name: String::new(),
+                        owner: None,
+                        comment: None,
+                        body: TypeBody::Enum { values: vec![] },
+                        editable: true,
+                        unsupported: vec![],
+                    }),
+                    _ => ObjectDef::Domain(DomainDef {
+                        schema,
+                        name: String::new(),
+                        owner: None,
+                        comment: None,
+                        base_type: "text".into(),
+                        collation: None,
+                        default: None,
+                        not_null: false,
+                        constraints: vec![],
+                        editable: true,
+                        unsupported: vec![],
+                    }),
+                }
+            }
+            ObjectKind::Trigger => {
+                let Some(table_oid) = ctx.table_oid else {
+                    return invalid("Trigger yalnızca bir tablo altında oluşturulabilir.");
+                };
+                let (schema, table) = self.trigger_table_name(server, database_oid, table_oid).await?;
+                ObjectDef::Trigger(TriggerDef {
+                    schema,
+                    table,
+                    name: String::new(),
+                    timing: TriggerTiming::After,
+                    events: TriggerEvents { insert: true, update: false, update_columns: vec![], delete: false, truncate: false },
+                    level: TriggerLevel::Row,
+                    when: None,
+                    function_schema: String::new(),
+                    function_name: String::new(),
+                    args: vec![],
+                    old_table: None,
+                    new_table: None,
+                    constraint: false,
+                    deferrable: false,
+                    initially_deferred: false,
+                    enabled: TriggerEnabled::Origin,
+                    comment: None,
+                    editable: true,
+                    unsupported: vec![],
+                })
             }
         })
     }
@@ -928,6 +1280,15 @@ impl DdlManager {
         let row = self
             .mgr
             .run(server, Target::Database(database_oid), move |c| async move { c.client.query_opt(TABLE_NAME_SQL, &[&oid]).await })
+            .await?;
+        row.map(|r| (r.get("schema"), r.get("name"))).ok_or_else(|| Error::NotFound("tablo".into()))
+    }
+
+    /// Trigger'ın tablosu: yalnızca sıradan ve bölümlenmiş tablo (görünüm/MV/yabancı tablo trigger'ı kapsam dışı).
+    async fn trigger_table_name(&self, server: Uuid, database_oid: u32, oid: u32) -> Result<(String, String)> {
+        let row = self
+            .mgr
+            .run(server, Target::Database(database_oid), move |c| async move { c.client.query_opt(TRIGGER_TABLE_SQL, &[&oid]).await })
             .await?;
         row.map(|r| (r.get("schema"), r.get("name"))).ok_or_else(|| Error::NotFound("tablo".into()))
     }
@@ -1402,6 +1763,326 @@ mod tests {
         });
         assert!(identity_changed(&d("a", None), &d("b", None)));
         assert!(!identity_changed(&d("a", None), &d("a", Some("c"))));
+    }
+
+    // ---- Plan 18: Function / Procedure / Trigger / Type / Domain ----
+
+    fn func(name: &str, args: &[(&str, &str)]) -> FunctionDef {
+        FunctionDef {
+            schema: "public".into(),
+            name: name.into(),
+            owner: None,
+            comment: None,
+            language: "plpgsql".into(),
+            args: args
+                .iter()
+                .map(|(n, t)| FunctionArg { mode: ArgMode::In, name: Some((*n).into()), type_name: (*t).into(), default: None })
+                .collect(),
+            returns: Some(FunctionReturn::Void),
+            body: "BEGIN\n\nEND;".into(),
+            volatility: Volatility::Volatile,
+            strict: false,
+            security_definer: false,
+            leakproof: false,
+            parallel: Parallel::Unsafe,
+            cost: None,
+            rows: None,
+            settings: vec![],
+            recreate: false,
+            editable: true,
+            unsupported: vec![],
+        }
+    }
+
+    fn trig(name: &str) -> TriggerDef {
+        TriggerDef {
+            schema: "public".into(),
+            table: "t".into(),
+            name: name.into(),
+            timing: TriggerTiming::After,
+            events: TriggerEvents { insert: true, update: false, update_columns: vec![], delete: false, truncate: false },
+            level: TriggerLevel::Row,
+            when: None,
+            function_schema: "public".into(),
+            function_name: "tf".into(),
+            args: vec![],
+            old_table: None,
+            new_table: None,
+            constraint: false,
+            deferrable: false,
+            initially_deferred: false,
+            enabled: TriggerEnabled::Origin,
+            comment: None,
+            editable: true,
+            unsupported: vec![],
+        }
+    }
+
+    fn pgtype(schema: &str, name: &str) -> TypeDef {
+        TypeDef {
+            schema: schema.into(),
+            name: name.into(),
+            owner: None,
+            comment: None,
+            body: TypeBody::Enum { values: vec![EnumValue { label: "a".into(), original: Some("a".into()) }] },
+            editable: true,
+            unsupported: vec![],
+        }
+    }
+
+    fn domain(schema: &str, name: &str) -> DomainDef {
+        DomainDef {
+            schema: schema.into(),
+            name: name.into(),
+            owner: None,
+            comment: None,
+            base_type: "text".into(),
+            collation: None,
+            default: None,
+            not_null: false,
+            constraints: vec![],
+            editable: true,
+            unsupported: vec![],
+        }
+    }
+
+    #[test]
+    fn identity_changed_for_routines_triggers_types_domains() {
+        let f = |d: &FunctionDef| ObjectDef::Function(d.clone());
+        let base = func("f", &[("a", "integer")]);
+        let mut body = base.clone();
+        body.body = "BEGIN RETURN; END;".into();
+        body.comment = Some("c".into());
+        assert!(!identity_changed(&f(&base), &f(&body)), "OR REPLACE oid'i korur");
+        let mut renamed = base.clone();
+        renamed.name = "g".into();
+        assert!(identity_changed(&f(&base), &f(&renamed)));
+        let mut moved = base.clone();
+        moved.schema = "app".into();
+        assert!(identity_changed(&f(&base), &f(&moved)));
+        // İmza değişimi yalnızca yeniden kurmayla (yeni oid).
+        let mut retyped = func("f", &[("a", "text")]);
+        assert!(!identity_changed(&f(&base), &f(&retyped)), "recreate'siz plan zaten alan hatası");
+        retyped.recreate = true;
+        assert!(identity_changed(&f(&base), &f(&retyped)));
+        // Gereksiz `recreate` yok sayılır (üretici de sessizce yok sayar).
+        let mut needless = body.clone();
+        needless.recreate = true;
+        assert!(!identity_changed(&f(&base), &f(&needless)));
+        let p = |d: &FunctionDef| ObjectDef::Procedure(FunctionDef { returns: None, ..d.clone() });
+        assert!(identity_changed(&p(&base), &p(&renamed)));
+        assert!(!identity_changed(&p(&base), &p(&body)));
+        assert!(identity_changed(&p(&base), &p(&retyped)));
+
+        let t = |d: TriggerDef| ObjectDef::Trigger(d);
+        assert!(identity_changed(&t(trig("a")), &t(trig("b"))));
+        let mut commented = trig("a");
+        commented.comment = Some("c".into());
+        commented.enabled = TriggerEnabled::Disabled;
+        assert!(!identity_changed(&t(trig("a")), &t(commented)));
+        // Yeniden kurma (PG < 14 / constraint trigger: DROP + CREATE) oid'i değiştirebilir.
+        let mut rebuilt = trig("a");
+        rebuilt.timing = TriggerTiming::Before;
+        assert!(identity_changed(&t(trig("a")), &t(rebuilt)));
+
+        let ty = |d: TypeDef| ObjectDef::Type(d);
+        assert!(identity_changed(&ty(pgtype("public", "e")), &ty(pgtype("public", "e2"))));
+        assert!(identity_changed(&ty(pgtype("public", "e")), &ty(pgtype("app", "e"))));
+        let mut added = pgtype("public", "e");
+        added.body = TypeBody::Enum { values: vec![EnumValue { label: "a".into(), original: Some("a".into()) }, EnumValue { label: "b".into(), original: None }] };
+        assert!(!identity_changed(&ty(pgtype("public", "e")), &ty(added)));
+        let d = |d: DomainDef| ObjectDef::Domain(d);
+        assert!(identity_changed(&d(domain("public", "d")), &d(domain("public", "d2"))));
+        assert!(identity_changed(&d(domain("public", "d")), &d(domain("app", "d"))));
+        let mut nn = domain("public", "d");
+        nn.not_null = true;
+        assert!(!identity_changed(&d(domain("public", "d")), &d(nn)));
+    }
+
+    #[test]
+    fn read_only_gate_refuses_alter_and_drop_with_a_generic_reason() {
+        let object = ObjectRef { kind: ObjectKind::Function, oid: 1 };
+        let mut ro = func("gizli_fn_adi", &[]);
+        ro.editable = false;
+        ro.language = "c".into();
+        ro.unsupported = vec!["LANGUAGE c".into(), "EXTENSION gizli_eklenti (eklentiye ait)".into()];
+        let mut new = ro.clone();
+        new.comment = Some("x".into());
+        let alter = PlanRequest::Alter { object, old: ObjectDef::Function(ro.clone()), new: ObjectDef::Function(new) };
+        let drop = PlanRequest::Drop { object, def: ObjectDef::Function(ro.clone()), cascade: false, force: false };
+        for req in [&alter, &drop] {
+            let m = read_only_refusal(req).expect("salt okunur reddedilmeli");
+            assert!(m.starts_with(READ_ONLY_PREFIX), "{m}");
+            // Kodsuz düz `invalid`.
+            assert_eq!(crate::ddl_payload(&Error::Invalid(m.clone())).code, "invalid");
+            assert!(!m.contains("gizli"), "ad/değer yok: {m}");
+        }
+        // Gerekçe ilk girdiden, genel biçimde.
+        assert_eq!(read_only_refusal(&drop).unwrap(), format!("{READ_ONLY_PREFIX}{}", read_only_reason(Some("LANGUAGE c"))));
+        // Düzenlenebilir nesne ve create geçer.
+        let ok = PlanRequest::Drop { object, def: ObjectDef::Function(func("f", &[])), cascade: false, force: false };
+        assert_eq!(read_only_refusal(&ok), None);
+        assert_eq!(read_only_refusal(&PlanRequest::Create { def: ObjectDef::Function(ro.clone()), concurrently: false }), None);
+        // Beş türün her biri.
+        let mut t = trig("t");
+        (t.editable, t.unsupported) = (false, vec!["iç trigger (kısıt ya da sistem tarafından yönetilir)".into()]);
+        let mut ty = pgtype("public", "e");
+        (ty.editable, ty.unsupported) = (false, vec!["BASE TYPE".into()]);
+        let mut dm = domain("public", "d");
+        (dm.editable, dm.unsupported) = (false, vec![]);
+        let p = ObjectDef::Procedure(FunctionDef { returns: None, ..ro.clone() });
+        for def in [p, ObjectDef::Trigger(t), ObjectDef::Type(ty), ObjectDef::Domain(dm)] {
+            let req = PlanRequest::Drop { object: ObjectRef { kind: def.kind(), oid: 1 }, def, cascade: true, force: false };
+            assert!(read_only_refusal(&req).is_some_and(|m| m.starts_with(READ_ONLY_PREFIX)), "{req:?}");
+        }
+        // Eski türler bu kapıdan etkilenmez.
+        assert_eq!(read_only_refusal(&PlanRequest::Drop { object, def: schema("s"), cascade: false, force: false }), None);
+    }
+
+    #[test]
+    fn read_only_reasons_are_generic() {
+        // Yükleyicinin ürettiği her gerekçe biçimi (ad/değer taşıyanlar dahil) ad/değer içermeyen sabit metne iner.
+        let entries = [
+            "LANGUAGE zz_gizli",
+            "BEGIN ATOMIC (SQL standart gövde)",
+            "AGGREGATE",
+            "WINDOW",
+            "EXTENSION zz_gizli (eklentiye ait)",
+            "sistem şeması",
+            "SUPPORT zz_gizli",
+            "TRANSFORM FOR TYPE",
+            "tip zz_gizli",
+            "argüman modu 'zz_gizli'",
+            "adsız TABLE kolonu",
+            "COST zz_gizli",
+            "ROWS zz_gizli",
+            "iç trigger (kısıt ya da sistem tarafından yönetilir)",
+            "bölümlenmiş üst tablodan klonlanmış (üst tablodan yönetilir)",
+            "FROM zz_gizli (constraint trigger başvurulan tablosu)",
+            "görünüm trigger'ı",
+            "yabancı tablo trigger'ı",
+            "'zz_gizli' türü ilişkinin trigger'ı",
+            "WHEN koşulu ayrıştırılamadı",
+            "trigger argümanları çözülemedi",
+            "etkinlik durumu 'zz_gizli'",
+            "tablo satır tipi (relkind 'zz_gizli'; ilişkiden yönetilir)",
+            "ilişkisi bulunamayan composite",
+            "range bilgisi bulunamadı",
+            "fonksiyon zz_gizli",
+            "MULTIRANGE (range tipinden yönetilir)",
+            "dizi tipi (ARRAY; öğe tipinden yönetilir)",
+            "BASE TYPE",
+            "SHELL TYPE (tanımsız)",
+            "PSEUDO TYPE",
+            "'zz_gizli' türü tip",
+            "CHECK zz_gizli (ayrıştırılamadı)",
+            "NOT NULL zz_gizli (NOT VALID)",
+            "'zz_gizli' türü kısıt zz_gizli",
+            "zz_gizli bilinmeyen",
+        ];
+        let generic = read_only_reason(None);
+        for e in entries {
+            let r = read_only_reason(Some(e));
+            assert!(!r.contains("zz_gizli") && !r.is_empty(), "{e} → {r}");
+            if e != "zz_gizli bilinmeyen" {
+                assert_ne!(r, generic, "bilinen gerekçe genel metne düşmemeli: {e}");
+            }
+        }
+        assert_eq!(read_only_reason(Some("zz_gizli bilinmeyen")), generic);
+    }
+
+    #[test]
+    fn routine_type_domain_hints() {
+        let none = HintCtx { leakproof: false };
+        let lp = HintCtx { leakproof: true };
+        type Case<'a> = (ObjectKind, &'a str, &'a str, &'a str, HintCtx, Option<&'a str>);
+        let cases: [Case; 22] = [
+            // Silme: bağımlılar (CASCADE önerilir).
+            (ObjectKind::Function, "drop", "DROP FUNCTION public.f(integer)", "2BP01", none, Some(VIEW_DEPENDENTS_HINT)),
+            (ObjectKind::Procedure, "drop", "DROP PROCEDURE public.p(IN integer)", "2BP01", none, Some(VIEW_DEPENDENTS_HINT)),
+            (ObjectKind::Type, "drop", "DROP TYPE public.e", "2BP01", none, Some(VIEW_DEPENDENTS_HINT)),
+            (ObjectKind::Domain, "drop", "DROP DOMAIN public.d", "2BP01", none, Some(VIEW_DEPENDENTS_HINT)),
+            // Yeniden kurma: bu akışta CASCADE yok.
+            (ObjectKind::Function, "alter", "DROP FUNCTION public.f(integer)", "2BP01", none, Some(ROUTINE_REBUILD_DEPENDENTS_HINT)),
+            (ObjectKind::Procedure, "alter", "DROP PROCEDURE public.p(IN integer)", "2BP01", none, Some(ROUTINE_REBUILD_DEPENDENTS_HINT)),
+            // OR REPLACE sınırı.
+            (ObjectKind::Function, "alter", "CREATE OR REPLACE FUNCTION public.f() RETURNS void", "42P13", none, Some(OR_REPLACE_HINT)),
+            (ObjectKind::Procedure, "alter", "CREATE OR REPLACE PROCEDURE public.p()", "42P13", none, Some(OR_REPLACE_HINT)),
+            (ObjectKind::Function, "create", "CREATE FUNCTION public.f() RETURNS void", "42P13", none, None),
+            // Function ↔ Procedure.
+            (ObjectKind::Function, "alter", "CREATE OR REPLACE FUNCTION public.f() RETURNS void", "42809", none, Some(ROUTINE_KIND_HINT)),
+            (ObjectKind::Procedure, "create", "CREATE PROCEDURE public.p()", "42809", none, Some(ROUTINE_KIND_HINT)),
+            (ObjectKind::Type, "alter", "ALTER TYPE public.e RENAME TO f", "42809", none, None),
+            // Typed table.
+            (ObjectKind::Type, "alter", "ALTER TYPE public.c DROP ATTRIBUTE a", "2BP01", none, Some(TYPED_TABLE_HINT)),
+            (ObjectKind::Type, "alter", "ALTER TYPE public.c ADD ATTRIBUTE b integer", "2BP01", none, Some(TYPED_TABLE_HINT)),
+            (ObjectKind::Type, "alter", "ALTER TYPE public.c ALTER ATTRIBUTE a TYPE text", "2BP01", none, Some(TYPED_TABLE_HINT)),
+            (ObjectKind::Type, "alter", "ALTER TYPE public.c ALTER ATTRIBUTE a TYPE text", "0A000", none, Some(TYPE_COLUMN_RETYPE_HINT)),
+            (ObjectKind::Type, "alter", "ALTER TYPE public.c RENAME TO d", "0A000", none, None),
+            // LEAKPROOF yalnız süper kullanıcı; başka 42501 genel yetki ipucu.
+            (ObjectKind::Function, "create", "CREATE FUNCTION public.f() RETURNS integer LEAKPROOF", "42501", lp, Some(LEAKPROOF_HINT)),
+            (ObjectKind::Function, "alter", "CREATE OR REPLACE FUNCTION public.f() RETURNS integer", "42501", lp, Some(LEAKPROOF_HINT)),
+            (ObjectKind::Function, "alter", "ALTER FUNCTION public.f() OWNER TO r", "42501", lp, Some(PRIVILEGE_HINT)),
+            (ObjectKind::Function, "create", "CREATE FUNCTION public.f() RETURNS integer", "42501", none, Some(PRIVILEGE_HINT)),
+            (ObjectKind::Trigger, "drop", "DROP TRIGGER t ON public.x", "2BP01", none, None),
+        ];
+        for (kind, op, sql, code, ctx, want) in cases {
+            let p = failure_payload_with(kind, op, ctx, Some(&stmt(sql, false)), 0, &q(code, None));
+            assert_eq!(p.hint.as_deref(), want, "{kind:?} {op} {code} {sql}");
+        }
+        // PG'nin kendi ipucu: CASCADE ya da SQL öneren ipuçları bu akışlarda yanıltıcıdır → bizimki geçer; diğerleri korunur.
+        for (kind, op, sql, code, want) in [
+            (ObjectKind::Function, "alter", "DROP FUNCTION public.f(integer)", "2BP01", ROUTINE_REBUILD_DEPENDENTS_HINT),
+            (ObjectKind::Type, "alter", "ALTER TYPE public.c DROP ATTRIBUTE a", "2BP01", TYPED_TABLE_HINT),
+            (ObjectKind::Function, "alter", "CREATE OR REPLACE FUNCTION public.f() RETURNS void", "42P13", OR_REPLACE_HINT),
+        ] {
+            let p = failure_payload_with(kind, op, none, Some(&stmt(sql, false)), 0, &q(code, Some("Use CASCADE")));
+            assert_eq!(p.hint.as_deref(), Some(want), "{kind:?} {code}");
+        }
+        let p = failure_payload_with(ObjectKind::Function, "drop", none, Some(&stmt("DROP FUNCTION f()", false)), 0, &q("2BP01", Some("pg")));
+        assert_eq!(p.hint.as_deref(), Some("pg"));
+        // İpuçları SQL/ad/değer taşımaz.
+        for h in [ROUTINE_REBUILD_DEPENDENTS_HINT, OR_REPLACE_HINT, ROUTINE_KIND_HINT, TYPED_TABLE_HINT, TYPE_COLUMN_RETYPE_HINT, LEAKPROOF_HINT] {
+            for sql in ["DROP ", "ALTER ", "CREATE ", "public", "$"] {
+                assert!(!h.contains(sql), "{h}");
+            }
+        }
+        assert!(!ROUTINE_REBUILD_DEPENDENTS_HINT.contains("CASCADE"));
+    }
+
+    #[test]
+    fn leakproof_hint_context_follows_the_request() {
+        let mut f = func("f", &[]);
+        f.returns = Some(FunctionReturn::Type { type_name: "integer".into(), setof: false });
+        let create = |d: &FunctionDef| PlanRequest::Create { def: ObjectDef::Function(d.clone()), concurrently: false };
+        assert!(!HintCtx::of(&create(&f)).leakproof);
+        let mut l = f.clone();
+        l.leakproof = true;
+        assert!(HintCtx::of(&create(&l)).leakproof);
+        let object = ObjectRef { kind: ObjectKind::Function, oid: 1 };
+        let alter = PlanRequest::Alter { object, old: ObjectDef::Function(f.clone()), new: ObjectDef::Function(l.clone()) };
+        assert!(HintCtx::of(&alter).leakproof);
+        let drop = PlanRequest::Drop { object, def: ObjectDef::Function(l), cascade: false, force: false };
+        assert!(!HintCtx::of(&drop).leakproof);
+    }
+
+    #[test]
+    fn routine_find_parameters_use_the_identity_signature() {
+        let mut f = func("f", &[("a", "integer"), ("b", "text")]);
+        f.args.push(FunctionArg { mode: ArgMode::Out, name: Some("o".into()), type_name: "text".into(), default: None });
+        f.args.push(FunctionArg { mode: ArgMode::Variadic, name: Some("v".into()), type_name: "int[]".into(), default: None });
+        // Fonksiyon: giriş tipleri (OUT hariç), modlar karşılaştırılmaz.
+        assert_eq!(routine_find_args(ObjectKind::Function, &f), (vec!["integer".to_string(), "text".into(), "int[]".into()], None));
+        // Procedure: tüm argümanlar + `proargmodes` metni (hepsi IN ise boş).
+        assert_eq!(
+            routine_find_args(ObjectKind::Procedure, &f),
+            (vec!["integer".to_string(), "text".into(), "text".into(), "int[]".into()], Some("{i,i,o,v}".to_string()))
+        );
+        let plain = func("p", &[("a", "integer")]);
+        assert_eq!(routine_find_args(ObjectKind::Procedure, &plain), (vec!["integer".to_string()], Some(String::new())));
+        let mut io = plain.clone();
+        io.args[0].mode = ArgMode::Inout;
+        assert_eq!(routine_find_args(ObjectKind::Procedure, &io).1.as_deref(), Some("{b}"));
     }
 
     #[test]
