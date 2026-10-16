@@ -12,6 +12,7 @@ pub mod extension;
 pub mod freesql;
 pub mod index;
 pub mod matview;
+pub mod pgtype;
 pub mod role;
 pub mod routine;
 pub mod schema;
@@ -172,7 +173,7 @@ pub struct DropOptions {
     pub force: bool,
 }
 
-/// Plan 18 Task 4–5'in üreticileri gelene kadar Type/Domain'in tek yer tutucu hatası.
+/// Plan 18 Task 5'in üreticisi gelene kadar Domain'in tek yer tutucu hatası.
 fn unsupported_kind() -> Vec<FieldError> {
     vec![err("kind", "Bu tür henüz desteklenmiyor.")]
 }
@@ -199,7 +200,8 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Function(d) => routine::validate(ctx, ObjectKind::Function, d),
         ObjectDef::Procedure(d) => routine::validate(ctx, ObjectKind::Procedure, d),
         ObjectDef::Trigger(d) => trigger::validate(ctx, d),
-        ObjectDef::Type(_) | ObjectDef::Domain(_) => unsupported_kind(),
+        ObjectDef::Type(d) => pgtype::validate(ctx, d),
+        ObjectDef::Domain(_) => unsupported_kind(),
     }
 }
 
@@ -291,8 +293,9 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Function(d) => routine::create(ctx, ObjectKind::Function, d),
         ObjectDef::Procedure(d) => routine::create(ctx, ObjectKind::Procedure, d),
         ObjectDef::Trigger(d) => trigger::create(ctx, d),
+        ObjectDef::Type(d) => pgtype::create(ctx, d),
         // `validate` yer tutucu hatası yukarıda döner; buraya ulaşılmaz.
-        ObjectDef::Type(_) | ObjectDef::Domain(_) => Err(unsupported_kind()),
+        ObjectDef::Domain(_) => Err(unsupported_kind()),
     }
 }
 
@@ -334,6 +337,9 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         // Trigger kendi doğrulamasını yapar: tablo değiştirilemez, yalnızca değişen/yazılan alanlar, salt okunur kapısı;
         // yapı değişimi PG 14+'da OR REPLACE, aksi hâlde aynı transaction'da yeniden kurma (Karar 5).
         (ObjectDef::Trigger(o), ObjectDef::Trigger(n)) => return trigger::alter(ctx, o, n),
+        // Type kendi doğrulamasını yapar: yalnızca değişen/yazılan alanlar, enum/composite `original` eşlemesi, range
+        // gövdesi sabit, tür (variant) değişmez, salt okunur kapısı.
+        (ObjectDef::Type(o), ObjectDef::Type(n)) => return pgtype::alter(ctx, o, n),
         _ => {}
     }
     checked(new, ctx)?;
@@ -387,7 +393,8 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Function(d) => routine::drop(ObjectKind::Function, d, cascade),
         ObjectDef::Procedure(d) => routine::drop(ObjectKind::Procedure, d, cascade),
         ObjectDef::Trigger(d) => trigger::drop(d, cascade),
-        ObjectDef::Type(_) | ObjectDef::Domain(_) => Err(unsupported_kind()),
+        ObjectDef::Type(d) => pgtype::drop(d, cascade),
+        ObjectDef::Domain(_) => Err(unsupported_kind()),
     }
 }
 
@@ -742,7 +749,8 @@ mod tests {
                 name: "ty".into(),
                 owner: None,
                 comment: None,
-                body: TypeBody::Enum { values: vec![EnumValue { label: "a".into(), original: None }] },
+                // Yüklü biçim (`original` dolu): `alter(d, d)` sabit noktası; create `original`'ı okumaz.
+                body: TypeBody::Enum { values: vec![EnumValue { label: "a".into(), original: Some("a".into()) }] },
                 editable: true,
                 unsupported: vec![],
             }),
@@ -763,10 +771,10 @@ mod tests {
     }
 
     #[test]
-    fn type_domain_are_placeholders_until_their_builders() {
-        // Task 4–5'in üreticileri gelene kadar: create/alter/drop/validate yer tutucu "kind" hatası; kimlik kolları gerçek.
+    fn domain_is_placeholder_until_its_builder() {
+        // Task 5'in üreticisi gelene kadar: create/alter/drop/validate yer tutucu "kind" hatası; kimlik kolları gerçek.
         let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
-        for d in new_kind_defs("public").into_iter().skip(3) {
+        for d in new_kind_defs("public").into_iter().skip(4) {
             assert_eq!(validate(&d, &ctx())[0].path, "kind", "{d:?}");
             assert_eq!(kind(create(&d, &ctx())), "kind", "{d:?}");
             assert_eq!(kind(alter(&d, &d, &ctx())), "kind", "{d:?}");
@@ -781,6 +789,33 @@ mod tests {
         // Function ↔ Procedure ayrı türlerdir: alter tür uyuşmazlığı.
         let defs = new_kind_defs("public");
         assert!(alter(&defs[0], &defs[1], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
+    }
+
+    #[test]
+    fn type_is_wired() {
+        let defs = new_kind_defs("public");
+        let ty = &defs[3];
+        assert!(validate(ty, &ctx()).is_empty());
+        assert_eq!(create(ty, &ctx()).unwrap().statements[0].sql, "CREATE TYPE public.ty AS ENUM ('a')");
+        assert!(alter(ty, ty, &ctx()).unwrap().statements.is_empty());
+        assert_eq!(drop(ty, false, &ctx()).unwrap().statements[0].sql, "DROP TYPE public.ty");
+        assert_eq!(drop(ty, true, &ctx()).unwrap().statements[0].sql, "DROP TYPE public.ty CASCADE");
+        // Sürüm bağlamı dağıtıcıdan geçer (PG 11: ADD VALUE transaction dışında); eski taraf `old.` önekiyle.
+        let ObjectDef::Type(mut added) = ty.clone() else { unreachable!() };
+        added.body = TypeBody::Enum {
+            values: vec![EnumValue { label: "a".into(), original: Some("a".into()) }, EnumValue { label: "b".into(), original: None }],
+        };
+        let loaded = ObjectDef::Type(TypeDef {
+            body: TypeBody::Enum { values: vec![EnumValue { label: "a".into(), original: Some("a".into()) }] },
+            ..added.clone()
+        });
+        let v11 = BuildCtx { version_num: 110000, ..Default::default() };
+        assert!(!alter(&loaded, &ObjectDef::Type(added.clone()), &v11).unwrap().statements[0].transactional);
+        assert!(alter(&loaded, &ObjectDef::Type(added), &ctx()).unwrap().statements[0].transactional);
+        let sys = &new_kind_defs("pg_catalog")[3];
+        assert_eq!(alter(sys, ty, &ctx()).unwrap_err()[0].path, "old.schema");
+        assert!(alter(ty, &defs[4], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
+        assert_eq!(drop_with(ty, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
     }
 
     #[test]

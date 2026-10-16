@@ -1,0 +1,27 @@
+---
+source: crates/pgt-ddl/src/build/pgtype.rs
+expression: out
+---
+# ekle
+[Safe] ALTER TYPE public.ty ADD ATTRIBUTE c numeric(10,2)
+
+# ekle collation
+[Safe] ALTER TYPE public.ty ADD ATTRIBUTE c text COLLATE "C"
+
+# yeniden adlandır
+[Safe] ALTER TYPE public.ty RENAME ATTRIBUTE b TO "Yeni B"
+
+# tip değiştir
+[DataLoss] ALTER TYPE public.ty ALTER ATTRIBUTE a TYPE bigint  -- tipi kullanan tablolardaki veri kaybolur
+
+# collation değiştir
+[DataLoss] ALTER TYPE public.ty ALTER ATTRIBUTE b TYPE text COLLATE "C"  -- tipi kullanan tablolardaki veri kaybolur
+
+# sil
+[DataLoss] ALTER TYPE public.ty DROP ATTRIBUTE b  -- tipi kullanan tablolardaki veri kaybolur
+
+# aynı adla silip ekle
+[DataLoss] ALTER TYPE public.ty DROP ATTRIBUTE b  -- tipi kullanan tablolardaki veri kaybolur
+[Safe] ALTER TYPE public.ty ADD ATTRIBUTE b jsonb
+
+# kanonik eşit tip

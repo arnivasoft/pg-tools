@@ -1,0 +1,14 @@
+---
+source: crates/pgt-ddl/src/build/pgtype.rs
+expression: render(&pl)
+---
+[Safe] ALTER TYPE public.ty RENAME TO ty2
+[Safe] ALTER TYPE public.ty2 SET SCHEMA app
+[Safe] ALTER TYPE app.ty2 RENAME ATTRIBUTE a TO a2
+[Safe] ALTER TYPE app.ty2 RENAME ATTRIBUTE d TO e
+[DataLoss] ALTER TYPE app.ty2 DROP ATTRIBUTE b  -- tipi kullanan tablolardaki veri kaybolur
+[DataLoss] ALTER TYPE app.ty2 ALTER ATTRIBUTE a2 TYPE bigint  -- tipi kullanan tablolardaki veri kaybolur
+[Safe] ALTER TYPE app.ty2 ADD ATTRIBUTE b text
+[Safe] ALTER TYPE app.ty2 ADD ATTRIBUTE f uuid
+[Safe] COMMENT ON TYPE app.ty2 IS 'k'
+[Safe] ALTER TYPE app.ty2 OWNER TO r

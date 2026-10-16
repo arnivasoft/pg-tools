@@ -1,0 +1,15 @@
+---
+source: crates/pgt-ddl/src/build/pgtype.rs
+expression: out
+---
+silme: body.values (PostgreSQL enum değerlerini silemez ya da yeniden sıralayamaz.)
+hepsini silme: body.values (PostgreSQL enum değerlerini silemez ya da yeniden sıralayamaz.)
+yeniden sıralama: body.values (PostgreSQL enum değerlerini silemez ya da yeniden sıralayamaz.)
+silip aynı adla ekleme: body.values (PostgreSQL enum değerlerini silemez ya da yeniden sıralayamaz.)
+bilinmeyen original: body.values[3].original (Yüklü enum değeri bulunamadı.)
+original tekrar: body.values[3].original (Yüklü enum değeri birden çok kez eşlenmiş.)
+değiş tokuş: body.values[0].label (Yeni ad başka bir yüklü değerle çakışıyor; önce onu ayrı bir değişiklikte yeniden adlandırın.); body.values[1].label (Yeni ad başka bir yüklü değerle çakışıyor; önce onu ayrı bir değişiklikte yeniden adlandırın.)
+yeni etiket yüklüyle aynı: body.values[3].label (Etiket birden çok kez kullanılmış.)
+yeni etiket tekrar: body.values[4].label (Etiket birden çok kez kullanılmış.)
+yeniden adlandırma 64 bayt: body.values[0].label (Etiket en çok 63 bayt olabilir (şu an 64 bayt).)
+yeniden adlandırma boş: body.values[0].label (Etiket boş olamaz.)

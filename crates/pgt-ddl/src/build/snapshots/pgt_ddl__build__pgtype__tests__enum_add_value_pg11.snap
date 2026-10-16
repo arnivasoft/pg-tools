@@ -1,0 +1,7 @@
+---
+source: crates/pgt-ddl/src/build/pgtype.rs
+expression: "render(&alter_ok_v(&old, &new, 110000))"
+---
+[Safe] ALTER TYPE public.ty RENAME VALUE 'a' TO 'b'
+[Safe non-tx] ALTER TYPE public.ty ADD VALUE 'x' AFTER 'b'  -- PG 12 öncesinde transaction dışında çalışır
+[Safe non-tx] ALTER TYPE public.ty ADD VALUE 'y' AFTER 'x'  -- PG 12 öncesinde transaction dışında çalışır

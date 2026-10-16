@@ -1,0 +1,29 @@
+---
+source: crates/pgt-ddl/src/build/pgtype.rs
+expression: out
+---
+# enum
+[Safe] CREATE TYPE public.ty AS ENUM ('a', 'b c', 'it''s')
+
+# enum boş
+[Safe] CREATE TYPE public.ty AS ENUM ()
+
+# enum yorum + sahip
+[Safe] CREATE TYPE public.ty AS ENUM ('x')
+[Safe] COMMENT ON TYPE public.ty IS 'c'
+[Safe] ALTER TYPE public.ty OWNER TO "Sahip"
+
+# composite
+[Safe] CREATE TYPE public.ty AS (a integer, "Ad Soyad" text COLLATE "C", t numeric(10,2)[])
+
+# composite boş
+[Safe] CREATE TYPE public.ty AS ()
+
+# range yalın
+[Safe] CREATE TYPE public.ty AS RANGE (SUBTYPE = float8)
+
+# range tam
+[Safe] CREATE TYPE public.ty AS RANGE (SUBTYPE = text, SUBTYPE_OPCLASS = text_ops, COLLATION = "C", CANONICAL = public.canon, SUBTYPE_DIFF = "My S"."diff.fn", MULTIRANGE_TYPE_NAME = textmultirange)
+
+# range niteliksiz fonksiyon
+[Safe] CREATE TYPE public.ty AS RANGE (SUBTYPE = int4, CANONICAL = canon)
