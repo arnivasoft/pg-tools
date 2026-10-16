@@ -39,6 +39,7 @@ pub const KIND_CHANGE_MSG: &str = "Tipin türü (enum / composite / range) deği
 pub const RANGE_FIXED_MSG: &str = "Range tipinin bu alanı oluşturulduktan sonra değiştirilemez.";
 pub const MULTIRANGE_VERSION: &str = "MULTIRANGE_TYPE_NAME PG 14+ gerektirir.";
 pub const ATTR_DATA_LOSS_NOTE: &str = "tipi kullanan tablolardaki veri kaybolur";
+pub const ATTR_RETYPE_NOTE: &str = "tipi kullanan tablo kolonu varsa PostgreSQL reddeder; typed table CASCADE ister (desteklenmez)";
 pub const ADD_VALUE_NT_NOTE: &str = "PG 12 öncesinde transaction dışında çalışır";
 pub const CASCADE_WARNING: &str = "Bağımlı nesneler de silinir";
 pub const READ_ONLY_MSG: &str =
@@ -459,7 +460,7 @@ fn composite_changes(ty: &str, old: &[CompositeAttr], new: &[CompositeAttr], e: 
         if let Some(c) = &a.collation {
             sql.push_str(&format!(" COLLATE {}", quote_ident(c)));
         }
-        out.push(stmt(sql, Risk::DataLoss, Some(ATTR_DATA_LOSS_NOTE)));
+        out.push(stmt(sql, Risk::DataLoss, Some(ATTR_RETYPE_NOTE)));
     }
     for a in new.iter().filter(|a| a.original.is_none()) {
         out.push(stmt(format!("ALTER TYPE {ty} ADD ATTRIBUTE {}", attr_sql(a)), Risk::Safe, None));
@@ -959,8 +960,12 @@ mod tests {
             assert_eq!(pl.risk(), risk, "{label}");
             for s in &pl.statements {
                 assert!(s.transactional);
-                let dl = s.risk == Risk::DataLoss;
-                assert_eq!(s.note.as_deref(), if dl { Some(ATTR_DATA_LOSS_NOTE) } else { None }, "{label}");
+                let want_note = match s.risk {
+                    Risk::DataLoss if s.sql.contains(" DROP ATTRIBUTE ") => Some(ATTR_DATA_LOSS_NOTE),
+                    Risk::DataLoss => Some(ATTR_RETYPE_NOTE),
+                    _ => None,
+                };
+                assert_eq!(s.note.as_deref(), want_note, "{label}");
                 assert!(!s.sql.contains("CASCADE"), "{label}");
             }
             out.push_str(&format!("# {label}\n{}\n", render(&pl)));

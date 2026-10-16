@@ -260,7 +260,13 @@ fn check_positive(path: &str, v: &str, errs: &mut Vec<FieldError>) {
 
 fn same_number(a: &Option<String>, b: &Option<String>) -> bool {
     match (a, b) {
-        (Some(x), Some(y)) => x == y || matches!((parse_positive(x), parse_positive(y)), (Some(p), Some(q)) if p == q),
+        // PG procost/prorows'u float4 saklar: float4'e yuvarlanınca eşit olan değerler aynıdır.
+        (Some(x), Some(y)) => {
+            x == y
+                || (parse_positive(x).is_some()
+                    && parse_positive(y).is_some()
+                    && x.parse::<f32>().ok() == y.parse::<f32>().ok())
+        }
         (None, None) => true,
         _ => false,
     }
@@ -302,7 +308,10 @@ fn definition_changed(old: &FunctionDef, new: &FunctionDef) -> bool {
         || old.parallel != new.parallel
         || !same_number(&old.cost, &new.cost)
         || !same_number(&old.rows, &new.rows)
-        || old.settings != new.settings
+        // Ayar sırası değişikliği değişiklik sayılmaz (PG'de etkisi yok).
+        || old.settings.len() != new.settings.len()
+        || !old.settings.iter().all(|s| new.settings.contains(s))
+        || !new.settings.iter().all(|s| old.settings.contains(s))
 }
 
 /// OR REPLACE ile yapılamayan değişiklikler (Karar 2), alan yollarıyla; boş = OR REPLACE yeterli.
@@ -1346,6 +1355,15 @@ mod tests {
         // Sayısal metin eşdeğerliği: "100" = "100.0".
         let pl = alter_ok(&x, &FunctionDef { cost: Some("100.0".into()), ..x.clone() });
         assert!(pl.statements.is_empty());
+        // PG float4 saklar: float4'e yuvarlanınca eşit olan değerler değişiklik değildir.
+        let c = FunctionDef { cost: Some("1.2345679".into()), ..x.clone() };
+        assert!(alter_ok(&c, &FunctionDef { cost: Some("1.23456789".into()), ..c.clone() }).statements.is_empty());
+        assert!(!alter_ok(&c, &FunctionDef { cost: Some("1.5".into()), ..c.clone() }).statements.is_empty());
+        // Ayar sırası değişikliği değişiklik sayılmaz.
+        let s = FunctionDef { settings: vec![set("work_mem", "1MB"), set("search_path", "public")], ..x.clone() };
+        let r = FunctionDef { settings: vec![set("search_path", "public"), set("work_mem", "1MB")], ..x.clone() };
+        assert!(alter_ok(&s, &r).statements.is_empty());
+        assert!(!alter_ok(&s, &FunctionDef { settings: vec![set("search_path", "public")], ..x.clone() }).statements.is_empty());
         let pr = FunctionDef { owner: Some("a".into()), ..p() };
         assert!(balter(&op(&pr), &op(&pr), &ctx()).unwrap().statements.is_empty());
     }

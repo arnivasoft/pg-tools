@@ -314,7 +314,8 @@ pub fn alter(ctx: &BuildCtx, old: &TriggerDef, new: &TriggerDef) -> Result<Plan,
     // PG 14+ OR REPLACE; constraint trigger (her iki taraf) OR REPLACE ile kurulamaz ve değiştirilemez.
     let replace = rebuild && ctx.version_num >= 140000 && !old.constraint && !new.constraint;
     let recreate = rebuild && !replace;
-    let write_comment = comment_changed || (recreate && new.comment.is_some());
+    // DROP + CREATE yorumu zaten siler: yeniden kurmada yalnız (varsa) yeni yorum yazılır.
+    let write_comment = if recreate { new.comment.is_some() } else { comment_changed };
 
     // Ad aynıysa yüklü ad `old.name` olarak zaten (gevşek) denetlendi.
     if name_changed {
@@ -697,6 +698,13 @@ mod tests {
         // ORIGIN hedef ve yorumsuz: yalnız DROP + CREATE.
         let pl = alter_ok_v(&t(), &TriggerDef { timing: TriggerTiming::After, ..t() }, 130000);
         assert_eq!(sqls(&pl).len(), 2);
+        // Yeniden kurmada yorum temizlendi: DROP yorumu zaten siler; COMMENT … IS NULL yazılmaz.
+        let cleared = TriggerDef { timing: TriggerTiming::After, comment: None, ..old.clone() };
+        let pl = alter_ok_v(&old, &cleared, 130000);
+        assert!(sqls(&pl).iter().all(|s| !s.starts_with("COMMENT")), "{:?}", sqls(&pl));
+        // OR REPLACE (PG 14+) yorumu korur: temizleme açıkça yazılır.
+        let pl = alter_ok_v(&old, &cleared, 140000);
+        assert!(sqls(&pl).iter().any(|s| s.starts_with("COMMENT") && s.ends_with("IS NULL")), "{:?}", sqls(&pl));
         // PG 14 sınırı.
         assert!(alter_ok_v(&t(), &TriggerDef { timing: TriggerTiming::After, ..t() }, 140000).statements[0].sql.starts_with("CREATE OR REPLACE TRIGGER"));
         assert!(alter_ok_v(&t(), &TriggerDef { timing: TriggerTiming::After, ..t() }, 139999).statements[0].sql.starts_with("DROP TRIGGER"));

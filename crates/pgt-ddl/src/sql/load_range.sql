@@ -7,7 +7,7 @@ SELECT format_type(r.rngsubtype, NULL) AS subtype,
        CASE WHEN r.rngcollation <> 0 AND r.rngcollation <> st.typcollation THEN co.collname::text END AS collation,
        CASE WHEN r.rngcanonical <> 0 THEN r.rngcanonical::pg_catalog.regproc::text END AS canonical,
        CASE WHEN r.rngsubdiff <> 0 THEN r.rngsubdiff::pg_catalog.regproc::text END AS subtype_diff,
-       NULL::text AS multirange
+       NULL::bytea AS multirange
 FROM pg_range r
 JOIN pg_type st ON st.oid = r.rngsubtype
 JOIN pg_opclass oc ON oc.oid = r.rngsubopc

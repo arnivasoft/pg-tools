@@ -291,8 +291,7 @@ Bu yöntemle Task 8'de akışlar (onay, transaction, iptal, CSV, geçmiş, 50.00
 kapanışı) ve Task 9'da yayın exe'sinde sorgu sekmesi açılış süresi ile bellek (`docs/performance.md`) doğrulandı.
 
 ## Yayın exe duman testi
-    bun run tauri build --no-bundle                 # dist + ön yüzü gömülü target
-eleasepg-tools.exe (NSIS yok)
+    bun run tauri build --no-bundle                 # dist + ön yüzü gömülü target\release\pg-tools.exe (NSIS yok)
     ./scripts/smoke-release.ps1                     # varsayılan: target\release\pg-tools.exe, 6 sn
     ./scripts/smoke-release.ps1 -Exe C:\yol\pg-tools.exe -Seconds 10
 

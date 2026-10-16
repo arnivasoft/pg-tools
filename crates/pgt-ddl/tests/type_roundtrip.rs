@@ -345,7 +345,7 @@ async fn trigger_readonly_body(ts: TestServer) {
     let l = tload_oid(&env, trigger_oid(&env, "ro", "v", "vt").await).await;
     assert_eq!(l.timing, TriggerTiming::InsteadOf);
     assert_trigger_read_only(&env, &l, "görünüm");
-    // Bölüm klonu (PG 11–12 iç, PG 13+ tgparentid).
+    // Bölüm klonu (PG 11–14 iç, PG 13+ tgparentid).
     if env.version >= 110000 {
         env.sql(
             "CREATE TABLE ro.pt (a int) PARTITION BY RANGE (a); CREATE TABLE ro.pt1 PARTITION OF ro.pt FOR VALUES FROM (0) TO (10);
@@ -357,6 +357,8 @@ async fn trigger_readonly_body(ts: TestServer) {
         let clone = tload_oid(&env, trigger_oid(&env, "ro", "pt1", "rt").await).await;
         let want = if env.version >= 130000 { "klon" } else { "iç trigger" };
         assert_trigger_read_only(&env, &clone, want);
+        // PG 13–14 klonu hem iç hem klon: ilk (gösterilen) gerekçe klonlanmış olmalı.
+        assert!(clone.unsupported[0].contains(want), "PG {major}: ilk gerekçe '{want}' değil: {:?}", clone.unsupported);
         eprintln!("PG {major}: bölüm klonu salt okunur ({:?})", clone.unsupported);
     }
     // Bulunamayan nesne; trigger olmayan oid.
@@ -704,6 +706,15 @@ async fn range_body(ts: TestServer) {
         let n: i64 = env.admin.query_one("SELECT count(*) FROM pg_type WHERE typname = 'patmultirange'", &[]).await.unwrap().get(0);
         let n2: i64 = env.admin.query_one("SELECT count(*) FROM pg_type WHERE typname = 'pat_multirange'", &[]).await.unwrap().get(0);
         assert_eq!(n + n2, 1);
+        // Çok baytlı uzun ad: PG (`makeMultirangeTypeName`) adı ham 52 bayta keser; karakter ortasından kesilirse
+        // otomatik ad geçersiz UTF-8 olur. Yükleyici çökmeden onu varsayılan sayar (None).
+        for name in [format!("a{}", "ş".repeat(31)), format!("{}x", "ş".repeat(31))] {
+            env.sql(&format!("CREATE TYPE tr.\"{name}\" AS RANGE (subtype = integer)")).await;
+            let (_, d) = yload(&env, "tr", &name).await;
+            let TypeBody::Range { multirange_type_name, .. } = &d.body else { unreachable!() };
+            assert_eq!(multirange_type_name, &None, "{name}: varsayılan multirange adı None");
+            assert!(d.editable, "{:?}", d.unsupported);
+        }
     }
     let b = yload_oid(&env, type_oid(&env, "pg_catalog", "int4").await).await;
     assert!(!b.editable && b.unsupported.iter().any(|u| u.contains("BASE")), "{b:?}");

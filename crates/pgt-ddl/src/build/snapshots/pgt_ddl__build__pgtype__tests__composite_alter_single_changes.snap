@@ -12,10 +12,10 @@ expression: out
 [Safe] ALTER TYPE public.ty RENAME ATTRIBUTE b TO "Yeni B"
 
 # tip değiştir
-[DataLoss] ALTER TYPE public.ty ALTER ATTRIBUTE a TYPE bigint  -- tipi kullanan tablolardaki veri kaybolur
+[DataLoss] ALTER TYPE public.ty ALTER ATTRIBUTE a TYPE bigint  -- tipi kullanan tablo kolonu varsa PostgreSQL reddeder; typed table CASCADE ister (desteklenmez)
 
 # collation değiştir
-[DataLoss] ALTER TYPE public.ty ALTER ATTRIBUTE b TYPE text COLLATE "C"  -- tipi kullanan tablolardaki veri kaybolur
+[DataLoss] ALTER TYPE public.ty ALTER ATTRIBUTE b TYPE text COLLATE "C"  -- tipi kullanan tablo kolonu varsa PostgreSQL reddeder; typed table CASCADE ister (desteklenmez)
 
 # sil
 [DataLoss] ALTER TYPE public.ty DROP ATTRIBUTE b  -- tipi kullanan tablolardaki veri kaybolur

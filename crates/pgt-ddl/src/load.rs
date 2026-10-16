@@ -1186,18 +1186,19 @@ fn trigger_enabled(c: &str) -> Option<TriggerEnabled> {
 /// - Fonksiyon şema + ad (her zaman nitelikli yazılır); transition tablo adları `tgoldtable`/`tgnewtable`.
 /// - `constraint = tgconstraint <> 0`; ertelenebilirlik `pg_constraint`'ten. Boş yorum `None`.
 /// - `unsupported` (R5; doluysa `editable = false`, üretici her değişikliği ve drop'u reddeder): iç trigger
-///   (`tgisinternal`; FK/kısıt, PG 11–12 bölüm klonları), bölüm klonu (PG 13+ `tgparentid`), `FROM` başvurulan tablolu
+///   (`tgisinternal`; FK/kısıt, PG 11–14 bölüm klonları), bölüm klonu (PG 13+ `tgparentid`; ilk gerekçe), `FROM` başvurulan tablolu
 ///   constraint trigger (`tgconstrrelid`; modellenmez), görünüm/yabancı tablo trigger'ı (üretici yalnız tablo trigger'ı
 ///   kurar), sistem şeması, ayrıştırılamayan WHEN, çözülemeyen argümanlar, bilinmeyen `tgenabled`.
 async fn load_trigger(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
     let rows = fetch(mgr, server, db, &TRIGGER_SQL, oid).await?;
     let r = rows.first().ok_or_else(|| not_found("trigger"))?;
     let mut unsupported = vec![];
-    if r.get::<_, bool>("is_internal") {
-        unsupported.push("iç trigger (kısıt ya da sistem tarafından yönetilir)".to_string());
-    }
+    // Klon önce: PG 13–14 klonu `tgisinternal` de taşır; gösterilen ilk gerekçe asıl neden olsun.
     if r.get::<_, bool>("is_clone") {
         unsupported.push("bölümlenmiş üst tablodan klonlanmış (üst tablodan yönetilir)".to_string());
+    }
+    if r.get::<_, bool>("is_internal") {
+        unsupported.push("iç trigger (kısıt ya da sistem tarafından yönetilir)".to_string());
     }
     if let Some(t) = r.get::<_, Option<String>>("from_table") {
         unsupported.push(format!("FROM {t} (constraint trigger başvurulan tablosu)"));
@@ -1259,26 +1260,41 @@ async fn load_trigger(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) 
 // Type
 // ---------------------------------------------------------------------------------------------------------------
 
-/// `s`'yi en çok `max` bayta, karakter sınırında kırpar.
-fn clip_bytes(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+/// PG 14+ otomatik multirange adı, PG'nin `makeMultirangeTypeName`'i ile bayt bayt aynı: adda `range` varsa ilk
+/// geçişin önüne `multi` eklenir, yoksa ad **ham** 52 bayta kesilir (`pnstrdup`; çok baytlı karakter ortasından
+/// kesebilir → geçersiz UTF-8) ve `_multirange` eklenir; sonuç `pg_mbcliplen` ile 63 bayta kırpılır.
+fn default_multirange_name(range: &str) -> Vec<u8> {
+    let r = range.as_bytes();
+    let mut buf = match range.find("range") {
+        Some(p) => [&r[..p], b"multi", &r[p..]].concat(),
+        None => [&r[..r.len().min(52)], b"_multirange"].concat(),
+    };
+    buf.truncate(pg_utf8_mbcliplen(&buf, 63));
+    buf
 }
 
-/// PG 14+ otomatik multirange adı (`makeMultirangeTypeName`): adda `range` varsa ilk geçişin önüne `multi` eklenir,
-/// yoksa sona `_multirange`; sonuç 63 bayta kırpılır.
-fn default_multirange_name(range: &str) -> String {
-    let s = match range.find("range") {
-        Some(p) => format!("{}multi{}", &range[..p], &range[p..]),
-        None => format!("{}_multirange", clip_bytes(range, 52)),
-    };
-    clip_bytes(&s, 63).to_string()
+/// PG `pg_mbcliplen` (UTF-8): karakterleri öncü baytın bildirdiği uzunlukla (`pg_utf_mblen`) yürür; `limit`i aşacak
+/// karakterden önce durur.
+fn pg_utf8_mbcliplen(s: &[u8], limit: usize) -> usize {
+    let mut clen = 0;
+    while clen < s.len() && s[clen] != 0 {
+        let c = s[clen];
+        let l = match c {
+            _ if c & 0x80 == 0 => 1,
+            _ if c & 0xe0 == 0xc0 => 2,
+            _ if c & 0xf0 == 0xe0 => 3,
+            _ if c & 0xf8 == 0xf0 => 4,
+            _ => 1,
+        };
+        if clen + l > limit {
+            break;
+        }
+        clen += l;
+        if clen == limit {
+            break;
+        }
+    }
+    clen.min(s.len())
 }
 
 /// Composite öznitelik satırları → model (`original = Some(ad)`); üreticinin tip dilbilgisinden geçmeyen tip gerekçesi.
@@ -1363,7 +1379,11 @@ async fn load_type(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> 
                         unsupported.push(format!("fonksiyon {f}"));
                     }
                 }
-                let multirange = r.get::<_, Option<String>>("multirange").filter(|m| *m != default_multirange_name(&name));
+                // Ham baytlar: otomatik ad geçersiz UTF-8 olabilir (bkz. `default_multirange_name`).
+                let multirange = r
+                    .get::<_, Option<Vec<u8>>>("multirange")
+                    .filter(|m| *m != default_multirange_name(&name))
+                    .map(|m| String::from_utf8_lossy(&m).into_owned());
                 TypeBody::Range {
                     subtype,
                     subtype_opclass: r.get("opclass"),
@@ -1702,16 +1722,24 @@ mod tests {
 
     #[test]
     fn default_multirange_name_follows_pg() {
-        assert_eq!(default_multirange_name("int4range"), "int4multirange");
-        assert_eq!(default_multirange_name("f8r"), "f8r_multirange");
-        assert_eq!(default_multirange_name("My Thing"), "My Thing_multirange");
-        assert_eq!(default_multirange_name("a_range_range"), "a_multirange_range");
+        let s = |v: Vec<u8>| String::from_utf8(v).unwrap();
+        assert_eq!(s(default_multirange_name("int4range")), "int4multirange");
+        assert_eq!(s(default_multirange_name("f8r")), "f8r_multirange");
+        assert_eq!(s(default_multirange_name("My Thing")), "My Thing_multirange");
+        assert_eq!(s(default_multirange_name("a_range_range")), "a_multirange_range");
         let long = "x".repeat(60);
-        assert_eq!(default_multirange_name(&long), format!("{}_multirange", "x".repeat(52)));
+        assert_eq!(s(default_multirange_name(&long)), format!("{}_multirange", "x".repeat(52)));
         let long_range = format!("{}range", "y".repeat(58));
-        assert_eq!(default_multirange_name(&long_range).len(), 63);
-        // Çok baytlı karakter sınırında kırpma.
-        assert!(default_multirange_name(&"ş".repeat(40)).is_char_boundary(0));
+        assert_eq!(s(default_multirange_name(&long_range)), format!("{}multi", "y".repeat(58)));
+        // Çok baytlı ad: 52 bayt karakter sınırına denk gelir.
+        assert_eq!(s(default_multirange_name(&"ş".repeat(40))), format!("{}_multirange", "ş".repeat(26)));
+        // PG ham 52 bayta keser: karakter ortası → öncü bayt (0xC5) kalır, geçersiz UTF-8 (PG 16'da doğrulandı).
+        assert_eq!(
+            default_multirange_name(&format!("a{}", "ş".repeat(40))),
+            [format!("a{}", "ş".repeat(25)).as_bytes(), &[0xC5], b"_multirange"].concat()
+        );
+        // `range` içeren uzun çok baytlı ad: 63 baytta karakter sınırına geri çekilir (pg_mbcliplen).
+        assert_eq!(s(default_multirange_name(&format!("xx{}range", "ş".repeat(31)))), format!("xx{}", "ş".repeat(30)));
     }
 
     #[test]

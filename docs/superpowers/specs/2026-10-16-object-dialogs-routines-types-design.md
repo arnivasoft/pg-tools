@@ -98,11 +98,11 @@ Aşağıdaki maddeler **gönderilen** davranışı anlatır (kod ve Docker PG 10
 
 ### 8.5 Alan yolları (`FieldError.path`)
 
-- **Function/Procedure:** `schema`, `name`, `owner`, `comment`, `language`, `body`, `cost`, `rows`, `volatility`, `strict`, `leakproof`, `parallel`, `kind` (Procedure PG < 11), `object` (salt okunur), `args`, `args[i].name|typeName|default`, `returns`, `returns.typeName`, `returns.columns[i].name|typeName`, `settings[i].name|value`.
-- **Trigger:** `schema`, `table`, `name`, `timing`, `events`, `events.updateColumns[i]`, `events.truncate`, `level`, `when`, `functionSchema`, `functionName`, `args[i]`, `oldTable`, `newTable`, `deferrable`, `initiallyDeferred`, `comment`, `object`.
-- **Type:** `schema`, `name`, `owner`, `comment`, `body`, `body.values[i].label|original` (enum), `body.attributes[i].name|typeName|collation|original` (composite), `body.subtype|subtypeOpclass|collation|canonical|subtypeDiff|multirangeTypeName` (range), `object`.
+- **Function/Procedure:** `schema`, `name`, `owner`, `comment`, `language`, `body`, `cost`, `rows`, `volatility`, `strict`, `leakproof`, `parallel`, `kind` (Procedure PG < 11), `object` (salt okunur), `args`, `args[i].name|typeName|default|mode` (`mode`: VARIADIC son giriş değil / Procedure OUT PG < 14), `returns`, `returns.typeName`, `returns.columns` (TABLE dönüşü kolonsuz), `returns.columns[i].name|typeName`, `settings[i].name|value`.
+- **Trigger:** `schema`, `table`, `name`, `timing`, `events`, `events.updateColumns` (UPDATE olayı olmadan kolon listesi), `events.updateColumns[i]`, `events.truncate`, `level`, `when`, `functionSchema`, `functionName`, `args[i]`, `oldTable`, `newTable`, `deferrable`, `initiallyDeferred`, `comment`, `object`.
+- **Type:** `schema`, `name`, `owner`, `comment`, `body`, `body.values` (liste düzeyi: yüklü enum değeri silme/yeniden sıralama), `body.values[i].label|original` (enum), `body.attributes` (liste düzeyi: yüklü öznitelik sırası / yeni öznitelik yalnız sona), `body.attributes[i].name|typeName|collation|original` (composite), `body.subtype|subtypeOpclass|collation|canonical|subtypeDiff|multirangeTypeName` (range), `object`.
 - **Domain:** `schema`, `name`, `owner`, `comment`, `baseType`, `collation`, `default`, `constraints`, `constraints[i].name|expression|notValid|validate|original`, `object`.
-- `old.` önekli yollar (`old.name`, `old.schema`, `old.table`, `old.body.values[i].label`, `old.body.attributes[i].name`, `old.constraints[i].name`) alter'da gönderilen **yüklü** (`old`) tanımın bayat ya da geçersiz olduğunu gösterir.
+- `old.` önekli yollar (`old.name`, `old.schema`, `old.table`, `old.args[i].typeName`, `old.body.values[i].label`, `old.body.attributes[i].name`, `old.constraints[i].name`) alter'da gönderilen **yüklü** (`old`) tanımın bayat ya da geçersiz olduğunu gösterir.
 - `SECURITY DEFINER` seçimi önizlemede **uyarı** üretir (engellemez); yeniden oluşturma ayrıca GRANT uyarısı ve DROP notu ekler.
 
 ### 8.6 İpuçları (hata kodu → ipucu)
@@ -122,8 +122,8 @@ Doğrulanmış (Docker PG 10–18):
 - `CREATE OR REPLACE TRIGGER` (PG 14+) `tgenabled`'ı **ORIGIN'e sıfırlar**, yorumu ve oid'i korur. PG < 14 (ve constraint trigger) `DROP` + `CREATE` yeniden kurmasında etkinlik ve yorum yeniden yazılır (Destructive + not).
 - Enum `ADD VALUE` zinciri (aynı transaction'da yeni değerin ardına başka değer) PG 12–18'de çalışır. PG < 12'de `ADD VALUE` **transaction dışıdır** (`stmt_nt`): kısmi uygulama olabilir, işlenmiş (committed) sayısı raporlanır.
 - Trigger `WHEN` koşulu `pg_get_triggerdef`'ten ayrıştırılır (sabit nokta testli).
-- Multirange adı şema-nitelikli yazılır/yüklenir.
-- `COST`/`ROWS` PG'de `float4` olarak saklanır: yüklenen değer yazılandan farklı yuvarlanmış olabilir. `alter(loaded, loaded)` yine boş plandır; arayüz yüklenen metni olduğu gibi göstermelidir.
+- Multirange adı şema-nitelikli yazılır/yüklenir. Otomatik ad (yüklemede `None`) PG'nin `makeMultirangeTypeName`'i ile bayt bayt aynı hesaplanır: `range` içermeyen ad ham 52 bayta kesilir; çok baytlı karakter ortasına denk gelirse PG'nin ürettiği ad geçersiz UTF-8'dir (PG 16'da doğrulandı) — yükleyici adı ham bayt (`textsend`) okur ve çökmez.
+- `COST`/`ROWS` PG'de `float4` olarak saklanır: yüklenen değer yazılandan farklı yuvarlanmış olabilir. Değişiklik tespiti değerleri `float4` (`f32`) olarak karşılaştırır: `float4`'e yuvarlanınca eşit olan metinler (ör. `1.23456789` ↔ `1.2345679`, `100` ↔ `100.0`) değişiklik sayılmaz; `alter(loaded, loaded)` boş plandır; arayüz yüklenen metni olduğu gibi göstermelidir.
 
 Bilinen sınırlar (arayüz bunları açıklamalıdır):
 - Yüklenen **düz `\` içeren** argüman varsayılanı, `WHEN` koşulu ya da domain `DEFAULT`/`CHECK` ifadesi (PG bunları `E'…'` öneki olmadan yazar) o ifadenin **düzenlenmesini** kapıda reddeder (ad/sahip/yorum serbest; Plan 14 view sorgusu emsali). Kaçış için `E'…'`.
@@ -131,7 +131,7 @@ Bilinen sınırlar (arayüz bunları açıklamalıdır):
 - Range'in multirange **şeması** modellenmez.
 - PG 17+ **adlı** domain `NOT NULL` kısıtının adı korunmaz (`notNull = true` olarak yüklenir).
 - View / `INSTEAD OF` trigger'lar bu planda yok (backlog; Explorer'da view altında trigger düğümü ulaşılamaz).
-- `settings` sırası: yükleyici ayarları sıralı döndürür; istemci **yüklenen sırayı korumalıdır** (sıra değişimi fark sayılabilir ve gereksiz `OR REPLACE` üretir).
+- `settings` sırası: yükleyici ayarları sıralı döndürür; **sıra değişikliği değişiklik sayılmaz** (ayar kümesi aynıysa `OR REPLACE` üretilmez; bir değişiklik olursa liste istemcinin gönderdiği sırayla yazılır).
 - `BEGIN ATOMIC` (PG 14+ `prosqlbody`) gövdeli fonksiyonlar, C/internal dilli, aggregate/pencere, eklentiye ait ve sistem şemasındaki nesneler salt okunurdur.
 
 ### 8.8 Ön yüz bütçe notu
