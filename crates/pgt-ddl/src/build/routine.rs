@@ -3,9 +3,10 @@
 //!
 //! - **Gövde** (Karar 1): içeriği taranmaz; `dollar_tag` gövdede geçmeyen bir etiket (`$pgt$`, `$pgt1$`, …) seçer ve
 //!   gövde baytı baytına sarılır. Nihai ifade yine `composed_is_clean` ile taranır (olmaması gereken kayma → alan hatası).
-//! - **Kimlik** (Karar 3): ALTER/DROP/COMMENT `şema.ad(giriş tipleri)` ile yazılır; giriş = IN, INOUT, VARIADIC. PG 14+
-//!   procedure'de OUT argümanları da çağrı imzasına girdiğinden procedure kimliği OUT'ları `OUT tip` olarak yazar (bu
-//!   biçim PG 14+'da tüm argümanlarla eşleşir; PG 11–13'te procedure OUT alamaz).
+//! - **Kimlik** (Karar 3): fonksiyonda ALTER/DROP/COMMENT `şema.ad(giriş tipleri)` ile yazılır; giriş = IN, INOUT,
+//!   VARIADIC. PG 14+ procedure'de OUT argümanları da çağrı imzasına girdiğinden procedure kimliği TÜM argümanları açık
+//!   modla yazar (`IN int, OUT text`): modsuz liste aşırı yüklemede belirsiz kalabilir (bkz. `ident_sql`); PG 11–13'te
+//!   procedure OUT alamaz, açık mod yine kabul edilir.
 //! - **`OR REPLACE` sınırları** (Karar 2): `needs_recreate`; `recreate` yalnızca bu liste doluysa anlamlıdır.
 //! - **Serbest SQL**: yalnız argüman `DEFAULT` ifadeleri (`check_free_sql` + `wrap`); tipler `validate_type` ile katı.
 //! - Alter "değişti mi" kararı tiplerde `canonical_type`, COST/ROWS'ta sayısal değer ile verilir (yüklü `format_type`
@@ -107,12 +108,23 @@ pub fn signature_sql(schema: &str, name: &str, args: &[FunctionArg]) -> String {
     format!("{}({})", qualified(schema, name), types.join(", "))
 }
 
-/// ALTER/DROP/COMMENT hedefi: fonksiyonda `signature_sql`; OUT argümanlı procedure'de tüm argümanlar (`OUT tip`).
+/// ALTER/DROP/COMMENT hedefi: fonksiyonda `signature_sql`; procedure'de TÜM argümanlar açık modla (`IN tip`, `INOUT
+/// tip`, `VARIADIC tip`, `OUT tip`). PG 14+'da modsuz liste hem giriş hem tüm argüman imzasıyla eşlenir: `p(int, text)`
+/// yanında `p(int, OUT text)` varsa "not unique" hatası verir; açık `IN`/`OUT` her zaman tek nesneyi seçer. PG 11–13
+/// açık modu da kabul eder (OUT zaten yoktur; Docker'da 11/13/14/18 doğrulandı).
 fn ident_sql(kind: ObjectKind, schema: &str, name: &str, args: &[FunctionArg]) -> String {
-    if kind == ObjectKind::Procedure && args.iter().any(|a| a.mode == ArgMode::Out) {
+    if kind == ObjectKind::Procedure {
         let types: Vec<String> = args
             .iter()
-            .map(|a| if a.mode == ArgMode::Out { format!("OUT {}", a.type_name) } else { a.type_name.clone() })
+            .map(|a| {
+                let mode = match a.mode {
+                    ArgMode::In => "IN",
+                    ArgMode::Out => "OUT",
+                    ArgMode::Inout => "INOUT",
+                    ArgMode::Variadic => "VARIADIC",
+                };
+                format!("{mode} {}", a.type_name)
+            })
             .collect();
         format!("{}({})", qualified(schema, name), types.join(", "))
     } else {
@@ -227,7 +239,8 @@ fn owner_sql(kind: ObjectKind, ident: &str, owner: &str) -> String {
 }
 
 /// Sayısal metin: `rakam+ ('.' rakam+)?`, değeri > 0 (ifadeye tırnaksız yazılır; dilbilgisi güvenlik kapısıdır).
-fn parse_positive(v: &str) -> Option<f64> {
+/// Yükleyici `procost`/`prorows` metnini de bununla sınar (geçmeyen değer salt okunur gerekçesidir).
+pub(crate) fn parse_positive(v: &str) -> Option<f64> {
     let (int, frac) = match v.split_once('.') {
         Some((i, f)) => (i, Some(f)),
         None => (v, None),
@@ -1066,10 +1079,19 @@ mod tests {
         ] {
             assert_eq!(paths(bcreate(&op(&d), &ctx()).unwrap_err()), [want], "{d:?}");
         }
-        // Procedure kimliği OUT argümanlarını da yazar (PG 14+ çağrı imzası); fonksiyon yazmaz.
+        // Procedure kimliği tüm argümanları AÇIK modla yazar (PG 14+ çağrı imzası OUT'ları içerir; modsuz
+        // `p(int, text)` yanında `p(int, OUT text)` aşırı yüklemesi varsa PG "not unique" der — Docker'da gözlendi);
+        // fonksiyon yalnızca giriş tiplerini yazar.
         let both = FunctionDef { args: vec![a_in("a", "int"), arg(ArgMode::Out, Some("o"), "text", None)], ..p() };
         let d = bdrop(&op(&both), false, &ctx()).unwrap();
-        assert_eq!(sqls(&d), ["DROP PROCEDURE public.p(int, OUT text)"]);
+        assert_eq!(sqls(&d), ["DROP PROCEDURE public.p(IN int, OUT text)"]);
+        let all_in = FunctionDef { args: vec![a_in("a", "int"), a_in("b", "text")], ..p() };
+        assert_eq!(sqls(&bdrop(&op(&all_in), false, &ctx()).unwrap()), ["DROP PROCEDURE public.p(IN int, IN text)"]);
+        let modes = FunctionDef {
+            args: vec![arg(ArgMode::Inout, Some("b"), "text", None), arg(ArgMode::Variadic, Some("c"), "int[]", None)],
+            ..p()
+        };
+        assert_eq!(sqls(&bdrop(&op(&modes), false, &ctx()).unwrap()), ["DROP PROCEDURE public.p(INOUT text, VARIADIC int[])"]);
         let fun = FunctionDef { returns: ty("text", false), ..both.clone() };
         assert_eq!(sqls(&bdrop(&of(&fun), false, &ctx()).unwrap()), ["DROP FUNCTION public.p(int)"]);
     }

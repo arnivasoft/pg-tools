@@ -13,6 +13,8 @@
 //!   her zaman `None`; yeniden kurmada kaybolacak ekler `unsupported` listesinde).
 //! - Database/Role (sunucu kapsamlı): bakım bağlantısında okunur (`Target::Maintenance`, `database_oid` yok sayılır);
 //!   bkz. `load_database`/`load_role` (ayar adları küçük harf, ada göre sıralı; rol parolası hiç okunmaz).
+//! - Function/Procedure: bkz. `load_function` (tipler `format_type`, varsayılanlar `pg_get_function_arg_default`, gövde
+//!   `prosrc` baytı baytına, COST/ROWS üstelsiz ondalık metin; salt okunurluk `unsupported` doluysa `editable = false`).
 //!
 //! Okuma salt okunur katalog bağlantısındandır; SQL/değerler günlüğe yazılmaz.
 
@@ -77,6 +79,14 @@ static ROLE_MEMBERS_SQL: VersionedSql = VersionedSql(&[
     (16, include_str!("sql/load_role_members.sql")),
 ]);
 const ROLE_SETTINGS_SQL: &str = include_str!("sql/load_db_role_settings.sql");
+/// PG 10: `prokind` yok (`proisagg`/`proiswindow`); PG 12: `prosupport`; PG 14: `prosqlbody` (BEGIN ATOMIC).
+static FUNCTION_SQL: VersionedSql = VersionedSql(&[
+    (10, include_str!("sql/load_function.pg10.sql")),
+    (11, include_str!("sql/load_function.pg11.sql")),
+    (12, include_str!("sql/load_function.pg12.sql")),
+    (14, include_str!("sql/load_function.sql")),
+]);
+const FUNCTION_ARGS_SQL: &str = include_str!("sql/load_function_args.sql");
 
 const SYSTEM_ERROR: &str = "sistem nesnesi düzenlenemez";
 
@@ -127,8 +137,9 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into
         // Sunucu kapsamlı türler: bakım veritabanında (veritabanı oid'i yok sayılır).
         ObjectKind::Database => load_database(mgr, server, Target::Maintenance, obj.oid).await,
         ObjectKind::Role => load_role(mgr, server, Target::Maintenance, obj.oid).await,
-        // Yer tutucu: yükleyiciler Plan 18 Task 6–7'de.
-        ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Trigger | ObjectKind::Type | ObjectKind::Domain => {
+        ObjectKind::Function | ObjectKind::Procedure => load_function(mgr, server, database_oid, obj.kind, obj.oid).await,
+        // Yer tutucu: yükleyiciler Plan 18 Task 7'de.
+        ObjectKind::Trigger | ObjectKind::Type | ObjectKind::Domain => {
             Err(Error::Invalid("Bu tür henüz desteklenmiyor.".into()))
         }
     }
@@ -834,6 +845,206 @@ async fn load_role(mgr: &ConnectionManager, server: Uuid, target: Target, oid: u
     }))
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Function / Procedure
+// ---------------------------------------------------------------------------------------------------------------
+
+/// `pg_proc` argüman satırı (`load_function_args.sql`; saf işlemeyi test edilebilir kılan ara biçim).
+#[derive(Debug, Clone, PartialEq)]
+struct ProcArg {
+    mode: String,
+    name: Option<String>,
+    type_name: String,
+    default: Option<String>,
+}
+
+/// Argüman satırları → (argümanlar, TABLE kolonları — `t` modu yoksa `None`, desteklenmeyenler). Bilinmeyen mod ya da
+/// adsız TABLE kolonu (beklenmez) `unsupported`'a yazılır ve argüman atlanır (zaten salt okunur olur).
+fn routine_args(rows: &[ProcArg]) -> (Vec<FunctionArg>, Option<Vec<ReturnColumn>>, Vec<String>) {
+    let (mut args, mut table, mut unsupported) = (vec![], None::<Vec<ReturnColumn>>, vec![]);
+    for r in rows {
+        let mode = match r.mode.as_str() {
+            "i" => ArgMode::In,
+            "o" => ArgMode::Out,
+            "b" => ArgMode::Inout,
+            "v" => ArgMode::Variadic,
+            "t" => {
+                match &r.name {
+                    Some(name) => table.get_or_insert_with(Vec::new).push(ReturnColumn { name: name.clone(), type_name: r.type_name.clone() }),
+                    None => unsupported.push("adsız TABLE kolonu".to_string()),
+                }
+                continue;
+            }
+            other => {
+                unsupported.push(format!("argüman modu '{other}'"));
+                continue;
+            }
+        };
+        args.push(FunctionArg { mode, name: r.name.clone(), type_name: r.type_name.clone(), default: r.default.clone() });
+    }
+    (args, table, unsupported)
+}
+
+/// `float4` → üstelsiz ondalık metin (`1e+10` → `10000000000`, `0.5` → `0.5`): Rust `f32` gösterimi en kısa kesin
+/// ondalığı üs kullanmadan yazar; üreticinin `parse_positive` dilbilgisi (`rakam+ ('.' rakam+)?`) bunu kabul eder.
+fn float_text(v: f32) -> String {
+    format!("{v}")
+}
+
+/// Pozitif sayı metni ya da (üreticinin dilbilgisinden geçmiyorsa — ör. 32 karakteri aşan çok büyük değer) gerekçe.
+fn positive_text(label: &str, v: f32, unsupported: &mut Vec<String>) -> String {
+    let t = float_text(v);
+    if crate::build::routine::parse_positive(&t).is_none() {
+        unsupported.push(format!("{label} {t}"));
+    }
+    t
+}
+
+/// Liste ayarı (`search_path` vb.) değeri PG `SplitGUCList` kuralıyla bölünemiyorsa üretici onu tek öğe yazardı (anlam
+/// değişir; `OR REPLACE` her seferinde tüm `SET` listesini yeniden yazar) → salt okunur gerekçesi.
+fn unsplittable_settings(settings: &[ConfigSetting]) -> Vec<String> {
+    use crate::build::settings::{LIST_QUOTE_GUCS, split_guc_list};
+    settings
+        .iter()
+        .filter(|s| LIST_QUOTE_GUCS.contains(&s.name.as_str()) && split_guc_list(&s.value).is_err())
+        .map(|s| format!("SET {} (liste değeri ayrıştırılamıyor)", s.name))
+        .collect()
+}
+
+/// Function/Procedure yükleyicisi. Normalleştirme (üreticiyle gidiş-dönüşün ve `alter(yüklü, yüklü)` boş planının dayanağı):
+/// - Sahip `Some`; boş yorum `None`; `recreate = false`; dil `pg_language` adı (küçük harf).
+/// - Argümanlar konum sırasıyla; tip `format_type(oid, NULL)` (görünmeyen şema nitelikli, değiştiricisiz); adsız →
+///   `None`; varsayılan `pg_get_function_arg_default` metni (giriş argümanlarında). `t` modlu argümanlar
+///   `returns = Table` kolonlarıdır (argüman listesinde yer almaz).
+/// - Dönüş: Procedure `None`; TABLE (yukarıda); `prorettype = trigger` → `Trigger`; küme olmayan `void` → `Void`; diğer
+///   her şey `Type { format_type, proretset }` (OUT argümanlı fonksiyonda `record` ya da tek OUT tipi).
+/// - Gövde `prosrc` baytı baytına (CRLF, Unicode, `$pgt$` dahil).
+/// - COST: fonksiyonda HER ZAMAN `Some(procost)` (varsayılan 100 dahil; `None` yalnızca create'te "varsayılan" demektir);
+///   ROWS: küme dönen fonksiyonda `Some(prorows)` (varsayılan 1000 dahil), diğerlerinde `None` (`prorows = 0`).
+///   Procedure'de ikisi de `None` (PG yazdırmaz; üretici reddeder). Metin `float_text` (üstelsiz ondalık).
+/// - Ayarlar `config_settings` (noktasız adlar küçük harf, ada göre sıralı; değer saklandığı gibi).
+/// - `unsupported` (Karar 4 + R5; doluysa `editable = false`, üretici ad/sahip/yorum dahil her değişikliği ve drop'u
+///   reddeder): `LANGUAGE c|internal`, `BEGIN ATOMIC` (prosqlbody), `AGGREGATE`, `WINDOW`, `EXTENSION e` (eklentiye ait),
+///   `sistem şeması`, `SUPPORT f` (PG 12+), `TRANSFORM` (protrftypes), üretici dilbilgisinden geçmeyen tip/COST/ROWS,
+///   bölünemeyen liste ayarı, bilinmeyen argüman modu. Bunlar modelin ifade edemediği ve bir `OR REPLACE`/yeniden
+///   kurmanın sessizce düşüreceği özelliklerdir.
+/// - Tür uyuşmazlığı (Function istenip `prokind = 'p'` ya da tersi) → `Invalid`.
+async fn load_function(mgr: &ConnectionManager, server: Uuid, db: u32, kind: ObjectKind, oid: u32) -> Result<ObjectDef> {
+    let (head, arg_rows) = mgr
+        .run(server, Target::Database(db), move |c| async move {
+            let params: [&(dyn ToSql + Sync); 1] = [&oid];
+            let head = c.client.query(FUNCTION_SQL.pick(PgVersion(c.version_num())), &params).await?;
+            let args = if head.is_empty() { Vec::new() } else { c.client.query(FUNCTION_ARGS_SQL, &params).await? };
+            Ok((head, args))
+        })
+        .await?;
+    let procedure = kind == ObjectKind::Procedure;
+    let h = head.first().ok_or_else(|| not_found(if procedure { "procedure" } else { "fonksiyon" }))?;
+    let prokind: String = h.get("kind");
+    if (prokind == "p") != procedure {
+        return Err(Error::Invalid(if procedure { "nesne bir procedure değil" } else { "nesne bir procedure; fonksiyon değil" }.to_string()));
+    }
+    let rows: Vec<ProcArg> = arg_rows
+        .iter()
+        .map(|r| ProcArg { mode: r.get("mode"), name: r.get("name"), type_name: r.get("type_name"), default: r.get("default") })
+        .collect();
+    let (args, table, mut unsupported) = routine_args(&rows);
+
+    let language: String = h.get("language");
+    if matches!(language.as_str(), "c" | "internal") {
+        unsupported.push(format!("LANGUAGE {language}"));
+    }
+    if h.get::<_, bool>("sql_body") {
+        unsupported.push("BEGIN ATOMIC (SQL standart gövde)".to_string());
+    }
+    match prokind.as_str() {
+        "a" => unsupported.push("AGGREGATE".to_string()),
+        "w" => unsupported.push("WINDOW".to_string()),
+        _ => {}
+    }
+    if let Some(e) = h.get::<_, Option<String>>("extension") {
+        unsupported.push(format!("EXTENSION {e} (eklentiye ait)"));
+    }
+    if h.get::<_, bool>("is_system") {
+        unsupported.push("sistem şeması".to_string());
+    }
+    if let Some(s) = h.get::<_, Option<String>>("support") {
+        unsupported.push(format!("SUPPORT {s}"));
+    }
+    if h.get::<_, bool>("has_transform") {
+        unsupported.push("TRANSFORM FOR TYPE".to_string());
+    }
+
+    let retset: bool = h.get("retset");
+    let returns = if procedure {
+        None
+    } else if let Some(columns) = table {
+        Some(FunctionReturn::Table { columns })
+    } else if h.get::<_, bool>("ret_trigger") && !retset {
+        Some(FunctionReturn::Trigger)
+    } else if h.get::<_, bool>("ret_void") && !retset {
+        Some(FunctionReturn::Void)
+    } else {
+        Some(FunctionReturn::Type { type_name: h.get("ret_type"), setof: retset })
+    };
+    // Üreticinin tip dilbilgisinden geçmeyen yüklü tip ifadeye yazılamaz (ALTER/DROP imzası dahil).
+    let mut types: Vec<&str> = args.iter().map(|a| a.type_name.as_str()).collect();
+    match &returns {
+        Some(FunctionReturn::Type { type_name, .. }) => types.push(type_name),
+        Some(FunctionReturn::Table { columns }) => types.extend(columns.iter().map(|c| c.type_name.as_str())),
+        _ => {}
+    }
+    for t in types {
+        if crate::build::type_syntax::validate_type(t).is_err() {
+            unsupported.push(format!("tip {t}"));
+        }
+    }
+
+    let volatility = match h.get::<_, String>("volatility").as_str() {
+        "i" => Volatility::Immutable,
+        "s" => Volatility::Stable,
+        _ => Volatility::Volatile,
+    };
+    let parallel = match h.get::<_, String>("parallel").as_str() {
+        "s" => Parallel::Safe,
+        "r" => Parallel::Restricted,
+        _ => Parallel::Unsafe,
+    };
+    let (cost, rows) = if procedure {
+        (None, None)
+    } else {
+        let cost = Some(positive_text("COST", h.get("cost"), &mut unsupported));
+        let prorows: f32 = h.get("rows");
+        let rows = (retset && prorows > 0.0).then(|| positive_text("ROWS", prorows, &mut unsupported));
+        (cost, rows)
+    };
+    let settings = config_settings(&h.get::<_, Vec<String>>("settings"));
+    unsupported.extend(unsplittable_settings(&settings));
+
+    let def = FunctionDef {
+        schema: h.get("schema"),
+        name: h.get("name"),
+        owner: Some(h.get("owner")),
+        comment: h.get::<_, Option<String>>("comment").filter(|c| !c.is_empty()),
+        language,
+        args,
+        returns,
+        body: h.get("body"),
+        volatility,
+        strict: h.get("strict"),
+        security_definer: h.get("security_definer"),
+        leakproof: h.get("leakproof"),
+        parallel,
+        cost,
+        rows,
+        settings,
+        recreate: false,
+        editable: unsupported.is_empty(),
+        unsupported,
+    };
+    Ok(if procedure { ObjectDef::Procedure(def) } else { ObjectDef::Function(def) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,6 +1144,59 @@ mod tests {
         assert_eq!(default_bounds(SeqType::Integer, 1), (1, i32::MAX as i64));
         assert_eq!(default_bounds(SeqType::Smallint, -3), (i16::MIN as i64, -1));
         assert_eq!(default_bounds(SeqType::Bigint, 5), (1, i64::MAX));
+    }
+
+    fn parg(mode: &str, name: Option<&str>, t: &str, default: Option<&str>) -> ProcArg {
+        ProcArg { mode: mode.into(), name: name.map(Into::into), type_name: t.into(), default: default.map(Into::into) }
+    }
+
+    #[test]
+    fn routine_args_split_table_columns_and_modes() {
+        let rows = [
+            parg("i", Some("a"), "integer", None),
+            parg("b", None, "text", Some("'x'::text")),
+            parg("v", Some("v"), "integer[]", None),
+            parg("o", Some("o"), "numeric", None),
+        ];
+        let (args, table, unsupported) = routine_args(&rows);
+        let modes: Vec<ArgMode> = args.iter().map(|a| a.mode).collect();
+        assert_eq!(modes, [ArgMode::In, ArgMode::Inout, ArgMode::Variadic, ArgMode::Out]);
+        assert_eq!((args[1].name.clone(), args[1].default.as_deref()), (None, Some("'x'::text")));
+        assert_eq!((table, unsupported.len()), (None, 0));
+        // TABLE kolonları argüman listesinden çıkar.
+        let rows = [parg("i", Some("a"), "integer", Some("1")), parg("t", Some("x"), "integer", None), parg("t", Some("Y z"), "text", None)];
+        let (args, table, unsupported) = routine_args(&rows);
+        assert_eq!(args.len(), 1);
+        let cols: Vec<(String, String)> = table.unwrap().into_iter().map(|c| (c.name, c.type_name)).collect();
+        assert_eq!(cols, [("x".to_string(), "integer".to_string()), ("Y z".to_string(), "text".to_string())]);
+        assert!(unsupported.is_empty());
+        // Bilinmeyen mod ve adsız TABLE kolonu salt okunur gerekçesi.
+        let (args, _, unsupported) = routine_args(&[parg("z", None, "integer", None), parg("t", None, "integer", None)]);
+        assert!(args.is_empty());
+        assert_eq!(unsupported, ["argüman modu 'z'", "adsız TABLE kolonu"]);
+    }
+
+    #[test]
+    fn float_text_has_no_exponent_and_passes_builder_grammar() {
+        for (v, want) in [(100.0f32, "100"), (1e10, "10000000000"), (0.5, "0.5"), (0.1, "0.1"), (1000.0, "1000"), (2.5e-5, "0.000025")] {
+            assert_eq!(float_text(v), want);
+            assert!(crate::build::routine::parse_positive(want).is_some(), "{want}");
+        }
+        // Dilbilgisinin 32 karakter sınırını aşan değer salt okunur gerekçesi olur.
+        let mut u = vec![];
+        let t = positive_text("COST", 1e35, &mut u);
+        assert!(!t.contains('e') && t.len() > 32);
+        assert_eq!(u, [format!("COST {t}")]);
+        let mut u = vec![];
+        assert_eq!(positive_text("ROWS", 1000.0, &mut u), "1000");
+        assert!(u.is_empty());
+    }
+
+    #[test]
+    fn unsplittable_list_settings_are_read_only() {
+        let s = |n: &str, v: &str| ConfigSetting { name: n.into(), value: v.into() };
+        assert!(unsplittable_settings(&[s("search_path", "\"$user\", public"), s("work_mem", "a b"), s("app.x", "\"")]).is_empty());
+        assert_eq!(unsplittable_settings(&[s("search_path", "a b")]), ["SET search_path (liste değeri ayrıştırılamıyor)"]);
     }
 
     #[test]
