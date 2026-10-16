@@ -41,15 +41,56 @@ const COMPOSED_BROKEN: &str = "Gövde ya da varsayılan ifadeler, yerleştirildi
 /// sonunda olan ilki. Bu, "gövdede geçmez" koşulundan güçlüdür: gövde etiketin önekiyle bitse (`x $pgt`) kapanış erken
 /// eşleşirdi. PG'nin dolar tırnak sözcükleyicisi kapanışı gövdenin ilk eşleşen alt dizisinde bulur (öncesindeki
 /// tanımlayıcı karakterlerine bakmaz); tarayıcımız da aynı kuralı izler.
+///
+/// Doğrusal: gövde TEK geçişte taranır (`$pgt` geçişleri; ardından `$` → n = 0, sıfırsız rakamlar + `$` → n), en küçük
+/// kullanılmayan n seçilir. Etiketlerin tek kenarlığı (hem önek hem sonek) `$` olduğundan `gövde + etiket` içindeki
+/// erken geçiş yalnızca gövde etiketin son `$` hariç önekiyle (`$pgt`, `$pgt1` …) bittiğinde olur; o aday atlanır
+/// (en çok bir aday). Daha katı "gövde etiketin hiçbir önekiyle bitmesin" kuralı `$` ile biten her gövdede sonsuz
+/// döngü olurdu.
 pub fn dollar_tag(body: &str) -> String {
-    let mut n = 0usize;
+    let mut used = std::collections::HashSet::new();
+    for (i, _) in body.match_indices("$pgt") {
+        let rest = &body.as_bytes()[i + 4..];
+        let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+        if rest.get(digits) != Some(&b'$') {
+            continue;
+        }
+        if digits == 0 {
+            used.insert(0usize);
+        } else if rest[0] != b'0'
+            && let Ok(n) = std::str::from_utf8(&rest[..digits]).unwrap_or_default().parse::<usize>()
+        {
+            // Üretilen etiketler sıfırsız yazılır (`$pgt01$` hiçbir adayla çakışmaz); taşan sayı aday olamaz.
+            used.insert(n);
+        }
+    }
+    let tag = |n: usize| if n == 0 { "$pgt$".to_string() } else { format!("$pgt{n}$") };
+    let mut n = 0;
     loop {
-        let tag = if n == 0 { "$pgt$".to_string() } else { format!("$pgt{n}$") };
-        if format!("{body}{tag}").find(&tag) == Some(body.len()) {
-            return tag;
+        if !used.contains(&n) {
+            let t = tag(n);
+            if !body.ends_with(&t[..t.len() - 1]) {
+                return t;
+            }
         }
         n += 1;
     }
+}
+
+/// Dizi eki taşımayan ama VARIADIC olabilen çok biçimli tipler (`anyarray`, `anycompatiblearray`, `"any"`).
+fn is_polymorphic_variadic(t: &str) -> bool {
+    let c = canonical_type(t);
+    let c = c.strip_prefix("pg_catalog.").unwrap_or(&c);
+    matches!(c, "anyarray" | "anycompatiblearray" | "\"any\"" | "any")
+}
+
+/// Dil adı: sade ASCII ad (`[A-Za-z_][A-Za-z0-9_]*`) tırnaksız yazılmış gibi küçük harfe çevrilir (`PLPGSQL` →
+/// `plpgsql`; `pg_language` adları küçük harflidir), diğer her ad olduğu gibi kalır. Yerleştirme yine `quote_ident`.
+fn language_name(l: &str) -> String {
+    let mut chars = l.chars();
+    let plain = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if plain { l.to_ascii_lowercase() } else { l.to_string() }
 }
 
 fn is_input(a: &FunctionArg) -> bool {
@@ -143,7 +184,7 @@ fn define_sql(kind: ObjectKind, replace: bool, schema: &str, name: &str, d: &Fun
         s.push(' ');
         s.push_str(&returns_sql(r));
     }
-    s.push_str(&format!(" LANGUAGE {}", quote_ident(&d.language)));
+    s.push_str(&format!(" LANGUAGE {}", quote_ident(&language_name(&d.language))));
     if function {
         s.push(' ');
         s.push_str(volatility_sql(d.volatility));
@@ -236,7 +277,7 @@ fn same_arg(a: &FunctionArg, b: &FunctionArg) -> bool {
 
 /// `CREATE [OR REPLACE]` ifadesine yazılan alanlardan biri değişti mi (ad/şema/sahip/yorum hariç)?
 fn definition_changed(old: &FunctionDef, new: &FunctionDef) -> bool {
-    old.language != new.language
+    language_name(&old.language) != language_name(&new.language)
         || old.args.len() != new.args.len()
         || old.args.iter().zip(&new.args).any(|(a, b)| !same_arg(a, b))
         || !same_return(&old.returns, &new.returns)
@@ -279,10 +320,17 @@ pub fn needs_recreate(_kind: ObjectKind, old: &FunctionDef, new: &FunctionDef) -
             }
         }
     }
-    let outs = |d: &FunctionDef| -> Vec<(Option<String>, String)> {
-        d.args.iter().filter(|a| is_output(a)).map(|a| (a.name.clone(), canonical_type(&a.type_name))).collect()
-    };
-    if outs(old) != outs(new) && !e.iter().any(|x| x.path == "args") {
+    // Çıkış listesi (OUT/INOUT): sayı, mod, ad, kanonik tip. Her iki tarafta INOUT olan ve adı/tipi giriş olarak zaten
+    // `args[i].name|typeName` ile raporlanmış argüman ayrıca `args` üretmez (aynı değişiklik iki kez gösterilmesin).
+    let oo: Vec<&FunctionArg> = old.args.iter().filter(|a| is_output(a)).collect();
+    let no: Vec<(usize, &FunctionArg)> = new.args.iter().enumerate().filter(|(_, a)| is_output(a)).collect();
+    let reported = |i: usize| e.iter().any(|x| x.path == format!("args[{i}].name") || x.path == format!("args[{i}].typeName"));
+    let outs_changed = oo.len() != no.len()
+        || oo.iter().zip(&no).any(|(o, (i, n))| {
+            let same = o.mode == n.mode && o.name == n.name && same_type(&o.type_name, &n.type_name);
+            !same && !(o.mode == ArgMode::Inout && n.mode == ArgMode::Inout && reported(*i))
+        });
+    if outs_changed && !e.iter().any(|x| x.path == "args") {
         e.push(err("args", RECREATE_MSG));
     }
     if !same_return(&old.returns, &new.returns) {
@@ -349,7 +397,7 @@ fn validate_definition(ctx: &BuildCtx, kind: ObjectKind, d: &FunctionDef, old: O
             if d.args[i + 1..].iter().any(is_input) {
                 e.push(err(&path("mode"), "VARIADIC yalnızca son giriş argümanı olabilir."));
             }
-            if type_ok && !a.type_name.ends_with(']') {
+            if type_ok && !a.type_name.ends_with(']') && !is_polymorphic_variadic(&a.type_name) {
                 e.push(err(&path("typeName"), "VARIADIC argümanın tipi dizi olmalı (ör. integer[])."));
             }
         }
@@ -456,7 +504,9 @@ fn validate_definition(ctx: &BuildCtx, kind: ObjectKind, d: &FunctionDef, old: O
     }
 }
 
-/// Nihai ifade taraması (yalnızca diğer her şey geçerliyse anlamlıdır).
+/// Nihai ifade taraması (yalnızca diğer her şey geçerliyse anlamlıdır). Hata `body`'ye yazılır: varsayılan ifadeleri
+/// önceden `check_free_sql` + `wrap` ile tek başına temizdir, adlar/tipler/ayarlar tırnaklıdır ya da katı dilbilgisinden
+/// geçmiştir; geriye kalan tek serbest parça gövde ve etiketidir (olmaması gereken durum).
 fn check_composed(sql: impl FnOnce() -> String, e: &mut Vec<FieldError>) {
     if e.is_empty() && !composed_is_clean(&sql()) {
         e.push(err("body", COMPOSED_BROKEN));
@@ -770,6 +820,57 @@ mod tests {
             let joined = format!("{body}{t}");
             assert_eq!(joined.find(&t), Some(body.len()), "{body:?} → {t}");
         }
+    }
+
+    #[test]
+    fn dollar_tag_is_linear_on_tag_heavy_bodies() {
+        // 200k farklı `$pgtN$` + `$pgt$`: eski aday başına kopyalama O(n²) idi; tek geçiş anında döner.
+        let mut body = String::from("$pgt$");
+        for i in 1..=200_000 {
+            body.push_str(&format!("$pgt{i}$"));
+        }
+        assert_eq!(dollar_tag(&body), "$pgt200001$");
+        // Önde sıfırlı / sayısal olmayan ekler üretilen etiketlerle çakışmaz; gövde `$` ile bitebilir.
+        assert_eq!(dollar_tag("$pgt01$ $pgtx$ $pgt"), "$pgt1$");
+        assert_eq!(dollar_tag("x $"), "$pgt$");
+        assert_eq!(dollar_tag("$pgt$ x $pgt1"), "$pgt2$");
+    }
+
+    #[test]
+    fn variadic_accepts_polymorphic_any_types() {
+        for t in ["anyarray", "anycompatiblearray", "\"any\"", "pg_catalog.anyarray", "ANYARRAY"] {
+            let d = FunctionDef { args: vec![arg(ArgMode::Variadic, Some("a"), t, None)], ..f() };
+            assert!(bcreate(&of(&d), &ctx()).is_ok(), "{t}");
+        }
+        for t in ["anyelement", "integer", "\"anyarray\"x"] {
+            let d = FunctionDef { args: vec![arg(ArgMode::Variadic, Some("a"), t, None)], ..f() };
+            assert_eq!(create_err(&d), ["args[0].typeName"], "{t}");
+        }
+    }
+
+    #[test]
+    fn inout_rename_reports_only_the_name() {
+        let old = FunctionDef { args: vec![arg(ArgMode::Inout, Some("a"), "integer", None)], ..f() };
+        let new = FunctionDef { args: vec![arg(ArgMode::Inout, Some("b"), "integer", None)], ..f() };
+        assert_eq!(paths(needs_recreate(ObjectKind::Function, &old, &new)), ["args[0].name"]);
+        let typed = FunctionDef { args: vec![arg(ArgMode::Inout, Some("a"), "bigint", None)], ..f() };
+        assert_eq!(paths(needs_recreate(ObjectKind::Function, &old, &typed)), ["args[0].typeName"]);
+        // Mod değişimi (INOUT → IN) çıkış listesini değiştirir: `args`.
+        let mode = FunctionDef { args: vec![a_in("a", "integer")], ..f() };
+        assert_eq!(paths(needs_recreate(ObjectKind::Function, &old, &mode)), ["args"]);
+    }
+
+    #[test]
+    fn plain_language_names_are_lowercased() {
+        let sql = |l: &str| bcreate(&of(&FunctionDef { language: l.into(), ..f() }), &ctx()).unwrap().statements[0].sql.clone();
+        assert!(sql("PLPGSQL").contains(" LANGUAGE plpgsql "));
+        assert!(sql("PlPgSql").contains(" LANGUAGE plpgsql "));
+        assert!(sql("SQL").contains(" LANGUAGE \"sql\" "));
+        // Sade olmayan ad olduğu gibi tırnaklanır.
+        assert!(sql("My Lang").contains(" LANGUAGE \"My Lang\" "));
+        assert!(sql("plpgsql_ş").contains(" LANGUAGE \"plpgsql_ş\" "));
+        // Yalnızca harf büyüklüğü farkı değişiklik değildir.
+        assert!(alter_ok(&f(), &FunctionDef { language: "PLPGSQL".into(), ..f() }).statements.is_empty());
     }
 
     #[test]
