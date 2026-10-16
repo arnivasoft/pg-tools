@@ -1,0 +1,35 @@
+---
+source: crates/pgt-ddl/src/build/routine.rs
+expression: out
+---
+# gövde
+[Safe] CREATE OR REPLACE FUNCTION public.f(x integer) RETURNS integer LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE AS $pgt$BEGIN RETURN 2; END$pgt$
+
+# ad
+[Safe] ALTER FUNCTION public.f(integer) RENAME TO g
+
+# şema
+[Safe] ALTER FUNCTION public.f(integer) SET SCHEMA app
+
+# sahip
+[Safe] ALTER FUNCTION public.f(integer) OWNER TO b
+
+# sahip None
+
+# yorum
+[Safe] COMMENT ON FUNCTION public.f(integer) IS 'd'
+
+# yorum None
+[Safe] COMMENT ON FUNCTION public.f(integer) IS NULL
+
+# öznitelik
+[Safe] CREATE OR REPLACE FUNCTION public.f(x integer) RETURNS integer LANGUAGE plpgsql STABLE STRICT PARALLEL SAFE COST 5 AS $pgt$BEGIN RETURN 1; END$pgt$
+
+# ayar
+[Safe] CREATE OR REPLACE FUNCTION public.f(x integer) RETURNS integer LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE SET work_mem = '1MB' SET search_path = 'public' AS $pgt$BEGIN RETURN 1; END$pgt$
+
+# default ekleme
+[Safe] CREATE OR REPLACE FUNCTION public.f(x integer DEFAULT (1
+)) RETURNS integer LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE AS $pgt$BEGIN RETURN 1; END$pgt$
+
+# değişmez

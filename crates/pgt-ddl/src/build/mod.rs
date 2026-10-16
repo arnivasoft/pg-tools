@@ -13,6 +13,7 @@ pub mod freesql;
 pub mod index;
 pub mod matview;
 pub mod role;
+pub mod routine;
 pub mod schema;
 pub mod sequence;
 pub mod settings;
@@ -170,7 +171,7 @@ pub struct DropOptions {
     pub force: bool,
 }
 
-/// Plan 18 Task 2–5'in üreticileri gelene kadar Function/Procedure/Trigger/Type/Domain'in tek yer tutucu hatası.
+/// Plan 18 Task 3–5'in üreticileri gelene kadar Trigger/Type/Domain'in tek yer tutucu hatası.
 fn unsupported_kind() -> Vec<FieldError> {
     vec![err("kind", "Bu tür henüz desteklenmiyor.")]
 }
@@ -194,9 +195,9 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::MaterializedView(d) => matview::validate(d, ctx),
         ObjectDef::Database(d) => database::validate(d, ctx),
         ObjectDef::Role(d) => role::validate(d, ctx),
-        ObjectDef::Function(_) | ObjectDef::Procedure(_) | ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => {
-            unsupported_kind()
-        }
+        ObjectDef::Function(d) => routine::validate(ctx, ObjectKind::Function, d),
+        ObjectDef::Procedure(d) => routine::validate(ctx, ObjectKind::Procedure, d),
+        ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => unsupported_kind(),
     }
 }
 
@@ -285,10 +286,10 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::MaterializedView(d) => Ok(matview::create(d)),
         ObjectDef::Database(d) => Ok(database::create(d)),
         ObjectDef::Role(d) => Ok(role::create(d)),
+        ObjectDef::Function(d) => routine::create(ctx, ObjectKind::Function, d),
+        ObjectDef::Procedure(d) => routine::create(ctx, ObjectKind::Procedure, d),
         // `validate` yer tutucu hatası yukarıda döner; buraya ulaşılmaz.
-        ObjectDef::Function(_) | ObjectDef::Procedure(_) | ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => {
-            Err(unsupported_kind())
-        }
+        ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => Err(unsupported_kind()),
     }
 }
 
@@ -321,6 +322,13 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         // Rol kendi doğrulamasını yapar: yalnızca değişen/yazılan alanlar (üyelik, ayar, süre sınırı) katı, eski taraf
         // (ad, RESET hedefi ayar adları, REVOKE hedefi üyelik adları) gevşek.
         return role::alter(o, n, ctx);
+    }
+    // Function/Procedure kendi doğrulamasını yapar: eski imza tipleri katı (ifadeye yazılır), yeni tarafta yalnızca
+    // değişen/yazılan alanlar; `OR REPLACE` sınırları (`needs_recreate`) ve salt okunur kapısı.
+    match (old, new) {
+        (ObjectDef::Function(o), ObjectDef::Function(n)) => return routine::alter(ctx, ObjectKind::Function, o, n),
+        (ObjectDef::Procedure(o), ObjectDef::Procedure(n)) => return routine::alter(ctx, ObjectKind::Procedure, o, n),
+        _ => {}
     }
     checked(new, ctx)?;
     // Eski tanımdaki ad/şema da SQL'e girer (RENAME/ALTER hedefi); yalnızca kimlik alanları doğrulanır.
@@ -370,9 +378,9 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Database(d) => database::drop(d, o.force, ctx),
         // DROP OWNED / REASSIGN OWNED otomatikleştirilmez (Karar 9).
         ObjectDef::Role(d) => role::drop(d),
-        ObjectDef::Function(_) | ObjectDef::Procedure(_) | ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => {
-            Err(unsupported_kind())
-        }
+        ObjectDef::Function(d) => routine::drop(ObjectKind::Function, d, cascade),
+        ObjectDef::Procedure(d) => routine::drop(ObjectKind::Procedure, d, cascade),
+        ObjectDef::Trigger(_) | ObjectDef::Type(_) | ObjectDef::Domain(_) => Err(unsupported_kind()),
     }
 }
 
@@ -749,9 +757,9 @@ mod tests {
 
     #[test]
     fn routine_trigger_type_domain_are_placeholders_until_their_builders() {
-        // Task 2–5'in üreticileri gelene kadar: create/alter/drop/validate yer tutucu "kind" hatası; kimlik kolları gerçek.
+        // Task 3–5'in üreticileri gelene kadar: create/alter/drop/validate yer tutucu "kind" hatası; kimlik kolları gerçek.
         let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
-        for d in new_kind_defs("public") {
+        for d in new_kind_defs("public").into_iter().skip(2) {
             assert_eq!(validate(&d, &ctx())[0].path, "kind", "{d:?}");
             assert_eq!(kind(create(&d, &ctx())), "kind", "{d:?}");
             assert_eq!(kind(alter(&d, &d, &ctx())), "kind", "{d:?}");
@@ -766,6 +774,29 @@ mod tests {
         // Function ↔ Procedure ayrı türlerdir: alter tür uyuşmazlığı.
         let defs = new_kind_defs("public");
         assert!(alter(&defs[0], &defs[1], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
+    }
+
+    #[test]
+    fn routine_is_wired() {
+        let defs = new_kind_defs("public");
+        let (func, proc) = (&defs[0], &defs[1]);
+        assert!(validate(func, &ctx()).is_empty());
+        assert!(validate(proc, &ctx()).is_empty());
+        assert_eq!(
+            create(func, &ctx()).unwrap().statements[0].sql,
+            "CREATE FUNCTION public.f() RETURNS void LANGUAGE \"sql\" VOLATILE PARALLEL UNSAFE AS $pgt$SELECT 1$pgt$"
+        );
+        assert_eq!(create(proc, &ctx()).unwrap().statements[0].sql, "CREATE PROCEDURE public.f() LANGUAGE \"sql\" AS $pgt$SELECT 1$pgt$");
+        assert!(alter(func, func, &ctx()).unwrap().statements.is_empty());
+        assert!(alter(proc, proc, &ctx()).unwrap().statements.is_empty());
+        assert_eq!(drop(func, false, &ctx()).unwrap().statements[0].sql, "DROP FUNCTION public.f()");
+        assert_eq!(drop(proc, true, &ctx()).unwrap().statements[0].sql, "DROP PROCEDURE public.f() CASCADE");
+        // Sürüm kapısı dağıtıcıdan geçer; eski taraf `old.` önekiyle; sistem şeması drop'ta reddedilir.
+        assert_eq!(create(proc, &BuildCtx { version_num: 100000, ..Default::default() }).unwrap_err()[0].path, "kind");
+        let sys = &new_kind_defs("pg_catalog")[0];
+        assert_eq!(alter(sys, func, &ctx()).unwrap_err()[0].path, "old.schema");
+        assert_eq!(drop(sys, false, &ctx()).unwrap_err()[0].path, "schema");
+        assert_eq!(drop_with(func, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
     }
 
     #[test]

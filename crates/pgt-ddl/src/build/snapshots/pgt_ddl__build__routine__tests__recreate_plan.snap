@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/build/routine.rs
+expression: render(&pl)
+---
+[DataLoss] DROP FUNCTION public.f(integer)  -- GRANT'lar ve bağımlılar kaybolur; bağımlı nesne varsa PG reddeder
+[Safe] CREATE FUNCTION app.g(x bigint) RETURNS bigint LANGUAGE plpgsql VOLATILE SECURITY DEFINER PARALLEL UNSAFE AS $pgt$BEGIN RETURN 1; END$pgt$
+[Safe] COMMENT ON FUNCTION app.g(bigint) IS 'c'
+[Safe] ALTER FUNCTION app.g(bigint) OWNER TO a
+WARN: Yeniden oluşturma: yetkiler (GRANT) yeniden verilmelidir
+WARN: Fonksiyon sahibinin yetkileriyle çalışır; SET search_path = … önerilir.

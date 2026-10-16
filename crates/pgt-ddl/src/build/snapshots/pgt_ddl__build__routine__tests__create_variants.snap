@@ -1,0 +1,57 @@
+---
+source: crates/pgt-ddl/src/build/routine.rs
+expression: out
+---
+# skaler
+[Safe] CREATE FUNCTION public.f() RETURNS integer LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE AS $pgt$BEGIN RETURN 1; END$pgt$
+
+# setof
+[Safe] CREATE FUNCTION public.f() RETURNS SETOF text LANGUAGE "sql" VOLATILE PARALLEL UNSAFE AS $pgt$SELECT 'a'$pgt$
+
+# table
+[Safe] CREATE FUNCTION public.f() RETURNS TABLE (id integer, "Ad" text) LANGUAGE "sql" VOLATILE PARALLEL UNSAFE AS $pgt$SELECT 1, 'x'$pgt$
+
+# trigger
+[Safe] CREATE FUNCTION public.tf() RETURNS trigger LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE AS $pgt$BEGIN RETURN NEW; END$pgt$
+
+# void
+[Safe] CREATE FUNCTION public.f() RETURNS void LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE AS $pgt$BEGIN END$pgt$
+
+# procedure
+[Safe] CREATE PROCEDURE public.p(x integer) LANGUAGE plpgsql AS $pgt$BEGIN NULL; END$pgt$
+
+# out/inout/variadic
+[Safe] CREATE FUNCTION public.f(a integer, OUT o text, INOUT io bigint, VARIADIC rest numeric[]) RETURNS record LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE AS $pgt$BEGIN RETURN 1; END$pgt$
+
+# default
+[Safe] CREATE FUNCTION public.f(a integer, b text DEFAULT ('x'
+), integer DEFAULT (1 + 2 -- yorum
+
+)) RETURNS integer LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE AS $pgt$BEGIN RETURN 1; END$pgt$
+
+# set
+[Safe] CREATE FUNCTION public.f() RETURNS integer LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE SET search_path = '$user', 'public' SET work_mem = '64MB' AS $pgt$BEGIN RETURN 1; END$pgt$
+
+# security definer
+[Safe] CREATE FUNCTION public.f() RETURNS integer LANGUAGE plpgsql VOLATILE SECURITY DEFINER PARALLEL UNSAFE AS $pgt$BEGIN RETURN 1; END$pgt$
+WARN: Fonksiyon sahibinin yetkileriyle çalışır; SET search_path = … önerilir.
+
+# leakproof
+[Safe] CREATE FUNCTION public.f() RETURNS integer LANGUAGE plpgsql IMMUTABLE STRICT LEAKPROOF PARALLEL UNSAFE AS $pgt$BEGIN RETURN 1; END$pgt$
+
+# parallel safe
+[Safe] CREATE FUNCTION public.f() RETURNS integer LANGUAGE plpgsql STABLE PARALLEL SAFE AS $pgt$BEGIN RETURN 1; END$pgt$
+
+# cost/rows
+[Safe] CREATE FUNCTION public.f() RETURNS SETOF integer LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE COST 10 ROWS 2.5 AS $pgt$BEGIN RETURN 1; END$pgt$
+
+# sahip/yorum
+[Safe] CREATE FUNCTION public.f(a integer) RETURNS integer LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE AS $pgt$BEGIN RETURN 1; END$pgt$
+[Safe] COMMENT ON FUNCTION public.f(integer) IS 'it''s'
+[Safe] ALTER FUNCTION public.f(integer) OWNER TO "Bob"
+
+# procedure tam
+[Safe] CREATE PROCEDURE public.p() LANGUAGE plpgsql SECURITY DEFINER SET work_mem = '1MB' AS $pgt$BEGIN NULL; END$pgt$
+[Safe] COMMENT ON PROCEDURE public.p() IS 'c'
+[Safe] ALTER PROCEDURE public.p() OWNER TO o
+WARN: Fonksiyon sahibinin yetkileriyle çalışır; SET search_path = … önerilir.

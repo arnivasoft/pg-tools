@@ -1,0 +1,9 @@
+---
+source: crates/pgt-ddl/src/build/routine.rs
+expression: render(&pl)
+---
+[Safe] CREATE OR REPLACE FUNCTION public.f(x int) RETURNS integer LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE AS $pgt$BEGIN RETURN x; END$pgt$
+[Safe] ALTER FUNCTION public.f(integer) RENAME TO "select"
+[Safe] ALTER FUNCTION public."select"(integer) SET SCHEMA "App"
+[Safe] COMMENT ON FUNCTION "App"."select"(int) IS NULL
+[Safe] ALTER FUNCTION "App"."select"(int) OWNER TO b
