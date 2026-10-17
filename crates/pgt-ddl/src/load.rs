@@ -850,7 +850,7 @@ async fn load_role(mgr: &ConnectionManager, server: Uuid, target: Target, oid: u
             Ok((head, members, settings))
         })
         .await?;
-    let h = head.first().ok_or_else(|| not_found("rol"))?;
+    let h = head.first().ok_or_else(|| not_found(crate::error_codes::ROLE_SUBJECT))?;
     if h.get::<_, bool>("is_system") {
         return Err(Error::Invalid("sistem rolü düzenlenemez".to_string()));
     }

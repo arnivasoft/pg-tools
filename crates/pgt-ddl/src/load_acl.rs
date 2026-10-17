@@ -363,7 +363,7 @@ fn default_editable(unsupported: &[String]) -> bool {
 }
 
 /// Bir rolün (genel ya da şema kapsamlı) varsayılan yetkilerini okur. `scope.role` `None` → bağlı rol; rol yok →
-/// `NotFound("rol")`; şema yok → `NotFound("şema")`; sistem şeması → salt okunur. `pg_default_acl` veritabanı başınadır:
+/// `NotFound(ROLE_SUBJECT)` (arayüze `role_not_found`); şema yok → `NotFound("şema")` (`not_found`); sistem şeması → salt okunur. `pg_default_acl` veritabanı başınadır:
 /// hedef veritabanından okunur.
 pub async fn load_default_acl(mgr: &ConnectionManager, server: Uuid, database_oid: u32, scope: DefaultAclScope) -> Result<DefaultAclDef> {
     let target = target_for(ObjectKind::Schema, Some(database_oid))?;
@@ -386,7 +386,7 @@ pub async fn load_default_acl(mgr: &ConnectionManager, server: Uuid, database_oi
             }
         })
         .await?;
-    let h = head.first().ok_or_else(|| Error::NotFound("rol".to_string()))?;
+    let h = head.first().ok_or_else(|| Error::NotFound(crate::error_codes::ROLE_SUBJECT.to_string()))?;
     if schema_oid.is_some() && !h.get::<_, bool>("schema_found") {
         return Err(Error::NotFound("şema".to_string()));
     }
