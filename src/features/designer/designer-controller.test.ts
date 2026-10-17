@@ -1607,3 +1607,59 @@ describe("designer-controller Plan 15: uygulama sonrası akışlar", () => {
     expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "stale" });
   });
 });
+
+describe("designer-controller Plan 19: preset ve editable/unsupported", () => {
+  const fn = (p: Record<string, unknown> = {}): ObjectDef => ({
+    kind: "function", schema: "public", name: "", owner: null, comment: null, language: "plpgsql", args: [],
+    returns: { kind: "trigger" }, body: "BEGIN\n  RETURN NEW;\nEND;", volatility: "volatile", strict: false, securityDefiner: false,
+    leakproof: false, parallel: "unsafe", cost: null, rows: null, settings: [], recreate: false, editable: true, unsupported: [], ...p,
+  } as ObjectDef);
+
+  it("create preset ddlDefaults'a aynen geçer (trigger_function); reload aynı preset'i gönderir", async () => {
+    const s = setup();
+    s.api.ddlDefaults.mockResolvedValue(fn());
+    await s.ctl.openCreate({
+      tabId: "F1", serverId: "S1", databaseOid: 5, create: { kind: "function", context: { schemaOid: 2200, tableOid: null }, preset: "trigger_function" },
+      refreshNodeId: "coll-tf",
+    });
+    expect(s.api.ddlDefaults).toHaveBeenLastCalledWith("S1", 5, "function", { schemaOid: 2200, tableOid: null }, "trigger_function");
+    await s.ctl.reload("F1", { force: true });
+    expect(s.api.ddlDefaults).toHaveBeenCalledTimes(2);
+    expect(s.api.ddlDefaults).toHaveBeenLastCalledWith("S1", 5, "function", { schemaOid: 2200, tableOid: null }, "trigger_function");
+  });
+
+  it("ddl_defaults'ın editable/unsupported alanları düzenleme sonrası PlanRequest'te korunur", async () => {
+    const s = setup();
+    s.api.ddlDefaults.mockResolvedValue(fn());
+    await s.ctl.openCreate({
+      tabId: "F2", serverId: "S1", databaseOid: 5, create: { kind: "function", context: { schemaOid: 2200, tableOid: null }, preset: null }, refreshNodeId: null,
+    });
+    s.ctl.edit("F2", (d) => {
+      if (d.kind === "function") d.name = "f";
+    });
+    await settle();
+    const req = s.api.ddlPreview.mock.calls.at(-1)![2];
+    expect(req.op).toBe("create");
+    const def = (req as Extract<PlanRequest, { op: "create" }>).def as Record<string, unknown>;
+    expect(def).toMatchObject({ kind: "function", name: "f", editable: true, unsupported: [], recreate: false });
+    // Varsayılana dönen düzenleme kirli değil (editable/unsupported karşılaştırmada korunur)
+    s.ctl.edit("F2", (d) => {
+      if (d.kind === "function") d.name = "";
+    });
+    expect(s.ctl.isDirty("F2")).toBe(false);
+  });
+
+  it("alter: yüklenen editable=false + unsupported old/new'de aynen gider", async () => {
+    const s = setup();
+    const loaded = fn({ name: "f", editable: false, unsupported: ["C dili"] });
+    s.api.ddlLoad.mockResolvedValue(loaded);
+    await s.ctl.openAlter({ tabId: "F3", serverId: "S1", databaseOid: 5, object: { kind: "function", oid: 9 }, refreshNodeId: null });
+    s.ctl.edit("F3", (d) => {
+      if (d.kind === "function") d.comment = "x";
+    });
+    await settle();
+    const req = s.api.ddlPreview.mock.calls.at(-1)![2] as Extract<PlanRequest, { op: "alter" }>;
+    expect(req.old).toMatchObject({ editable: false, unsupported: ["C dili"] });
+    expect(req.new).toMatchObject({ editable: false, unsupported: ["C dili"], comment: "x" });
+  });
+});

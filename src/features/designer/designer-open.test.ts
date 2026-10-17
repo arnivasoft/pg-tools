@@ -379,3 +379,19 @@ describe("designer-open Plan 15: sunucu kapsamı", () => {
     }
   });
 });
+
+describe("designer-open Plan 19: preset", () => {
+  it("trigfuncs koleksiyonundan Oluştur preset'i openCreate'e taşır", async () => {
+    const target: DdlTarget = {
+      serverId: "S1", databaseOid: 5, object: null, create: { kind: "function", context: { schemaOid: 10, tableOid: null }, preset: "trigger_function" },
+      focus: null, refreshNodeId: "coll-seq",
+    };
+    const { opener, designer, store } = setup(target);
+    await opener.open("coll-seq", "create");
+    const tab = store.state.designers[0];
+    expect(designer.openCreate).toHaveBeenCalledWith({
+      tabId: tab.id, serverId: "S1", databaseOid: 5, create: { kind: "function", context: { schemaOid: 10, tableOid: null }, preset: "trigger_function" },
+      refreshNodeId: "coll-seq",
+    });
+  });
+});
