@@ -1,0 +1,8 @@
+---
+source: crates/pgt-ddl/src/build/trigger.rs
+expression: render(&pl)
+---
+[Safe] ALTER TRIGGER tr ON public.t RENAME TO "select"
+[Safe] CREATE OR REPLACE TRIGGER "select" AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf()
+[Safe] ALTER TABLE public.t ENABLE REPLICA TRIGGER "select"
+[Safe] COMMENT ON TRIGGER "select" ON public.t IS 'd'

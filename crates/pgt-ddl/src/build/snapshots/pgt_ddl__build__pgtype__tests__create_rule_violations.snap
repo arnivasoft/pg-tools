@@ -1,0 +1,31 @@
+---
+source: crates/pgt-ddl/src/build/pgtype.rs
+expression: out
+---
+etiket boş: body.values[1].label
+etiket NUL: body.values[0].label
+etiket satır sonu: body.values[0].label
+etiket C1: body.values[0].label
+etiket 64 bayt: body.values[0].label
+etiket 64 bayt çok baytlı: body.values[0].label
+etiket tekrar: body.values[2].label
+öznitelik adı boş: body.attributes[0].name
+öznitelik adı tekrar: body.attributes[1].name
+öznitelik tipi enjeksiyon: body.attributes[0].typeName
+öznitelik tipi NOT NULL: body.attributes[0].typeName
+öznitelik tipi boş: body.attributes[0].typeName
+öznitelik collation boş: body.attributes[0].collation
+range alt tip boş: body.subtype
+range alt tip enjeksiyon: body.subtype
+range opclass satır sonu: body.subtypeOpclass
+range collation boş: body.collation
+range canonical üç parça: body.canonical
+range canonical parantez: body.canonical
+range subtype_diff boş: body.subtypeDiff
+range subtype_diff enjeksiyon: body.subtypeDiff
+range multirange boş: body.multirangeTypeName
+ad boş: name
+ad 64 bayt: name
+şema sistem: schema
+sahip boş: owner
+yorum NUL: comment

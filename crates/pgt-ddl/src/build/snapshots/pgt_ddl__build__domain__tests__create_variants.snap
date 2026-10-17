@@ -1,0 +1,26 @@
+---
+source: crates/pgt-ddl/src/build/domain.rs
+expression: out
+---
+# yalın
+[Safe] CREATE DOMAIN public.d AS integer
+
+# tam
+[Safe] CREATE DOMAIN public.d AS character varying(20) COLLATE "C" DEFAULT ('x'
+) NOT NULL CONSTRAINT uzun CHECK (length(VALUE) > 1
+) CHECK (VALUE <> 'y'
+) CONSTRAINT "Büyük Ad" CHECK (VALUE ~ '^[a-z]' -- yorum
+
+)
+
+# yorum + sahip
+[Safe] CREATE DOMAIN public.d AS integer
+[Safe] COMMENT ON DOMAIN public.d IS 'it''s'
+[Safe] ALTER DOMAIN public.d OWNER TO "Sahip"
+
+# dizi tipi + yalnız NOT NULL
+[Safe] CREATE DOMAIN public.d AS numeric(10,2)[] NOT NULL
+
+# yalnız adsız kısıt
+[Safe] CREATE DOMAIN public.d AS integer CHECK (VALUE > 0
+)

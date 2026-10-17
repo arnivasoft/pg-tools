@@ -1,0 +1,8 @@
+---
+source: crates/pgt-ddl/src/build/trigger.rs
+expression: render(&pl)
+---
+[Destructive] DROP TRIGGER tr ON public.t  -- aynı transaction içinde yeniden kurulur
+[Safe] CREATE TRIGGER tr AFTER INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf()
+[Safe] ALTER TABLE public.t ENABLE ALWAYS TRIGGER tr
+[Safe] COMMENT ON TRIGGER tr ON public.t IS 'c'

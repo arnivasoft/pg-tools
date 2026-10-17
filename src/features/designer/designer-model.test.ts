@@ -50,6 +50,30 @@ describe("kindLabel / defName", () => {
       start: "1", cache: "1", cycle: false, ownedBy: null, comment: null,
     })).toBe("s.q");
   });
+  it("Plan 18 türleri: etiketler; function/procedure/type/domain şema nitelikli, trigger tablo bağlamıyla", () => {
+    expect(["function", "procedure", "trigger", "type", "domain"].map((k) => kindLabel(k as ObjectKind))).toEqual([
+      "Function", "Procedure", "Trigger", "Type", "Domain",
+    ]);
+    const base = { schema: "s", name: "n", owner: null, comment: null, editable: true, unsupported: [] };
+    const fn = {
+      ...base, language: "sql", args: [], body: "SELECT 1", volatility: "volatile" as const, strict: false, securityDefiner: false,
+      leakproof: false, parallel: "unsafe" as const, cost: null, rows: null, settings: [], recreate: false,
+    };
+    expect(defName({ kind: "function", ...fn, returns: { kind: "void" } })).toBe("s.n");
+    expect(defName({ kind: "procedure", ...fn, returns: null })).toBe("s.n");
+    expect(defName({ kind: "type", ...base, body: { variant: "enum", values: [] } })).toBe("s.n");
+    expect(defName({
+      kind: "domain", ...base, baseType: "integer", collation: null, default: null, notNull: false, constraints: [],
+    })).toBe("s.n");
+    const trg = {
+      schema: "s", table: "t", name: "tr", timing: "before" as const, level: "row" as const, when: null,
+      events: { insert: true, update: false, updateColumns: [], delete: false, truncate: false },
+      functionSchema: "s", functionName: "tf", args: [], oldTable: null, newTable: null, constraint: false, deferrable: false,
+      initiallyDeferred: false, enabled: "origin" as const, comment: null, editable: true, unsupported: [],
+    };
+    expect(defName({ kind: "trigger", ...trg })).toBe("s.t.tr");
+    expect(defName({ kind: "trigger", ...trg, name: "" })).toBe("");
+  });
   it("Plan 14 türleri: etiketler; view/MV şema nitelikli, database/role düz ad", () => {
     expect([kindLabel("view"), kindLabel("materialized_view"), kindLabel("database"), kindLabel("role")]).toEqual([
       "View", "Materialized View", "Database", "Role",
@@ -495,7 +519,7 @@ describe("Plan 15: sunucu kapsamı, gizlenmiş plan, parola kapısı", () => {
   it("isServerScoped: yalnızca database ve role", () => {
     const table: Record<ObjectKind, boolean> = {
       schema: false, sequence: false, extension: false, index: false, table: false, view: false, materialized_view: false,
-      database: true, role: true,
+      database: true, role: true, function: false, procedure: false, trigger: false, type: false, domain: false,
     };
     for (const [k, v] of Object.entries(table)) expect(isServerScoped(k as ObjectKind)).toBe(v);
   });
@@ -548,7 +572,7 @@ describe("Plan 15: sunucu kapsamı, gizlenmiş plan, parola kapısı", () => {
 
   it("designerTabKey: databaseOid null → alter:role:s1:null:16384; create anahtarında da null", () => {
     expect(designerTabKey([], { serverId: "s1", databaseOid: null, object: { kind: "role", oid: 16384 } })).toBe("alter:role:s1:null:16384");
-    expect(designerTabKey([], { serverId: "s1", databaseOid: null, create: { kind: "database", context: { schemaOid: null, tableOid: null } } }))
+    expect(designerTabKey([], { serverId: "s1", databaseOid: null, create: { kind: "database", context: { schemaOid: null, tableOid: null }, preset: null } }))
       .toBe("create:database:s1:null:::1");
   });
 });

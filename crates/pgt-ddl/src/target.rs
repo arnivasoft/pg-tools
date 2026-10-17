@@ -5,15 +5,27 @@
 //! kısıt `…/tbl:T/con:K`. Kolon/kısıt düğümü tablonun kendisini hedefler ve `focus` ile diyaloğun açılacağı satırı
 //! bildirir. Görünüm `…/sch:S/view:V`, materialized view `…/sch:S/mv:M` (koleksiyonları `views`/`matviews`).
 //! Sunucu kapsamlı: veritabanı `db:N` (koleksiyon `dbs`), rol `role:N` (koleksiyon `roles`) — `databaseOid` `null`.
+//! Fonksiyon `…/sch:S/fn:F`, procedure `proc:P`, trigger fonksiyonu `tfn:F` (Function), tip `typ:T`, domain `dom:D`
+//! (koleksiyonları `functions`/`procedures`/`trigfuncs`/`types`/`domains`; `trigfuncs`'tan oluşturma `preset` taşır);
+//! trigger `…/tbl:T/trg:G` (bölüm tablosu dahil; koleksiyonu `triggers`, oluşturmada `tableOid = T`).
 //! Görünüm/materialized view kolonları ve diğer her düğüm boştur.
 
 use pgt_catalog::node::{Coll, NodeId, Seg};
 use pgt_core::{Error, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
 use crate::{CreateContext, ObjectKind, ObjectRef};
+
+/// "Yeni …" diyaloğunun ön ayarı (koleksiyondan gelir).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum CreatePreset {
+    /// "Trigger Functions" koleksiyonu: dönüşü `trigger` olan Function.
+    TriggerFunction,
+}
 
 /// "Yeni …" diyaloğunun türü ve bağlamı.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -22,6 +34,8 @@ use crate::{CreateContext, ObjectKind, ObjectRef};
 pub struct DdlCreate {
     pub kind: ObjectKind,
     pub context: CreateContext,
+    /// Yalnızca `trigfuncs` koleksiyonunda dolu.
+    pub preset: Option<CreatePreset>,
 }
 
 /// Tablo diyaloğunun açılınca odaklanacağı satır: kolon (`attnum`) ya da kısıt (`pg_constraint.oid`).
@@ -72,7 +86,7 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
     let database_oid = path.iter().find_map(|s| if let Seg::Db(o) = s { Some(*o) } else { None });
     let mut t = DdlTarget { server_id: server, database_oid, object: None, create: None, focus: None, refresh_node_id: None };
     let obj = |kind, oid| Some(ObjectRef { kind, oid });
-    let create = |kind, schema_oid, table_oid| Some(DdlCreate { kind, context: CreateContext { schema_oid, table_oid } });
+    let create = |kind, schema_oid, table_oid| Some(DdlCreate { kind, context: CreateContext { schema_oid, table_oid }, preset: None });
     let last = path.len().checked_sub(1);
     let prev = path.len().checked_sub(2).map(|i| path[i]);
     // Üst tablo (kolon/kısıt düğümünün hemen üstündeki, ağaçta geçerli konumdaki tablo).
@@ -122,6 +136,42 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
         Some(Seg::Coll(Coll::MatViews)) => {
             if let Some(Seg::Schema(s)) = prev {
                 t.create = create(ObjectKind::MaterializedView, Some(s), None);
+            }
+        }
+        // Şema altındaki fonksiyon/procedure/trigger fonksiyonu/tip/domain.
+        Some(Seg::Function(oid) | Seg::TriggerFunction(oid)) if matches!(prev, Some(Seg::Schema(_))) => {
+            t.object = obj(ObjectKind::Function, oid)
+        }
+        Some(Seg::Procedure(oid)) if matches!(prev, Some(Seg::Schema(_))) => t.object = obj(ObjectKind::Procedure, oid),
+        Some(Seg::Type(oid)) if matches!(prev, Some(Seg::Schema(_))) => t.object = obj(ObjectKind::Type, oid),
+        Some(Seg::Domain(oid)) if matches!(prev, Some(Seg::Schema(_))) => t.object = obj(ObjectKind::Domain, oid),
+        Some(Seg::Coll(c @ (Coll::Functions | Coll::Procedures | Coll::TriggerFunctions | Coll::Types | Coll::Domains))) => {
+            if let Some(Seg::Schema(s)) = prev {
+                let kind = match c {
+                    Coll::Procedures => ObjectKind::Procedure,
+                    Coll::Types => ObjectKind::Type,
+                    Coll::Domains => ObjectKind::Domain,
+                    _ => ObjectKind::Function,
+                };
+                t.create = create(kind, Some(s), None);
+                if c == Coll::TriggerFunctions
+                    && let Some(cr) = t.create.as_mut()
+                {
+                    cr.preset = Some(CreatePreset::TriggerFunction);
+                }
+            }
+        }
+        // Trigger: ağaçta geçerli konumdaki (bölüm) tablonun altında.
+        Some(Seg::Trigger(oid)) => {
+            if parent_table.is_some() {
+                t.object = obj(ObjectKind::Trigger, oid);
+            }
+        }
+        Some(Seg::Coll(Coll::Triggers)) => {
+            if let Some(tbl) = parent_table
+                && let Some(s) = path.iter().rev().find_map(|s| if let Seg::Schema(o) = s { Some(*o) } else { None })
+            {
+                t.create = create(ObjectKind::Trigger, Some(s), Some(tbl));
             }
         }
         Some(Seg::Coll(Coll::Indexes)) => {
@@ -175,6 +225,13 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
             ObjectKind::MaterializedView => Coll::MatViews,
             ObjectKind::Database => Coll::Databases,
             ObjectKind::Role => Coll::Roles,
+            // Trigger fonksiyonu kendi koleksiyonunda listelenir.
+            ObjectKind::Function if matches!(path.last(), Some(Seg::TriggerFunction(_))) => Coll::TriggerFunctions,
+            ObjectKind::Function => Coll::Functions,
+            ObjectKind::Procedure => Coll::Procedures,
+            ObjectKind::Trigger => Coll::Triggers,
+            ObjectKind::Type => Coll::Types,
+            ObjectKind::Domain => Coll::Domains,
         };
         t.refresh_node_id = Some(id.parent().child(Seg::Coll(coll)).to_string());
     }
@@ -195,7 +252,66 @@ mod tests {
         Some(ObjectRef { kind, oid })
     }
     fn cr(kind: ObjectKind, schema_oid: Option<u32>, table_oid: Option<u32>) -> Option<DdlCreate> {
-        Some(DdlCreate { kind, context: CreateContext { schema_oid, table_oid } })
+        Some(DdlCreate { kind, context: CreateContext { schema_oid, table_oid }, preset: None })
+    }
+
+    #[test]
+    fn routine_type_domain_and_trigger_nodes() {
+        // (düğüm, nesne, oluşturma, yenilenecek düğüm)
+        let s = |p: &str| Some(format!("srv:{U}/{p}"));
+        let trig_fn = Some(DdlCreate {
+            kind: ObjectKind::Function,
+            context: CreateContext { schema_oid: Some(2200), table_oid: None },
+            preset: Some(CreatePreset::TriggerFunction),
+        });
+        let cases = [
+            ("db:5/sch:2200/fn:32", obj(ObjectKind::Function, 32), None, s("db:5/sch:2200/functions")),
+            ("db:5/sch:2200/proc:33", obj(ObjectKind::Procedure, 33), None, s("db:5/sch:2200/procedures")),
+            // Trigger fonksiyonu bir Function'dır; kendi koleksiyonunda yenilenir.
+            ("db:5/sch:2200/tfn:34", obj(ObjectKind::Function, 34), None, s("db:5/sch:2200/trigfuncs")),
+            ("db:5/sch:2200/typ:35", obj(ObjectKind::Type, 35), None, s("db:5/sch:2200/types")),
+            ("db:5/sch:2200/dom:36", obj(ObjectKind::Domain, 36), None, s("db:5/sch:2200/domains")),
+            ("db:5/sch:2200/tbl:24576/trg:42", obj(ObjectKind::Trigger, 42), None, s("db:5/sch:2200/tbl:24576/triggers")),
+            // Bölüm tablosunun trigger'ı (klonlanmışsa yükleyici salt okunur döner).
+            (
+                "db:5/sch:2200/tbl:24576/tbl:24580/trg:43",
+                obj(ObjectKind::Trigger, 43),
+                None,
+                s("db:5/sch:2200/tbl:24576/tbl:24580/triggers"),
+            ),
+            ("db:5/sch:2200/functions", None, cr(ObjectKind::Function, Some(2200), None), s("db:5/sch:2200/functions")),
+            ("db:5/sch:2200/procedures", None, cr(ObjectKind::Procedure, Some(2200), None), s("db:5/sch:2200/procedures")),
+            ("db:5/sch:2200/trigfuncs", None, trig_fn, s("db:5/sch:2200/trigfuncs")),
+            ("db:5/sch:2200/types", None, cr(ObjectKind::Type, Some(2200), None), s("db:5/sch:2200/types")),
+            ("db:5/sch:2200/domains", None, cr(ObjectKind::Domain, Some(2200), None), s("db:5/sch:2200/domains")),
+            ("db:5/sch:2200/tbl:24576/triggers", None, cr(ObjectKind::Trigger, Some(2200), Some(24576)), s("db:5/sch:2200/tbl:24576/triggers")),
+            (
+                "db:5/sch:2200/tbl:24576/tbl:24580/triggers",
+                None,
+                cr(ObjectKind::Trigger, Some(2200), Some(24580)),
+                s("db:5/sch:2200/tbl:24576/tbl:24580/triggers"),
+            ),
+        ];
+        for (p, object, create, refresh) in cases {
+            let x = t(p);
+            assert_eq!((x.object, x.create, x.focus, x.database_oid), (object, create, None, Some(5)), "{p}");
+            assert_eq!(x.refresh_node_id, refresh, "{p}");
+            let id = x.refresh_node_id.unwrap();
+            assert_eq!(NodeId::parse(&id).unwrap().to_string(), id, "{p}");
+        }
+    }
+
+    #[test]
+    fn create_preset_serializes_snake_case() {
+        let v = serde_json::to_value(t("db:5/sch:2200/trigfuncs")).unwrap();
+        assert_eq!(
+            v["create"],
+            serde_json::json!({"kind": "function", "context": {"schemaOid": 2200, "tableOid": null}, "preset": "trigger_function"})
+        );
+        let v = serde_json::to_value(t("db:5/sch:2200/functions")).unwrap();
+        assert!(v["create"]["preset"].is_null());
+        let v = serde_json::to_value(t("db:5/sch:2200/tbl:24576/triggers")).unwrap();
+        assert_eq!(v["create"], serde_json::json!({"kind": "trigger", "context": {"schemaOid": 2200, "tableOid": 24576}, "preset": null}));
     }
 
     #[test]
@@ -314,16 +430,43 @@ mod tests {
             "db:5/sch:2200/tbl:24576/columns",
             "db:5/sch:2200/tbl:24576/constraints",
             "db:5/sch:2200/tbl:24576/partitions",
-            "db:5/sch:2200/tbl:24576/triggers",
             "db:5/sch:2200/tbl:24576/policies",
-            "db:5/sch:2200/tbl:24576/trg:42",
             "db:5/sch:2200/tbl:24576/pol:43",
             // Görünüm / materialized view kolonları tablo diyaloğu açmaz.
             "db:5/sch:2200/view:30/columns",
             "db:5/sch:2200/view:30/col:1",
             "db:5/sch:2200/mv:31/col:1",
             "db:5/sch:2200/mv:31/columns",
-            "db:5/sch:2200/fn:32",
+            // Fonksiyon/tip/domain yalnızca şema altında, trigger yalnızca (bölüm) tablo altında.
+            "db:5/fn:32",
+            "db:5/proc:32",
+            "db:5/tfn:32",
+            "db:5/typ:32",
+            "db:5/dom:32",
+            "db:5/trg:42",
+            "db:5/functions",
+            "db:5/procedures",
+            "db:5/trigfuncs",
+            "db:5/types",
+            "db:5/domains",
+            "db:5/triggers",
+            "db:5/sch:2200/triggers",
+            "db:5/sch:2200/trg:42",
+            "db:5/sch:2200/view:30/triggers",
+            "db:5/sch:2200/view:30/trg:42",
+            "db:5/sch:2200/mv:31/trg:42",
+            "db:5/sch:2200/tbl:24576/functions",
+            "db:5/sch:2200/tbl:24576/fn:32",
+            "db:5/sch:2200/tbl:24576/typ:32",
+            "db:5/sch:2200/fn:32/fn:33",
+            "db:5/sch:2200/tbl:24576/triggers/trg:42",
+            "db:5/sch:2200/tables/tbl:24576/trg:42",
+            "fn:32",
+            "functions",
+            "sch:2200/fn:32",
+            "sch:2200/functions",
+            "sch:2200/tbl:1/trg:2",
+            "sch:2200/tbl:1/triggers",
             // Sunucu kapsamlı düğümler yalnızca sunucunun hemen altında; görünümler yalnızca şema altında.
             "db:5/roles",
             "db:5/role:10",
@@ -414,11 +557,11 @@ mod tests {
         let v = serde_json::to_value(t("db:5")).unwrap();
         assert_eq!(v["object"], serde_json::json!({"kind": "database", "oid": 5}));
         let v = serde_json::to_value(t("roles")).unwrap();
-        assert_eq!(v["create"], serde_json::json!({"kind": "role", "context": {"schemaOid": null, "tableOid": null}}));
+        assert_eq!(v["create"], serde_json::json!({"kind": "role", "context": {"schemaOid": null, "tableOid": null}, "preset": null}));
         let v = serde_json::to_value(t("db:5/sch:2200/matviews")).unwrap();
         assert_eq!(v["create"]["kind"], "materialized_view");
         assert_eq!(v["databaseOid"], 5);
         let v = serde_json::to_value(t("db:5/sch:2200/tables")).unwrap();
-        assert_eq!(v["create"], serde_json::json!({"kind": "table", "context": {"schemaOid": 2200, "tableOid": null}}));
+        assert_eq!(v["create"], serde_json::json!({"kind": "table", "context": {"schemaOid": 2200, "tableOid": null}, "preset": null}));
     }
 }

@@ -84,7 +84,7 @@ pub(crate) struct TableHead {
 }
 
 pub(crate) async fn head(cat: &Catalog, server: Uuid, db: u32, table: u32) -> Result<TableHead> {
-    let r = crate::db::query_one(&cat.mgr, server, Target::Database(db), &HEAD, p![table], "tablo").await?;
+    let r = crate::db::query_one_ddl(&cat.mgr, server, Target::Database(db), &HEAD, p![table], "tablo").await?;
     Ok(TableHead {
         qname: r.get("qname"),
         owner: r.get("owner"),
@@ -104,7 +104,7 @@ pub(crate) async fn head(cat: &Catalog, server: Uuid, db: u32, table: u32) -> Re
 pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: u32, table: u32) -> Result<String> {
     use crate::ddl::{ColumnDef, column_line, comment, grants, header, join_blocks, owner};
     let target = Target::Database(db);
-    let q = |sql: &'static VersionedSql, params: crate::db::Params| query(&cat.mgr, server, target, sql, params);
+    let q = |sql: &'static VersionedSql, params: crate::db::Params| crate::db::query_ddl(&cat.mgr, server, target, sql, params);
     // Aynı bağlantıda eş zamanlı (pipeline) çalışır: tek tur gidiş-dönüşe yakın süre.
     let (h, col_rows, constraints, acl, indexes, triggers, policies, col_acl) = tokio::try_join!(
         head(cat, server, db, table),

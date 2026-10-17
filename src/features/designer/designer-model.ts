@@ -24,6 +24,11 @@ const KIND_LABELS: Record<ObjectKind, string> = {
   materialized_view: "Materialized View",
   database: "Database",
   role: "Role",
+  function: "Function",
+  procedure: "Procedure",
+  trigger: "Trigger",
+  type: "Type",
+  domain: "Domain",
 };
 export function kindLabel(kind: ObjectKind): string {
   return KIND_LABELS[kind];
@@ -48,7 +53,10 @@ export function scriptActionsEnabled(view: PlanView | null): { copy: boolean; op
   return { copy: ok, open: ok };
 }
 
-/** Başlıkta/mesajlarda görünen ad; şema altındaki türler (sequence, indeks, tablo, view, MV) şema nitelikli, ad boşsa boş. */
+/**
+ * Başlıkta/mesajlarda görünen ad; şema altındaki türler (sequence, indeks, tablo, view, MV, function, procedure, type,
+ * domain) şema nitelikli, trigger tablosuyla (`şema.tablo.ad`), ad boşsa boş.
+ */
 export function defName(def: ObjectDef): string {
   if (!def.name) return "";
   switch (def.kind) {
@@ -57,7 +65,13 @@ export function defName(def: ObjectDef): string {
     case "table":
     case "view":
     case "materialized_view":
+    case "function":
+    case "procedure":
+    case "type":
+    case "domain":
       return `${def.schema}.${def.name}`;
+    case "trigger":
+      return `${def.schema}.${def.table}.${def.name}`;
     default:
       return def.name;
   }

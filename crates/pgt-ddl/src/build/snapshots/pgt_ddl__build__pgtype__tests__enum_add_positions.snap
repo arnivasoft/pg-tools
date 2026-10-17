@@ -1,0 +1,22 @@
+---
+source: crates/pgt-ddl/src/build/pgtype.rs
+expression: out
+---
+# başa
+[Safe] ALTER TYPE public.ty ADD VALUE 'x' BEFORE 'a'
+
+# ortaya
+[Safe] ALTER TYPE public.ty ADD VALUE 'x' AFTER 'a'
+
+# sona
+[Safe] ALTER TYPE public.ty ADD VALUE 'x' AFTER 'c'
+
+# başa iki
+[Safe] ALTER TYPE public.ty ADD VALUE 'x' BEFORE 'a'
+[Safe] ALTER TYPE public.ty ADD VALUE 'y' AFTER 'x'
+
+# dağınık
+[Safe] ALTER TYPE public.ty ADD VALUE 'x' AFTER 'a'
+[Safe] ALTER TYPE public.ty ADD VALUE 'y' AFTER 'b'
+[Safe] ALTER TYPE public.ty ADD VALUE 'z' AFTER 'y'
+[Safe] ALTER TYPE public.ty ADD VALUE 'w' AFTER 'c'

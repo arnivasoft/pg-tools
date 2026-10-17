@@ -1,0 +1,25 @@
+---
+source: crates/pgt-ddl/src/build/domain.rs
+expression: out
+---
+temel tip değişimi: baseType (Domain'in temel tipi ve collation'ı oluşturulduktan sonra değiştirilemez.)
+collation değişimi: collation (Domain'in temel tipi ve collation'ı oluşturulduktan sonra değiştirilemez.)
+collation kaldırma: collation (Domain'in temel tipi ve collation'ı oluşturulduktan sonra değiştirilemez.)
+eklenen kısıt adsız: constraints[2].name (Düzenlemede kısıt adı zorunludur (sonradan eşlenebilmesi için).)
+yüklü kısıt adı boşaltılmış: constraints[0].name (Düzenlemede kısıt adı zorunludur (sonradan eşlenebilmesi için).)
+bilinmeyen original: constraints[2].original (Yüklü kısıt bulunamadı.)
+original tekrar: constraints[1].original (Yüklü kısıt birden çok kez eşlenmiş.)
+yeniden adlandırma çakışması: constraints[0].name (Yeni ad başka bir yüklü kısıtla çakışıyor; önce onu ayrı bir değişiklikte yeniden adlandırın.)
+ad tekrar: constraints[2].name (Kısıt adı birden çok kez kullanılmış.)
+yeniden adlandırma geçersiz: constraints[0].name (Ad denetim karakteri (satır sonu, sekme vb.) içeremez.)
+yeni ad geçersiz: constraints[2].name (Ad boş olamaz.)
+NOT VALID yüklü kısıtta: constraints[0].notValid (NOT VALID yalnızca eklenen (yeni ya da ifadesi değişen) kısıtta kullanılabilir.)
+doğrula yeni kısıtta: constraints[2].validate (Doğrulama yalnızca yüklü, doğrulanmamış ve ifadesi değişmeyen kısıtta kullanılabilir.)
+doğrula doğrulanmış kısıtta: constraints[0].validate (Doğrulama yalnızca yüklü, doğrulanmamış ve ifadesi değişmeyen kısıtta kullanılabilir.)
+doğrula ifadesi değişen kısıtta: constraints[1].validate (Doğrulama yalnızca yüklü, doğrulanmamış ve ifadesi değişmeyen kısıtta kullanılabilir.)
+default ;: default (SQL tek bir ifade olmalı; tırnak/yorum dışında ';' kullanılamaz.)
+default ): default (SQL'de parantezler dengeli olmalı (fazladan ')' ya da kapanmamış '(' var).)
+default --: default (SQL satır yorumu (--) ile bitemez; yorumdan sonra yeni satır ekleyin ya da yorumu kaldırın.)
+yeni ifade ;: constraints[2].expression (SQL tek bir ifade olmalı; tırnak/yorum dışında ';' kullanılamaz.)
+değişen ifade ): constraints[0].expression (SQL'de parantezler dengeli olmalı (fazladan ')' ya da kapanmamış '(' var).)
+değişen ifade --: constraints[0].expression (SQL satır yorumu (--) ile bitemez; yorumdan sonra yeni satır ekleyin ya da yorumu kaldırın.)

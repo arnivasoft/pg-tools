@@ -1,0 +1,18 @@
+---
+source: crates/pgt-ddl/src/build/domain.rs
+expression: render(&pl)
+---
+[Safe] ALTER DOMAIN public.d RENAME TO d2
+[Safe] ALTER DOMAIN public.d2 SET SCHEMA app
+[Safe] ALTER DOMAIN app.d2 DROP DEFAULT
+[Safe] ALTER DOMAIN app.d2 DROP NOT NULL
+[Safe] ALTER DOMAIN app.d2 RENAME CONSTRAINT a TO a2
+[Destructive] ALTER DOMAIN app.d2 DROP CONSTRAINT b  -- ifade değişti: kısıt kaldırılıp yeniden eklenir
+[Destructive] ALTER DOMAIN app.d2 DROP CONSTRAINT d
+[Safe] ALTER DOMAIN app.d2 ADD CONSTRAINT b CHECK (VALUE < 20
+)  -- kullanan kolonları tarar
+[Safe] ALTER DOMAIN app.d2 ADD CONSTRAINT e CHECK (VALUE <> 7
+)  -- kullanan kolonları tarar
+[Safe] ALTER DOMAIN app.d2 VALIDATE CONSTRAINT c
+[Safe] COMMENT ON DOMAIN app.d2 IS NULL
+[Safe] ALTER DOMAIN app.d2 OWNER TO r

@@ -3,4 +3,4 @@
 /**
  * Desteklenen nesne türleri.
  */
-export type ObjectKind = "schema" | "sequence" | "extension" | "index" | "table" | "view" | "materialized_view" | "database" | "role";
+export type ObjectKind = "schema" | "sequence" | "extension" | "index" | "table" | "view" | "materialized_view" | "database" | "role" | "function" | "procedure" | "trigger" | "type" | "domain";

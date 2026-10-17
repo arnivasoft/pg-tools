@@ -8,11 +8,14 @@
 //! (alan sınırlarında kapanma/açılma kaymasını yakalamak için). Tarayıcı `standard_conforming_strings = on` varsayar.
 
 pub mod database;
+pub mod domain;
 pub mod extension;
 pub mod freesql;
 pub mod index;
 pub mod matview;
+pub mod pgtype;
 pub mod role;
+pub mod routine;
 pub mod schema;
 pub mod sequence;
 pub mod settings;
@@ -20,13 +23,14 @@ mod sqlscan;
 pub mod table;
 pub mod table_alter;
 pub mod table_constraint;
+pub mod trigger;
 pub mod type_canon;
 pub mod type_syntax;
 pub mod view;
 
 pub use sqlscan::{ScanResult, scan_semicolons};
 
-use crate::model::{FieldError, ObjectDef, ObjectKind};
+use crate::model::{DomainDef, FieldError, MatViewDef, ObjectDef, ObjectKind, TableDef, TriggerDef, ViewDef};
 use crate::plan::{Plan, Risk, Statement};
 
 /// PG tanımlayıcı üst sınırı (BAYT, UTF-8).
@@ -189,6 +193,11 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::MaterializedView(d) => matview::validate(d, ctx),
         ObjectDef::Database(d) => database::validate(d, ctx),
         ObjectDef::Role(d) => role::validate(d, ctx),
+        ObjectDef::Function(d) => routine::validate(ctx, ObjectKind::Function, d),
+        ObjectDef::Procedure(d) => routine::validate(ctx, ObjectKind::Procedure, d),
+        ObjectDef::Trigger(d) => trigger::validate(ctx, d),
+        ObjectDef::Type(d) => pgtype::validate(ctx, d),
+        ObjectDef::Domain(d) => domain::validate(ctx, d),
     }
 }
 
@@ -229,8 +238,73 @@ pub(crate) fn validate_identity(def: &ObjectDef) -> Vec<FieldError> {
         // Rol: görünümle aynı gerekçe (yüklü ad yalnızca `quote_ident` ile yerleşir; gevşek eski taraf). Yeni ad (create,
         // rename hedefi) katıdır ve ayrılmış adlar (`public`, `none`, `pg_*`) reddedilir (`role::validate`/`alter`).
         ObjectDef::Role(d) => check_old_ident("name", &d.name, &mut e),
+        // Function/Procedure/Type/Domain: görünümle aynı gerekçe (yüklü ad yalnızca `quote_ident`/`qualified` ile
+        // yerleşir; gevşek eski taraf, sistem şeması yasak).
+        ObjectDef::Function(d) | ObjectDef::Procedure(d) => {
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("name", &d.name, &mut e);
+        }
+        // Trigger: tablo kapsamlı; tablo adı da ifadeye girer (`ON schema.table`).
+        ObjectDef::Trigger(d) => {
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("table", &d.table, &mut e);
+            check_old_ident("name", &d.name, &mut e);
+        }
+        ObjectDef::Type(d) => {
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("name", &d.name, &mut e);
+        }
+        ObjectDef::Domain(d) => {
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("name", &d.name, &mut e);
+        }
     }
     e
+}
+
+/// Yükleyicinin `INVALID_UTF8_REASON` koyduğu tanım (her tür): gösterim için kayıplı çözülmüş ad/tip metni taşır →
+/// değiştirilemez, silinemez, yeniden oluşturulamaz (kayıplı ad SQL'e yazılmaz). `editable` alanı olan türlerde zaten
+/// kapalıdır; bu kapı aynı kuralı `editable`'ı olmayan tablo/görünüm/MV/rol için de uygular.
+fn invalid_utf8_locked(d: &ObjectDef) -> bool {
+    let unsupported = match d {
+        ObjectDef::Table(d) => &d.unsupported,
+        ObjectDef::View(d) => &d.unsupported,
+        ObjectDef::MaterializedView(d) => &d.unsupported,
+        ObjectDef::Role(d) => &d.unsupported,
+        ObjectDef::Function(d) | ObjectDef::Procedure(d) => &d.unsupported,
+        ObjectDef::Trigger(d) => &d.unsupported,
+        ObjectDef::Type(d) => &d.unsupported,
+        ObjectDef::Domain(d) => &d.unsupported,
+        _ => return false,
+    };
+    unsupported.iter().any(|u| u == crate::load::INVALID_UTF8_REASON)
+}
+
+/// DROP metni yalnızca şema/ad (ve trigger'da tablo) kullanan türlerde, tek gerekçe `INVALID_UTF8_REASON` ise bu
+/// gerekçe olmadan aynı tanım: bu adlar katalogda geçerli UTF-8'dir (kayıplı alanlar DROP'a girmez). Fonksiyon/
+/// procedure (imza kayıplı tip içerir) ve tip (adı kayıplı olabilir) için `None`: kilitli kalır.
+fn droppable_despite_invalid_utf8(d: &ObjectDef) -> Option<ObjectDef> {
+    fn only_reason(u: &[String]) -> bool {
+        matches!(u, [r] if r == crate::load::INVALID_UTF8_REASON)
+    }
+    Some(match d {
+        ObjectDef::Table(t) if only_reason(&t.unsupported) => ObjectDef::Table(TableDef { unsupported: vec![], ..t.clone() }),
+        ObjectDef::View(v) if only_reason(&v.unsupported) => ObjectDef::View(ViewDef { unsupported: vec![], ..v.clone() }),
+        ObjectDef::MaterializedView(m) if only_reason(&m.unsupported) => {
+            ObjectDef::MaterializedView(MatViewDef { unsupported: vec![], ..m.clone() })
+        }
+        ObjectDef::Domain(x) if only_reason(&x.unsupported) => {
+            ObjectDef::Domain(DomainDef { unsupported: vec![], editable: true, ..x.clone() })
+        }
+        ObjectDef::Trigger(x) if only_reason(&x.unsupported) => {
+            ObjectDef::Trigger(TriggerDef { unsupported: vec![], editable: true, ..x.clone() })
+        }
+        _ => return None,
+    })
+}
+
+fn read_only() -> Vec<FieldError> {
+    vec![err("object", routine::READ_ONLY_MSG)]
 }
 
 fn checked(def: &ObjectDef, ctx: &BuildCtx) -> Result<(), Vec<FieldError>> {
@@ -239,6 +313,9 @@ fn checked(def: &ObjectDef, ctx: &BuildCtx) -> Result<(), Vec<FieldError>> {
 }
 
 pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
+    if invalid_utf8_locked(def) {
+        return Err(read_only());
+    }
     // Tablo: paylaşılan doğrulamaya ek olarak yalnızca oluşturmaya özgü kurallar ve nihai ifade taraması.
     let errs = match def {
         ObjectDef::Table(d) => table::validate_create(d, ctx),
@@ -257,6 +334,11 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::MaterializedView(d) => Ok(matview::create(d)),
         ObjectDef::Database(d) => Ok(database::create(d)),
         ObjectDef::Role(d) => Ok(role::create(d)),
+        ObjectDef::Function(d) => routine::create(ctx, ObjectKind::Function, d),
+        ObjectDef::Procedure(d) => routine::create(ctx, ObjectKind::Procedure, d),
+        ObjectDef::Trigger(d) => trigger::create(ctx, d),
+        ObjectDef::Type(d) => pgtype::create(ctx, d),
+        ObjectDef::Domain(d) => domain::create(ctx, d),
     }
 }
 
@@ -265,6 +347,10 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
 pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     if old.kind() != new.kind() {
         return Err(mismatch(old, new));
+    }
+    if invalid_utf8_locked(old) || invalid_utf8_locked(new) {
+        // Değişiklik yoksa boş plan (kayıplı eski adlar doğrulanmaz, hiçbir şey yazılmaz).
+        return if old == new { Ok(Plan::default()) } else { Err(read_only()) };
     }
     if let (ObjectDef::Table(o), ObjectDef::Table(n)) = (old, new) {
         // Tablo kendi doğrulamasını yapar: eski tarafta kimlik alanlarına kolon adları/attnum'lar da girer, yeni
@@ -290,6 +376,22 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         // (ad, RESET hedefi ayar adları, REVOKE hedefi üyelik adları) gevşek.
         return role::alter(o, n, ctx);
     }
+    // Function/Procedure kendi doğrulamasını yapar: eski imza tipleri katı (ifadeye yazılır), yeni tarafta yalnızca
+    // değişen/yazılan alanlar; `OR REPLACE` sınırları (`needs_recreate`) ve salt okunur kapısı.
+    match (old, new) {
+        (ObjectDef::Function(o), ObjectDef::Function(n)) => return routine::alter(ctx, ObjectKind::Function, o, n),
+        (ObjectDef::Procedure(o), ObjectDef::Procedure(n)) => return routine::alter(ctx, ObjectKind::Procedure, o, n),
+        // Trigger kendi doğrulamasını yapar: tablo değiştirilemez, yalnızca değişen/yazılan alanlar, salt okunur kapısı;
+        // yapı değişimi PG 14+'da OR REPLACE, aksi hâlde aynı transaction'da yeniden kurma (Karar 5).
+        (ObjectDef::Trigger(o), ObjectDef::Trigger(n)) => return trigger::alter(ctx, o, n),
+        // Type kendi doğrulamasını yapar: yalnızca değişen/yazılan alanlar, enum/composite `original` eşlemesi, range
+        // gövdesi sabit, tür (variant) değişmez, salt okunur kapısı.
+        (ObjectDef::Type(o), ObjectDef::Type(n)) => return pgtype::alter(ctx, o, n),
+        // Domain kendi doğrulamasını yapar: temel tip/collation create-only, kısıtlar `original` ile eşlenir, yalnızca
+        // değişen/yazılan alanlar, salt okunur kapısı.
+        (ObjectDef::Domain(o), ObjectDef::Domain(n)) => return domain::alter(ctx, o, n),
+        _ => {}
+    }
     checked(new, ctx)?;
     // Eski tanımdaki ad/şema da SQL'e girer (RENAME/ALTER hedefi); yalnızca kimlik alanları doğrulanır.
     let mut old_errs = validate_identity(old);
@@ -314,6 +416,12 @@ pub fn drop(def: &ObjectDef, cascade: bool, ctx: &BuildCtx) -> Result<Plan, Vec<
 
 /// Silme; ortak kurallar: `force` yalnızca Database, `cascade` Database/Role'de yok.
 pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
+    if invalid_utf8_locked(def) {
+        return match droppable_despite_invalid_utf8(def) {
+            Some(d) => drop_with(&d, o, ctx),
+            None => Err(read_only()),
+        };
+    }
     let mut errs = validate_identity(def);
     let kind = def.kind();
     if o.force && kind != ObjectKind::Database {
@@ -338,6 +446,11 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Database(d) => database::drop(d, o.force, ctx),
         // DROP OWNED / REASSIGN OWNED otomatikleştirilmez (Karar 9).
         ObjectDef::Role(d) => role::drop(d),
+        ObjectDef::Function(d) => routine::drop(ObjectKind::Function, d, cascade),
+        ObjectDef::Procedure(d) => routine::drop(ObjectKind::Procedure, d, cascade),
+        ObjectDef::Trigger(d) => trigger::drop(d, cascade),
+        ObjectDef::Type(d) => pgtype::drop(d, cascade),
+        ObjectDef::Domain(d) => domain::drop(d, cascade),
     }
 }
 
@@ -410,6 +523,80 @@ mod tests {
         let errs = alter(&s, &e, &ctx()).unwrap_err();
         assert_eq!(errs[0].path, "kind");
         assert!(errs[0].message.contains("uyuşmazlığı"));
+    }
+
+    #[test]
+    fn invalid_utf8_reason_locks_every_kind_with_unsupported() {
+        let col = ColumnDef {
+            attnum: Some(1),
+            name: "m".into(),
+            data_type: "u8.\"a\u{FFFD}_multirange\"".into(),
+            not_null: false,
+            default: None,
+            identity: None,
+            generated: None,
+            collation: None,
+            comment: None,
+            using: None,
+        };
+        let ObjectDef::Table(t) = table() else { unreachable!() };
+        let locked = TableDef { columns: vec![col], unsupported: vec![crate::load::INVALID_UTF8_REASON.into()], ..t };
+        let l = ObjectDef::Table(locked.clone());
+        let paths = |e: Vec<FieldError>| e.into_iter().map(|e| (e.path, e.message)).collect::<Vec<_>>();
+        let ro = vec![("object".to_string(), routine::READ_ONLY_MSG.to_string())];
+        assert!(alter(&l, &l, &ctx()).unwrap().statements.is_empty(), "değişiklik yoksa boş plan");
+        let changed = ObjectDef::Table(TableDef { comment: Some("x".into()), ..locked.clone() });
+        assert_eq!(paths(alter(&l, &changed, &ctx()).unwrap_err()), ro);
+        assert_eq!(paths(create(&l, &ctx()).unwrap_err()), ro, "yüklü tanım yeniden oluşturulamaz");
+        // DROP yalnızca şema/adı yazar (geçerli): tek gerekçe buysa izinli.
+        let p = drop(&l, false, &ctx()).unwrap();
+        assert_eq!(p.statements.len(), 1, "{p:?}");
+        assert!(p.statements[0].sql.starts_with("DROP TABLE") && !p.statements[0].sql.contains('\u{FFFD}'), "{p:?}");
+        // Başka gerekçe de varsa drop kilitli kalır.
+        let both = ObjectDef::Table(TableDef {
+            unsupported: vec![crate::load::INVALID_UTF8_REASON.into(), "EXCLUDE ex".into()],
+            ..locked.clone()
+        });
+        assert_eq!(paths(drop(&both, false, &ctx()).unwrap_err()), ro);
+        // Başka gerekçe tek başına tabloyu kilitlemez (yalnızca bilgi): kapı yalnızca bu gerekçeye bakar.
+        let other = ObjectDef::Table(TableDef { unsupported: vec!["EXCLUDE ex".into()], ..locked });
+        assert!(!invalid_utf8_locked(&other) && invalid_utf8_locked(&l));
+    }
+
+    #[test]
+    fn invalid_utf8_drop_unblock_is_limited_to_name_only_kinds() {
+        let reason = vec![crate::load::INVALID_UTF8_REASON.to_string()];
+        let dom = ObjectDef::Domain(DomainDef {
+            schema: "s".into(),
+            name: "dm".into(),
+            owner: None,
+            comment: None,
+            base_type: "s.\"a\u{FFFD}_multirange\"".into(),
+            collation: None,
+            default: None,
+            not_null: false,
+            constraints: vec![],
+            editable: false,
+            unsupported: reason.clone(),
+        });
+        let p = drop(&dom, false, &ctx()).unwrap();
+        assert!(p.statements[0].sql.starts_with("DROP DOMAIN") && !p.statements[0].sql.contains('\u{FFFD}'), "{p:?}");
+        // Tip: adın kendisi kayıplı olabilir → kilitli; değişiklik de kilitli.
+        let ty = ObjectDef::Type(crate::model::TypeDef {
+            schema: "s".into(),
+            name: "a\u{FFFD}_multirange".into(),
+            owner: None,
+            comment: None,
+            body: crate::model::TypeBody::Composite { attributes: vec![] },
+            editable: false,
+            unsupported: reason.clone(),
+        });
+        let ro = vec![("object".to_string(), routine::READ_ONLY_MSG.to_string())];
+        let paths = |e: Vec<FieldError>| e.into_iter().map(|e| (e.path, e.message)).collect::<Vec<_>>();
+        assert_eq!(paths(drop(&ty, false, &ctx()).unwrap_err()), ro);
+        let ObjectDef::Domain(d) = &dom else { unreachable!() };
+        let changed = ObjectDef::Domain(DomainDef { comment: Some("x".into()), ..d.clone() });
+        assert_eq!(paths(alter(&dom, &changed, &ctx()).unwrap_err()), ro, "drop dışı kilitli kalır");
     }
 
     fn table() -> ObjectDef {
@@ -636,6 +823,186 @@ mod tests {
         assert_eq!(paths(&ObjectDef::Database(d)), ["name"]);
         // Kimlik hatası drop'ta döner.
         assert_eq!(drop(&role(""), false, &ctx()).unwrap_err()[0].path, "name");
+    }
+
+    fn routine(schema: &str) -> FunctionDef {
+        FunctionDef {
+            schema: schema.into(),
+            name: "f".into(),
+            owner: None,
+            comment: None,
+            language: "sql".into(),
+            args: vec![],
+            returns: Some(FunctionReturn::Void),
+            body: "SELECT 1".into(),
+            volatility: Volatility::Volatile,
+            strict: false,
+            security_definer: false,
+            leakproof: false,
+            parallel: Parallel::Unsafe,
+            cost: None,
+            rows: None,
+            settings: vec![],
+            recreate: false,
+            editable: true,
+            unsupported: vec![],
+        }
+    }
+
+    fn new_kind_defs(schema: &str) -> Vec<ObjectDef> {
+        vec![
+            ObjectDef::Function(routine(schema)),
+            ObjectDef::Procedure(FunctionDef { returns: None, ..routine(schema) }),
+            ObjectDef::Trigger(TriggerDef {
+                schema: schema.into(),
+                table: "t".into(),
+                name: "tr".into(),
+                timing: TriggerTiming::Before,
+                events: TriggerEvents { insert: true, update: false, update_columns: vec![], delete: false, truncate: false },
+                level: TriggerLevel::Row,
+                when: None,
+                function_schema: "public".into(),
+                function_name: "tf".into(),
+                args: vec![],
+                old_table: None,
+                new_table: None,
+                constraint: false,
+                deferrable: false,
+                initially_deferred: false,
+                enabled: TriggerEnabled::Origin,
+                comment: None,
+                editable: true,
+                unsupported: vec![],
+            }),
+            ObjectDef::Type(TypeDef {
+                schema: schema.into(),
+                name: "ty".into(),
+                owner: None,
+                comment: None,
+                // Yüklü biçim (`original` dolu): `alter(d, d)` sabit noktası; create `original`'ı okumaz.
+                body: TypeBody::Enum { values: vec![EnumValue { label: "a".into(), original: Some("a".into()) }] },
+                editable: true,
+                unsupported: vec![],
+            }),
+            ObjectDef::Domain(DomainDef {
+                schema: schema.into(),
+                name: "d".into(),
+                owner: None,
+                comment: None,
+                base_type: "integer".into(),
+                collation: None,
+                default: None,
+                not_null: false,
+                constraints: vec![],
+                editable: true,
+                unsupported: vec![],
+            }),
+        ]
+    }
+
+    #[test]
+    fn domain_is_wired() {
+        let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
+        let defs = new_kind_defs("public");
+        let dom = &defs[4];
+        assert!(validate(dom, &ctx()).is_empty());
+        assert!(validate_identity(dom).is_empty());
+        assert_eq!(create(dom, &ctx()).unwrap().statements[0].sql, "CREATE DOMAIN public.d AS integer");
+        assert!(alter(dom, dom, &ctx()).unwrap().statements.is_empty());
+        assert_eq!(drop(dom, false, &ctx()).unwrap().statements[0].sql, "DROP DOMAIN public.d");
+        assert_eq!(drop(dom, true, &ctx()).unwrap().statements[0].sql, "DROP DOMAIN public.d CASCADE");
+        let ObjectDef::Domain(mut nn) = dom.clone() else { unreachable!() };
+        nn.not_null = true;
+        assert_eq!(alter(dom, &ObjectDef::Domain(nn), &ctx()).unwrap().statements[0].sql, "ALTER DOMAIN public.d SET NOT NULL");
+        let sys = &new_kind_defs("pg_catalog")[4];
+        assert_eq!(alter(sys, dom, &ctx()).unwrap_err()[0].path, "old.schema");
+        assert_eq!(kind(create(sys, &ctx())), "schema");
+        assert!(alter(dom, &defs[3], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
+        assert_eq!(drop_with(dom, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
+    }
+
+    #[test]
+    fn new_kinds_identity_and_kind_mismatch() {
+        let kind = |r: Result<Plan, Vec<FieldError>>| r.unwrap_err()[0].path.clone();
+        // Eski taraf/drop kimliği: sistem şeması reddedilir.
+        for d in new_kind_defs("pg_catalog") {
+            assert_eq!(validate_identity(&d).into_iter().map(|e| e.path).collect::<Vec<_>>(), ["schema"], "{d:?}");
+            assert_eq!(kind(drop(&d, false, &ctx())), "schema", "{d:?}");
+        }
+        // Function ↔ Procedure ayrı türlerdir: alter tür uyuşmazlığı.
+        let defs = new_kind_defs("public");
+        assert!(alter(&defs[0], &defs[1], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
+    }
+
+    #[test]
+    fn type_is_wired() {
+        let defs = new_kind_defs("public");
+        let ty = &defs[3];
+        assert!(validate(ty, &ctx()).is_empty());
+        assert_eq!(create(ty, &ctx()).unwrap().statements[0].sql, "CREATE TYPE public.ty AS ENUM ('a')");
+        assert!(alter(ty, ty, &ctx()).unwrap().statements.is_empty());
+        assert_eq!(drop(ty, false, &ctx()).unwrap().statements[0].sql, "DROP TYPE public.ty");
+        assert_eq!(drop(ty, true, &ctx()).unwrap().statements[0].sql, "DROP TYPE public.ty CASCADE");
+        // Sürüm bağlamı dağıtıcıdan geçer (PG 11: ADD VALUE transaction dışında); eski taraf `old.` önekiyle.
+        let ObjectDef::Type(mut added) = ty.clone() else { unreachable!() };
+        added.body = TypeBody::Enum {
+            values: vec![EnumValue { label: "a".into(), original: Some("a".into()) }, EnumValue { label: "b".into(), original: None }],
+        };
+        let loaded = ObjectDef::Type(TypeDef {
+            body: TypeBody::Enum { values: vec![EnumValue { label: "a".into(), original: Some("a".into()) }] },
+            ..added.clone()
+        });
+        let v11 = BuildCtx { version_num: 110000, ..Default::default() };
+        assert!(!alter(&loaded, &ObjectDef::Type(added.clone()), &v11).unwrap().statements[0].transactional);
+        assert!(alter(&loaded, &ObjectDef::Type(added), &ctx()).unwrap().statements[0].transactional);
+        let sys = &new_kind_defs("pg_catalog")[3];
+        assert_eq!(alter(sys, ty, &ctx()).unwrap_err()[0].path, "old.schema");
+        assert!(alter(ty, &defs[4], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
+        assert_eq!(drop_with(ty, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
+    }
+
+    #[test]
+    fn trigger_is_wired() {
+        let defs = new_kind_defs("public");
+        let trg = &defs[2];
+        assert!(validate(trg, &ctx()).is_empty());
+        assert_eq!(
+            create(trg, &ctx()).unwrap().statements[0].sql,
+            "CREATE TRIGGER tr BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION public.tf()"
+        );
+        assert!(alter(trg, trg, &ctx()).unwrap().statements.is_empty());
+        assert_eq!(drop(trg, false, &ctx()).unwrap().statements[0].sql, "DROP TRIGGER tr ON public.t");
+        assert_eq!(drop(trg, true, &ctx()).unwrap().statements[0].sql, "DROP TRIGGER tr ON public.t CASCADE");
+        // Sürüm kapısı dağıtıcıdan geçer (PG 10: EXECUTE PROCEDURE); eski taraf `old.` önekiyle; tür uyuşmazlığı.
+        let v10 = BuildCtx { version_num: 100000, ..Default::default() };
+        assert!(create(trg, &v10).unwrap().statements[0].sql.ends_with("EXECUTE PROCEDURE public.tf()"));
+        let sys = &new_kind_defs("pg_catalog")[2];
+        assert_eq!(alter(sys, trg, &ctx()).unwrap_err()[0].path, "old.schema");
+        assert!(alter(trg, &defs[0], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
+        assert_eq!(drop_with(trg, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
+    }
+
+    #[test]
+    fn routine_is_wired() {
+        let defs = new_kind_defs("public");
+        let (func, proc) = (&defs[0], &defs[1]);
+        assert!(validate(func, &ctx()).is_empty());
+        assert!(validate(proc, &ctx()).is_empty());
+        assert_eq!(
+            create(func, &ctx()).unwrap().statements[0].sql,
+            "CREATE FUNCTION public.f() RETURNS void LANGUAGE \"sql\" VOLATILE PARALLEL UNSAFE AS $pgt$SELECT 1$pgt$"
+        );
+        assert_eq!(create(proc, &ctx()).unwrap().statements[0].sql, "CREATE PROCEDURE public.f() LANGUAGE \"sql\" AS $pgt$SELECT 1$pgt$");
+        assert!(alter(func, func, &ctx()).unwrap().statements.is_empty());
+        assert!(alter(proc, proc, &ctx()).unwrap().statements.is_empty());
+        assert_eq!(drop(func, false, &ctx()).unwrap().statements[0].sql, "DROP FUNCTION public.f()");
+        assert_eq!(drop(proc, true, &ctx()).unwrap().statements[0].sql, "DROP PROCEDURE public.f() CASCADE");
+        // Sürüm kapısı dağıtıcıdan geçer; eski taraf `old.` önekiyle; sistem şeması drop'ta reddedilir.
+        assert_eq!(create(proc, &BuildCtx { version_num: 100000, ..Default::default() }).unwrap_err()[0].path, "kind");
+        let sys = &new_kind_defs("pg_catalog")[0];
+        assert_eq!(alter(sys, func, &ctx()).unwrap_err()[0].path, "old.schema");
+        assert_eq!(drop(sys, false, &ctx()).unwrap_err()[0].path, "schema");
+        assert_eq!(drop_with(func, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
     }
 
     #[test]

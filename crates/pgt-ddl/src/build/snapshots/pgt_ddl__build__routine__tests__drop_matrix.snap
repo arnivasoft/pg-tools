@@ -1,0 +1,17 @@
+---
+source: crates/pgt-ddl/src/build/routine.rs
+expression: out
+---
+[Destructive] DROP FUNCTION public.f()
+
+[DataLoss] DROP FUNCTION public.f() CASCADE  -- Bağımlı nesneler de silinir
+WARN: Bağımlı nesneler de silinir
+
+[Destructive] DROP FUNCTION public.f(integer, text[])
+
+[Destructive] DROP FUNCTION public."My ""F"""()
+
+[Destructive] DROP PROCEDURE public.p()
+
+[DataLoss] DROP PROCEDURE public.p() CASCADE  -- Bağımlı nesneler de silinir
+WARN: Bağımlı nesneler de silinir

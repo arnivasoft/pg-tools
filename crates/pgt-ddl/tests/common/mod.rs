@@ -269,6 +269,23 @@ impl Env {
         self.admin.query_one(sql, &[&schema, &name]).await.unwrap_or_else(|e| panic!("{schema}.{name} bulunamadı: {e}")).get(0)
     }
 
+    /// Fonksiyon/procedure oid'i: `şema.ad(giriş tipleri)` (`regprocedure`; `args` = virgüllü tip listesi, OUT hariç).
+    pub async fn proc_oid(&self, schema: &str, name: &str, args: &str) -> u32 {
+        let sig = format!("{}({args})", pgt_ddl::qualified(schema, name));
+        self.admin
+            .query_one("SELECT $1::text::regprocedure::oid", &[&sig])
+            .await
+            .unwrap_or_else(|e| panic!("{sig} bulunamadı: {}", db_message(&e)))
+            .get(0)
+    }
+
+    /// `şema.ad(giriş tipleri)` var mı (`to_regprocedure`).
+    pub async fn proc_exists(&self, schema: &str, name: &str, args: &str) -> bool {
+        let sig = format!("{}({args})", pgt_ddl::qualified(schema, name));
+        let v: Option<u32> = self.admin.query_one("SELECT to_regprocedure($1::text)::oid", &[&sig]).await.unwrap().get(0);
+        v.is_some()
+    }
+
     pub async fn schema_oid(&self, name: &str) -> u32 {
         self.admin.query_one("SELECT oid FROM pg_namespace WHERE nspname = $1::text", &[&name]).await.unwrap().get(0)
     }

@@ -1,11 +1,12 @@
 //! Veri sözleşmeli SQL dosyalarını `TreeNode` / `PropertySection` / DDL metnine çeviren genel motor.
 
 use pgt_core::connection::Target;
+use pgt_core::pgtext::{PgText, lossy, lossy_opt};
 use pgt_core::{Error, Result};
 use uuid::Uuid;
 
 use crate::Catalog;
-use crate::db::{p, query};
+use crate::db::{p, query, query_ddl};
 use crate::node::{Coll, NodeFlags, NodeId, NodeKind, Seg, TreeNode};
 use crate::props::PropertySection;
 use super::registry::{DdlDef, PropsDef};
@@ -72,8 +73,8 @@ pub(crate) async fn list(
             continue;
         }
         let oid: u32 = r.get("oid");
-        let mut node = TreeNode::new(&parent.child((def.seg)(oid)), def.child_kind, r.get::<_, String>("name"))
-            .with_detail(r.try_get::<_, Option<String>>("detail").ok().flatten())
+        let mut node = TreeNode::new(&parent.child((def.seg)(oid)), def.child_kind, lossy(r, "name"))
+            .with_detail(r.try_get::<_, Option<PgText>>("detail").ok().flatten().map(PgText::into_lossy))
             .with_flags(NodeFlags {
                 partitioned: flag("partitioned"),
                 system: flag("system"),
@@ -106,7 +107,7 @@ pub(crate) async fn properties(
     for r in &rows {
         let title: String = r.get("section");
         let label: String = r.get("label");
-        let value: Option<String> = r.get("value");
+        let value = lossy_opt(r, "value");
         if sections.last().is_none_or(|s| s.title != title) {
             sections.push(PropertySection::new(title));
         }
@@ -134,7 +135,7 @@ fn acl_sql(catalog: &str) -> Result<&'static VersionedSql> {
 /// DDL SQL'inin tek satırlık sonucunu pgAdmin biçimli metne çevirir.
 pub(crate) async fn ddl(cat: &Catalog, server: Uuid, db: Option<u32>, def: &DdlDef, oid: u32) -> Result<String> {
     let target = target(def.level, db)?;
-    let rows = query(&cat.mgr, server, target, def.sql, p![oid]).await?;
+    let rows = query_ddl(&cat.mgr, server, target, def.sql, p![oid]).await?;
     let r = rows.first().ok_or_else(|| Error::NotFound(def.what.to_string()))?;
     let text = |c: &str| r.get::<_, Option<String>>(c);
     let acl = match text("acl_catalog") {

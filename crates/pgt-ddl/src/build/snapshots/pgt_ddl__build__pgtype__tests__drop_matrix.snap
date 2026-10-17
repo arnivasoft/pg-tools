@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/build/pgtype.rs
+expression: out
+---
+[Destructive] DROP TYPE public.ty
+
+[DataLoss] DROP TYPE public.ty CASCADE  -- Bağımlı nesneler de silinir
+WARN: Bağımlı nesneler de silinir
+
+[Destructive] DROP TYPE "Ş"."My ""T"""

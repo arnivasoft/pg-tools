@@ -444,7 +444,7 @@ describe("DATABASE_PATHS", () => {
 });
 
 describe("ROLE_PATHS", () => {
-  it("Plan 15 Task 5 yol kümesi; FORM_PATHS her ObjectKind için tanımlı (dokuz tür)", () => {
+  it("Plan 15 Task 5 yol kümesi; FORM_PATHS Plan 14 dokuz türü için tanımlı (Plan 18 türleri Plan 19 formlarıyla gelir)", () => {
     expect([...ROLE_PATHS].sort()).toEqual(
       ["name", "login", "superuser", "createdb", "createrole", "inherit", "replication", "bypassrls", "connectionLimit", "validUntil", "password", "memberOf", "settings", "comment"].sort(),
     );

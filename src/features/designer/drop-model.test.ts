@@ -34,6 +34,8 @@ describe("dropRequest", () => {
       index: { cascade: true, force: false }, table: { cascade: true, force: false }, view: { cascade: true, force: false },
       materialized_view: { cascade: true, force: false },
       database: { cascade: false, force: true }, role: { cascade: false, force: false },
+      function: { cascade: true, force: false }, procedure: { cascade: true, force: false }, trigger: { cascade: true, force: false },
+      type: { cascade: true, force: false }, domain: { cascade: true, force: false },
     };
     for (const [k, v] of Object.entries(table)) expect(dropOptionsFor(k as ObjectKind)).toEqual(v);
   });

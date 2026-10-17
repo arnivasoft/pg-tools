@@ -1,0 +1,17 @@
+---
+source: crates/pgt-ddl/src/build/pgtype.rs
+expression: out
+---
+yeniden sıralama: body.attributes (PostgreSQL composite özniteliklerini yeniden sıralayamaz.)
+yeni ortada: body.attributes (Yeni öznitelikler yalnızca sona eklenebilir (PostgreSQL öznitelikleri sona ekler).)
+yeni başta: body.attributes (Yeni öznitelikler yalnızca sona eklenebilir (PostgreSQL öznitelikleri sona ekler).)
+bilinmeyen original: body.attributes[2].original (Yüklü öznitelik bulunamadı.)
+original tekrar: body.attributes[1].original (Yüklü öznitelik birden çok kez eşlenmiş.)
+değiş tokuş: body.attributes[0].name (Yeni ad başka bir yüklü değerle çakışıyor; önce onu ayrı bir değişiklikte yeniden adlandırın.); body.attributes[1].name (Yeni ad başka bir yüklü değerle çakışıyor; önce onu ayrı bir değişiklikte yeniden adlandırın.)
+silinen adı devralma: body.attributes[0].name (Yeni ad başka bir yüklü değerle çakışıyor; önce onu ayrı bir değişiklikte yeniden adlandırın.)
+yeni ad tekrar: body.attributes[2].name (Öznitelik adı birden çok kez kullanılmış.)
+yeni ad boş: body.attributes[2].name (Ad boş olamaz.)
+yeni tip geçersiz: body.attributes[2].typeName (Veri tipi ';' içeremez.)
+değişen tip geçersiz: body.attributes[0].typeName (Bilinmeyen çok sözcüklü tip; kullanıcı tipleri tek ad olmalı (gerekirse çift tırnak). Tip alanına NOT NULL, DEFAULT, COLLATE gibi ek yan tümceler yazılamaz.)
+değişen collation geçersiz: body.attributes[1].collation (Ad denetim karakteri (satır sonu, sekme vb.) içeremez.)
+yeniden adlandırma 64 bayt: body.attributes[0].name (Ad en çok 63 bayt olabilir (şu an 64 bayt).)

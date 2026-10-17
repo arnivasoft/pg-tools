@@ -90,8 +90,40 @@ pub async fn admin_client(server: &TestServer, dbname: &str) -> tokio_postgres::
     client
 }
 
+/// PG 14+: `u8` şemasında adı geçersiz UTF-8 olan bir multirange tipi ve onu kullanan nesneler.
+///
+/// PG `makeMultirangeTypeName` otomatik adı ham 52 bayta keser: `'a' || 'ş' × 31` (63 bayt) adlı range'in multirange'i
+/// `a` + 25 × `ş` + yarım `ş` (0xC5) + `_multirange` olur. Ad SQL'e yazılamadığı (istemci girdisi doğrulanır) için
+/// kullanan nesneler `regtype::text` ile sunucu tarafında `EXECUTE` edilir: `u8.t.m` sütunu (varsayılanı ve
+/// CHECK'i tip adını içerir), `u8.dm` domain'i, `u8.f(x)` işlevi, `u8.v` görünümü; `u8.t`'de bir satır.
+pub const INVALID_UTF8_TYPE_NAME_SQL: &str = r#"
+CREATE SCHEMA u8;
+CREATE TYPE u8."aşşşşşşşşşşşşşşşşşşşşşşşşşşşşşşş" AS RANGE (SUBTYPE = int4);
+DO $$
+DECLARE m text := (SELECT r.rngmultitypid::regtype::text FROM pg_range r JOIN pg_type t ON t.oid = r.rngtypid
+                   WHERE t.typnamespace = 'u8'::regnamespace);
+BEGIN
+  EXECUTE format('CREATE TABLE u8.t (id int PRIMARY KEY, m %s DEFAULT ''{}'' CHECK (m <> ''{[5,6)}''))', m);
+  EXECUTE format('CREATE DOMAIN u8.dm AS %s', m);
+  EXECUTE format('CREATE FUNCTION u8.f(x %s) RETURNS int LANGUAGE sql AS ''SELECT 1''', m);
+END $$;
+INSERT INTO u8.t VALUES (1, '{[1,3)}');
+CREATE VIEW u8.v AS SELECT m FROM u8.t;
+"#;
+
+/// `INVALID_UTF8_TYPE_NAME_SQL`'deki range adı (geçerli UTF-8).
+pub fn invalid_utf8_range_name() -> String {
+    format!("a{}", "ş".repeat(31))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn invalid_utf8_fixture_range_name_matches_sql() {
+        assert_eq!(super::invalid_utf8_range_name().len(), 63);
+        assert!(super::INVALID_UTF8_TYPE_NAME_SQL.contains(&format!("\"{}\"", super::invalid_utf8_range_name())));
+    }
+
     #[test]
     fn parse_failure_does_not_leak_the_url() {
         let secret = "postgres://u:cok-gizli-parola@h:notaport/db";

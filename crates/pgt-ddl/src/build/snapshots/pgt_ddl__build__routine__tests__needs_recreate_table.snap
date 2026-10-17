@@ -1,0 +1,18 @@
+---
+source: crates/pgt-ddl/src/build/routine.rs
+expression: out
+---
+imza tipi: ["args[0].typeName"]
+argüman ekleme: ["args"]
+argüman silme: ["args"]
+giriş adı: ["args[0].name"]
+giriş adı kaldırma: ["args[0].name"]
+default kaldırma: ["args[1].default"]
+OUT tipi: ["args"]
+OUT adı: ["args"]
+OUT kaldırma: ["args"]
+IN → INOUT: ["args"]
+dönüş tipi: ["returns"]
+SETOF: ["returns"]
+void: ["returns"]
+imza + dönüş: ["args[0].typeName", "returns"]

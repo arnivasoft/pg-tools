@@ -40,7 +40,7 @@ function tree(): TreeState {
 }
 
 const createTarget: DdlTarget = {
-  serverId: "S1", databaseOid: 5, object: null, create: { kind: "sequence", context: { schemaOid: 10, tableOid: null } }, focus: null, refreshNodeId: "coll-seq",
+  serverId: "S1", databaseOid: 5, object: null, create: { kind: "sequence", context: { schemaOid: 10, tableOid: null }, preset: null }, focus: null, refreshNodeId: "coll-seq",
 };
 const objectTarget: DdlTarget = {
   serverId: "S1", databaseOid: 5, object: { kind: "sequence", oid: 77 }, create: null, focus: null, refreshNodeId: "coll-seq",
@@ -337,7 +337,7 @@ describe("designer-open Plan 15: sunucu kapsamı", () => {
   });
 
   it("rol create: başlık tdes.tab.create(kind, sunucu, null)", async () => {
-    const t: DdlTarget = { ...roleTarget, object: null, create: { kind: "role", context: { schemaOid: null, tableOid: null } } };
+    const t: DdlTarget = { ...roleTarget, object: null, create: { kind: "role", context: { schemaOid: null, tableOid: null }, preset: null } };
     const { opener, store, designer } = setup(t);
     await opener.open("roles", "create");
     const tab = store.state.designers[0];

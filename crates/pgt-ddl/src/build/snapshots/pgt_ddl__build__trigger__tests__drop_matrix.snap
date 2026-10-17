@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/build/trigger.rs
+expression: out
+---
+[Destructive] DROP TRIGGER tr ON public.t
+
+[DataLoss] DROP TRIGGER tr ON public.t CASCADE  -- Bağımlı nesneler de silinir
+WARN: Bağımlı nesneler de silinir
+
+[Destructive] DROP TRIGGER "a b" ON "Ş"."My ""T"""
