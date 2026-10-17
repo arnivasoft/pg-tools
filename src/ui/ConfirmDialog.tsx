@@ -1,75 +1,33 @@
-import { createSignal } from "solid-js";
+// Silme onayı (ana paket): yalnız model + tembel görünüm. `Dialog`/Kobalte burada statik içe aktarılmaz.
+import { Suspense, Show, lazy } from "solid-js";
 import { t } from "../app/strings";
-import { Button } from "./Button";
-import { Dialog } from "./Dialog";
+import { toast } from "../app/toast";
+import { createDeleteConfirmModel } from "./delete-confirm";
+import { createLoader } from "./lazy-load";
 
-export function ConfirmDialog(props: {
-  open: boolean;
-  title: string;
-  message: string;
-  confirmLabel: string;
-  danger?: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
-}) {
-  let cancelEl: HTMLButtonElement | undefined;
-  return (
-    <Dialog
-      open={props.open}
-      onOpenChange={(open) => !open && props.onCancel()}
-      title={props.title}
-      width="380px"
-      // Yıkıcı eylem yanlışlıkla Enter ile onaylanmasın: odak "Vazgeç"te başlar.
-      onOpenAutoFocus={(e) => {
-        e.preventDefault();
-        cancelEl?.focus();
-      }}
-      footer={
-        <>
-          <Button ref={cancelEl} onClick={() => props.onCancel()}>
-            {t.server.cancel}
-          </Button>
-          <Button
-            variant="primary"
-            class={props.danger ? "!bg-danger !text-white" : ""}
-            onClick={() => props.onConfirm()}
-          >
-            {props.confirmLabel}
-          </Button>
-        </>
-      }
-    >
-      <p>{props.message}</p>
-    </Dialog>
-  );
-}
-
-type Request = { name: string; resolve: (ok: boolean) => void };
+/** Görünüm yükleyicisi (tek tanım): `lazy` ve ileride önyükleme aynı içe aktarmayı paylaşır. */
+export const loadConfirmDialogView = () => import("./ConfirmDialogView");
+const ConfirmDialogView = lazy(loadConfirmDialogView);
 
 /** Söz tabanlı onay: `ask(name)` kullanıcı yanıtlayınca çözülür; `View` bir kez bağlanır. */
 export function createDeleteConfirm() {
-  const [request, setRequest] = createSignal<Request | null>(null);
-  const ask = (name: string) =>
-    new Promise<boolean>((resolve) => {
-      request()?.resolve(false);
-      setRequest({ name, resolve });
-    });
-  const finish = (ok: boolean) => {
-    const cur = request();
-    if (!cur) return;
-    setRequest(null);
-    cur.resolve(ok);
-  };
-  const View = () => (
-    <ConfirmDialog
-      open={request() !== null}
-      title={t.menu.confirmTitle}
-      message={t.menu.confirmMessage(request()?.name ?? "")}
-      confirmLabel={t.menu.confirmLabel}
-      danger
-      onConfirm={() => finish(true)}
-      onCancel={() => finish(false)}
-    />
+  const m = createDeleteConfirmModel(
+    createLoader(loadConfirmDialogView, () => toast.show(t.app.chunkLoadFailed, "error")),
   );
-  return { ask, View };
+  const View = () => (
+    <Show when={m.loaded()}>
+      <Suspense>
+        <ConfirmDialogView
+          open={m.request() !== null}
+          title={t.menu.confirmTitle}
+          message={t.menu.confirmMessage(m.request()?.name ?? "")}
+          confirmLabel={t.menu.confirmLabel}
+          danger
+          onConfirm={() => m.finish(true)}
+          onCancel={() => m.finish(false)}
+        />
+      </Suspense>
+    </Show>
+  );
+  return { ask: m.ask, View };
 }

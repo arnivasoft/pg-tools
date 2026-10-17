@@ -1,4 +1,5 @@
 export const t = {
+  app: { chunkLoadFailed: "Pencere yüklenemedi." },
   import: {
     button: "İçe aktar",
     title: "pgAdmin sunucularını içe aktar",

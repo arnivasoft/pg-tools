@@ -4,7 +4,7 @@ import { toast } from "../../app/toast";
 import type { HistoryEntry } from "../../ipc/bindings/HistoryEntry";
 import { commands, type Api } from "../../ipc/commands";
 import { toPayload } from "../../ipc/errors";
-import { ConfirmDialog } from "../../ui/ConfirmDialog";
+import { ConfirmDialog } from "../../ui/ConfirmDialogView";
 import { inputClass } from "../../ui/Field";
 import { Button } from "../../ui/Button";
 import { displaySql, searchQuery } from "./history-model";

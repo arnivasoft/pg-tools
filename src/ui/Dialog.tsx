@@ -1,7 +1,10 @@
 import { Dialog as K } from "@kobalte/core/dialog";
 import { X } from "lucide-solid";
 import { Show, type JSX } from "solid-js";
-import { t } from "../app/strings";
+
+// `t.server.close` ile aynı metin; Dialog ortak tembel parçadır, `app/strings` içe aktarılırsa `strings` ana paketten ayrı bir
+// parçaya bölünüp index.html önyüklemesine girer.
+const CLOSE_LABEL = "Kapat";
 
 export function Dialog(props: {
   open: boolean;
@@ -24,7 +27,7 @@ export function Dialog(props: {
           >
             <div class="flex items-center justify-between border-b border-border px-4 py-2.5">
               <K.Title class="font-semibold">{props.title}</K.Title>
-              <K.CloseButton class="rounded p-1 text-muted hover:bg-hover" aria-label={t.server.close}>
+              <K.CloseButton class="rounded p-1 text-muted hover:bg-hover" aria-label={CLOSE_LABEL}>
                 <X size={14} />
               </K.CloseButton>
             </div>

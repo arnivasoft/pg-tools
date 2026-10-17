@@ -6,7 +6,7 @@ import { Dynamic } from "solid-js/web";
 import { tdes } from "../../app/strings-designer";
 import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
 import { Button } from "../../ui/Button";
-import { ConfirmDialog } from "../../ui/ConfirmDialog";
+import { ConfirmDialog } from "../../ui/ConfirmDialogView";
 import ApplyBar from "./ApplyBar";
 import type { DesignerController, DesignerModel } from "./designer-controller";
 import { groupIssues, kindLabel } from "./designer-model";
