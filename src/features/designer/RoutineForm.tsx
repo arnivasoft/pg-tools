@@ -14,7 +14,7 @@ import { CheckRow, CommentField, FieldRow, FreeSqlNote, OwnerSelect, createFocus
 import { exactIssues, normalizeEmpty, orphanRowIssues } from "./forms-model";
 import { ReadOnlyReasons } from "./ReadOnlyReasons";
 import {
-  argModes, asRoutine, hasRecreateError, languageChoices, newArg, newReturnColumn, recreateLoss, recreateNeedLabel, recreateNeeds,
+  argModes, asRoutine, procedureHiddenErrors, shouldFocusRecreate, stashReturn, type ReturnStash, hasRecreateError, languageChoices, newArg, newReturnColumn, recreateLoss, recreateNeedLabel, recreateNeeds,
   returnColumns, returnKindOf, returnTypeName, routinePatch, rowsVisible, securityDefinerWarning, syncRecreate, tableOutArgsWarning, updateAt, withReturns,
   type ReturnChoice,
 } from "./routine-model";
@@ -71,25 +71,28 @@ export default function RoutineForm(props: FormProps) {
   const bodyNoteId = createUniqueId();
   const dollarId = createUniqueId();
   const argsNoteId = createUniqueId();
+  const argsEscId = createUniqueId();
   let nameEl: HTMLInputElement | undefined;
   let recreateEl: HTMLInputElement | undefined;
   createFocusOnRequest(props, "name", () => nameEl);
 
   // Arka uç "…yeniden oluşturmayı gerektirir…" alan hatası (recreate seçilmemiş) → kutuya odak. Kullanıcı bir metin
   // alanında yazarken odak çalınmaz (yazılan karakterler kutuya gitmesin); kutu zaten görünür (istemci listesi üst küme).
+  // Koşul memo'dur (her düzenlemede yeni değer üretmez) ve odak yalnızca yükselen kenarda (`shouldFocusRecreate`).
+  const recreateErr = createMemo(() => hasRecreateError(props.issues) && needs().length > 0 && !draft()?.recreate && !locked());
   createEffect(
-    on(
-      () => hasRecreateError(props.issues) && needs().length > 0 && !draft()?.recreate && !locked(),
-      (yes) => {
-        if (!yes) return;
-        queueMicrotask(() => {
-          const a = document.activeElement;
-          const typing = a instanceof HTMLTextAreaElement || (a instanceof HTMLInputElement && a.type !== "checkbox");
-          if (!typing) recreateEl?.focus();
-        });
-      },
-    ),
+    on(recreateErr, (yes, prev) => {
+      if (!shouldFocusRecreate(yes, prev)) return;
+      queueMicrotask(() => {
+        const a = document.activeElement;
+        const typing = a instanceof HTMLTextAreaElement || (a instanceof HTMLInputElement && a.type !== "checkbox");
+        if (!typing) recreateEl?.focus();
+      });
+    }),
   );
+
+  // Dönüş seçimi değişirken son tip adı / TABLE kolonları yedeklenir (gidiş-dönüşte veri kaybolmasın).
+  let returnStash: ReturnStash = { typeName: "", columns: [] };
 
   const [schemas] = createResource(
     () => props.tabId,
@@ -113,6 +116,7 @@ export default function RoutineForm(props: FormProps) {
           ...issuesFor(props.issues, "kind"),
           ...issuesFor(props.issues, "object"),
           ...(needs().length === 0 ? issuesFor(props.issues, "recreate") : []),
+          ...procedureHiddenErrors(d().kind, props.issues),
         ];
         return (
           <form class="flex max-w-3xl flex-col gap-5" onSubmit={(ev) => ev.preventDefault()}>
@@ -198,7 +202,7 @@ export default function RoutineForm(props: FormProps) {
                     onChange={(ev) => patch({ language: ev.currentTarget.value })}
                   >
                     <For each={langs()}>
-                      {(l) => <option value={l.value}>{l.detail ? `${l.value} (${l.detail})` : l.value}</option>}
+                      {(l) => <option value={l.value} selected={l.value === d().language}>{l.detail ? `${l.value} (${l.detail})` : l.value}</option>}
                     </For>
                   </select>
                 )}
@@ -216,6 +220,7 @@ export default function RoutineForm(props: FormProps) {
                 addLabel={trout.args.add}
                 emptyText={trout.args.empty}
                 readOnly={locked()}
+                reorderable={!triggerReturn()}
               >
                 {(a, i) => (
                   <div class="grid grid-cols-[7rem_1fr] gap-2 sm:grid-cols-[7rem_1fr_1fr]">
@@ -275,7 +280,7 @@ export default function RoutineForm(props: FormProps) {
                             autocomplete="off"
                             spellcheck={false}
                             placeholder={trout.args.defaultPlaceholder}
-                            aria-describedby={[f.describedBy, argsNoteId].filter(Boolean).join(" ")}
+                            aria-describedby={[f.describedBy, argsNoteId, argsEscId].filter(Boolean).join(" ")}
                             aria-invalid={f.invalid}
                             disabled={locked() || triggerReturn()}
                             value={a().default ?? ""}
@@ -300,6 +305,9 @@ export default function RoutineForm(props: FormProps) {
               </Show>
               <Show when={d().args.length > 0}>
                 <FreeSqlNote id={argsNoteId} />
+                <p id={argsEscId} class="text-xs text-muted">
+                  {trout.args.defaultEscapeHint}
+                </p>
               </Show>
             </div>
 
@@ -317,7 +325,10 @@ export default function RoutineForm(props: FormProps) {
                       onChange={(ev) =>
                         props.designer.edit(props.tabId, (x) => {
                           const r = asRoutine(x);
-                          return r ? syncRecreate(original(), { ...withReturns(r, ev.currentTarget.value as ReturnChoice), kind: r.kind }) : x;
+                          if (!r) return x;
+                          returnStash = stashReturn(returnStash, r.returns);
+                          const next = withReturns(r, ev.currentTarget.value as ReturnChoice, returnStash);
+                          return syncRecreate(original(), { ...next, kind: r.kind });
                         })
                       }
                     >

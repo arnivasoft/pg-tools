@@ -35,6 +35,7 @@ export const trout = {
     triggerClosed: "Trigger fonksiyonu argüman almaz; argümanlar trigger tanımında verilir (TG_ARGV).",
     tableOutWarning: "RETURNS TABLE ile OUT/INOUT argümanı birlikte kullanılamaz; dönüş kolonlarını TABLE listesine taşıyın.",
     defaultHint: "Varsayılan SQL ifadesi olarak olduğu gibi yazılır.",
+    defaultEscapeHint: "Ters bölü içeren metin varsayılanlarını E'…' biçiminde yazın; yüklenen düz \\ içeren varsayılan düzenlenemez.",
   },
   returns: {
     kind: "Dönüş türü (RETURNS)",

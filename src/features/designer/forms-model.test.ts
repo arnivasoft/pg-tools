@@ -467,7 +467,7 @@ describe("ROLE_PATHS", () => {
 describe("ROUTINE_PATHS (Plan 19 Task 3)", () => {
   it("spec §8.5 kök anahtarları; FORM_PATHS.function === FORM_PATHS.procedure === ROUTINE_PATHS", () => {
     expect([...ROUTINE_PATHS].sort()).toEqual(
-      ["schema", "name", "owner", "comment", "language", "body", "cost", "rows", "volatility", "strict", "leakproof", "parallel", "kind", "object", "args", "returns", "settings", "recreate"].sort(),
+      ["schema", "name", "owner", "comment", "language", "body", "cost", "rows", "volatility", "strict", "leakproof", "parallel", "kind", "object", "args", "returns", "settings", "recreate", "securityDefiner"].sort(),
     );
     expect(FORM_PATHS.function).toBe(ROUTINE_PATHS);
     expect(FORM_PATHS.procedure).toBe(ROUTINE_PATHS);
@@ -476,7 +476,7 @@ describe("ROUTINE_PATHS (Plan 19 Task 3)", () => {
     const g = groupIssues(
       [
         { path: "args[1].typeName", message: "a" }, { path: "returns.columns[0].name", message: "b" }, { path: "settings[0].value", message: "c" },
-        { path: "old.args[0].typeName", message: "d" }, { path: "securityDefinerX", message: "e" }, { path: "args", message: "f" },
+        { path: "old.args[0].typeName", message: "d" }, { path: "securityDefinerX", message: "e" }, { path: "securityDefiner", message: "g" }, { path: "args", message: "f" },
       ] as never,
       ROUTINE_PATHS,
     );
@@ -485,5 +485,6 @@ describe("ROUTINE_PATHS (Plan 19 Task 3)", () => {
     expect(issuesFor(g, "args")).toEqual(["a", "f"]);
     expect(g.byPath.get("settings[0].value")).toEqual(["c"]);
     expect(g.general).toEqual(["d", "e"]);
+    expect(g.byPath.get("securityDefiner")).toEqual(["g"]);
   });
 });

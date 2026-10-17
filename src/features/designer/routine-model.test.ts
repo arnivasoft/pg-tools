@@ -5,7 +5,7 @@ import type { FunctionDef } from "../../ipc/bindings/FunctionDef";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import {
   argModes, asRoutine, hasRecreateError, languageChoices, recreateLoss, recreateNeeds, returnColumns, returnKindOf, returnTypeName, routinePatch, rowsVisible,
-  securityDefinerWarning, syncRecreate, tableOutArgsWarning, withReturns,
+  procedureHiddenErrors, securityDefinerWarning, shouldFocusRecreate, stashReturn, syncRecreate, tableOutArgsWarning, withReturns,
 } from "./routine-model";
 
 const f = (p: Partial<FunctionDef> = {}): FunctionDef => ({
@@ -190,5 +190,39 @@ describe("hasRecreateError / languageChoices", () => {
     expect(languageChoices(items, "plpgsql").map((i) => i.value)).toEqual(["plpgsql", "sql"]);
     expect(languageChoices(items, "plpython3u").map((i) => i.value)).toEqual(["plpython3u", "plpgsql", "sql"]);
     expect(languageChoices([], "")).toEqual([]);
+  });
+});
+
+describe("review düzeltmeleri", () => {
+  it("shouldFocusRecreate: yalnız yükselen kenar (false/undefined → true)", () => {
+    expect(shouldFocusRecreate(true, undefined)).toBe(true);
+    expect(shouldFocusRecreate(true, false)).toBe(true);
+    expect(shouldFocusRecreate(true, true)).toBe(false);
+    expect(shouldFocusRecreate(false, true)).toBe(false);
+    expect(shouldFocusRecreate(false, undefined)).toBe(false);
+  });
+  it("stashReturn + withReturns yedeği: TABLE→tip→TABLE ve tip→void→tip veri kaybetmez", () => {
+    const cols = [{ name: "a", typeName: "int" }];
+    let stash = stashReturn({ typeName: "", columns: [] }, { kind: "table", columns: cols });
+    let d = withReturns(f({ returns: { kind: "table", columns: cols } }), "type", stash);
+    expect(d.returns).toEqual(ty(""));
+    stash = stashReturn(stash, d.returns);
+    expect(withReturns(d, "table", stash).returns).toEqual({ kind: "table", columns: cols });
+    stash = stashReturn({ typeName: "", columns: [] }, ty("numeric", true));
+    d = withReturns(f({ returns: ty("numeric", true) }), "void", stash);
+    stash = stashReturn(stash, d.returns);
+    expect(withReturns(d, "type", stash).returns).toEqual(ty("numeric"));
+    // Yedeksiz eski davranış
+    expect(withReturns(f(), "table").returns).toEqual({ kind: "table", columns: [] });
+  });
+  it("stashReturn: void/trigger/null yedeği değiştirmez", () => {
+    const st = { typeName: "x", columns: [] };
+    expect(stashReturn(st, { kind: "void" })).toBe(st);
+    expect(stashReturn(st, null)).toBe(st);
+  });
+  it("procedureHiddenErrors: procedure'de gösterilmeyen seçenek/dönüş yollarının hataları", () => {
+    const issues = { byPath: new Map([["volatility", ["v"]], ["rows", ["r"]], ["returns.typeName", ["t"]], ["name", ["n"]]]), general: [], generalPaths: [] };
+    expect(procedureHiddenErrors("procedure", issues)).toEqual(["v", "r", "t"]);
+    expect(procedureHiddenErrors("function", issues)).toEqual([]);
   });
 });

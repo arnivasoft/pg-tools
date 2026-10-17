@@ -25,6 +25,7 @@ export function routinePatch(d: ObjectDef, patch: Partial<FunctionDef>): ObjectD
   return d.kind === "function" || d.kind === "procedure" ? { ...d, ...patch, kind: d.kind } : d;
 }
 
+const under = (p: string, root: string) => p === root || p.startsWith(`${root}[`) || p.startsWith(`${root}.`);
 const isInput = (a: FunctionArg) => a.mode !== "out";
 const isOutput = (a: FunctionArg) => a.mode === "out" || a.mode === "inout";
 /** Karar 2: istemcide yalnız metin karşılaştırması (`int` ↔ `int4` eşdeğerliği arka ucun işidir). */
@@ -106,20 +107,49 @@ export function rowsVisible(d: FunctionDef): boolean {
 /**
  * Dönüş seçimi değişimi: tip ↔ SETOF tip adı taşınır, TABLE önceki kolonları korur; argümanlar her zaman korunur
  * (trigger'da argüman arka uç hatasıdır, TABLE + OUT/INOUT `tableOutArgsWarning`). Küme dönmeyen türe geçişte ROWS
- * temizlenir (yalnız küme dönende geçerli; gizli alanda hata kalmasın).
+ * temizlenir (yalnız küme dönende geçerli; gizli alanda hata kalmasın). `stash`: formun son tip adı / TABLE kolonları
+ * yedeği (TABLE→tip→TABLE, tip→void→tip gidiş-dönüşleri veri kaybetmesin).
  */
-export function withReturns(d: FunctionDef, kind: ReturnChoice): FunctionDef {
+export function withReturns(d: FunctionDef, kind: ReturnChoice, stash?: ReturnStash): FunctionDef {
   const prev = d.returns;
   let returns: FunctionReturn;
   if (kind === "type" || kind === "setof") {
-    returns = { kind: "type", typeName: prev?.kind === "type" ? prev.typeName : "", setof: kind === "setof" };
+    returns = { kind: "type", typeName: prev?.kind === "type" ? prev.typeName : (stash?.typeName ?? ""), setof: kind === "setof" };
   } else if (kind === "table") {
-    returns = { kind: "table", columns: prev?.kind === "table" ? prev.columns : [] };
+    returns = { kind: "table", columns: prev?.kind === "table" ? prev.columns : (stash?.columns ?? []) };
   } else {
     returns = { kind };
   }
   const next = { ...d, returns };
   return rowsVisible(next) ? next : { ...next, rows: null };
+}
+
+/** Dönüş seçimi değişirken kaybolmasın diye formda tutulan son tip adı ve TABLE kolonları. */
+export interface ReturnStash {
+  typeName: string;
+  columns: ReturnColumn[];
+}
+/** Geçerli dönüşü yedeğe yazar (tip → `typeName`, TABLE → `columns`); diğerlerinde aynı nesne. */
+export function stashReturn(stash: ReturnStash, r: FunctionReturn | null): ReturnStash {
+  if (r?.kind === "type") return { ...stash, typeName: r.typeName };
+  if (r?.kind === "table") return { ...stash, columns: r.columns };
+  return stash;
+}
+
+/** Odak yalnızca koşulun yükselen kenarında (önceki false/yok → true); her düzenlemede tekrar çalmaz. */
+export function shouldFocusRecreate(now: boolean, prev: boolean | undefined): boolean {
+  return now && !prev;
+}
+
+const PROCEDURE_HIDDEN = ["volatility", "strict", "leakproof", "parallel", "cost", "rows", "returns"] as const;
+/** Procedure formunda denetimi olmayan yolların hataları (formun üstünde gösterilir); Function'da []. */
+export function procedureHiddenErrors(kind: RoutineKind, issues: FieldIssues): string[] {
+  if (kind !== "procedure") return [];
+  const out: string[] = [];
+  for (const root of PROCEDURE_HIDDEN) {
+    for (const [p, msgs] of issues.byPath) if (under(p, root)) out.push(...msgs);
+  }
+  return out;
 }
 
 /** RETURNS TABLE ile OUT/INOUT argüman birlikte (PG reddeder): uyarı. */
@@ -150,7 +180,6 @@ export function recreateNeedLabel(path: string): string {
 }
 
 const RECREATE_MARK = "yeniden oluşturmayı gerektirir";
-const under = (p: string, root: string) => p === root || p.startsWith(`${root}[`) || p.startsWith(`${root}.`);
 
 /** Arka uç `args*` / `returns*` yolunda "…yeniden oluşturmayı gerektirir…" alan hatası verdi mi (kutuya odak). */
 export function hasRecreateError(issues: FieldIssues): boolean {

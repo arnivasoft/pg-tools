@@ -54,6 +54,8 @@ export function SqlBodyEditor(props: SqlBodyEditorProps) {
   const describedBy = () => [props.describedBy, hintId].filter(Boolean).join(" ");
 
   const onKeyDown = (ev: KeyboardEvent & { currentTarget: HTMLTextAreaElement }) => {
+    // IME bileşimi sürüyor (Tab/Esc bileşime aittir): dokunulmaz.
+    if (ev.isComposing || ev.keyCode === 229) return;
     if (ev.key === "Escape") {
       escaped = true;
       return;

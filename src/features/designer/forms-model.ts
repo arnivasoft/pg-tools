@@ -61,7 +61,7 @@ export const ROLE_PATHS: ReadonlySet<string> = new Set([
  */
 export const ROUTINE_PATHS: ReadonlySet<string> = new Set([
   "schema", "name", "owner", "comment", "language", "body", "cost", "rows", "volatility", "strict", "leakproof", "parallel",
-  "kind", "object", "args", "returns", "settings", "recreate",
+  "kind", "object", "args", "returns", "settings", "recreate", "securityDefiner",
 ]);
 /**
  * Tür → bilinen yollar (testte denetlenir). Geçici `Partial`: trigger/type/domain yolları Plan 19 formlarıyla gelir.
