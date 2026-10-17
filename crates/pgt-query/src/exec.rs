@@ -267,7 +267,7 @@ impl Executor {
         Ok(rows
             .iter()
             // Gösterim: PG'nin kestiği tip adı kayıplı (`pgt_core::pgtext`).
-            .map(|r| (0..r.len()).map(|i| r.try_get::<_, Option<PgText>>(i).ok().flatten().map(|t| t.lossy())).collect())
+            .map(|r| (0..r.len()).map(|i| r.try_get::<_, Option<PgText>>(i).ok().flatten().map(PgText::into_lossy)).collect())
             .collect())
     }
 
@@ -502,7 +502,7 @@ impl Executor {
         let failure = match result {
             Ok(rows) => {
                 // Gösterim adı: PG'nin kestiği tip adı kayıplı (`pgt_core::pgtext`).
-                let names = rows.iter().map(|r| r.try_get::<_, Option<PgText>>(0).ok().flatten().map(|t| t.lossy())).collect();
+                let names = rows.iter().map(|r| r.try_get::<_, Option<PgText>>(0).ok().flatten().map(PgText::into_lossy)).collect();
                 self.type_names.store(&missing, names);
                 self.type_name_failures = 0;
                 None

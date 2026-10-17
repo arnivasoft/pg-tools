@@ -102,6 +102,18 @@ async fn select_of_invalid_utf8_type_runs_without_type_info() {
             assert!(rows.len() == 1 && rows[0].iter().all(|v| v.as_deref() == Some("\u{FFFD}")), "{sql}: {ev:?}");
             assert!(ev.iter().any(|e| matches!(e, QueryEvent::Done { .. })), "{sql}: {ev:?}");
         }
+        // Yedek yoldaki yazma tam bir kez çalışır (prepare başarısız oldu, ifade yalnızca metin protokolüyle gitti).
+        let ev = fx.run("INSERT INTO u8.t VALUES (2, '{}') RETURNING m").await;
+        let Some(QueryEvent::Started { columns, .. }) = ev.iter().find(|e| matches!(e, QueryEvent::Started { .. })) else {
+            panic!("başlamadı: {ev:?}")
+        };
+        assert_eq!(columns.iter().map(|c| (c.name.as_str(), c.type_display.as_str())).collect::<Vec<_>>(), [("m", "?")]);
+        let rows: Vec<_> = ev.iter().filter_map(|e| if let QueryEvent::Rows { rows, .. } = e { Some(rows) } else { None }).flatten().collect();
+        assert_eq!(rows, [&vec![Some("{}".to_string())]], "{ev:?}");
+        assert!(ev.iter().any(|e| matches!(e, QueryEvent::Done { rows_affected: Some(1), .. })), "{ev:?}");
+        let ev = fx.run("SELECT count(*) FROM u8.t WHERE id = 2").await;
+        let rows: Vec<_> = ev.iter().filter_map(|e| if let QueryEvent::Rows { rows, .. } = e { Some(rows) } else { None }).flatten().collect();
+        assert_eq!(rows, [&vec![Some("1".to_string())]], "tek satır eklendi: {ev:?}");
         let ev = fx.run("UPDATE u8.t SET m = m WHERE id = 1").await;
         assert!(ev.iter().any(|e| matches!(e, QueryEvent::Done { rows_affected: Some(1), .. })), "{ev:?}");
         drop(fx);

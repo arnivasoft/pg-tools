@@ -30,7 +30,7 @@ pub mod view;
 
 pub use sqlscan::{ScanResult, scan_semicolons};
 
-use crate::model::{FieldError, ObjectDef, ObjectKind};
+use crate::model::{DomainDef, FieldError, MatViewDef, ObjectDef, ObjectKind, TableDef, TriggerDef, ViewDef};
 use crate::plan::{Plan, Risk, Statement};
 
 /// PG tanımlayıcı üst sınırı (BAYT, UTF-8).
@@ -280,6 +280,29 @@ fn invalid_utf8_locked(d: &ObjectDef) -> bool {
     unsupported.iter().any(|u| u == crate::load::INVALID_UTF8_REASON)
 }
 
+/// DROP metni yalnızca şema/ad (ve trigger'da tablo) kullanan türlerde, tek gerekçe `INVALID_UTF8_REASON` ise bu
+/// gerekçe olmadan aynı tanım: bu adlar katalogda geçerli UTF-8'dir (kayıplı alanlar DROP'a girmez). Fonksiyon/
+/// procedure (imza kayıplı tip içerir) ve tip (adı kayıplı olabilir) için `None`: kilitli kalır.
+fn droppable_despite_invalid_utf8(d: &ObjectDef) -> Option<ObjectDef> {
+    fn only_reason(u: &[String]) -> bool {
+        matches!(u, [r] if r == crate::load::INVALID_UTF8_REASON)
+    }
+    Some(match d {
+        ObjectDef::Table(t) if only_reason(&t.unsupported) => ObjectDef::Table(TableDef { unsupported: vec![], ..t.clone() }),
+        ObjectDef::View(v) if only_reason(&v.unsupported) => ObjectDef::View(ViewDef { unsupported: vec![], ..v.clone() }),
+        ObjectDef::MaterializedView(m) if only_reason(&m.unsupported) => {
+            ObjectDef::MaterializedView(MatViewDef { unsupported: vec![], ..m.clone() })
+        }
+        ObjectDef::Domain(x) if only_reason(&x.unsupported) => {
+            ObjectDef::Domain(DomainDef { unsupported: vec![], editable: true, ..x.clone() })
+        }
+        ObjectDef::Trigger(x) if only_reason(&x.unsupported) => {
+            ObjectDef::Trigger(TriggerDef { unsupported: vec![], editable: true, ..x.clone() })
+        }
+        _ => return None,
+    })
+}
+
 fn read_only() -> Vec<FieldError> {
     vec![err("object", routine::READ_ONLY_MSG)]
 }
@@ -394,7 +417,10 @@ pub fn drop(def: &ObjectDef, cascade: bool, ctx: &BuildCtx) -> Result<Plan, Vec<
 /// Silme; ortak kurallar: `force` yalnızca Database, `cascade` Database/Role'de yok.
 pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     if invalid_utf8_locked(def) {
-        return Err(read_only());
+        return match droppable_despite_invalid_utf8(def) {
+            Some(d) => drop_with(&d, o, ctx),
+            None => Err(read_only()),
+        };
     }
     let mut errs = validate_identity(def);
     let kind = def.kind();
@@ -521,11 +547,56 @@ mod tests {
         assert!(alter(&l, &l, &ctx()).unwrap().statements.is_empty(), "değişiklik yoksa boş plan");
         let changed = ObjectDef::Table(TableDef { comment: Some("x".into()), ..locked.clone() });
         assert_eq!(paths(alter(&l, &changed, &ctx()).unwrap_err()), ro);
-        assert_eq!(paths(drop(&l, false, &ctx()).unwrap_err()), ro);
         assert_eq!(paths(create(&l, &ctx()).unwrap_err()), ro, "yüklü tanım yeniden oluşturulamaz");
-        // Başka gerekçe tabloyu kilitlemez (yalnızca bilgi): kapı yalnızca bu gerekçeye bakar.
+        // DROP yalnızca şema/adı yazar (geçerli): tek gerekçe buysa izinli.
+        let p = drop(&l, false, &ctx()).unwrap();
+        assert_eq!(p.statements.len(), 1, "{p:?}");
+        assert!(p.statements[0].sql.starts_with("DROP TABLE") && !p.statements[0].sql.contains('\u{FFFD}'), "{p:?}");
+        // Başka gerekçe de varsa drop kilitli kalır.
+        let both = ObjectDef::Table(TableDef {
+            unsupported: vec![crate::load::INVALID_UTF8_REASON.into(), "EXCLUDE ex".into()],
+            ..locked.clone()
+        });
+        assert_eq!(paths(drop(&both, false, &ctx()).unwrap_err()), ro);
+        // Başka gerekçe tek başına tabloyu kilitlemez (yalnızca bilgi): kapı yalnızca bu gerekçeye bakar.
         let other = ObjectDef::Table(TableDef { unsupported: vec!["EXCLUDE ex".into()], ..locked });
         assert!(!invalid_utf8_locked(&other) && invalid_utf8_locked(&l));
+    }
+
+    #[test]
+    fn invalid_utf8_drop_unblock_is_limited_to_name_only_kinds() {
+        let reason = vec![crate::load::INVALID_UTF8_REASON.to_string()];
+        let dom = ObjectDef::Domain(DomainDef {
+            schema: "s".into(),
+            name: "dm".into(),
+            owner: None,
+            comment: None,
+            base_type: "s.\"a\u{FFFD}_multirange\"".into(),
+            collation: None,
+            default: None,
+            not_null: false,
+            constraints: vec![],
+            editable: false,
+            unsupported: reason.clone(),
+        });
+        let p = drop(&dom, false, &ctx()).unwrap();
+        assert!(p.statements[0].sql.starts_with("DROP DOMAIN") && !p.statements[0].sql.contains('\u{FFFD}'), "{p:?}");
+        // Tip: adın kendisi kayıplı olabilir → kilitli; değişiklik de kilitli.
+        let ty = ObjectDef::Type(crate::model::TypeDef {
+            schema: "s".into(),
+            name: "a\u{FFFD}_multirange".into(),
+            owner: None,
+            comment: None,
+            body: crate::model::TypeBody::Composite { attributes: vec![] },
+            editable: false,
+            unsupported: reason.clone(),
+        });
+        let ro = vec![("object".to_string(), routine::READ_ONLY_MSG.to_string())];
+        let paths = |e: Vec<FieldError>| e.into_iter().map(|e| (e.path, e.message)).collect::<Vec<_>>();
+        assert_eq!(paths(drop(&ty, false, &ctx()).unwrap_err()), ro);
+        let ObjectDef::Domain(d) = &dom else { unreachable!() };
+        let changed = ObjectDef::Domain(DomainDef { comment: Some("x".into()), ..d.clone() });
+        assert_eq!(paths(alter(&dom, &changed, &ctx()).unwrap_err()), ro, "drop dışı kilitli kalır");
     }
 
     fn table() -> ObjectDef {

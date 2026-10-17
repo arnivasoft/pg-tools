@@ -74,7 +74,7 @@ pub(crate) async fn list(
         }
         let oid: u32 = r.get("oid");
         let mut node = TreeNode::new(&parent.child((def.seg)(oid)), def.child_kind, lossy(r, "name"))
-            .with_detail(r.try_get::<_, Option<PgText>>("detail").ok().flatten().map(|t| t.lossy()))
+            .with_detail(r.try_get::<_, Option<PgText>>("detail").ok().flatten().map(PgText::into_lossy))
             .with_flags(NodeFlags {
                 partitioned: flag("partitioned"),
                 system: flag("system"),

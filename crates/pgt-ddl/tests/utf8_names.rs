@@ -54,14 +54,23 @@ fn has_reason(unsupported: &[String]) -> bool {
     unsupported.iter().any(|u| u == INVALID_UTF8_REASON)
 }
 
-/// Salt okunur: değişiklik ve drop `object` hatası; `alter(l, l)` boş plan.
-fn assert_read_only(env: &Env, l: &ObjectDef, changed: &ObjectDef) {
+/// Salt okunur: değişiklik `object` hatası; `alter(l, l)` boş plan. `drop_sql`: DROP yalnızca geçerli adları yazan
+/// türlerde izinli (beklenen tek ifade), aksi halde (`None`) `object` hatası.
+fn assert_read_only(env: &Env, l: &ObjectDef, changed: &ObjectDef, drop_sql: Option<&str>) {
     let e = build::alter(l, changed, &env.ctx(false)).unwrap_err();
     assert_eq!(e.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["object"], "{e:?}");
     let p = build::alter(l, l, &env.ctx(false)).unwrap();
     assert!(p.statements.is_empty(), "{:?}", p.statements);
-    let e = build::drop(l, false, &env.ctx(false)).unwrap_err();
-    assert_eq!(e.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["object"], "{e:?}");
+    match drop_sql {
+        Some(sql) => {
+            let p = build::drop(l, false, &env.ctx(false)).unwrap();
+            assert_eq!(p.statements.iter().map(|s| s.sql.as_str()).collect::<Vec<_>>(), [sql]);
+        }
+        None => {
+            let e = build::drop(l, false, &env.ctx(false)).unwrap_err();
+            assert_eq!(e.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["object"], "{e:?}");
+        }
+    }
 }
 
 const MULTIRANGE_OID: &str = "SELECT r.rngmultitypid FROM pg_range r JOIN pg_type t ON t.oid = r.rngtypid WHERE t.typnamespace = 'u8'::regnamespace";
@@ -73,11 +82,17 @@ async fn table_body(ts: TestServer) {
     assert!(lossy(&m.data_type), "{m:?}");
     assert!(has_reason(&t.unsupported), "{:?}", t.unsupported);
     let l = ObjectDef::Table(t.clone());
-    assert_read_only(&env, &l, &ObjectDef::Table(TableDef { comment: Some("x".into()), ..t.clone() }));
+    assert_read_only(&env, &l, &ObjectDef::Table(TableDef { comment: Some("x".into()), ..t.clone() }), Some("DROP TABLE u8.t"));
     // Görünüm kolonları da tipi taşır.
     let v = load_ok(&env, ObjectKind::View, env.class_oid("u8", "v").await).await;
     let ObjectDef::View(vd) = &v else { unreachable!() };
     assert!(has_reason(&vd.unsupported), "{:?}", vd.unsupported);
+    // Tek gerekçe buysa DROP yalnızca geçerli adları yazar ve gerçekten çalışır (önce görünüm, sonra tablo).
+    for d in [&v, &l] {
+        let p = build::drop(d, false, &env.ctx(false)).unwrap();
+        env.exec_tx(&p).await;
+    }
+    assert!(env.admin.query_opt("SELECT 1 FROM pg_class WHERE relname = 't' AND relnamespace = 'u8'::regnamespace", &[]).await.unwrap().is_none());
 }
 docker_test!(table_with_invalid_utf8_column_type_loads_read_only, table_body, "table");
 
@@ -85,12 +100,12 @@ async fn routine_domain_type_body(ts: TestServer) {
     let Some(env) = env(&ts, "rdt").await else { return };
     let ObjectDef::Domain(d) = load_ok(&env, ObjectKind::Domain, oid(&env, "SELECT 'u8.dm'::regtype::oid").await).await else { unreachable!() };
     assert!(lossy(&d.base_type) && !d.editable && has_reason(&d.unsupported), "{d:?}");
-    assert_read_only(&env, &ObjectDef::Domain(d.clone()), &ObjectDef::Domain(DomainDef { comment: Some("x".into()), ..d.clone() }));
+    assert_read_only(&env, &ObjectDef::Domain(d.clone()), &ObjectDef::Domain(DomainDef { comment: Some("x".into()), ..d.clone() }), Some("DROP DOMAIN u8.dm"));
 
     let f_oid = oid(&env, "SELECT p.oid FROM pg_proc p WHERE p.pronamespace = 'u8'::regnamespace AND p.proname = 'f'").await;
     let ObjectDef::Function(f) = load_ok(&env, ObjectKind::Function, f_oid).await else { unreachable!() };
     assert!(lossy(&f.args[0].type_name) && !f.editable && has_reason(&f.unsupported), "{f:?}");
-    assert_read_only(&env, &ObjectDef::Function(f.clone()), &ObjectDef::Function(FunctionDef { comment: Some("x".into()), ..f.clone() }));
+    assert_read_only(&env, &ObjectDef::Function(f.clone()), &ObjectDef::Function(FunctionDef { comment: Some("x".into()), ..f.clone() }), None);
 
     // Multirange tipinin kendisi ve dizisi: ad kayıplı, salt okunur.
     let m_oid = oid(&env, MULTIRANGE_OID).await;

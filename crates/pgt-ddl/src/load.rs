@@ -24,7 +24,7 @@
 
 use pgt_catalog::version::{PgVersion, VersionedSql};
 use pgt_core::connection::{ConnectionManager, Target};
-use pgt_core::pgtext::{is_utf8, lossy, lossy_opt};
+use pgt_core::pgtext::{is_utf8, lossy, lossy_opt, lossy_vec};
 use pgt_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Row;
@@ -431,8 +431,8 @@ fn constraint_from_row(r: &Row) -> LoadedConstraint {
     if let Some(x) = &extra {
         return unsupported(label, Some(x));
     }
-    let columns: Vec<String> = r.get("columns");
-    let include: Vec<String> = r.get("include");
+    let columns = lossy_vec(r, "columns");
+    let include = lossy_vec(r, "include");
     let kind = match contype.as_str() {
         "p" => ConstraintKind::PrimaryKey { columns, include },
         "u" => ConstraintKind::Unique { columns, include, nulls_not_distinct: r.get("nulls_not_distinct") },
@@ -455,7 +455,7 @@ fn constraint_from_row(r: &Row) -> LoadedConstraint {
                 columns,
                 ref_schema: r.get::<_, Option<String>>("ref_schema").unwrap_or_default(),
                 ref_table: r.get::<_, Option<String>>("ref_table").unwrap_or_default(),
-                ref_columns: r.get("ref_columns"),
+                ref_columns: lossy_vec(r, "ref_columns"),
                 match_type,
                 on_update,
                 on_delete,
@@ -532,7 +532,7 @@ async fn load_table(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) ->
     if let Some(t) = h.get::<_, Option<String>>("of_type") {
         unsupported.push(format!("OF {t} (tipli tablo)"));
     }
-    for o in h.get::<_, Vec<String>>("other_options") {
+    for o in lossy_vec(h, "other_options") {
         unsupported.push(format!("WITH ({o})"));
     }
     let columns: Vec<ColumnDef> = cols.iter().map(column_from_row).collect();
@@ -649,11 +649,11 @@ async fn load_view(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> 
     let (head, cols) = fetch_relation(mgr, server, db, &VIEW_SQL, oid).await?;
     let h = head.first().ok_or_else(|| not_found("görünüm"))?;
     refuse_temp_or_system(h)?;
-    let (check_option, security_barrier, security_invoker, other) = view_options(&h.get::<_, Vec<String>>("options"));
+    let (check_option, security_barrier, security_invoker, other) = view_options(&lossy_vec(h, "options"));
     let (columns, defaults, comments) = relation_columns(&cols);
     let mut unsupported = vec![];
-    unsupported.extend(h.get::<_, Vec<String>>("triggers").into_iter().map(|t| format!("TRIGGER {t}")));
-    unsupported.extend(h.get::<_, Vec<String>>("rules").into_iter().map(|r| format!("RULE {r}")));
+    unsupported.extend(lossy_vec(h, "triggers").into_iter().map(|t| format!("TRIGGER {t}")));
+    unsupported.extend(lossy_vec(h, "rules").into_iter().map(|r| format!("RULE {r}")));
     unsupported.extend(defaults.into_iter().map(|c| format!("DEFAULT {c}")));
     unsupported.extend(comments.into_iter().map(|c| format!("COMMENT {c}")));
     unsupported.extend(other);
@@ -683,8 +683,8 @@ async fn load_matview(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) 
     refuse_temp_or_system(h)?;
     let (columns, _defaults, comments) = relation_columns(&cols);
     let mut unsupported: Vec<String> =
-        h.get::<_, Vec<String>>("other_options").into_iter().map(|o| format!("WITH ({o})")).collect();
-    unsupported.extend(h.get::<_, Vec<String>>("indexes").into_iter().map(|i| format!("INDEX {i}")));
+        lossy_vec(h, "other_options").into_iter().map(|o| format!("WITH ({o})")).collect();
+    unsupported.extend(lossy_vec(h, "indexes").into_iter().map(|i| format!("INDEX {i}")));
     unsupported.extend(comments.into_iter().map(|c| format!("COMMENT {c}")));
     note_invalid_utf8(&[&head, &cols], &mut unsupported);
     Ok(ObjectDef::MaterializedView(MatViewDef {
@@ -1060,7 +1060,7 @@ async fn load_function(mgr: &ConnectionManager, server: Uuid, db: u32, kind: Obj
         let rows = (retset && prorows > 0.0).then(|| positive_text("ROWS", prorows, &mut unsupported));
         (cost, rows)
     };
-    let settings = config_settings(&h.get::<_, Vec<String>>("settings"));
+    let settings = config_settings(&lossy_vec(h, "settings"));
     unsupported.extend(unsplittable_settings(&settings));
 
     let def = FunctionDef {
@@ -1237,7 +1237,7 @@ async fn load_trigger(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) 
         unsupported.push("sistem şeması".to_string());
     }
     let (timing, level, mut events) = trigger_kind(r.get("tgtype"));
-    events.update_columns = r.get("update_columns");
+    events.update_columns = lossy_vec(r, "update_columns");
     note_invalid_utf8(&[&rows], &mut unsupported);
     let when = match trigger_when(&lossy(r, "def")) {
         Ok(w) => w,
@@ -1500,7 +1500,10 @@ async fn load_domain(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -
     let mut unsupported = vec![];
     note_invalid_utf8(&[&head, &cons], &mut unsupported);
     let base_type = lossy(h, "base_type");
-    if crate::build::type_syntax::validate_type(&base_type).is_err() {
+    // Kayıplı (yalnızca gösterim) tip metni dilbilgisinden geçmez; o durumda asıl gerekçe yukarıdaki UTF-8 gerekçesidir
+    // (tek gerekçe kalsın: DROP yalnızca adı yazar ve izinlidir, bkz. `build::droppable_despite_invalid_utf8`).
+    let lossy_text = unsupported.iter().any(|u| u == INVALID_UTF8_REASON);
+    if !lossy_text && crate::build::type_syntax::validate_type(&base_type).is_err() {
         unsupported.push(format!("tip {base_type}"));
     }
     let mut constraints = vec![];
