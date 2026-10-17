@@ -16,7 +16,7 @@ import SqlPreview from "./SqlPreview";
 
 // Tür → form (tembel bileşen + bilinen alan yolları; kök yol alt yolları da kapsar: `columns` ⊃ `columns[1].key`).
 // Table formu kendi parçasıdır (TableForm-*.js). View ve MV aynı parçayı paylaşır (`model.kind`'e göre); tek `lazy`
-// (aynı bileşen, tek parça). Geçici `Partial`: trigger/type/domain formları Plan 19'da gelir; o zamana
+// (aynı bileşen, tek parça). Geçici `Partial`: type/domain formları Plan 19'da gelir; o zamana
 // dek formu olmayan tür tek satır şerit gösterir (Plan 19 kaldırır; metin bu tembel parçada, ana paket değişmez).
 const viewForm = lazy(() => import("./ViewForm"));
 // Function ve Procedure aynı parçayı paylaşır (RoutineForm-*.js; `model.kind`'e göre).
@@ -33,6 +33,7 @@ const FORMS: Partial<Record<ObjectKind, FormEntry>> = {
   role: { view: lazy(() => import("./RoleForm")), paths: FORM_PATHS.role },
   function: { view: routineForm, paths: FORM_PATHS.function },
   procedure: { view: routineForm, paths: FORM_PATHS.procedure },
+  trigger: { view: lazy(() => import("./TriggerForm")), paths: FORM_PATHS.trigger },
 };
 
 const NO_PATHS: ReadonlySet<string> = new Set();

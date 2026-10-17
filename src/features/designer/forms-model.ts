@@ -64,12 +64,21 @@ export const ROUTINE_PATHS: ReadonlySet<string> = new Set([
   "kind", "object", "args", "returns", "settings", "recreate", "securityDefiner",
 ]);
 /**
- * Tür → bilinen yollar (testte denetlenir). Geçici `Partial`: trigger/type/domain yolları Plan 19 formlarıyla gelir.
+ * Trigger (spec §8.5): `events` kökü `events.updateColumns`, `events.updateColumns[i]`, `events.truncate`; `args` kökü
+ * `args[i]` alt yollarını kapsar; `old.*` genel şeride düşer. `schema`/`table`/`object` salt okunur bilgi olsa da kök
+ * listededir (formun üstünde gösterilir).
+ */
+export const TRIGGER_PATHS: ReadonlySet<string> = new Set([
+  "schema", "table", "name", "timing", "events", "level", "when", "functionSchema", "functionName", "args", "oldTable",
+  "newTable", "deferrable", "initiallyDeferred", "comment", "object",
+]);
+/**
+ * Tür → bilinen yollar (testte denetlenir). Geçici `Partial`: type/domain yolları Plan 19 formlarıyla gelir.
  */
 export const FORM_PATHS = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
   view: VIEW_PATHS, materialized_view: MATVIEW_PATHS, database: DATABASE_PATHS, role: ROLE_PATHS,
-  function: ROUTINE_PATHS, procedure: ROUTINE_PATHS,
+  function: ROUTINE_PATHS, procedure: ROUTINE_PATHS, trigger: TRIGGER_PATHS,
 } satisfies Partial<Record<ObjectKind, ReadonlySet<string>>>;
 
 /**

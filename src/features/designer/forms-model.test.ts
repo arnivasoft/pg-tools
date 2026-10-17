@@ -8,7 +8,7 @@ import type { SchemaDef } from "../../ipc/bindings/SchemaDef";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
 import { addColumn, groupIssues, issuesFor, moveColumn, removeColumn, updateColumn } from "./designer-model";
 import {
-  DATABASE_PATHS, EXTENSION_PATHS, FORM_PATHS, ROLE_PATHS, ROUTINE_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
+  DATABASE_PATHS, EXTENSION_PATHS, FORM_PATHS, ROLE_PATHS, ROUTINE_PATHS, TRIGGER_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
   columnKeyLabel, exactIssues, extensionEditPatch, extensionOptionLabel, extensionVersionNote, fillfactorEnabled,
   fillfactorFromInput, findExtension, incrementEditPatch, incrementSign, indexEditPatch, indexMethodPatch, indexReadOnlyReason,
   newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect, orphanRowIssues, ownedByHint, restrictedControlDisabled, schemaEditPatch, sequenceSchemaPatch, tablespaceChoices,
@@ -449,7 +449,7 @@ describe("ROLE_PATHS", () => {
       ["name", "login", "superuser", "createdb", "createrole", "inherit", "replication", "bypassrls", "connectionLimit", "validUntil", "password", "memberOf", "settings", "comment"].sort(),
     );
     expect(FORM_PATHS.role).toBe(ROLE_PATHS);
-    const kinds = ["schema", "sequence", "extension", "index", "table", "view", "materialized_view", "database", "role", "function", "procedure"] as const;
+    const kinds = ["schema", "sequence", "extension", "index", "table", "view", "materialized_view", "database", "role", "function", "procedure", "trigger"] as const;
     expect(Object.keys(FORM_PATHS).sort()).toEqual([...kinds].sort());
     expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
   });
@@ -486,5 +486,27 @@ describe("ROUTINE_PATHS (Plan 19 Task 3)", () => {
     expect(g.byPath.get("settings[0].value")).toEqual(["c"]);
     expect(g.general).toEqual(["d", "e"]);
     expect(g.byPath.get("securityDefiner")).toEqual(["g"]);
+  });
+});
+
+describe("TRIGGER_PATHS (Plan 19 Task 4)", () => {
+  it("spec §8.5 kök anahtarları; FORM_PATHS.trigger === TRIGGER_PATHS", () => {
+    expect([...TRIGGER_PATHS].sort()).toEqual(
+      ["schema", "table", "name", "timing", "events", "level", "when", "functionSchema", "functionName", "args", "oldTable", "newTable", "deferrable", "initiallyDeferred", "comment", "object"].sort(),
+    );
+    expect(FORM_PATHS.trigger).toBe(TRIGGER_PATHS);
+  });
+  it("groupIssues: events.updateColumns[1] / events.truncate / args[0] alan; old.table ve bilinmeyen genel", () => {
+    const g = groupIssues(
+      [
+        { path: "events.updateColumns[1]", message: "a" }, { path: "events.truncate", message: "b" }, { path: "args[0]", message: "c" },
+        { path: "old.table", message: "d" }, { path: "enabledX", message: "e" }, { path: "functionName", message: "f" },
+      ] as never,
+      TRIGGER_PATHS,
+    );
+    expect(issuesFor(g, "events")).toEqual(["a", "b"]);
+    expect(g.byPath.get("args[0]")).toEqual(["c"]);
+    expect(g.byPath.get("functionName")).toEqual(["f"]);
+    expect(g.general).toEqual(["d", "e"]);
   });
 });
