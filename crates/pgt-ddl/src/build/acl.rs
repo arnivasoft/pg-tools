@@ -121,6 +121,24 @@ pub(crate) fn grant_option(g: Option<&AclGrant>, p: Privilege) -> Option<bool> {
     g?.privileges.iter().find(|x| x.privilege == p).map(|x| x.grant_option)
 }
 
+/// Yüklü (eski) alıcı adlarının gevşek doğrulaması (`old.<prefix>[i].grantee`); yükleyici de aynı kuralla salt okunurluk
+/// kararı verir (`load_acl::builder_gate`).
+pub(crate) fn check_old_grantees(prefix: &str, old: &[AclGrant], e: &mut Vec<FieldError>) {
+    for (i, g) in old.iter().enumerate() {
+        if let Some(n) = &g.grantee {
+            check_old_ref(&format!("old.{prefix}[{i}].grantee"), n, e);
+        }
+    }
+}
+
+/// Yüklü tanımın üreticide reddedilecek kimlik/alıcı hataları (hedef + eski alıcılar). Yükleyici bunlar varsa tanımı
+/// salt okunur yapar; böylece "düzenlenebilir" görünüp her planda reddedilen tanım olmaz.
+pub(crate) fn loaded_errors(d: &AclDef) -> Vec<FieldError> {
+    let mut e = object_target(d).err().unwrap_or_default();
+    check_old_grantees("grants", &d.grants, &mut e);
+    e
+}
+
 /// Yeni tarafın alıcı/yetki kuralları (Karar 2, 8, 10) ve eski alıcı adlarının gevşek doğrulaması. `prefix` alan yolu
 /// önekidir (`grants` ya da `sections[i].grants`); `owner` Karar 8'in GRANT OPTION kuralının sahibidir (varsayılan
 /// yetkilerde `role`). Varsayılan yetki üreticisi de aynı kuralları paylaşır.
@@ -131,20 +149,18 @@ pub(crate) fn validate_rows(
     (old, new): (&[AclGrant], &[AclGrant]),
     e: &mut Vec<FieldError>,
 ) {
-    for (i, g) in old.iter().enumerate() {
-        if let Some(n) = &g.grantee {
-            check_old_ref(&format!("old.{prefix}[{i}].grantee"), n, e);
-        }
-    }
+    check_old_grantees(prefix, old, e);
     let mut seen = BTreeSet::new();
     for (i, g) in new.iter().enumerate() {
         let path = format!("{prefix}[{i}].grantee");
         if let Some(n) = &g.grantee {
-            if n.eq_ignore_ascii_case("public") {
-                // PG `public` adlı rolü yasaklar; adla yazmak `PUBLIC` anlamına gelmez/hata verir.
-                e.push(err(&path, PUBLIC_MSG));
-            } else if find(old, Some(n)).is_some() {
+            if find(old, Some(n)).is_some() {
+                // Yüklü alıcı (ör. `"PUBLIC"`/`"Public"` adlı gerçek rol) yalnız gevşek doğrulanır.
                 check_old_ref(&path, n, e);
+            } else if n == "public" {
+                // PG yalnız tam küçük harf `public`'i ayırır (rol oluşturulamaz); `quote_ident("public")` tırnaksız
+                // yazılır ve `PUBLIC` anlamına gelir. `"PUBLIC"`/`"Public"` geçerli rol adlarıdır.
+                e.push(err(&path, PUBLIC_MSG));
             } else {
                 check_ident(&path, n, e);
             }
@@ -288,6 +304,7 @@ pub fn privileges(ctx: &BuildCtx, old: &AclDef, new: &AclDef, cascade: bool) -> 
     if old.columns != new.columns {
         e.push(err("columns", COLUMNS_MSG));
     }
+    // İkinci küme (`170000`) yalnız MAINTAIN iletisini "sürüm" ile "tür" arasında ayırmak için.
     validate_rows(
         "grants",
         (privileges_for(new.kind, ctx.version_num), privileges_for(new.kind, 170000)),
@@ -648,7 +665,6 @@ mod tests {
                 ctx(),
                 vec!["grants[2].privileges[1].grantOption"],
             ),
-            ("Some(PUBLIC)", base.clone(), edit(&|n| n.grants.push(row(Some("PUBLIC"), &plain(&[Select])))), ctx(), vec!["grants[2].grantee"]),
             ("Some(public)", base.clone(), edit(&|n| n.grants.push(row(Some("public"), &plain(&[Select])))), ctx(), vec!["grants[2].grantee"]),
             ("boş alıcı", base.clone(), edit(&|n| n.grants.push(row(Some(""), &plain(&[Select])))), ctx(), vec!["grants[2].grantee"]),
             (
@@ -720,7 +736,7 @@ mod tests {
         assert_eq!(msg(&base, &invalid, &ctx()), "Bu nesne türünde geçersiz yetki.");
         let dup = edit(&|n| n.grants.push(row(Some("r"), &plain(&[Insert]))));
         assert_eq!(msg(&base, &dup, &ctx()), "Bu alıcı zaten listede.");
-        let public = edit(&|n| n.grants.push(row(Some("Public"), &plain(&[Select]))));
+        let public = edit(&|n| n.grants.push(row(Some("public"), &plain(&[Select]))));
         assert_eq!(msg(&base, &public, &ctx()), "PUBLIC için alıcıyı boş bırakın.");
         let public_go = edit(&|n| n.grants.push(row(None, &[(Select, true)])));
         assert_eq!(msg(&base, &public_go, &ctx()), "PUBLIC'e GRANT OPTION verilemez.");
@@ -742,6 +758,25 @@ mod tests {
         assert_eq!(sqls(&privileges(&ctx(), &owner_less, &back, false).unwrap()), ["GRANT INSERT ON TABLE s.t TO own"]);
         let back_go = AclDef { grants: vec![row(Some("own"), &[(Select, false), (Insert, true)])], ..table() };
         assert_eq!(paths(privileges(&ctx(), &owner_less, &back_go, false).unwrap_err()), ["grants[0].privileges[1].grantOption"]);
+    }
+
+    #[test]
+    fn public_named_roles_are_real_roles() {
+        // PG yalnız tam küçük harf `public`'i ayırır; `"PUBLIC"`/`"Public"` gerçek rol olabilir (`quote_ident` tırnaklar).
+        for name in ["PUBLIC", "Public"] {
+            let loaded = with(&table(), vec![row(Some(name), &plain(&[Select]))]);
+            assert!(ok(&loaded, &loaded, false).statements.is_empty(), "{name}");
+            // Yüklü rolün yetkisini kaldırmak çalışır.
+            let p = ok(&loaded, &table(), false);
+            assert_eq!(sqls(&p), [format!("REVOKE SELECT ON TABLE s.t FROM \"{name}\"")], "{name}");
+            // Yeni alıcı olarak da kabul edilir.
+            let p = ok(&table(), &loaded, false);
+            assert_eq!(sqls(&p), [format!("GRANT SELECT ON TABLE s.t TO \"{name}\"")], "{name}");
+        }
+        // Yeni alıcı `public` (tam küçük harf) reddedilir.
+        let new = with(&table(), vec![row(Some("public"), &plain(&[Select]))]);
+        let e = privileges(&ctx(), &table(), &new, false).unwrap_err();
+        assert_eq!((e[0].path.as_str(), e[0].message.as_str()), ("grants[1].grantee", PUBLIC_MSG));
     }
 
     #[test]

@@ -2902,6 +2902,20 @@ async fn acl_flow_body(ts: TestServer) {
     let reloaded = f.load_acl_of(dbo).await;
     assert_eq!(row_of(&reloaded, None).map(|g| g.privileges.clone()), Some(vec![pgr(Privilege::Connect, false)]));
 
+    // Başka role ait nesne: süper kullanıcının GRANT/REVOKE'u sahip adına kaydedilir → ACL_WARNING yok, `foreign` boş.
+    env.sql(&format!("CREATE TABLE {qs}.o (id int); ALTER TABLE {qs}.o OWNER TO {q2}")).await;
+    let to = ObjectRef { kind: ObjectKind::Table, oid: env.class_oid(&s, "o").await };
+    let req = f.privileges(to, |d| set_grant(d, Some(&r1), vec![pgr(Privilege::Select, true)]), false).await;
+    assert_eq!(warnings_of(f.apply(&req).await), None);
+    let l = f.load_acl_of(to).await;
+    assert_eq!((l.owner.as_str(), l.viewer.as_str()), (r2.as_str(), env.me.as_str()));
+    assert!(l.foreign.is_empty(), "{l:?}");
+    assert_eq!(row_of(&l, Some(&r1)).map(|g| g.privileges.clone()), Some(vec![pgr(Privilege::Select, true)]));
+    let req = f.privileges(to, |d| set_grant(d, Some(&r1), vec![]), false).await;
+    assert_eq!(warnings_of(f.apply_with(&req, |o| o.confirmed = true).await), None);
+    let l = f.load_acl_of(to).await;
+    assert!(l.foreign.is_empty() && row_of(&l, Some(&r1)).is_none(), "{l:?}");
+
     // Varsayılan yetkiler: kapsam rolü `old.role` ile uyuşmazsa `invalid_def` (bağlantı yok).
     let PlanRequest::DefaultPrivileges { scope, old, new } = &def_req else { unreachable!() };
     let bad = PlanRequest::DefaultPrivileges { scope: DefaultAclScope { role: Some(r1.clone()), schema_oid: None }, old: old.clone(), new: new.clone() };

@@ -8,7 +8,9 @@
 //! - Adlar ham metin (tırnaklama üreticide); imza `pg_get_function_identity_arguments` (yalnız Function/Procedure).
 //! - Tür uyuşmazlığı (Table istenip relkind 'S', Function istenip procedure, Type istenip domain …) → `NotFound`.
 //! - `unsupported` (doluysa `editable = false`): `sistem şeması`, aggregate (`AGGREGATE …`; R4a), dizi/multirange/tablo
-//!   satır tipi, bilinmeyen yetki (`yetki <metin>`), denetim karakterli imza (`imza`), geçersiz UTF-8 ad (`INVALID_UTF8_REASON`; adlar kayıplı).
+//!   satır tipi, bilinmeyen yetki (`yetki <metin>`), denetim karakterli imza (`imza`), geçersiz UTF-8 ad (`INVALID_UTF8_REASON`; adlar kayıplı),
+//!   başka gerekçe yokken üreticinin yüklü taraf doğrulamasının reddettiği tanım (`BUILDER_REJECTS_REASON`; ör. denetim
+//!   karakterli alıcı, `pg_temp_N` şema — üreticinin kendi doğrulayıcılarıyla).
 //!
 //! Database bakım bağlantısından okunur (`database_oid` yok sayılır); diğerleri veritabanı gerektirir. Adlar/yetkiler
 //! günlüğe yazılmaz.
@@ -53,6 +55,19 @@ pub const ROW_TYPE_REASON: &str = "tablo satır tipi (yetkiler ilişkiden yönet
 /// R4a: aggregate salt okunur (Plan 18 `read_only_reason` "AGGREGATE" önekini tanır). Sıralı küme/varsayımsal
 /// aggregate imzası `ORDER BY` içerir ve `ON FUNCTION` hedefinde ayrıştırılamaz; Explorer/Plan 18 de salt okunur sayar.
 pub const AGGREGATE_REASON: &str = "AGGREGATE (aggregate yetkileri buradan düzenlenmez)";
+
+/// Üreticinin yüklü taraf doğrulaması tanımı reddedecek (denetim karakterli alıcı adı, geçici şema `pg_temp_N` …):
+/// düzenlenebilir görünüp her planda reddedilmesin diye salt okunur (genel metin; ad içermez).
+pub const BUILDER_REJECTS_REASON: &str = "üreticinin kabul etmediği ad ya da şema";
+
+/// Yükleyici ↔ üretici uyumu: `build::acl::loaded_errors` (üreticinin kendi doğrulayıcıları) hata veriyorsa ve başka
+/// gerekçe yoksa `BUILDER_REJECTS_REASON` eklenir; `editable` gerekçelerden yeniden hesaplanır.
+fn builder_gate(d: &mut AclDef) {
+    if d.unsupported.is_empty() && !crate::build::acl::loaded_errors(d).is_empty() {
+        d.unsupported.push(BUILDER_REJECTS_REASON.to_string());
+    }
+    d.editable = d.unsupported.is_empty();
+}
 
 fn not_found() -> Error {
     Error::NotFound("nesne".to_string())
@@ -100,6 +115,7 @@ fn split_entries(kind: ObjectKind, entries: Vec<Entry>, unsupported: &mut Vec<St
             None => grants.push(AclGrant { grantee: e.grantee, privileges: vec![pg] }),
         }
     }
+    // `170000`: yalnız kanonik sıra (tüm sürümlerin kümesi, MAINTAIN dahil).
     sort_grants(&mut grants, privileges_for(kind, 170000));
     foreign.sort_by(|a, b| {
         (&a.grantor, &a.grantee, rank(kind, a.privilege)).cmp(&(&b.grantor, &b.grantee, rank(kind, b.privilege)))
@@ -236,7 +252,7 @@ pub async fn load_acl(mgr: &ConnectionManager, server: Uuid, database_oid: impl 
         keyed.push((r.get::<_, i32>("attnum"), column));
     }
 
-    Ok(AclDef {
+    let mut def = AclDef {
         kind,
         schema: lossy_opt(h, "schema"),
         name: lossy(h, "name"),
@@ -247,9 +263,11 @@ pub async fn load_acl(mgr: &ConnectionManager, server: Uuid, database_oid: impl 
         grants,
         foreign,
         columns: sort_columns(kind, keyed),
-        editable: unsupported.is_empty(),
+        editable: false,
         unsupported,
-    })
+    };
+    builder_gate(&mut def);
+    Ok(def)
 }
 
 // ================================================================================================================
@@ -330,6 +348,7 @@ fn assemble_sections(schema_scoped: bool, entries: Vec<DefaultEntry>, unsupporte
         }
     }
     for s in &mut sections {
+        // `170000`: yalnız kanonik sıra (tüm sürümlerin kümesi).
         let order = default_privileges_for(s.object_type, 170000);
         sort_grants(&mut s.grants, order);
         sort_grants(&mut s.baseline, order);
@@ -392,14 +411,25 @@ pub async fn load_default_acl(mgr: &ConnectionManager, server: Uuid, database_oi
         })
         .collect();
     let sections = assemble_sections(schema_oid.is_some(), entries, &mut unsupported);
-    Ok(DefaultAclDef {
+    let mut def = DefaultAclDef {
         role: lossy(h, "role"),
         schema: lossy_opt(h, "schema"),
         viewer: lossy(h, "viewer"),
         sections,
-        editable: default_editable(&unsupported),
+        editable: false,
         unsupported,
-    })
+    };
+    builder_gate_default(&mut def);
+    Ok(def)
+}
+
+/// `builder_gate`'in varsayılan yetki karşılığı (`build::default_acl::loaded_errors`); LARGE OBJECTS bilgi notu
+/// "başka gerekçe" sayılmaz.
+fn builder_gate_default(d: &mut DefaultAclDef) {
+    if default_editable(&d.unsupported) && !crate::build::default_acl::loaded_errors(d).is_empty() {
+        d.unsupported.push(BUILDER_REJECTS_REASON.to_string());
+    }
+    d.editable = default_editable(&d.unsupported);
 }
 
 #[cfg(test)]
@@ -580,6 +610,74 @@ mod tests {
         assert!(r.starts_with("AGGREGATE"), "{r}");
         for k in ["f", "w", "p"] {
             assert_eq!(routine_reason(k), None, "{k}");
+        }
+    }
+
+    fn acl(schema: &str, grantee: &str) -> AclDef {
+        AclDef {
+            kind: ObjectKind::Table,
+            schema: Some(schema.into()),
+            name: "t".into(),
+            signature: None,
+            owner: "o".into(),
+            viewer: "o".into(),
+            explicit: true,
+            grants: vec![AclGrant { grantee: Some(grantee.into()), privileges: vec![pgr(Select, false)] }],
+            foreign: vec![],
+            columns: vec![],
+            editable: true,
+            unsupported: vec![],
+        }
+    }
+
+    #[test]
+    fn builder_rejected_acl_is_read_only() {
+        // Üreticinin kabul ettiği tanım düzenlenebilir kalır.
+        let mut d = acl("s", "PUBLIC");
+        builder_gate(&mut d);
+        assert!(d.editable && d.unsupported.is_empty(), "{:?}", d.unsupported);
+        // Denetim karakterli yüklü alıcı, geçici şema (`pg_temp_N`/`pg_toast_temp_N`) ve geçici şemanın kendisi.
+        let mut schema_kind = acl("x", "r");
+        (schema_kind.kind, schema_kind.schema, schema_kind.name) = (ObjectKind::Schema, None, "pg_temp_3".into());
+        for mut d in [acl("s", "a\nb"), acl("pg_temp_3", "r"), acl("pg_toast_temp_3", "r"), schema_kind] {
+            builder_gate(&mut d);
+            assert_eq!((d.editable, d.unsupported.as_slice()), (false, [BUILDER_REJECTS_REASON.to_string()].as_slice()), "{:?}", d.name);
+        }
+        // Başka gerekçe zaten varsa yinelenmez (tanım zaten salt okunur).
+        let mut d = acl("pg_temp_3", "r");
+        d.unsupported.push(SYSTEM_SCHEMA_REASON.into());
+        builder_gate(&mut d);
+        assert_eq!((d.editable, d.unsupported.as_slice()), (false, [SYSTEM_SCHEMA_REASON.to_string()].as_slice()));
+    }
+
+    #[test]
+    fn builder_rejected_default_acl_is_read_only() {
+        let def = |schema: Option<&str>, grantee: &str| DefaultAclDef {
+            role: "o".into(),
+            schema: schema.map(Into::into),
+            viewer: "o".into(),
+            sections: default_sections(schema.is_some())
+                .iter()
+                .map(|&object_type| DefaultAclSection {
+                    object_type,
+                    grants: vec![AclGrant { grantee: Some(grantee.into()), privileges: vec![] }],
+                    baseline: vec![],
+                })
+                .collect(),
+            editable: true,
+            unsupported: vec![],
+        };
+        let mut d = def(Some("s"), "Public");
+        builder_gate_default(&mut d);
+        assert!(d.editable && d.unsupported.is_empty(), "{:?}", d.unsupported);
+        // LARGE OBJECTS bilgi notu düzenlenebilirliği kapatmaz; üretici reddi kapatır.
+        let mut d = def(None, "r");
+        d.unsupported.push(LARGE_OBJECTS_REASON.into());
+        builder_gate_default(&mut d);
+        assert!(d.editable);
+        for mut d in [def(None, "a\tb"), def(Some("pg_temp_3"), "r")] {
+            builder_gate_default(&mut d);
+            assert!(!d.editable && d.unsupported.contains(&BUILDER_REJECTS_REASON.to_string()), "{:?}", d.unsupported);
         }
     }
 

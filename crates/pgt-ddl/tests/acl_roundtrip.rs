@@ -425,6 +425,31 @@ async fn foreign_body(ts: TestServer, tag: &'static str) {
     assert!(l5.foreign.is_empty(), "{:?}", l5.foreign);
 }
 
+docker_test!(acl_other_owner_superuser_applies, other_owner_body, "otherowner");
+
+/// Nesne başka role ait; süper kullanıcı (bağlı rol, sahip değil) üretici planını uygular: PG girdileri sahip adına
+/// kaydeder → yeniden yüklenen `grants` istenendir, `foreign` boş kalır.
+async fn other_owner_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag, &["o", "1", "2"]).await;
+    let (ro, r1, r2) = (role(tag, "o"), role(tag, "1"), role(tag, "2"));
+    let s = format!("pgt_ddl_rt_{tag}");
+    env.sql(&format!("CREATE SCHEMA {s}; CREATE TABLE {s}.t (a int); ALTER TABLE {s}.t OWNER TO {}", quote_ident(&ro))).await;
+    let oid = env.class_oid(&s, "t").await;
+    use Privilege::*;
+    let l0 = ld(&env, ObjectKind::Table, oid).await;
+    assert_eq!((l0.owner.as_str(), l0.viewer.as_str()), (ro.as_str(), env.me.as_str()));
+    let owner = row(Some(&ro), privileges_for(ObjectKind::Table, env.version));
+    assert_eq!(l0.grants, std::slice::from_ref(&owner), "{l0:?}");
+    // GRANT (GRANT OPTION'lı dahil) ve PUBLIC.
+    let l1 = apply(&env, &l0, oid, vec![owner.clone(), row_go(Some(&r1), &[(Select, true), (Insert, false)]), row(None, &[Select])], false).await;
+    assert!(l1.foreign.is_empty(), "{:?}", l1.foreign);
+    // REVOKE, REVOKE GRANT OPTION FOR ve yeni alıcı.
+    let l2 = apply(&env, &l1, oid, vec![owner.clone(), row(Some(&r1), &[Select]), row(Some(&r2), &[Update])], false).await;
+    assert!(l2.foreign.is_empty(), "{:?}", l2.foreign);
+    let l3 = apply(&env, &l2, oid, vec![owner], false).await;
+    assert!(l3.foreign.is_empty() && l3.owner == ro, "{l3:?}");
+}
+
 // ================================================================================================================
 // kolon yetkileri (salt okunur)
 // ================================================================================================================

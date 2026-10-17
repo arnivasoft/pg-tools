@@ -407,7 +407,7 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
     const GENERIC: &str = "desteklenmeyen özellik";
     let Some(e) = entry else { return GENERIC };
     // (önek, gerekçe): ilk eşleşen kazanır; sabit girdiler kendi metniyle.
-    const PREFIXES: [(&str, &str); 38] = [
+    const PREFIXES: [(&str, &str); 39] = [
         ("LANGUAGE ", "desteklenmeyen dil (C/internal)"),
         ("BEGIN ATOMIC", "BEGIN ATOMIC (SQL standart gövde)"),
         ("AGGREGATE", "aggregate fonksiyonu"),
@@ -445,6 +445,7 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
         ("imza", "imza çözülemedi"),
         ("varsayılan yetki türü ", "desteklenmeyen varsayılan yetki türü"),
         ("veren rolden farklı", "veren rolden farklı (beklenmeyen varsayılan yetki girdisi)"),
+        ("üreticinin kabul etmediği", "üreticinin kabul etmediği ad ya da şema"),
         ("geçerli UTF-8 olmayan ad", "geçerli UTF-8 olmayan ad"),
         // Yükleyicinin `'<kod>' türü …` biçimleri (ilişki/tip/kısıt türü).
         ("'", ""),
@@ -574,11 +575,18 @@ fn materialize_for<'a>(statements: &'a [Statement], role: Option<&str>, secret: 
 /// İfadeye ve SQLSTATE'e göre ipucu (Karar 1/8/9, inceleme m-2: kod tek başına yetmez, başarısız ifade de eşleşmeli).
 fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> Option<&'static str> {
     let routine = matches!(kind, ObjectKind::Function | ObjectKind::Procedure);
+    let acl_op = op == "privileges" || op == "default_privileges";
+    // 42704 rol eksikliği yalnız yetki ifadesinde; Type/Domain'de aynı kod nesnenin kaybolması da olabilir (yeniden
+    // yükleme eşitliğinden sonra yarış) — orada yanıltıcı ipucu verilmez, PG iletisi yeterlidir.
+    let role_missing = acl_op
+        && !matches!(kind, ObjectKind::Type | ObjectKind::Domain)
+        && ["GRANT ", "REVOKE ", "ALTER DEFAULT PRIVILEGES "].iter().any(|p| sql.starts_with(p));
     Some(match (code, kind) {
         ("2BP01", ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Type | ObjectKind::Domain) if op == "drop" => {
             VIEW_DEPENDENTS_HINT
         }
-        ("42809", _) if routine => ROUTINE_KIND_HINT,
+        // Yeniden kurma ipucu yalnız tanım işlemlerinde (yetki ifadesinde 42809 yeniden kurmayla çözülmez).
+        ("42809", _) if routine && !acl_op => ROUTINE_KIND_HINT,
         ("0A000", ObjectKind::Type) if sql.starts_with("ALTER TYPE ") && sql.contains(" ALTER ATTRIBUTE ") => TYPE_COLUMN_RETYPE_HINT,
         // Fonksiyon tanımı (CREATE [OR REPLACE]) LEAKPROOF isterken yetki hatası; sahip/yorum ifadeleri genel ipucu alır.
         // Ödünleşim: aynı CREATE ifadesindeki başka bir 42501 (ör. şemada CREATE yetkisi yok, dil USAGE yok) da
@@ -594,7 +602,7 @@ fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> 
         // Plan 20 Karar 15: yetki istekleri işleme (`op`) göre; genel 42501 kolundan önce.
         ("42501", _) if op == "privileges" => ACL_PRIVILEGE_HINT,
         ("42501", _) if op == "default_privileges" => DEFAULT_ACL_PRIVILEGE_HINT,
-        ("42704", _) if op == "privileges" || op == "default_privileges" => ACL_ROLE_MISSING_HINT,
+        ("42704", _) if role_missing => ACL_ROLE_MISSING_HINT,
         ("42501", _) => PRIVILEGE_HINT,
         ("2BP01", ObjectKind::Role) => ROLE_DEPENDENTS_HINT,
         // Düzenlemedeki DROP (yeniden kurma) CASCADE sunmaz; yalnızca silme akışında CASCADE önerilir.
@@ -696,6 +704,7 @@ enum VerifyAcl {
 
 impl VerifyAcl {
     fn of(req: &PlanRequest) -> Option<Self> {
+        // `170000`: yalnız kanonik sıra için tüm sürümlerin kümesi (MAINTAIN dahil); sürüm kapısı değildir.
         match req {
             PlanRequest::Privileges { object, new, .. } => {
                 Some(VerifyAcl::Object(*object, canonical_grants(&new.grants, privileges_for(object.kind, 170000))))
@@ -712,11 +721,13 @@ impl VerifyAcl {
 /// Yeniden yüklenen nesne ACL'sinin `grants`'ı istenenden farklı mı (`foreign`/`columns` karşılaştırılmaz: sahip
 /// olmayan bağlı rolün GRANT'ı `foreign`'a düşer ve burada fark olarak görünür).
 fn acl_grants_differ(intended: &[AclGrant], loaded: &AclDef) -> bool {
+    // `170000`: yalnız kanonik sıra (tüm sürümlerin kümesi).
     intended != canonical_grants(&loaded.grants, privileges_for(loaded.kind, 170000))
 }
 
 /// Yeniden yüklenen varsayılan yetkilerin bölüm `grants`'ı istenenden farklı mı (`baseline` karşılaştırılmaz).
 fn default_acl_grants_differ(intended: &[Vec<AclGrant>], loaded: &DefaultAclDef) -> bool {
+    // `170000`: yalnız kanonik sıra (tüm sürümlerin kümesi).
     let got: Vec<Vec<AclGrant>> =
         loaded.sections.iter().map(|s| canonical_grants(&s.grants, default_privileges_for(s.object_type, 170000))).collect();
     intended != got.as_slice()
@@ -1692,6 +1703,17 @@ mod tests {
             // PG'nin kendi ipucu (2BP01 dışında) korunur.
             assert_eq!(hint(kind, op, s, "42501", Some("pg")).as_deref(), Some("pg"));
         }
+        // 42704 yalnız GRANT/REVOKE/ALTER DEFAULT PRIVILEGES ifadesinde ve Type/Domain dışında rol eksikliğidir;
+        // Type/Domain'de nesnenin kendisi kaybolmuş olabilir (`type … does not exist` da 42704).
+        for kind in [ObjectKind::Type, ObjectKind::Domain] {
+            assert_eq!(hint(kind, "privileges", &st("REVOKE USAGE ON TYPE public.e FROM r"), "42704", None), None, "{kind:?}");
+        }
+        assert_eq!(hint(ObjectKind::Table, "privileges", &st("SELECT 1"), "42704", None), None);
+        assert_eq!(hint(ObjectKind::Function, "privileges", &st("GRANT EXECUTE ON FUNCTION public.f() TO r"), "42704", None).as_deref(), Some(ACL_ROLE_MISSING_HINT));
+        // 42809 (Function ↔ Procedure) yeniden kurma ipucu yetki işlemlerinde verilmez.
+        for (kind, op) in [(ObjectKind::Function, "privileges"), (ObjectKind::Procedure, "privileges"), (ObjectKind::Function, "default_privileges")] {
+            assert_eq!(hint(kind, op, &st("GRANT EXECUTE ON FUNCTION public.f() TO r"), "42809", None), None, "{kind:?} {op}");
+        }
         // Genel 42501 diğer işlemlerde değişmez; 42704 başka işlemde ipucu almaz.
         let alter = st("ALTER VIEW v OWNER TO r");
         assert_eq!(hint(ObjectKind::View, "alter", &alter, "42501", None).as_deref(), Some(PRIVILEGE_HINT));
@@ -2412,6 +2434,7 @@ mod tests {
             crate::load_acl::AGGREGATE_REASON,
             crate::load_acl::SIGNATURE_REASON,
             crate::load_acl::DEFAULT_GRANTOR_REASON,
+            crate::load_acl::BUILDER_REJECTS_REASON,
             crate::load::INVALID_UTF8_REASON,
             "yetki zz_gizli",
             "varsayılan yetki türü zz_gizli",

@@ -7,7 +7,7 @@ use crate::model::FieldError;
 use crate::plan::{Plan, Risk};
 use crate::quote::quote_ident;
 
-use super::acl::{diff_rows, grantee_statements, validate_rows};
+use super::acl::{check_old_grantees, diff_rows, grantee_statements, validate_rows};
 use super::freesql::composed_is_clean;
 use super::{BuildCtx, check_old_ident, check_old_schema_ident, err};
 
@@ -37,6 +37,25 @@ fn sections_match(d: &DefaultAclDef) -> bool {
     d.sections.len() == want.len() && d.sections.iter().zip(want).all(|(s, t)| s.object_type == *t)
 }
 
+/// Yüklü kimliğin (rol, şema) gevşek doğrulaması.
+fn check_identity(d: &DefaultAclDef, e: &mut Vec<FieldError>) {
+    check_old_ident("object", &d.role, e);
+    if let Some(s) = &d.schema {
+        check_old_schema_ident("object", s, e);
+    }
+}
+
+/// Yüklü tanımın üreticide reddedilecek kimlik/alıcı hataları (rol, şema, bölümlerin eski alıcıları); yükleyici bunlar
+/// varsa tanımı salt okunur yapar (`load_acl::builder_gate_default`).
+pub(crate) fn loaded_errors(d: &DefaultAclDef) -> Vec<FieldError> {
+    let mut e = vec![];
+    check_identity(d, &mut e);
+    for (i, s) in d.sections.iter().enumerate() {
+        check_old_grantees(&format!("sections[{i}].grants"), &s.grants, &mut e);
+    }
+    e
+}
+
 /// Bölüm bölüm fark (Karar 6 sırası, bölüm sırasıyla). Fark yoksa boş plan; boş değilse tek plan notu eklenir.
 pub fn default_privileges(ctx: &BuildCtx, old: &DefaultAclDef, new: &DefaultAclDef) -> Result<Plan, Vec<FieldError>> {
     if old.role != new.role || old.schema != new.schema || old.viewer != new.viewer {
@@ -59,14 +78,12 @@ pub fn default_privileges(ctx: &BuildCtx, old: &DefaultAclDef, new: &DefaultAclD
         return if changed || baseline_changed { Err(vec![err("object", READ_ONLY_MSG)]) } else { Ok(Plan::default()) };
     }
     let mut e = vec![];
-    check_old_ident("object", &old.role, &mut e);
-    if let Some(s) = &old.schema {
-        check_old_schema_ident("object", s, &mut e);
-    }
+    check_identity(old, &mut e);
     for (i, (o, n)) in old.sections.iter().zip(&new.sections).enumerate() {
         if o.baseline != n.baseline {
             e.push(err(&format!("sections[{i}].baseline"), BASELINE_MSG));
         }
+        // İkinci küme (`170000`) yalnız MAINTAIN iletisini "sürüm" ile "tür" arasında ayırmak için.
         validate_rows(
             &format!("sections[{i}].grants"),
             (default_privileges_for(n.object_type, ctx.version_num), default_privileges_for(n.object_type, 170000)),
@@ -378,6 +395,31 @@ mod tests {
         // Mesaj.
         let b = edit(&scoped, &|n| n.sections[0].baseline.push(row(None, &plain(&[Select]))));
         assert_eq!(default_privileges(&ctx(), &scoped, &b).unwrap_err()[0].message, BASELINE_MSG);
+    }
+
+    #[test]
+    fn public_named_roles_are_real_roles() {
+        // PG yalnız tam küçük harf `public`'i ayırır; `"PUBLIC"`/`"Public"` gerçek roldür.
+        for name in ["PUBLIC", "Public"] {
+            let mut loaded = def(None);
+            section(&mut loaded, Tables).grants.push(row(Some(name), &plain(&[Select])));
+            crate::acl::sort_grants(&mut section(&mut loaded, Tables).grants, default_privileges_for(Tables, 170000));
+            assert!(ok(&loaded, &loaded).statements.is_empty(), "{name}");
+            assert_eq!(
+                sqls(&ok(&loaded, &def(None))),
+                [format!("ALTER DEFAULT PRIVILEGES FOR ROLE own REVOKE SELECT ON TABLES FROM \"{name}\"")],
+                "{name}"
+            );
+            assert_eq!(
+                sqls(&ok(&def(None), &loaded)),
+                [format!("ALTER DEFAULT PRIVILEGES FOR ROLE own GRANT SELECT ON TABLES TO \"{name}\"")],
+                "{name}"
+            );
+        }
+        let mut new = def(None);
+        section(&mut new, Tables).grants.push(row(Some("public"), &plain(&[Select])));
+        let e = default_privileges(&ctx(), &def(None), &new).unwrap_err();
+        assert_eq!((e[0].path.as_str(), e[0].message.as_str()), ("sections[0].grants[1].grantee", "PUBLIC için alıcıyı boş bırakın."));
     }
 
     #[test]
