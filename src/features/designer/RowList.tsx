@@ -28,6 +28,8 @@ export interface RowListProps<T> {
   reorderable?: boolean;
   /** Taşınamayan satır (ör. yüklü enum değeri); kilitli satırla yer de değiştirilemez. */
   moveLocked?: (i: number) => boolean;
+  /** Ek taşıma kuralı (satır çifti; ör. enum: iki yüklü değer yer değiştiremez ama yeni değer yüklülerin arasına girer). */
+  moveAllowed?: (i: number, dir: MoveDir) => boolean;
   /** Silinemeyen satır. */
   removeLocked?: (i: number) => boolean;
   readOnly: boolean;
@@ -51,7 +53,10 @@ export function RowList<T>(props: RowListProps<T>) {
     return tdes.rows.rowName(i, it === undefined ? "" : props.name(it, i));
   };
   const movable = (i: number, dir: MoveDir) =>
-    editable() && (props.reorderable ?? true) && canMove(i, dir, props.items.length, props.moveLocked);
+    editable() &&
+    (props.reorderable ?? true) &&
+    canMove(i, dir, props.items.length, props.moveLocked) &&
+    (props.moveAllowed?.(i, dir) ?? true);
   const removable = (i: number) => editable() && !(props.removeLocked?.(i) ?? false);
 
   const move = (i: number, dir: MoveDir) => {

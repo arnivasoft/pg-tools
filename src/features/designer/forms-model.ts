@@ -73,12 +73,19 @@ export const TRIGGER_PATHS: ReadonlySet<string> = new Set([
   "newTable", "deferrable", "initiallyDeferred", "comment", "object",
 ]);
 /**
- * Tür → bilinen yollar (testte denetlenir). Geçici `Partial`: type/domain yolları Plan 19 formlarıyla gelir.
+ * Type (spec §8.5): `body` kökü `body.values`, `body.values[i].label|original`, `body.attributes`,
+ * `body.attributes[i].name|typeName|collation|original` ve range `body.subtype|subtypeOpclass|collation|canonical|
+ * subtypeDiff|multirangeTypeName` alt yollarını kapsar; `old.*` genel şeride düşer. `object` (salt okunur) kök listededir
+ * (formun üstünde gösterilir).
+ */
+export const TYPE_PATHS: ReadonlySet<string> = new Set(["schema", "name", "owner", "comment", "body", "object"]);
+/**
+ * Tür → bilinen yollar (testte denetlenir). Geçici `Partial`: domain yolları Plan 19 formuyla gelir.
  */
 export const FORM_PATHS = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
   view: VIEW_PATHS, materialized_view: MATVIEW_PATHS, database: DATABASE_PATHS, role: ROLE_PATHS,
-  function: ROUTINE_PATHS, procedure: ROUTINE_PATHS, trigger: TRIGGER_PATHS,
+  function: ROUTINE_PATHS, procedure: ROUTINE_PATHS, trigger: TRIGGER_PATHS, type: TYPE_PATHS,
 } satisfies Partial<Record<ObjectKind, ReadonlySet<string>>>;
 
 /**
