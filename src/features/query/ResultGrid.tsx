@@ -1,7 +1,6 @@
 import { createVirtualizer } from "@tanstack/solid-virtual";
 import { For, Show, createEffect, createMemo, createSignal, createUniqueId, on, untrack } from "solid-js";
 import { copyText } from "../../app/clipboard";
-import { t } from "../../app/strings";
 import type { Column } from "../../ipc/bindings/Column";
 import { Button } from "../../ui/Button";
 import {
@@ -10,6 +9,7 @@ import {
   type NavKey, type Selection, type TextMeasure,
 } from "./grid-model";
 import { LOAD_MORE_CHUNK, type StmtResult } from "./result-model";
+import { tgrid } from "./strings-grid";
 
 /** İki satırlı başlık: ad (12 px, satır 16) + tür (11 px, satır 14) + dikey boşluk. Satırlar 24 px kalır. */
 const HEADER_HEIGHT = 36;
@@ -262,7 +262,7 @@ export function ResultGrid(props: {
       <div
         ref={scrollEl}
         role="grid"
-        aria-label={t.query.grid.ariaLabel}
+        aria-label={tgrid.grid.ariaLabel}
         aria-rowcount={rows().length + 1}
         aria-colcount={columns().length}
         aria-multiselectable="true"
@@ -277,7 +277,7 @@ export function ResultGrid(props: {
       >
         <Show
           when={!props.result.dropped}
-          fallback={<p class="p-4 font-sans text-[13px] text-muted">{t.query.grid.dropped}</p>}
+          fallback={<p class="p-4 font-sans text-[13px] text-muted">{tgrid.grid.dropped}</p>}
         >
           <div
             style={{
@@ -297,7 +297,7 @@ export function ResultGrid(props: {
                 class="sticky left-0 z-30 border-r border-border bg-panel"
                 style={{ width: `${rowNumWidth()}px`, height: `${HEADER_HEIGHT}px`, position: "sticky" }}
                 role="columnheader"
-                aria-label={t.query.grid.rowNumber}
+                aria-label={tgrid.grid.rowNumber}
               />
               <For each={colV.getVirtualItems()}>
                 {(item) => (
@@ -381,7 +381,7 @@ export function ResultGrid(props: {
                                   "text-overflow": "ellipsis",
                                 }}
                               >
-                                <Show when={!cell().null} fallback={<span class="italic text-muted">{t.query.grid.nullText}</span>}>
+                                <Show when={!cell().null} fallback={<span class="italic text-muted">{tgrid.grid.nullText}</span>}>
                                   {cell().text}
                                 </Show>
                               </div>
@@ -398,13 +398,13 @@ export function ResultGrid(props: {
         </Show>
       </div>
       <div class="flex h-8 shrink-0 items-center gap-3 border-t border-border bg-panel px-3 font-sans text-[12px]">
-        <span>{t.query.grid.rowsLoaded(rows().length)}</span>
+        <span>{tgrid.grid.rowsLoaded(rows().length)}</span>
         <Show when={props.result.truncated}>
-          <span class="text-danger">{t.query.grid.limitWarning}</span>
+          <span class="text-danger">{tgrid.grid.limitWarning}</span>
         </Show>
         <Show when={showMore()}>
           <Button class="ml-auto h-6 text-[12px]" disabled={!props.canLoadMore} onClick={() => props.onLoadMore()}>
-            {t.query.grid.loadMore(LOAD_MORE_CHUNK)}
+            {tgrid.grid.loadMore(LOAD_MORE_CHUNK)}
           </Button>
         </Show>
       </div>

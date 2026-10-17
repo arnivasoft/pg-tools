@@ -3,6 +3,7 @@ import { tdes } from "../../app/strings-designer";
 import type { ApplyOptions } from "../../ipc/bindings/ApplyOptions";
 import type { ApplyOutcome } from "../../ipc/bindings/ApplyOutcome";
 import type { CreateContext } from "../../ipc/bindings/CreateContext";
+import type { CreatePreset } from "../../ipc/bindings/CreatePreset";
 import type { LookupItem } from "../../ipc/bindings/LookupItem";
 import type { LookupRequest } from "../../ipc/bindings/LookupRequest";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
@@ -38,7 +39,7 @@ function setup() {
     S1: { name: "prod-1", locked: false, production: false },
   };
   const api = {
-    ddlDefaults: vi.fn(async (_s: string, _db: number | null, _k: ObjectKind, _c: CreateContext): Promise<ObjectDef> => schema()),
+    ddlDefaults: vi.fn(async (_s: string, _db: number | null, _k: ObjectKind, _c: CreateContext, _p: CreatePreset | null = null): Promise<ObjectDef> => schema()),
     ddlLoad: vi.fn(async (_s: string, _db: number | null, _o: ObjectRef): Promise<ObjectDef> => schema()),
     ddlLookup: vi.fn(async (_s: string, _db: number | null, _r: LookupRequest): Promise<LookupItem[]> => []),
     ddlPreview: vi.fn(async (_s: string, _db: number | null, r: PlanRequest): Promise<PlanView> =>

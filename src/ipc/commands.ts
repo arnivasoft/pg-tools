@@ -36,6 +36,7 @@ import type { StatementsOrder } from "./bindings/StatementsOrder";
 import type { ApplyOptions } from "./bindings/ApplyOptions";
 import type { ApplyOutcome } from "./bindings/ApplyOutcome";
 import type { CreateContext } from "./bindings/CreateContext";
+import type { CreatePreset } from "./bindings/CreatePreset";
 import type { DdlTarget } from "./bindings/DdlTarget";
 import type { LookupItem } from "./bindings/LookupItem";
 import type { LookupRequest } from "./bindings/LookupRequest";
@@ -129,8 +130,8 @@ export const commands = {
 
   // Nesne diyalogları (ddl_*): Tauri parametre adları src-tauri/src/ddl.rs ile birebir (camelCase).
   ddlTargetOf: (nodeId: string) => call<DdlTarget>("ddl_target_of", { nodeId }),
-  ddlDefaults: (serverId: string, databaseOid: number | null, kind: ObjectKind, ctx: CreateContext) =>
-    call<ObjectDef>("ddl_defaults", { serverId, databaseOid, kind, ctx }),
+  ddlDefaults: (serverId: string, databaseOid: number | null, kind: ObjectKind, ctx: CreateContext, preset: CreatePreset | null = null) =>
+    call<ObjectDef>("ddl_defaults", { serverId, databaseOid, kind, ctx, preset }),
   ddlLoad: (serverId: string, databaseOid: number | null, object: ObjectRef) => call<ObjectDef>("ddl_load", { serverId, databaseOid, object }),
   ddlLookup: (serverId: string, databaseOid: number | null, request: LookupRequest) =>
     call<LookupItem[]>("ddl_lookup", { serverId, databaseOid, request }),

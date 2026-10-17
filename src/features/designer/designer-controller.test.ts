@@ -10,6 +10,7 @@ import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { PlanRequest } from "../../ipc/bindings/PlanRequest";
 import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { CreateContext } from "../../ipc/bindings/CreateContext";
+import type { CreatePreset } from "../../ipc/bindings/CreatePreset";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import type { RoleDef } from "../../ipc/bindings/RoleDef";
 import type { Risk } from "../../ipc/bindings/Risk";
@@ -42,7 +43,7 @@ function setup(extra: Partial<DesignerControllerDeps> = {}) {
     S2: { name: "other", locked: false, production: false },
   };
   const api = {
-    ddlDefaults: vi.fn(async (_s: string, _db: number | null, _k: ObjectKind, _c: CreateContext): Promise<ObjectDef> => schema({ name: "", owner: null })),
+    ddlDefaults: vi.fn(async (_s: string, _db: number | null, _k: ObjectKind, _c: CreateContext, _p: CreatePreset | null = null): Promise<ObjectDef> => schema({ name: "", owner: null })),
     ddlLoad: vi.fn(async (_s: string, _db: number | null, _o: ObjectRef): Promise<ObjectDef> => schema()),
     ddlLookup: vi.fn(async (_s: string, _db: number | null, _r: LookupRequest): Promise<LookupItem[]> => [{ value: "alice", detail: null }]),
     ddlPreview: vi.fn(async (_s: string, _db: number | null, _r: PlanRequest): Promise<PlanView> => view()),
@@ -99,7 +100,7 @@ describe("designer-controller açılış", () => {
   it("openCreate: defaults yüklenir, dirty=false, önizleme zamanlanmaz", async () => {
     const s = setup();
     const id = await openCreate(s);
-    expect(s.api.ddlDefaults).toHaveBeenCalledWith("S1", 5, "schema", { schemaOid: null, tableOid: null });
+    expect(s.api.ddlDefaults).toHaveBeenCalledWith("S1", 5, "schema", { schemaOid: null, tableOid: null }, null);
     const m = s.ctl.model(id)!;
     expect(m).toMatchObject({ mode: "create", kind: "schema", status: "ready", original: null, object: null, dirty: false, pending: false });
     expect(m.draft).toEqual(schema({ name: "", owner: null }));
@@ -1410,7 +1411,7 @@ describe("designer-controller Plan 15: sunucu kapsamı", () => {
       providerLocale: null, tablespace: null, connectionLimit: -1, isTemplate: false, allowConnections: true, settings: [], comment: null,
     });
     await s.ctl.openCreate({ tabId: "D1", serverId: "S1", databaseOid: null, create: { kind: "database", context: { schemaOid: null, tableOid: null }, preset: null }, refreshNodeId: "dbs" });
-    expect(s.api.ddlDefaults).toHaveBeenLastCalledWith("S1", null, "database", { schemaOid: null, tableOid: null });
+    expect(s.api.ddlDefaults).toHaveBeenLastCalledWith("S1", null, "database", { schemaOid: null, tableOid: null }, null);
     // objectDropped null ile eşleşir
     s.ctl.objectDropped("S1", null, ROLE);
     expect(s.ctl.model(id)!.status).toBe("gone");
