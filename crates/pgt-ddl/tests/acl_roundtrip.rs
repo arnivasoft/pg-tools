@@ -7,6 +7,9 @@
 //! tek transaction'da düz istemciyle çalıştırılır (`Env::exec_tx`). Sürüme bağlı kısımlar (procedure PG 11+, MAINTAIN
 //! PG 17+, multirange PG 14+) atlandığında yazdırılır.
 //!
+//! Varsayılan yetkiler (`load_default_acl` ↔ `default_privileges`) aynı kalıpla sınanır (`apply_def`); `FOR ROLE`
+//! yetkisizliği `SET ROLE` ile süper kullanıcı olmayan role geçilerek denenir; PG 18 large object notu PG 18+.
+//!
 //! **Sabit nokta:** yüklenen her tanımda `privileges(yüklü, yüklü)` boş plandır; düzenlenmiş kopya uygulanıp yeniden
 //! yüklendiğinde `grants` istenenle (kanonik sırada, boş satırlar düşmüş) aynıdır.
 
@@ -16,6 +19,8 @@ use common::{Env, acl_role, cleanup_acl, guarded, servers, setup_in};
 use pgt_core::Error;
 use pgt_core::testing::TestServer;
 use pgt_ddl::build::acl::privileges;
+use pgt_ddl::build::default_acl::default_privileges;
+use pgt_ddl::load_acl::{LARGE_OBJECTS_REASON, SYSTEM_SCHEMA_REASON};
 use pgt_ddl::*;
 
 const PFX: &str = "pgt_ddl_acl";
@@ -698,4 +703,376 @@ async fn readonly_body(ts: TestServer, tag: &'static str) {
     for kind in [K::Index, K::Extension, K::Role, K::Trigger] {
         assert!(matches!(try_load(&env, kind, t).await, Err(Error::Invalid(_))), "{kind:?}");
     }
+}
+
+// ================================================================================================================
+// varsayılan yetkiler (`load_default_acl` ↔ `build::default_acl::default_privileges`)
+// ================================================================================================================
+
+async fn try_load_def(env: &Env, role: Option<&str>, schema_oid: Option<u32>) -> pgt_core::Result<DefaultAclDef> {
+    load_default_acl(&env.mgr, env.server, env.db_oid, DefaultAclScope { role: role.map(Into::into), schema_oid }).await
+}
+
+async fn ldd(env: &Env, role: Option<&str>, schema_oid: Option<u32>) -> DefaultAclDef {
+    try_load_def(env, role, schema_oid).await.unwrap_or_else(|e| panic!("varsayılan yetkiler yüklenemedi: {e:?}"))
+}
+
+fn section(d: &DefaultAclDef, t: DefaultAclObjectType) -> &DefaultAclSection {
+    d.sections.iter().find(|s| s.object_type == t).unwrap_or_else(|| panic!("{t:?} bölümü yok"))
+}
+
+fn section_mut(d: &mut DefaultAclDef, t: DefaultAclObjectType) -> &mut DefaultAclSection {
+    d.sections.iter_mut().find(|s| s.object_type == t).unwrap_or_else(|| panic!("{t:?} bölümü yok"))
+}
+
+fn def_canonical(t: DefaultAclObjectType, mut v: Vec<AclGrant>) -> Vec<AclGrant> {
+    v.retain(|g| !g.privileges.is_empty());
+    sort_grants(&mut v, default_privileges_for(t, 170000));
+    v
+}
+
+/// Rolün `acldefault` satırı: bölüm türünün (sürüme göre) tüm yetkileri.
+fn def_owner_all(env: &Env, who: &str, t: DefaultAclObjectType) -> AclGrant {
+    row(Some(who), default_privileges_for(t, env.version))
+}
+
+/// `default_privileges(d, d)` boş plan.
+fn assert_def_fixed(env: &Env, d: &DefaultAclDef) {
+    let p = default_privileges(&env.ctx(false), d, d).unwrap_or_else(|e| panic!("sabit nokta reddedildi: {e:?}"));
+    assert!(p.statements.is_empty() && p.warnings.is_empty(), "sabit nokta boş değil: {:?}", sqls(&p));
+}
+
+/// `loaded`'ı `edit` ile değiştirip planlar, tek transaction'da uygular, aynı kapsamla yeniden yükler; bölümlerin
+/// `grants`'ı istenenin kanonik biçimi, `baseline` değişmemiş ve sabit nokta olmalı.
+async fn apply_def(env: &Env, loaded: &DefaultAclDef, scope: (Option<&str>, Option<u32>), edit: impl FnOnce(&mut DefaultAclDef)) -> (Plan, DefaultAclDef) {
+    let mut new = loaded.clone();
+    edit(&mut new);
+    let plan = default_privileges(&env.ctx(false), loaded, &new).unwrap_or_else(|e| panic!("plan reddedildi: {e:?}"));
+    assert!(!plan.statements.is_empty(), "değişiklik planı boş");
+    env.exec_tx(&plan).await;
+    let reloaded = ldd(env, scope.0, scope.1).await;
+    for (got, want) in reloaded.sections.iter().zip(&new.sections) {
+        assert_eq!(got.grants, def_canonical(want.object_type, want.grants.clone()), "{:?} plan: {:?}", want.object_type, sqls(&plan));
+        assert_eq!(got.baseline, want.baseline, "{:?}", want.object_type);
+    }
+    assert_eq!((&reloaded.role, &reloaded.schema, &reloaded.viewer), (&loaded.role, &loaded.schema, &loaded.viewer));
+    assert_def_fixed(env, &reloaded);
+    (plan, reloaded)
+}
+
+async fn flag(env: &Env, sql: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> bool {
+    env.admin.query_one(sql, params).await.unwrap_or_else(|e| panic!("sorgu başarısız: {e}")).get(0)
+}
+
+/// Fonksiyonun etkin ACL'sinde PUBLIC girdisi var mı.
+const PROC_PUBLIC_SQL: &str =
+    "SELECT EXISTS (SELECT 1 FROM pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a WHERE p.oid = $1::oid AND a.grantee = 0)";
+
+// ---- boş durum: acldefault değerleri, şema kapsamı, rol/şema bulunamadı, sistem şeması ----
+
+docker_test!(default_acl_effective_defaults, def_defaults_body, "ddefaults");
+
+async fn def_defaults_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag, &["1"]).await;
+    let major = env.version / 10000;
+    let r1 = role(tag, "1");
+    let s = format!("pgt_ddl_rt_{tag}");
+    env.sql(&format!("CREATE SCHEMA {s}")).await;
+    let soid = env.schema_oid(&s).await;
+    use DefaultAclObjectType::*;
+    use Privilege::*;
+    let me = env.me.clone();
+
+    let d = ldd(&env, None, None).await;
+    assert_eq!((d.role.as_str(), d.viewer.as_str(), d.schema.as_deref()), (me.as_str(), me.as_str(), None));
+    assert!(d.editable && d.unsupported.is_empty(), "{d:?}");
+    assert_eq!(d.sections.iter().map(|x| x.object_type).collect::<Vec<_>>(), [Tables, Sequences, Functions, Types, Schemas]);
+    assert_eq!(section(&d, Tables).grants, [def_owner_all(&env, &me, Tables)]);
+    assert_eq!(section(&d, Tables).grants[0].privileges.iter().any(|p| p.privilege == Maintain), major >= 17, "MAINTAIN yalnız PG 17+");
+    assert_eq!(section(&d, Sequences).grants, [row(Some(&me), &[Usage, Select, Update])]);
+    assert_eq!(section(&d, Functions).grants, [row(None, &[Execute]), row(Some(&me), &[Execute])]);
+    assert_eq!(section(&d, Types).grants, [row(None, &[Usage]), row(Some(&me), &[Usage])]);
+    assert_eq!(section(&d, Schemas).grants, [row(Some(&me), &[Usage, Create])]);
+    assert!(d.sections.iter().all(|x| x.baseline.is_empty()));
+    assert_def_fixed(&env, &d);
+
+    // Şema kapsamı: girdi yok → boş grants; baseline genel etkin değer; Schemas bölümü yok.
+    let ds = ldd(&env, None, Some(soid)).await;
+    assert_eq!((ds.role.as_str(), ds.schema.as_deref()), (me.as_str(), Some(s.as_str())));
+    assert!(ds.editable && ds.unsupported.is_empty(), "{ds:?}");
+    assert_eq!(ds.sections.iter().map(|x| x.object_type).collect::<Vec<_>>(), [Tables, Sequences, Functions, Types]);
+    for x in &ds.sections {
+        assert!(x.grants.is_empty(), "{x:?}");
+        assert_eq!(x.baseline, section(&d, x.object_type).grants, "{:?}", x.object_type);
+    }
+    assert_def_fixed(&env, &ds);
+
+    // Başka rol: kendi acldefault'u; bağlı rol değişmez.
+    let d1 = ldd(&env, Some(&r1), None).await;
+    assert_eq!((d1.role.as_str(), d1.viewer.as_str()), (r1.as_str(), me.as_str()));
+    assert_eq!(section(&d1, Tables).grants, [def_owner_all(&env, &r1, Tables)]);
+    assert_eq!(section(&d1, Functions).grants, [row(None, &[Execute]), row(Some(&r1), &[Execute])]);
+
+    // Bulunamadı.
+    let missing = role(tag, "yok");
+    match try_load_def(&env, Some(&missing), None).await {
+        Err(Error::NotFound(w)) => assert_eq!(w, "rol"),
+        other => panic!("{other:?}"),
+    }
+    match try_load_def(&env, None, Some(0)).await {
+        Err(Error::NotFound(w)) => assert_eq!(w, "şema"),
+        other => panic!("{other:?}"),
+    }
+
+    // Sistem şeması: salt okunur, değişiklik reddedilir.
+    let sys = ldd(&env, None, Some(env.schema_oid("pg_catalog").await)).await;
+    assert!(!sys.editable && sys.unsupported == [SYSTEM_SCHEMA_REASON], "{sys:?}");
+    assert_def_fixed(&env, &sys);
+    let mut new = sys.clone();
+    section_mut(&mut new, Tables).grants.push(row(Some(&r1), &[Select]));
+    assert_eq!(paths(&default_privileges(&env.ctx(false), &sys, &new).unwrap_err()), ["object"]);
+}
+
+// ---- genel kapsam: GRANT/REVOKE yeni nesnelere uygulanır; boş ACL; varsayılana dönüş ----
+
+docker_test!(default_acl_general_scope_applies_to_new_objects, def_general_body, "dgeneral");
+
+async fn def_general_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag, &["1", "2"]).await;
+    let (r1, r2) = (role(tag, "1"), role(tag, "2"));
+    let (q1, q2) = (quote_ident(&r1), quote_ident(&r2));
+    let s = format!("pgt_ddl_rt_{tag}");
+    env.sql(&format!("CREATE SCHEMA {s}; CREATE TABLE {s}.before (a int)")).await;
+    use DefaultAclObjectType::*;
+    use Privilege::*;
+    let me = env.me.clone();
+    let qme = quote_ident(&me);
+    let d0 = ldd(&env, None, None).await;
+
+    let (p, d1) = apply_def(&env, &d0, (None, None), |n| {
+        section_mut(n, Tables).grants.push(row(Some(&r1), &[Select]));
+        section_mut(n, Sequences).grants.push(row_go(Some(&r2), &[(Usage, true)]));
+        section_mut(n, Functions).grants.retain(|g| g.grantee.is_some());
+    })
+    .await;
+    assert_eq!(
+        sqls(&p),
+        [
+            format!("ALTER DEFAULT PRIVILEGES FOR ROLE {qme} GRANT SELECT ON TABLES TO {q1}"),
+            format!("ALTER DEFAULT PRIVILEGES FOR ROLE {qme} GRANT USAGE ON SEQUENCES TO {q2} WITH GRANT OPTION"),
+            format!("ALTER DEFAULT PRIVILEGES FOR ROLE {qme} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"),
+        ]
+    );
+    assert!(p.statements.iter().all(|st| st.risk == Risk::Safe));
+    assert_eq!(section(&d1, Types).grants, section(&d0, Types).grants);
+
+    // Yeni nesneler varsayılanı alır; önceden var olan tablo değişmez.
+    env.sql(&format!("CREATE TABLE {s}.t (a int); CREATE SEQUENCE {s}.sq; CREATE FUNCTION {s}.f() RETURNS int LANGUAGE sql AS 'SELECT 1'"))
+        .await;
+    let (t, before, sq) = (env.class_oid(&s, "t").await, env.class_oid(&s, "before").await, env.class_oid(&s, "sq").await);
+    let f = env.proc_oid(&s, "f", "").await;
+    assert!(flag(&env, "SELECT has_table_privilege($1::text, $2::oid, 'SELECT')", &[&r1, &t]).await);
+    assert!(!flag(&env, "SELECT has_table_privilege($1::text, $2::oid, 'SELECT')", &[&r1, &before]).await);
+    assert!(flag(&env, "SELECT has_sequence_privilege($1::text, $2::oid, 'USAGE WITH GRANT OPTION')", &[&r2, &sq]).await);
+    assert!(!flag(&env, PROC_PUBLIC_SQL, &[&f]).await, "yeni fonksiyonda PUBLIC EXECUTE olmamalı");
+    // Yeni tablonun nesne ACL'si de varsayılanı gösterir.
+    let lt = ld(&env, ObjectKind::Table, t).await;
+    assert!(lt.explicit && lt.grants.contains(&row(Some(&r1), &[Select])), "{lt:?}");
+
+    // Boş ACL ('{}'): rol dahil herkesten tablo yetkileri kaldırılır.
+    let (_, d2) = apply_def(&env, &d1, (None, None), |n| section_mut(n, Tables).grants.clear()).await;
+    assert!(section(&d2, Tables).grants.is_empty());
+    let raw: String = env
+        .admin
+        .query_one(
+            "SELECT d.defaclacl::text FROM pg_default_acl d JOIN pg_roles r ON r.oid = d.defaclrole WHERE d.defaclnamespace = 0 AND d.defaclobjtype = 'r' AND r.rolname = $1::text",
+            &[&me],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(raw, "{}");
+
+    // acldefault'a dönüş: PG girdiyi siler; yükleme ilk durumla aynı.
+    let (_, d3) = apply_def(&env, &d2, (None, None), |n| {
+        for x in &mut n.sections {
+            x.grants = section(&d0, x.object_type).grants.clone();
+        }
+    })
+    .await;
+    assert_eq!(d3, d0);
+    let left: i64 = env.admin.query_one("SELECT count(*) FROM pg_default_acl", &[]).await.unwrap().get(0);
+    assert_eq!(left, 0, "varsayılana dönen girdiler silinmeli");
+}
+
+// ---- şema kapsamı: yalnız eklenen yetkiler; baseline salt okunur ----
+
+docker_test!(default_acl_schema_scope_roundtrip, def_schema_body, "dschema");
+
+async fn def_schema_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag, &["1", "2"]).await;
+    let (r1, r2) = (role(tag, "1"), role(tag, "2"));
+    let q2 = quote_ident(&r2);
+    let s = format!("pgt_ddl_rt_{tag}");
+    env.sql(&format!("CREATE SCHEMA {s}")).await;
+    let soid = env.schema_oid(&s).await;
+    use DefaultAclObjectType::*;
+    use Privilege::*;
+    let qme = quote_ident(&env.me);
+
+    // Genel kapsamda r1 SELECT → şema kapsamının baseline'ında görünür.
+    let g0 = ldd(&env, None, None).await;
+    let (_, g1) = apply_def(&env, &g0, (None, None), |n| section_mut(n, Tables).grants.push(row(Some(&r1), &[Select]))).await;
+    let l0 = ldd(&env, None, Some(soid)).await;
+    assert_eq!(section(&l0, Tables).baseline, section(&g1, Tables).grants);
+    assert!(l0.sections.iter().all(|x| x.grants.is_empty()));
+
+    let (p, l1) = apply_def(&env, &l0, (None, Some(soid)), |n| {
+        section_mut(n, Tables).grants.push(row(Some(&r2), &[Select, Insert]));
+        section_mut(n, Types).grants.push(row_go(Some(&r2), &[(Usage, true)]));
+    })
+    .await;
+    assert_eq!(
+        sqls(&p),
+        [
+            format!("ALTER DEFAULT PRIVILEGES FOR ROLE {qme} IN SCHEMA {s} GRANT SELECT, INSERT ON TABLES TO {q2}"),
+            format!("ALTER DEFAULT PRIVILEGES FOR ROLE {qme} IN SCHEMA {s} GRANT USAGE ON TYPES TO {q2} WITH GRANT OPTION"),
+        ]
+    );
+    assert_eq!(section(&l1, Tables).grants, [row(Some(&r2), &[Select, Insert])]);
+    // Genel kapsam değişmedi.
+    assert_eq!(ldd(&env, None, None).await, g1);
+
+    // baseline salt okunur.
+    let mut bad = l1.clone();
+    section_mut(&mut bad, Tables).baseline.clear();
+    assert_eq!(paths(&default_privileges(&env.ctx(false), &l1, &bad).unwrap_err()), ["sections[0].baseline"]);
+
+    // Şemadaki yeni tablo: genel (r1 SELECT) + şema (r2 SELECT, INSERT); başka şemadaki tablo yalnız genel.
+    env.sql(&format!("CREATE TABLE {s}.t (a int); CREATE TABLE public.{s}_t (a int)")).await;
+    let (t, other) = (env.class_oid(&s, "t").await, env.class_oid("public", &format!("{s}_t")).await);
+    let has = "SELECT has_table_privilege($1::text, $2::oid, $3::text)";
+    assert!(flag(&env, has, &[&r1, &t, &"SELECT"]).await);
+    assert!(flag(&env, has, &[&r2, &t, &"INSERT"]).await);
+    assert!(!flag(&env, has, &[&r2, &other, &"INSERT"]).await);
+    assert!(flag(&env, has, &[&r1, &other, &"SELECT"]).await);
+
+    // Şema girdilerini geri alma → girdiler kalkar (grants boş), baseline aynı.
+    let (p, l2) = apply_def(&env, &l1, (None, Some(soid)), |n| {
+        for x in &mut n.sections {
+            x.grants.clear();
+        }
+    })
+    .await;
+    assert_eq!(
+        sqls(&p),
+        [
+            format!("ALTER DEFAULT PRIVILEGES FOR ROLE {qme} IN SCHEMA {s} REVOKE SELECT, INSERT ON TABLES FROM {q2}"),
+            format!("ALTER DEFAULT PRIVILEGES FOR ROLE {qme} IN SCHEMA {s} REVOKE USAGE ON TYPES FROM {q2}"),
+        ]
+    );
+    assert_eq!(l2, l0);
+}
+
+// ---- FOR ROLE: başka rol için üyelik gerekir (42501) ----
+
+docker_test!(default_acl_for_other_role_requires_membership, def_for_role_body, "dforrole");
+
+async fn def_for_role_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag, &["own", "other"]).await;
+    let (own, other) = (role(tag, "own"), role(tag, "other"));
+    let (qown, qother) = (quote_ident(&own), quote_ident(&other));
+    let s = format!("pgt_ddl_rt_{tag}");
+    env.sql(&format!("CREATE SCHEMA {s}; GRANT CREATE, USAGE ON SCHEMA {s} TO {qown}")).await;
+    use DefaultAclObjectType::*;
+    use Privilege::*;
+
+    // Süper kullanıcı başka rol için ayarlayabilir.
+    let l0 = ldd(&env, Some(&own), None).await;
+    assert_eq!(section(&l0, Tables).grants, [def_owner_all(&env, &own, Tables)]);
+    let (p, l1) = apply_def(&env, &l0, (Some(&own), None), |n| section_mut(n, Tables).grants.push(row(Some(&other), &[Select]))).await;
+    assert_eq!(sqls(&p), [format!("ALTER DEFAULT PRIVILEGES FOR ROLE {qown} GRANT SELECT ON TABLES TO {qother}")]);
+
+    // Rolün oluşturduğu tablo varsayılanı alır.
+    env.sql(&format!("SET ROLE {qown}; CREATE TABLE {s}.t (a int); RESET ROLE")).await;
+    let t = env.class_oid(&s, "t").await;
+    assert!(flag(&env, "SELECT has_table_privilege($1::text, $2::oid, 'SELECT')", &[&other, &t]).await);
+
+    // Üye olmayan (süper kullanıcı olmayan) rol: 42501, hiçbir şey değişmez.
+    let mut new = l1.clone();
+    section_mut(&mut new, Sequences).grants.push(row(Some(&other), &[Usage]));
+    let p = default_privileges(&env.ctx(false), &l1, &new).unwrap();
+    env.sql(&format!("SET ROLE {qother}")).await;
+    let res = env.try_exec_tx(&p).await;
+    env.sql("RESET ROLE").await;
+    let err = res.expect_err("üye olmayan rol başka rol için varsayılan yetki değiştirebildi");
+    assert_eq!(sqlstate(&err), "42501", "{err}");
+    assert_eq!(ldd(&env, Some(&own), None).await, l1);
+}
+
+// ---- hostile adlar: rol, şema, alıcı ----
+
+docker_test!(default_acl_hostile_names_roundtrip, def_hostile_body, "dhostile");
+
+async fn def_hostile_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag, &[r#"Ş "q" Büyük x"#, "a b'c"]).await;
+    let (hr, grantee) = (role(tag, r#"Ş "q" Büyük x"#), role(tag, "a b'c"));
+    let qhr = quote_ident(&hr);
+    let s = format!(r#"pgt_ddl_rt_{tag} "Ş" X"#);
+    let qs = quote_ident(&s);
+    env.sql(&format!("CREATE SCHEMA {qs}; GRANT CREATE, USAGE ON SCHEMA {qs} TO {qhr}")).await;
+    let soid = env.schema_oid(&s).await;
+    use DefaultAclObjectType::*;
+    use Privilege::*;
+
+    for schema in [None, Some(soid)] {
+        let l = ldd(&env, Some(&hr), schema).await;
+        assert_eq!((l.role.as_str(), l.schema.as_deref()), (hr.as_str(), schema.map(|_| s.as_str())));
+        let (p, _) = apply_def(&env, &l, (Some(&hr), schema), |n| {
+            section_mut(n, Tables).grants.push(row_go(Some(&grantee), &[(Select, true), (Delete, false)]));
+            if schema.is_none() {
+                section_mut(n, Functions).grants.retain(|g| g.grantee.is_some());
+            }
+        })
+        .await;
+        assert!(p.statements.iter().all(|st| st.sql.contains(&qhr)), "{:?}", sqls(&p));
+    }
+    // Hostile rolün hostile şemada oluşturduğu tablo ve fonksiyon her iki kapsamdan da yetki alır.
+    env.sql(&format!(r#"SET ROLE {qhr}; CREATE TABLE {qs}."T ""x""" (a int); CREATE FUNCTION {qs}.f() RETURNS int LANGUAGE sql AS 'SELECT 1'; RESET ROLE"#))
+        .await;
+    let t = env.class_oid(&s, r#"T "x""#).await;
+    assert!(flag(&env, "SELECT has_table_privilege($1::text, $2::oid, 'SELECT WITH GRANT OPTION, DELETE')", &[&grantee, &t]).await);
+    assert!(!flag(&env, PROC_PUBLIC_SQL, &[&env.proc_oid(&s, "f", "").await]).await);
+}
+
+// ---- PG 18 large object varsayılanları: bilgi notu, düzenlenebilir ----
+
+docker_test!(default_acl_large_objects_note_pg18, def_large_body, "dlarge");
+
+async fn def_large_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag, &["1"]).await;
+    let major = env.version / 10000;
+    let r1 = role(tag, "1");
+    let s = format!("pgt_ddl_rt_{tag}");
+    env.sql(&format!("CREATE SCHEMA {s}")).await;
+    if major < 18 {
+        eprintln!("PG {major}: LARGE OBJECTS varsayılan yetkileri atlandı (PG 18+)");
+        return;
+    }
+    env.sql(&format!("ALTER DEFAULT PRIVILEGES GRANT SELECT ON LARGE OBJECTS TO {}", quote_ident(&r1))).await;
+    let d = ldd(&env, None, None).await;
+    assert_eq!(d.unsupported, [LARGE_OBJECTS_REASON]);
+    assert!(d.editable, "{d:?}");
+    assert_def_fixed(&env, &d);
+    // Diğer bölümler düzenlenebilir; large object girdisine dokunulmaz.
+    let (_, d2) = apply_def(&env, &d, (None, None), |n| {
+        section_mut(n, DefaultAclObjectType::Types).grants.push(row(Some(&r1), &[Privilege::Usage]));
+    })
+    .await;
+    assert_eq!(d2.unsupported, [LARGE_OBJECTS_REASON]);
+    let lo: i64 = env.admin.query_one("SELECT count(*) FROM pg_default_acl WHERE defaclobjtype = 'L'", &[]).await.unwrap().get(0);
+    assert_eq!(lo, 1);
+    // Şema kapsamında genel large object girdisi görünmez.
+    let ds = ldd(&env, None, Some(env.schema_oid(&s).await)).await;
+    assert!(ds.unsupported.is_empty() && ds.editable, "{ds:?}");
 }
