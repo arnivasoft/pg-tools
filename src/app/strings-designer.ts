@@ -24,9 +24,8 @@ export const tdes = {
   },
   /** Üst çubuk ve şeritler. */
   view: {
-    /** Plan 22: yetki sekmelerinin başlık rozeti (`kindLabel` yerine) ve formlar gelene kadar yer tutucu. */
+    /** Plan 22: yetki sekmelerinin başlık rozeti (`kindLabel` yerine). */
     variant: { acl: "Yetkiler", default_acl: "Varsayılan yetkiler" },
-    preparing: "Hazırlanıyor",
     statusLabel: "Durum",
     status: {
       loading: "Yükleniyor",

@@ -45,16 +45,39 @@ export function addGrantee(grants: AclGrant[], grantee: string | null): AclGrant
   return [...grants.map((g) => ({ ...g })), { grantee: name, privileges: [] }];
 }
 
+/** "Alıcı ekle" seçenekleri: rol listesi (gerçek rolle birebir eşleşme) ve PUBLIC sözde seçeneğinin değeri. */
+export interface GranteeInputOptions {
+  roles?: readonly string[];
+  /** Datalist'teki PUBLIC sözde seçeneğinin değeri (ör. "PUBLIC (herkes)"); gerçek "PUBLIC" rolünden ayırt edilir. */
+  publicToken?: string;
+}
+
 /**
- * Form "Alıcı ekle" girdisi: kırpılır; boş → `empty`; `public` (harf duyarsız; datalist'teki "PUBLIC" seçeneği) →
- * PUBLIC satırı (`grantee = null`); yinelenen → `duplicate`. Not: `"PUBLIC"`/`"Public"` adlı gerçek roller bu alandan
- * eklenemez (PUBLIC sayılır; spec E2'deki kenar durum, yüklü satırlar etkilenmez).
+ * Form "Alıcı ekle" girdisi: kırpılır; boş → `empty`. Rol listesinde birebir (harf duyarlı) eşleşen ad gerçek roldür
+ * (`"PUBLIC"`/`"Public"` adlı geçerli tırnaklı roller; spec E2). Aksi hâlde harf duyarsız `public` ya da sözde seçenek
+ * değeri (`publicToken`) PUBLIC satırıdır (`grantee = null`); diğer adlar serbest rol adıdır. Yinelenen → `duplicate`.
  */
-export function addGranteeInput(grants: AclGrant[], input: string): { grants: AclGrant[] } | { error: "empty" | "duplicate" } {
+export function addGranteeInput(
+  grants: AclGrant[],
+  input: string,
+  opts: GranteeInputOptions = {},
+): { grants: AclGrant[] } | { error: "empty" | "duplicate" } {
   const name = input.trim();
   if (name === "") return { error: "empty" };
-  const next = addGrantee(grants, name.toLowerCase() === "public" ? null : name);
+  const isRole = opts.roles?.includes(name) ?? false;
+  const isPublic = !isRole && (name.toLowerCase() === "public" || (opts.publicToken !== undefined && name === opts.publicToken.trim()));
+  const next = addGrantee(grants, isPublic ? null : name);
   return next ? { grants: next } : { error: "duplicate" };
+}
+
+/**
+ * Datalist önerileri: PUBLIC satırı yoksa önce sözde seçenek (`publicToken`, gerçek "PUBLIC" rolünden ayrı değer), sonra
+ * listede olmayan roller (tekrarsız, gelen sırayla).
+ */
+export function granteeOptions(grants: AclGrant[], roles: readonly string[], publicToken: string): string[] {
+  const used = new Set(grants.map((g) => g.grantee));
+  const names = [...new Set(roles)].filter((v) => !used.has(v));
+  return used.has(null) ? names : [publicToken, ...names];
 }
 
 /** Planda REVOKE var mı (CASCADE onay kutusu yalnız o zaman anlamlıdır; arka uç REVOKE yokken `cascade`'i yok sayar). */

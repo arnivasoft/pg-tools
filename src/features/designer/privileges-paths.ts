@@ -6,6 +6,7 @@
 // ekleme/silme sonrası eski görünümün hataları önizleme yenilenene kadar bayat kalabilir (bilinen pürüz) ama ızgara
 // var olmayan hücreye hata göstermez.
 import type { AclGrant } from "../../ipc/bindings/AclGrant";
+import type { DefaultAclSection } from "../../ipc/bindings/DefaultAclSection";
 import type { Privilege } from "../../ipc/bindings/Privilege";
 
 /** Her zaman üst şeride düşen kök yollar (belgeleme/test; catch-all zaten kapsar). */
@@ -16,9 +17,26 @@ export function aclGridPaths(base: string, grants: readonly AclGrant[], availabl
   const out = new Set<string>();
   grants.forEach((g, i) => {
     out.add(`${base}[${i}].grantee`);
+    // Satırda aynı yetki birden çok kez geçerse yalnız ilki hücreye eşlenir (`cellPath` ilkini okur); yinelenen
+    // konumun hatası (ör. "zaten listede") üst şeride düşer.
+    const seen = new Set<Privilege>();
     g.privileges.forEach((p, j) => {
-      if (available.includes(p.privilege)) out.add(`${base}[${i}].privileges[${j}]`);
+      if (!available.includes(p.privilege) || seen.has(p.privilege)) return;
+      seen.add(p.privilege);
+      out.add(`${base}[${i}].privileges[${j}]`);
     });
+  });
+  return out;
+}
+
+/**
+ * Varsayılan yetkiler: her bölümün ızgarası `sections[i].grants` yollarını sahiplenir. `sections`, `sections[i].baseline`
+ * (salt okunur genel değer) ve `old.*` sahiplenilmez → üst şerit.
+ */
+export function defaultAclGridPaths(sections: readonly DefaultAclSection[]): Set<string> {
+  const out = new Set<string>();
+  sections.forEach((s, i) => {
+    for (const p of aclGridPaths(`sections[${i}].grants`, s.grants, s.available)) out.add(p);
   });
   return out;
 }

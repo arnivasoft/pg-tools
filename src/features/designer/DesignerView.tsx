@@ -9,10 +9,10 @@ import { Button } from "../../ui/Button";
 import { ConfirmDialog } from "../../ui/ConfirmDialogView";
 import ApplyBar from "./ApplyBar";
 import type { DesignerController, DesignerModel, ObjectDesignerModel } from "./designer-controller";
-import { groupIssues, isAclDef, kindLabel, type DesignerVariant } from "./designer-model";
+import { groupIssues, isAclDef, isDefaultAclDef, kindLabel, type DesignerVariant } from "./designer-model";
 import type { AclFormProps, FormEntry } from "./FormParts";
 import { FORM_PATHS } from "./forms-model";
-import { aclGridPaths } from "./privileges-paths";
+import { aclGridPaths, defaultAclGridPaths } from "./privileges-paths";
 import SqlPreview from "./SqlPreview";
 
 // Tür → form (tembel bileşen + bilinen alan yolları; kök yol alt yolları da kapsar: `columns` ⊃ `columns[1].key`).
@@ -39,18 +39,17 @@ const FORMS: Record<ObjectKind, FormEntry> = {
 };
 
 // Plan 22: yetki sekmelerinin formları (`variant !== "object"`; ayrı tembel parçalar, kendi prop tipleriyle). Hata yolları
-// taslaktan hesaplanır (`aclIssuePaths`). Task 5 varsayılan yetkiler formunu (DefaultPrivilegesForm) ekler; o zamana dek
-// yer tutucu.
-const preparing = lazy(async () => ({ default: () => <p class="text-muted">{tdes.view.preparing}</p> }));
+// taslaktan hesaplanır (`aclIssuePaths`).
 const NO_PATHS: ReadonlySet<string> = new Set();
 const ACL_FORMS: Record<Exclude<DesignerVariant, "object">, Component<AclFormProps>> = {
   acl: lazy(() => import("./PrivilegesForm")),
-  default_acl: preparing,
+  default_acl: lazy(() => import("./DefaultPrivilegesForm")),
 };
 /** Yetki sekmesinde ızgaranın sahiplendiği yollar; geri kalan her hata üst şeride (catch-all). */
 function aclIssuePaths(m: DesignerModel): ReadonlySet<string> {
   const d = m.draft;
-  return d && isAclDef(d) ? aclGridPaths("grants", d.grants, d.available) : NO_PATHS;
+  if (d && isAclDef(d)) return aclGridPaths("grants", d.grants, d.available);
+  return d && isDefaultAclDef(d) ? defaultAclGridPaths(d.sections) : NO_PATHS;
 }
 
 type StatusKey = keyof typeof tdes.view.status;

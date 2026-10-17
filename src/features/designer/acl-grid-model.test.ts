@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AclGrant } from "../../ipc/bindings/AclGrant";
 import type { Privilege } from "../../ipc/bindings/Privilege";
 import {
-  addGrantee, addGranteeInput, allowGrantOption, cellPath, cellState, nextCellFocus, nextCellState, removeGrantee, setCell, planHasRevoke, unknownPrivileges,
+  addGrantee, addGranteeInput, allowGrantOption, granteeOptions, cellPath, cellState, nextCellFocus, nextCellState, removeGrantee, setCell, planHasRevoke, unknownPrivileges,
 } from "./acl-grid-model";
 
 const avail: Privilege[] = ["select", "insert", "update", "delete"];
@@ -149,5 +149,32 @@ describe("planHasRevoke", () => {
     expect(planHasRevoke(view("GRANT SELECT ON TABLE t TO a"))).toBe(false);
     expect(planHasRevoke(view())).toBe(false);
     expect(planHasRevoke(null)).toBe(false);
+  });
+});
+
+describe("PUBLIC adlı gerçek roller (spec E2)", () => {
+  const TOKEN = "PUBLIC (herkes)";
+  const roles = ["PUBLIC", "Public", "app"];
+  it("rol listesinde birebir eşleşen ad gerçek roldür", () => {
+    expect(addGranteeInput([], "PUBLIC", { roles, publicToken: TOKEN })).toEqual({ grants: [{ grantee: "PUBLIC", privileges: [] }] });
+    expect(addGranteeInput([], " Public ", { roles, publicToken: TOKEN })).toEqual({ grants: [{ grantee: "Public", privileges: [] }] });
+  });
+  it("eşleşmeyen harf duyarsız `public` ve sözde seçenek PUBLIC satırıdır", () => {
+    expect(addGranteeInput([], "public", { roles, publicToken: TOKEN })).toEqual({ grants: [{ grantee: null, privileges: [] }] });
+    expect(addGranteeInput([], "PUBLIC", { roles: ["app"], publicToken: TOKEN })).toEqual({ grants: [{ grantee: null, privileges: [] }] });
+    expect(addGranteeInput([], TOKEN, { roles, publicToken: TOKEN })).toEqual({ grants: [{ grantee: null, privileges: [] }] });
+  });
+  it("gerçek PUBLIC rolü ve PUBLIC satırı ayrı alıcıdır (yinelenen sayılmaz)", () => {
+    expect(addGranteeInput([g(null)], "PUBLIC", { roles, publicToken: TOKEN })).toEqual({
+      grants: [g(null), { grantee: "PUBLIC", privileges: [] }],
+    });
+    expect(addGranteeInput([g("PUBLIC")], TOKEN, { roles, publicToken: TOKEN })).toEqual({
+      grants: [g("PUBLIC"), { grantee: null, privileges: [] }],
+    });
+    expect(addGranteeInput([g("PUBLIC")], "PUBLIC", { roles, publicToken: TOKEN })).toEqual({ error: "duplicate" });
+  });
+  it("öneriler: sözde seçenek ayrı değerle; kullanılmış roller ve mevcut PUBLIC satırı düşer; tekrar yok", () => {
+    expect(granteeOptions([g("app")], [...roles, "app", "PUBLIC"], TOKEN)).toEqual([TOKEN, "PUBLIC", "Public"]);
+    expect(granteeOptions([g(null), g("PUBLIC")], roles, TOKEN)).toEqual(["Public", "app"]);
   });
 });

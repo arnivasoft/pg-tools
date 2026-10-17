@@ -2,15 +2,14 @@
 // gerekçeleri, yetki ızgarası + "Alıcı ekle", CASCADE onay kutusu ve salt okunur listeler (başka verenler, kolonlar).
 // Model daraltılmadan gelir (`AclFormProps`); tanım `isAclDef` ile okunur. Tüm metinler `strings-privileges.ts`'tedir.
 // Hata yolları DesignerView'da `aclGridPaths` ile ayrılır: ızgara satır/hücre hatalarını gösterir, gerisi üst şerittedir.
-import { For, Show, createMemo, createResource, createSignal, createUniqueId } from "solid-js";
+import { Show, createMemo, createResource } from "solid-js";
 import { tpriv } from "../../app/strings-privileges";
-import { inputClass } from "../../ui/Field";
-import { Button } from "../../ui/Button";
+import { AclAddGrantee } from "./AclAddGrantee";
 import { AclGrid } from "./AclGrid";
-import { addGranteeInput, planHasRevoke, removeGrantee } from "./acl-grid-model";
+import { planHasRevoke, removeGrantee } from "./acl-grid-model";
 import { AclReadOnlyLists } from "./AclReadOnlyLists";
 import { isAclDef } from "./designer-model";
-import { CheckRow, invalidClass, type AclFormProps } from "./FormParts";
+import { CheckRow, type AclFormProps } from "./FormParts";
 import { ReadOnlyReasons } from "./ReadOnlyReasons";
 
 export default function PrivilegesForm(props: AclFormProps) {
@@ -21,35 +20,13 @@ export default function PrivilegesForm(props: AclFormProps) {
   return (
     <Show when={def()}>
       {(d) => {
-        const inputId = createUniqueId();
-        const listId = createUniqueId();
-        const msgId = createUniqueId();
-        const [text, setText] = createSignal("");
-        const [addError, setAddError] = createSignal<string | null>(null);
         const [roles] = createResource(
           () => props.tabId,
           (tabId) => props.designer.lookup(tabId, { kind: "roles" }).catch(() => []),
         );
+        const roleNames = () => (roles() ?? []).map((r) => r.value);
         // Salt okunur tanımda (`editable = false`) hiçbir denetim çalışmaz.
         const ro = () => props.readOnly || !d().editable;
-        const hasPublic = () => d().grants.some((g) => g.grantee === null);
-        // Öneriler: listede olmayan roller; PUBLIC satırı yoksa "PUBLIC".
-        const options = () => {
-          const used = new Set(d().grants.map((g) => g.grantee));
-          const names = (roles() ?? []).map((r) => r.value).filter((v) => !used.has(v));
-          return hasPublic() ? names : [tpriv.publicName, ...names];
-        };
-        const add = () => {
-          if (ro()) return;
-          const r = addGranteeInput(d().grants, text());
-          if ("error" in r) {
-            setAddError(r.error === "empty" ? tpriv.add.empty : tpriv.add.duplicate);
-            return;
-          }
-          setAddError(null);
-          setText("");
-          props.designer.editAcl(props.tabId, (x) => ({ ...x, grants: r.grants }));
-        };
         const revoke = () => planHasRevoke(props.model.view);
         return (
           <div class="flex max-w-4xl flex-col gap-3">
@@ -78,43 +55,12 @@ export default function PrivilegesForm(props: AclFormProps) {
               onRemove={(row) => props.designer.editAcl(props.tabId, (x) => ({ ...x, grants: removeGrantee(x.grants, row) }))}
               footer={
                 <Show when={!ro()}>
-                  <div class="flex flex-col gap-1">
-                    <label for={inputId} class="text-xs text-muted">
-                      {tpriv.add.label}
-                    </label>
-                    <div class="flex items-center gap-2">
-                      <input
-                        id={inputId}
-                        data-acl-add
-                        class={`${inputClass} max-w-xs${invalidClass(addError() !== null)}`}
-                        list={listId}
-                        autocomplete="off"
-                        spellcheck={false}
-                        placeholder={tpriv.add.placeholder}
-                        aria-invalid={addError() !== null}
-                        aria-describedby={addError() !== null ? msgId : undefined}
-                        value={text()}
-                        onInput={(ev) => {
-                          setText(ev.currentTarget.value);
-                          setAddError(null);
-                        }}
-                        onKeyDown={(ev) => {
-                          if (ev.isComposing || ev.keyCode === 229 || ev.key !== "Enter") return;
-                          ev.preventDefault();
-                          add();
-                        }}
-                      />
-                      <datalist id={listId}>
-                        <For each={options()}>{(o) => <option value={o} />}</For>
-                      </datalist>
-                      <Button onClick={add}>{tpriv.add.button}</Button>
-                    </div>
-                    <Show when={addError()}>
-                      <span id={msgId} role="alert" class="text-xs text-danger">
-                        {addError()}
-                      </span>
-                    </Show>
-                  </div>
+                  <AclAddGrantee
+                    grants={d().grants}
+                    roles={roleNames()}
+                    labels={tpriv.add}
+                    onAdd={(grants) => props.designer.editAcl(props.tabId, (x) => ({ ...x, grants }))}
+                  />
                 </Show>
               }
             />
