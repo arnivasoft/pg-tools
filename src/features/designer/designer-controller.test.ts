@@ -1824,7 +1824,7 @@ describe("Plan 22: yetki varyantları (acl / default_acl)", () => {
     const s = setup();
     await s.ctl.openDefaultAcl("D1", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: null, schemaOid: null });
     const before = s.ctl.model("D1")!;
-    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("not_found", "rol yok"));
+    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("role_not_found", "rol yok"));
     s.ctl.setAclRole("D1", "yok");
     await flush();
     const m = s.ctl.model("D1")!;
@@ -1837,6 +1837,48 @@ describe("Plan 22: yetki varyantları (acl / default_acl)", () => {
     s.ctl.editDefaultAcl("D1", (d) => { d.sections[0]!.grants.push({ grantee: "bob", privileges: [{ privilege: "select", grantOption: false }] }); });
     await settle();
     expect(s.api.ddlPreview).toHaveBeenLastCalledWith("S1", 5, expect.objectContaining({ op: "default_privileges", scope: { role: null, schemaOid: null } }));
+  });
+
+  it("setAclRole: şema/veritabanı yok (`not_found`) → sekme gone (rol hatası değil)", async () => {
+    const s = setup();
+    await s.ctl.openDefaultAcl("D1", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: null, schemaOid: 7 });
+    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("not_found", "şema yok"));
+    s.ctl.setAclRole("D1", "bob");
+    await flush();
+    const m = s.ctl.model("D1")!;
+    expect(m.status).toBe("gone");
+    expect(m.aclRoleGone).toBeNull();
+  });
+
+  it("yeniden yükleme: seçili rol artık yok (`role_not_found`) → bağlı role (role: null) düşer, bilgi notu; sekme düşmez", async () => {
+    const s = setup();
+    await s.ctl.openDefaultAcl("D1", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: null, schemaOid: null });
+    s.ctl.setAclRole("D1", "bob");
+    await flush();
+    expect(s.ctl.model("D1")!.aclScope).toEqual({ role: "bob", schemaOid: null });
+    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("role_not_found", "rol yok"));
+    await s.ctl.reload("D1");
+    await flush();
+    expect(s.api.ddlLoadDefaultAcl).toHaveBeenLastCalledWith("S1", 5, { role: null, schemaOid: null });
+    const m = s.ctl.model("D1")!;
+    expect(m).toMatchObject({ status: "ready", error: null, aclScope: { role: null, schemaOid: null }, aclRoleGone: "bob" });
+    expect(m.draft).toEqual(defAclDef());
+    // Sonraki rol değişimi notu temizler.
+    s.ctl.setAclRole("D1", "carol");
+    await flush();
+    expect(s.ctl.model("D1")!.aclRoleGone).toBeNull();
+  });
+
+  it("yeniden yükleme: bağlı rol kapsamında (role: null) `role_not_found` ya da şema `not_found` → gone", async () => {
+    const s = setup();
+    await s.ctl.openDefaultAcl("D1", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: null, schemaOid: null });
+    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("role_not_found"));
+    await s.ctl.reload("D1");
+    expect(s.ctl.model("D1")!.status).toBe("gone");
+    await s.ctl.openDefaultAcl("D2", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: "bob", schemaOid: 7 });
+    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("not_found"));
+    await s.ctl.reload("D2");
+    expect(s.ctl.model("D2")!).toMatchObject({ status: "gone", aclScope: { role: "bob", schemaOid: 7 } });
   });
 
   it("planRequest: varyant yoksa nesne isteği (geriye uyumlu); default_acl kapsamsız → null", () => {

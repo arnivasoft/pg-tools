@@ -26,7 +26,8 @@ export type DesignerDef = ObjectDef | AclDef | DefaultAclDef;
 
 /**
  * Nesne tanımı mı (yetki tanımı değil). `viewer` yalnız yetki tanımlarında bulunur (`AclDef.kind` nesne türünü
- * taşıdığından `kind` ayırt etmez).
+ * taşıdığından `kind` ayırt etmez). Sekme modeli elindeyken önce `variant` denetlenmeli; bu koruma tip daraltması ve
+ * savunmadır. Hiçbir `ObjectDef` varyantının `viewer` taşımadığı `designer-model.test.ts`'te tür düzeyinde sınanır.
  */
 export function isObjectDef(d: DesignerDef): d is ObjectDef {
   return !("viewer" in d);

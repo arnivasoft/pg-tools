@@ -1,8 +1,10 @@
 // Yetki ızgarası (Plan 22; tembel parça). Satır = alıcı, sütun = `available` yetkileri; hücre üç durumlu düğmedir
 // (yok → var → var + GRANT OPTION → yok; PUBLIC ve sahip satırında son adım atlanır). Mantık saf `acl-grid-model`'dedir.
-// Erişilebilirlik: her hücre "<alıcı> — <yetki>: <durum>" adlı düğmedir (`aria-pressed` yok; durum metindir); ızgarada
-// ok tuşları/Home/End ile gezinilir (gezgin tabindex: yalnız etkin hücre sekme durağı); Space/Enter düğmenin tıklamasıyla
-// durumu değiştirir; IME bileşimi sırasında tuşlar yok sayılır. Hücre hatası `cellPath` ile `issues`'tan okunur
+// Erişilebilirlik: her hücre "<alıcı> — <yetki>: <durum>" adlı düğmedir (`labels.cell`; `aria-pressed` yok; durum
+// metindir); ızgarada ok tuşları/Home/End ile gezinilir (gezgin tabindex: yalnız etkin hücre sekme durağı); Space/Enter
+// düğmenin tıklamasıyla durumu değiştirir; IME bileşimi sırasında tuşlar yok sayılır. Salt okunur ızgarada hücreler
+// `disabled` değil `aria-disabled`dır: sekme durağı ve gezinme kalır, döngü etkisizdir (`cycleCell` → null). PUBLIC
+// satırı `labels.publicName` sözde adıyla gösterilir ("PUBLIC" adlı gerçek rolden ayrı). Hücre hatası `cellPath` ile `issues`'tan okunur
 // (`aria-invalid` + satır altı hata metni). `available` dışı yetkiler satırda salt okunur gösterilir.
 // Metinler `labels` ile gelir (Task 4: `strings-privileges.ts`); alıcı ekleme denetimini form sağlar (`footer`).
 import { Trash2 } from "lucide-solid";
@@ -11,8 +13,7 @@ import type { AclGrant } from "../../ipc/bindings/AclGrant";
 import type { Privilege } from "../../ipc/bindings/Privilege";
 import { Button } from "../../ui/Button";
 import {
-  allowGrantOption, cellPath, cellState, nextCellFocus, nextCellState, setCell, unknownPrivileges, type CellState,
-  type FocusKey,
+  cellPath, cellState, cycleCell, granteeLabel, nextCellFocus, unknownPrivileges, type CellState, type FocusKey,
 } from "./acl-grid-model";
 import { issuesFor, type FieldIssues } from "./designer-model";
 
@@ -23,8 +24,10 @@ export interface AclGridLabels {
   privilege: (p: Privilege) => string;
   /** Durum metinleri: yok / var / devredilebilir. */
   state: Record<CellState, string>;
-  /** PUBLIC satırının adı. */
+  /** PUBLIC sözde satırının adı ("PUBLIC" adlı gerçek rolden ayırt edilir). */
   publicName: string;
+  /** Hücrenin erişilebilir adı: alıcı, yetki adı, durum metni. */
+  cell: (grantee: string, privilege: string, state: string) => string;
   /** Sahip rozeti. */
   owner: string;
   /** Alıcı sütun başlığı. */
@@ -70,7 +73,7 @@ export function AclGrid(props: AclGridProps) {
     const [r, c] = active();
     return [Math.min(r, Math.max(props.grants.length - 1, 0)), Math.min(c, Math.max(cols() - 1, 0))];
   };
-  const name = (g: AclGrant) => g.grantee ?? props.labels.publicName;
+  const name = (g: AclGrant) => granteeLabel(g, props.labels.publicName);
   const cellIssues = (r: number, p: Privilege) => {
     const path = cellPath(props.basePath, r, props.grants, p);
     return path === null ? [] : issuesFor(props.issues, path);
@@ -79,11 +82,8 @@ export function AclGrid(props: AclGridProps) {
   const errId = (r: number) => `${gid}-err-${r}`;
 
   const cycle = (r: number, p: Privilege) => {
-    if (props.readOnly) return;
-    const g = props.grants[r];
-    if (!g) return;
-    const next = nextCellState(cellState(g, p), allowGrantOption(g, props.owner));
-    props.onChange(setCell(props.grants, r, p, next, props.available));
+    const next = cycleCell(props.grants, r, p, props.owner, props.available, props.readOnly);
+    if (next) props.onChange(next);
   };
 
   const remove = (r: number) => {
@@ -171,11 +171,11 @@ export function AclGrid(props: AclGridProps) {
                                 data-r={r}
                                 data-c={c}
                                 tabIndex={act()[0] === r && act()[1] === c ? 0 : -1}
-                                disabled={props.readOnly}
-                                aria-label={`${name(g())} — ${props.labels.privilege(p())}: ${props.labels.state[st()]}`}
+                                aria-disabled={props.readOnly ? true : undefined}
+                                aria-label={props.labels.cell(name(g()), props.labels.privilege(p()), props.labels.state[st()])}
                                 aria-invalid={errs().length > 0 ? true : undefined}
                                 aria-describedby={errs().length > 0 || rowIssues(r).length > 0 ? errId(r) : undefined}
-                                class={`inline-flex h-6 min-w-8 items-center justify-center rounded border px-1 text-[12px] outline-none focus:border-accent disabled:opacity-60 ${
+                                class={`inline-flex h-6 min-w-8 items-center justify-center rounded border px-1 text-[12px] outline-none focus:border-accent aria-disabled:opacity-60 ${
                                   st() === "none"
                                     ? "border-border text-muted"
                                     : st() === "granted"

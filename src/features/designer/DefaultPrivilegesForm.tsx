@@ -1,11 +1,14 @@
 // "Varsayılan yetkiler…" formu (Plan 22 Task 5, spec §8; tembel parça). Üstte kapsam satırı: rol seçici (`roles` lookup;
 // varsayılan bağlı rol) ve "Veritabanı geneli" / "Şema: <ad>". Rol değişimi tanımı yeniden yükler; taslak kirliyse önce
-// "değişiklikleri at" onayı (karar saf `roleSwitchDecision`). Seçici yükleme/uygulama sırasında devre dışıdır (art arda
-// değişimlerde yüklenmemiş kapsama dönüş yarışını önler). Yükleme başarısızsa (ör. rol yok, `not_found`) denetleyici
-// eski kapsama döner; hata seçicinin altında satır içi gösterilir (ayrıntı üst şeritte). Her nesne türü için bir ızgara
-// (sahip = rol); şema kapsamında altında genel kapsamın salt okunur değeri. Hata yolları DesignerView'da
-// `defaultAclGridPaths` ile ayrılır (baseline yolları sahiplenilmez → üst şerit).
-import { For, Show, createMemo, createResource, createSignal, createUniqueId } from "solid-js";
+// "değişiklikleri at" onayı (karar saf `roleSwitchDecision`). Seçici yükleme/uygulama sırasında `aria-disabled`dır
+// (odaklanabilir kalır; `disabled` ok tuşuyla değişimde odağı düşürürdü) ve değişimler yok sayılır (art arda değişimlerde
+// yüklenmemiş kapsama dönüş yarışını önler). Rol değişimi yüklemesi başarısızsa (ör. rol yok, `role_not_found`)
+// denetleyici eski kapsama döner; hata seçicinin altında satır içi gösterilir (ayrıntı üst şeritte). Yeniden yüklemede
+// seçili rol kaybolduysa bağlı role düşülür ve bilgi notu gösterilir (`aclRoleGone`). Her nesne türü için bir ızgara
+// (sahip = rol); şema kapsamında altında genel kapsamın salt okunur değeri. Bölümler `<Index>` ile çizilir: düzenleme
+// bölüm/ızgara bileşenlerini yeniden kurmaz (odak, etkin hücre ve "Alıcı ekle" girdisi korunur). Hata yolları
+// DesignerView'da `defaultAclGridPaths` ile ayrılır (baseline yolları sahiplenilmez → üst şerit).
+import { For, Index, Show, createMemo, createResource, createSignal, createUniqueId } from "solid-js";
 import { tdes } from "../../app/strings-designer";
 import { tpriv } from "../../app/strings-privileges";
 import type { AclGrant } from "../../ipc/bindings/AclGrant";
@@ -79,9 +82,9 @@ export default function DefaultPrivilegesForm(props: AclFormProps) {
                 </label>
                 <select
                   id={roleId}
-                  class={`${inputClass} max-w-xs`}
+                  class={`${inputClass} max-w-xs aria-disabled:opacity-60`}
                   value={current()}
-                  disabled={busy()}
+                  aria-disabled={busy() ? true : undefined}
                   aria-invalid={roleFailed() !== null ? true : undefined}
                   aria-describedby={roleFailed() !== null ? roleErrId : undefined}
                   onChange={(ev) => onRole(ev.currentTarget)}
@@ -106,6 +109,13 @@ export default function DefaultPrivilegesForm(props: AclFormProps) {
                 )}
               </Show>
             </div>
+            <Show when={props.model.aclRoleGone}>
+              {(r) => (
+                <p role="status" class="rounded border border-border px-3 py-2 text-xs text-muted">
+                  {L.roleGone(r())}
+                </p>
+              )}
+            </Show>
             <p role="note" class="rounded border border-border bg-panel px-3 py-2 text-xs text-muted">
               {L.note}
             </p>
@@ -118,49 +128,50 @@ export default function DefaultPrivilegesForm(props: AclFormProps) {
               </ul>
             </Show>
             <p class="text-xs text-muted">{tpriv.legend}</p>
-            <For each={sections()}>
+            <Index each={sections()}>
               {(s, i) => {
+                // `s` erişimcidir: düzenlemede bölüm nesnesi yenilenir ama bileşen (ve odak) aynı indekste kalır.
                 const titleId = createUniqueId();
-                const title = () => L.section[s.objectType];
+                const title = () => L.section[s().objectType];
                 return (
                   <section aria-labelledby={titleId} class="flex flex-col gap-2 border-t border-border pt-2">
                     <h3 id={titleId} class="text-[13px] font-medium">
                       {title()}
                     </h3>
                     <AclGrid
-                      grants={s.grants}
-                      available={s.available}
-                      owner={s.owner}
-                      basePath={s.basePath}
+                      grants={s().grants}
+                      available={s().available}
+                      owner={s().owner}
+                      basePath={s().basePath}
                       issues={props.issues}
-                      readOnly={s.readOnly}
-                      labels={{ ...tpriv.grid, grid: `${title()} — ${tpriv.grid.grid}`, empty: L.empty }}
-                      onChange={(grants) => editSection(i(), grants)}
-                      onRemove={(row) => editSection(i(), removeGrantee(s.grants, row))}
+                      readOnly={s().readOnly}
+                      labels={{ ...tpriv.grid, grid: tpriv.gridName(title(), tpriv.grid.grid), empty: L.empty }}
+                      onChange={(grants) => editSection(i, grants)}
+                      onRemove={(row) => editSection(i, removeGrantee(s().grants, row))}
                       footer={
-                        <Show when={!s.readOnly}>
+                        <Show when={!s().readOnly}>
                           <AclAddGrantee
-                            grants={s.grants}
+                            grants={s().grants}
                             roles={roleNames()}
                             labels={tpriv.add}
                             context={title()}
-                            onAdd={(grants) => editSection(i(), grants)}
+                            onAdd={(grants) => editSection(i, grants)}
                           />
                         </Show>
                       }
                     />
-                    <Show when={s.baseline}>
+                    <Show when={s().baseline}>
                       {(b) => (
                         <div class="ml-3 flex flex-col gap-1 border-l border-border pl-3">
                           <h4 class="text-xs text-muted">{L.baseline}</h4>
                           <AclGrid
                             grants={b().grants}
-                            available={s.available}
-                            owner={s.owner}
+                            available={s().available}
+                            owner={s().owner}
                             basePath={b().basePath}
                             issues={props.issues}
                             readOnly={b().readOnly}
-                            labels={{ ...tpriv.grid, grid: `${title()} — ${L.baseline}`, empty: L.baselineEmpty }}
+                            labels={{ ...tpriv.grid, grid: tpriv.gridName(title(), L.baseline), empty: L.baselineEmpty }}
                             onChange={() => {}}
                           />
                         </div>
@@ -169,7 +180,7 @@ export default function DefaultPrivilegesForm(props: AclFormProps) {
                   </section>
                 );
               }}
-            </For>
+            </Index>
             <ConfirmDialog
               open={pending() !== null}
               title={tdes.discard.title}

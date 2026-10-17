@@ -608,6 +608,12 @@ describe("Plan 22: yetki tanımları (defName / anahtarlar / eşitlik)", () => {
     expect(isObjectDef(aclDef())).toBe(false);
     expect(isObjectDef(defAclDef())).toBe(false);
   });
+  it("isObjectDef koruması: hiçbir ObjectDef varyantı `viewer` taşımaz (tür düzeyi; varyant kazanırsa typecheck kırılır)", () => {
+    // `isObjectDef` yetki tanımlarını `viewer` alanıyla ayırır; bir nesne türü `viewer` alanı kazanırsa bu satır derlenmez.
+    type ViewerVariants = Extract<ObjectDef, { viewer: unknown }>;
+    const noViewer: [ViewerVariants] extends [never] ? true : false = true;
+    expect(noViewer).toBe(true);
+  });
   it("cloneDef / defsEqual birleşim tipiyle çalışır", () => {
     const a = aclDef();
     const c = cloneDef(a);

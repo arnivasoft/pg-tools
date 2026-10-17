@@ -7,7 +7,8 @@ import { errorText } from "../../ipc/errors";
 /**
  * Kodun designer sekmesindeki karşılığı:
  * - `disconnected`: bağlantı yok/koptu → sekme "bağlantı kesildi" salt okunur;
- * - `gone`: sunucu kaydı (`unknown_server`) ya da nesne (`not_found`) yok;
+ * - `gone`: sunucu kaydı (`unknown_server`), nesne (`not_found`) ya da rol (`role_not_found`; varsayılan yetkilerde
+ *   denetleyici kapsamın rolü için ayrıca ele alır) yok;
  * - `planChanged`: nesne başka yerde değişti → yeniden yükleme önerisi;
  * - `invalidDef`: tanım geçersiz → önizleme yenilenir;
  * - `locked`: sunucu salt okunur kilitli;
@@ -22,6 +23,7 @@ const CLASSES: Record<string, ErrorClass> = {
   connection_lost: "disconnected",
   unknown_server: "gone",
   not_found: "gone",
+  role_not_found: "gone",
   plan_changed: "planChanged",
   invalid_def: "invalidDef",
   locked: "locked",

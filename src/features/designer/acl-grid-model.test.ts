@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { AclGrant } from "../../ipc/bindings/AclGrant";
 import type { Privilege } from "../../ipc/bindings/Privilege";
 import {
-  addGrantee, addGranteeInput, allowGrantOption, granteeOptions, cellPath, cellState, nextCellFocus, nextCellState, removeGrantee, setCell, planHasRevoke, unknownPrivileges,
+  addGrantee, addGranteeInput, allowGrantOption, granteeOptions, cellPath, cellState, cycleCell, granteeLabel, nextCellFocus, nextCellState,
+  removeGrantee, setCell, planHasRevoke, unknownPrivileges,
 } from "./acl-grid-model";
 
 const avail: Privilege[] = ["select", "insert", "update", "delete"];
@@ -176,5 +177,28 @@ describe("PUBLIC adlı gerçek roller (spec E2)", () => {
   it("öneriler: sözde seçenek ayrı değerle; kullanılmış roller ve mevcut PUBLIC satırı düşer; tekrar yok", () => {
     expect(granteeOptions([g("app")], [...roles, "app", "PUBLIC"], TOKEN)).toEqual([TOKEN, "PUBLIC", "Public"]);
     expect(granteeOptions([g(null), g("PUBLIC")], roles, TOKEN)).toEqual(["Public", "app"]);
+  });
+});
+
+describe("cycleCell (salt okunur ızgara odaklanabilir kalır, döngü etkisiz)", () => {
+  it("düzenlenebilir: bir sonraki duruma geçer (PUBLIC/sahipte GRANT OPTION adımı yok)", () => {
+    expect(cycleCell([g("app")], 0, "select", "own", avail, false)).toEqual([g("app", ["select"])]);
+    expect(cycleCell([g("app", ["select"])], 0, "select", "own", avail, false)).toEqual([g("app", ["select", true])]);
+    expect(cycleCell([g(null, ["select"])], 0, "select", "own", avail, false)).toEqual([g(null)]);
+    expect(cycleCell([g("own", ["select"])], 0, "select", "own", avail, false)).toEqual([g("own")]);
+  });
+  it("salt okunur ya da geçersiz satır → null (değişiklik yok)", () => {
+    expect(cycleCell([g("app")], 0, "select", "own", avail, true)).toBeNull();
+    expect(cycleCell([g("app")], 3, "select", "own", avail, false)).toBeNull();
+  });
+});
+
+describe("granteeLabel (PUBLIC sözde satırı gerçek \"PUBLIC\" rolünden ayrı)", () => {
+  const PSEUDO = "PUBLIC (herkes)";
+  it("PUBLIC satırı sözde adla, gerçek roller olduğu gibi", () => {
+    expect(granteeLabel(g(null), PSEUDO)).toBe(PSEUDO);
+    expect(granteeLabel(g("PUBLIC"), PSEUDO)).toBe("PUBLIC");
+    expect(granteeLabel(g("Public"), PSEUDO)).toBe("Public");
+    expect(granteeLabel(g(null), PSEUDO)).not.toBe(granteeLabel(g("PUBLIC"), PSEUDO));
   });
 });

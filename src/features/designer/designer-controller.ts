@@ -79,6 +79,11 @@ export interface DesignerModel {
   /** Yalnız default_acl: yükleme/istek kapsamı (`role = null` → bağlı rol); diğerlerinde null. */
   aclScope: DefaultAclScope | null;
   /**
+   * Yalnız default_acl: yeniden yüklemede artık var olmayan (`role_not_found`) seçili rol; kapsam bağlı role
+   * (`role = null`) düşürüldü (form bilgi notu gösterir). Sonraki rol değişiminde temizlenir.
+   */
+  aclRoleGone: string | null;
+  /**
    * alter: `ddl_load` (acl: `ddl_load_acl`, default_acl: `ddl_load_default_acl`) çıktısı (DEĞİŞTİRİLMEZ, `old` olarak
    * gider); create: null.
    */
@@ -407,7 +412,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   ): Entry => {
     const info = deps.serverInfo(serverId);
     const [m, set] = createSignal<DesignerModel>({
-      id: tabId, serverId, serverName: info?.name ?? "", databaseOid, mode, variant, kind, object, aclScope,
+      id: tabId, serverId, serverName: info?.name ?? "", databaseOid, mode, variant, kind, object, aclScope, aclRoleGone: null,
       original: null, draft: null, status: "loading", error: null, dirty: false,
       view: null, viewFor: -1, version: 0, pending: false, previewError: null,
       applying: false, applyId: null, outcome: null, applyError: null, gateError: null, needsReload: false,
@@ -428,9 +433,21 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     // Rol değişimi (default_acl) başarısız: kapsam eski role döner; tanım/taslak/görünüm o role aittir, tutarlı kalır.
     if (prevScope) patch(e, { aclScope: prevScope });
     const p = toPayload(err);
-    // Rol değişiminde `not_found` seçilen rolün yokluğudur (sekmenin kapsamı duruyor): sekme düşmez, hata gösterilir.
-    const roleMissing = prevScope !== undefined && p.code === "not_found";
-    if (!roleMissing && markIfDown(e, p)) return;
+    // default_acl: `role_not_found` kapsamın rolünün yokluğudur (şema/veritabanı yokluğu düz `not_found` → gone).
+    const roleMissing = e.model().variant === "default_acl" && p.code === "role_not_found";
+    // Rol değişiminde seçilen rol yok: sekme düşmez, hata gösterilir (önceki rolün tanımı kalır).
+    if (roleMissing && prevScope) {
+      patch(e, { status: prev === "ready" ? "ready" : "error", error: errorText(p) });
+      return;
+    }
+    // Yeniden yüklemede (açılış/yenileme/uygulama sonrası) seçili rol kaybolmuş: bağlı role düşülür, bilgi notu.
+    const scope = e.model().aclScope;
+    if (roleMissing && scope && scope.role !== null) {
+      patch(e, { aclScope: { ...scope, role: null }, aclRoleGone: scope.role });
+      void loadObject(e.model().id, e);
+      return;
+    }
+    if (markIfDown(e, p)) return;
     patch(e, { status: prev === "ready" ? "ready" : "error", error: errorText(p) });
   };
 
@@ -530,7 +547,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     if (!e || !m || m.variant !== "default_acl" || !m.aclScope || m.applying || m.status === "gone") return;
     forgetSecret(tabId);
     const prevScope = { ...m.aclScope };
-    patch(e, { aclScope: { ...m.aclScope, role }, postApplyWarnings: [] });
+    patch(e, { aclScope: { ...m.aclScope, role }, aclRoleGone: null, postApplyWarnings: [] });
     void loadObject(tabId, e, prevScope);
   };
 
@@ -564,7 +581,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       ...cur, draft: next, version: cur.version + 1, dirty: dirtyOf(e, next, cur), outcome: null, applyError: null,
     }));
     // Parola niyeti `set` değilse (keep/clear ya da rol dışı) girilmiş parola tutulmaz.
-    if (!(isObjectDef(next) && next.kind === "role" && next.password === "set")) forgetSecret(tabId);
+    if (!(variant === "object" && isObjectDef(next) && next.kind === "role" && next.password === "set")) forgetSecret(tabId);
     startPreview(e, false);
   };
   const edit = (tabId: string, f: (draft: ObjectDef) => ObjectDef | void) => editDef<ObjectDef>(tabId, "object", f);
@@ -632,6 +649,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     // Sunucu kapsamlı nesne (rol/veritabanı) her veritabanının lookup'larını (ör. `roles`) etkiler.
     dropLookups(m.serverId, isServerScoped(m.kind) ? undefined : m.databaseOid);
     refresh(e.refreshNodeId);
+    // Buraya yalnız `variant = "object"` ulaşır (yetki sekmeleri yukarıda döner); `isObjectDef` tip daraltmasıdır.
     if ((mode === "alter" || out.created) && m.draft && isObjectDef(m.draft)) {
       const before = m.original && isObjectDef(m.original) ? cloneDef(m.original) : null;
       try {
@@ -876,7 +894,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   const setSecret = (tabId: string, value: string | null): void => {
     const m = entries.get(tabId)?.model();
     const d = m?.draft;
-    const accept = !!value && !!m && m.status === "ready" && !!d && isObjectDef(d) && d.kind === "role" && d.password === "set";
+    const accept = !!value && !!m && m.status === "ready" && m.variant === "object" && !!d && isObjectDef(d) && d.kind === "role"
+      && d.password === "set";
     if (accept) {
       if (secrets.get(tabId) === value) return;
       secrets.set(tabId, value!);

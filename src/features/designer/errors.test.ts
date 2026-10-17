@@ -34,6 +34,11 @@ describe("designer errors", () => {
     expect(designerErrorText(p("io", "m", "d"))).toBe("m");
   });
 
+  it("role_not_found (rol yok) → gone sınıfı; kapı kodu değil", () => {
+    expect(classifyError(p("role_not_found"))).toBe("gone");
+    expect(isGateCode("role_not_found")).toBe(false);
+  });
+
   it("role_password_missing → passwordMissing sınıfı ve tdes.gate.passwordMissing metni; kapı kodu", () => {
     expect(classifyError(p("role_password_missing"))).toBe("passwordMissing");
     expect(designerErrorText(p("role_password_missing", "arka uç iletisi"))).toBe(tdes.gate.passwordMissing);

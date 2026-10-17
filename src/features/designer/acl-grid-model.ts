@@ -37,6 +37,23 @@ export function setCell(grants: AclGrant[], row: number, p: Privilege, s: CellSt
   return out;
 }
 
+/**
+ * Hücre tıklaması/Space/Enter: bir sonraki duruma geçer (PUBLIC/sahipte GRANT OPTION adımı yok). Salt okunur ızgara
+ * (hücreler odaklanabilir kalır, `aria-disabled`) ya da geçersiz satır → null (değişiklik yok).
+ */
+export function cycleCell(
+  grants: AclGrant[], row: number, p: Privilege, owner: string, available: Privilege[], readOnly: boolean,
+): AclGrant[] | null {
+  const g = grants[row];
+  if (readOnly || !g) return null;
+  return setCell(grants, row, p, nextCellState(cellState(g, p), allowGrantOption(g, owner)), available);
+}
+
+/** Satırın görünen/erişilebilir adı: PUBLIC satırı (`grantee = null`) sözde adla; "PUBLIC" adlı gerçek rol olduğu gibi. */
+export function granteeLabel(g: { grantee: string | null }, publicName: string): string {
+  return g.grantee ?? publicName;
+}
+
 /** Alıcıyı sona ekler (boş yetkiyle); yinelenen (PUBLIC dahil) ya da boş ad → null. */
 export function addGrantee(grants: AclGrant[], grantee: string | null): AclGrant[] | null {
   const name = grantee === null ? null : grantee.trim();

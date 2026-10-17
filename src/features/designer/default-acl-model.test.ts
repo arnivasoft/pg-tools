@@ -42,4 +42,14 @@ describe("defaultAclSections", () => {
     expect(defaultAclSections(def({ editable: false }), false).every((x) => x.readOnly)).toBe(true);
     expect(defaultAclSections(def(), true).every((x) => x.readOnly)).toBe(true);
   });
+  it("düzenleme sonrası her indeks aynı bölümü taşır (`<Index>` bölüm bileşenlerini korur; yalnız `grants` değişir)", () => {
+    const before = defaultAclSections(def(), false);
+    const edited = def();
+    edited.sections[1]!.grants = [{ grantee: "bob", privileges: [{ privilege: "execute", grantOption: false }] }];
+    const after = defaultAclSections(edited, false);
+    const shape = (xs: typeof before) => xs.map((x) => [x.objectType, x.basePath, x.owner, x.readOnly, x.baseline?.basePath ?? null]);
+    expect(shape(after)).toEqual(shape(before));
+    expect(after[1]!.grants).toEqual(edited.sections[1]!.grants);
+    expect(after[0]!.grants).toEqual(before[0]!.grants);
+  });
 });

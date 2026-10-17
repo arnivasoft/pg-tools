@@ -8,13 +8,18 @@ import type { Privilege } from "../ipc/bindings/Privilege";
 
 /** Yetki adı: SQL anahtar sözcüğü (SELECT, TEMPORARY…). */
 const privilegeName = (p: Privilege) => p.toUpperCase();
-const publicName = "PUBLIC";
+/**
+ * PUBLIC sözde satırının adı (ızgara, salt okunur listeler, "Alıcı ekle" sözde seçeneği): "PUBLIC" adlı gerçek rolden
+ * (spec E2) görünür metinde ve erişilebilir adlarda ayırt edilir. Gerçek rol adları olduğu gibi gösterilir.
+ */
+const publicName = "PUBLIC (herkes)";
 
 const grid: AclGridLabels = {
   grid: "Yetki ızgarası",
   privilege: privilegeName,
   state: { none: "yok", granted: "var", grantable: "devredilebilir" },
   publicName,
+  cell: (grantee, privilege, state) => `${grantee} — ${privilege}: ${state}`,
   owner: "sahip",
   grantee: "Alıcı",
   remove: (g) => `${g} alıcısını kaldır`,
@@ -40,6 +45,8 @@ export const tpriv = {
   grid,
   readOnly,
   publicName,
+  /** Bölüm ızgarasının adı ("<bölüm> — <ızgara>"; varsayılan yetkiler). */
+  gridName: (title: string, grid: string) => `${title} — ${grid}`,
   owner: "Sahip",
   viewer: "Bağlı rol",
   implicit: "Varsayılan (açık ACL yok) yetkiler gösteriliyor; ilk değişiklik ACL'yi açık hâle getirir.",
@@ -51,7 +58,7 @@ export const tpriv = {
     empty: "Alıcı adı girin.",
     duplicate: "Bu alıcı zaten listede.",
     // Sözde PUBLIC seçeneğinin değeri; "PUBLIC" adlı gerçek rolden ayırt edilir.
-    publicOption: "PUBLIC (herkes)",
+    publicOption: publicName,
   } satisfies AclAddGranteeLabels,
   cascade: "Bağımlı yetkilerle birlikte geri al (CASCADE)",
   cascadeHint: "Alıcının bu yetkiyle başkalarına verdiği yetkiler de geri alınır.",
@@ -65,6 +72,7 @@ export const tpriv = {
     note: "Yalnızca bundan sonra oluşturulan nesneleri etkiler; mevcut nesnelerin yetkileri değişmez.",
     info: "Bilgi",
     loadError: "Seçilen rolün varsayılan yetkileri yüklenemedi; önceki rol gösteriliyor.",
+    roleGone: (role: string) => `"${role}" rolü artık yok; bağlı rolün varsayılan yetkileri gösteriliyor.`,
     loading: "Yükleniyor…",
     baseline: "Genel varsayılan (salt okunur)",
     baselineEmpty: "Genel kapsamda bu tür için yetki yok.",
