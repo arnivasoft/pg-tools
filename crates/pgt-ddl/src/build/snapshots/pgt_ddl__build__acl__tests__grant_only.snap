@@ -1,0 +1,6 @@
+---
+source: crates/pgt-ddl/src/build/acl.rs
+expression: render(&p)
+---
+[Safe] GRANT SELECT ON TABLE s.t TO PUBLIC
+[Safe] GRANT SELECT, INSERT ON TABLE s.t TO "Reader"

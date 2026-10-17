@@ -1326,8 +1326,9 @@ fn object_check(req: &PlanRequest) -> Option<(ObjectRef, &ObjectDef)> {
 pub(crate) fn plan_view(req: &PlanRequest, version_num: u32) -> PlanView {
     let ctx = |concurrently| BuildCtx { version_num, concurrently };
     PlanView::from_build(match req {
-        // Geçici (Plan 20 Task 1): üreticiler sonraki görevlerde bağlanır.
-        PlanRequest::Privileges { .. } | PlanRequest::DefaultPrivileges { .. } => {
+        PlanRequest::Privileges { old, new, cascade, .. } => build::acl::privileges(&ctx(false), old, new, *cascade),
+        // Geçici (Plan 20 Task 1): varsayılan yetki üreticisi sonraki görevde bağlanır.
+        PlanRequest::DefaultPrivileges { .. } => {
             Err(vec![FieldError { path: String::new(), message: "henüz desteklenmiyor".into() }])
         }
         PlanRequest::Create { def, concurrently } => build::create(def, &ctx(*concurrently)),
@@ -1388,10 +1389,30 @@ mod tests {
         for r in [&p, &d] {
             assert!(read_only_refusal(r).is_none() && object_check(r).is_none());
             assert_eq!(HintCtx::of(r), HintCtx::default());
-            // Geçici: üretici bağlanana dek hata görünümü, ifade yok.
-            let v = plan_view(r, 170000);
-            assert!(v.statements.is_empty() && v.errors.len() == 1);
         }
+        // Nesne yetkileri üreticiye bağlı: fark yok → boş plan; yeni alıcı → GRANT; kimlik değişimi → `object`.
+        let v = plan_view(&p, 170000);
+        assert!(v.statements.is_empty() && v.errors.is_empty() && v.empty, "{v:?}");
+        use crate::acl::{AclGrant, Privilege, PrivilegeGrant};
+        let mut granted = acl(ObjectKind::Database);
+        granted.grants.push(AclGrant {
+            grantee: None,
+            privileges: vec![PrivilegeGrant { privilege: Privilege::Connect, grant_option: false }],
+        });
+        let PlanRequest::Privileges { object, old, .. } = &p else { unreachable!() };
+        let g = PlanRequest::Privileges { object: *object, old: old.clone(), new: granted, cascade: true };
+        let v = plan_view(&g, 170000);
+        assert_eq!(v.statements.iter().map(|s| s.sql.as_str()).collect::<Vec<_>>(), ["GRANT CONNECT ON DATABASE d TO PUBLIC"]);
+        let renamed = PlanRequest::Privileges {
+            object: *object,
+            old: old.clone(),
+            new: AclDef { name: "e".into(), ..old.clone() },
+            cascade: false,
+        };
+        assert_eq!(plan_view(&renamed, 170000).errors[0].path, "object");
+        // Geçici: varsayılan yetki üreticisi bağlanana dek hata görünümü, ifade yok.
+        let v = plan_view(&d, 170000);
+        assert!(v.statements.is_empty() && v.errors.len() == 1);
     }
 
     #[test]

@@ -1,0 +1,5 @@
+---
+source: crates/pgt-ddl/src/build/acl.rs
+expression: render(&p)
+---
+[Safe] GRANT SELECT, UPDATE ON TABLE s.t TO reader WITH GRANT OPTION

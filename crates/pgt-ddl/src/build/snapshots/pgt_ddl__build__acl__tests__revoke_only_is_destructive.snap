@@ -1,0 +1,5 @@
+---
+source: crates/pgt-ddl/src/build/acl.rs
+expression: render(&p)
+---
+[Destructive] REVOKE UPDATE, DELETE ON TABLE s.t FROM reader
