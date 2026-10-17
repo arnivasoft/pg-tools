@@ -1782,6 +1782,63 @@ describe("Plan 22: yetki varyantları (acl / default_acl)", () => {
     expect(s.ctl.model("P1")!.aclScope).toBeNull();
   });
 
+  it("acl: CASCADE değişimi sürümü ilerletir ve yeniden önizler; kapı yeni görünüme göre (üretim adı)", async () => {
+    const s = setup();
+    s.servers.S1!.production = true;
+    await s.ctl.openAcl("P1", CTX, TBL);
+    s.api.ddlPreview.mockResolvedValue(view({ risk: "destructive", hash: "h-rev" }));
+    s.ctl.editAcl("P1", (d) => { d.grants = []; });
+    await settle();
+    expect(s.ctl.peekApplyGate("P1")).toEqual({ kind: "needsConfirm" });
+    const v0 = s.ctl.model("P1")!.version;
+    s.api.ddlPreview.mockResolvedValue(view({ risk: "data_loss", hash: "h-cascade" }));
+    s.ctl.setCascade("P1", true);
+    expect(s.ctl.model("P1")!.version).toBe(v0 + 1);
+    expect(s.ctl.peekApplyGate("P1").kind).toBe("blocked");
+    await settle();
+    expect(s.api.ddlPreview).toHaveBeenLastCalledWith("S1", 5, expect.objectContaining({ op: "privileges", cascade: true }));
+    expect(s.ctl.peekApplyGate("P1")).toEqual({ kind: "needsProductionName", expected: "prod-1" });
+    // Aynı değer: yeni önizleme yok.
+    const calls = s.api.ddlPreview.mock.calls.length;
+    s.ctl.setCascade("P1", true);
+    await settle();
+    expect(s.api.ddlPreview).toHaveBeenCalledTimes(calls);
+  });
+
+  it("acl: yeni temelde (yeniden yükleme / uygulama sonrası) CASCADE false olur", async () => {
+    const s = setup();
+    await s.ctl.openAcl("P1", CTX, TBL);
+    s.ctl.setCascade("P1", true);
+    await s.ctl.reload("P1");
+    expect(s.ctl.model("P1")!.cascade).toBe(false);
+    s.ctl.editAcl("P1", grantInsert);
+    s.ctl.setCascade("P1", true);
+    await settle();
+    await s.ctl.apply("P1");
+    await flush();
+    expect(s.api.ddlApply).toHaveBeenCalledWith("S1", 5, expect.objectContaining({ cascade: true }), expect.anything());
+    expect(s.ctl.model("P1")).toMatchObject({ cascade: false, dirty: false });
+  });
+
+  it("setAclRole: yükleme başarısızsa kapsam eski role döner, eski tanım korunur, hata görünür", async () => {
+    const s = setup();
+    await s.ctl.openDefaultAcl("D1", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: null, schemaOid: null });
+    const before = s.ctl.model("D1")!;
+    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("not_found", "rol yok"));
+    s.ctl.setAclRole("D1", "yok");
+    await flush();
+    const m = s.ctl.model("D1")!;
+    expect(m.aclScope).toEqual({ role: null, schemaOid: null });
+    expect(m.status).toBe("ready");
+    expect(m.error).toBeTruthy();
+    expect(m.original).toEqual(before.original);
+    expect(m.draft).toEqual(before.draft);
+    // Sonraki istek eski kapsamla gider.
+    s.ctl.editDefaultAcl("D1", (d) => { d.sections[0]!.grants.push({ grantee: "bob", privileges: [{ privilege: "select", grantOption: false }] }); });
+    await settle();
+    expect(s.api.ddlPreview).toHaveBeenLastCalledWith("S1", 5, expect.objectContaining({ op: "default_privileges", scope: { role: null, schemaOid: null } }));
+  });
+
   it("planRequest: varyant yoksa nesne isteği (geriye uyumlu); default_acl kapsamsız → null", () => {
     expect(planRequest({
       variant: "default_acl", aclScope: null, mode: "alter", kind: "database", object: null, original: defAclDef(), draft: defAclDef(),

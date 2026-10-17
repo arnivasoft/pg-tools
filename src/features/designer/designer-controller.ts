@@ -424,9 +424,13 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   };
 
   /** Yükleme hatası: gone/disconnected ya da genel hata (önceki taslak varsa `ready` korunur). */
-  const loadFailed = (e: Entry, err: unknown, prev: DesignerStatus) => {
+  const loadFailed = (e: Entry, err: unknown, prev: DesignerStatus, prevScope?: DefaultAclScope) => {
+    // Rol değişimi (default_acl) başarısız: kapsam eski role döner; tanım/taslak/görünüm o role aittir, tutarlı kalır.
+    if (prevScope) patch(e, { aclScope: prevScope });
     const p = toPayload(err);
-    if (markIfDown(e, p)) return;
+    // Rol değişiminde `not_found` seçilen rolün yokluğudur (sekmenin kapsamı duruyor): sekme düşmez, hata gösterilir.
+    const roleMissing = prevScope !== undefined && p.code === "not_found";
+    if (!roleMissing && markIfDown(e, p)) return;
     patch(e, { status: prev === "ready" ? "ready" : "error", error: errorText(p) });
   };
 
@@ -434,6 +438,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   const setBase = (e: Entry, original: DesignerDef | null, draft: DesignerDef) =>
     update(e, (m) => ({
       ...m, status: "ready", error: null, original, draft, dirty: false, version: m.version + 1,
+      // acl: CASCADE her yeni temelde (yeniden yükleme/uygulama sonrası) güvenli varsayılana döner.
+      cascade: m.variant === "acl" ? false : m.cascade,
       view: null, viewFor: -1, pending: false, previewError: null, gateError: null, applyError: null, needsReload: false,
       confirm: emptyConfirm(),
     }));
@@ -462,7 +468,8 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     return api.ddlLoad(m.serverId, m.databaseOid, m.object!);
   };
 
-  const loadObject = async (tabId: string, e: Entry) => {
+  /** `prevScope`: rol değişimi yüklemesi; başarısızlıkta kapsam buna geri döner. */
+  const loadObject = async (tabId: string, e: Entry, prevScope?: DefaultAclScope) => {
     const gen = ++e.gen;
     e.previewer.cancel();
     const m = e.model();
@@ -473,7 +480,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       if (!alive(tabId, e, gen)) return;
       setBase(e, cloneDef(def), cloneDef(def));
     } catch (err) {
-      if (alive(tabId, e, gen)) loadFailed(e, err, prev);
+      if (alive(tabId, e, gen)) loadFailed(e, err, prev, prevScope);
     }
   };
 
@@ -522,8 +529,9 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const m = e?.model();
     if (!e || !m || m.variant !== "default_acl" || !m.aclScope || m.applying || m.status === "gone") return;
     forgetSecret(tabId);
+    const prevScope = { ...m.aclScope };
     patch(e, { aclScope: { ...m.aclScope, role }, postApplyWarnings: [] });
-    void loadObject(tabId, e);
+    void loadObject(tabId, e, prevScope);
   };
 
   /**
@@ -589,9 +597,21 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     patch(e, { concurrently: v, version: m.version + 1, dirty: m.draft ? dirtyOf(e, m.draft, { ...m, concurrently: v }) : m.dirty });
     startPreview(e, false);
   };
+  /**
+   * Nesne sekmesi: yalnız silme isteği seçeneği. acl: `privileges` isteğinin parçasıdır → plan değişir, sürüm ilerler ve
+   * önizleme yenilenir (risk/kapı/üretim adı onayı yeni görünüme göre; eski görünüm bayat sayılır).
+   */
   const setCascade = (tabId: string, v: boolean) => {
     const e = entries.get(tabId);
-    if (e) patch(e, { cascade: v });
+    const m = e?.model();
+    if (!e || !m) return;
+    if (m.variant !== "acl") {
+      patch(e, { cascade: v });
+      return;
+    }
+    if (!editable(m) || m.cascade === v) return;
+    patch(e, { cascade: v, version: m.version + 1 });
+    startPreview(e, false);
   };
 
   // ---- uygulama
