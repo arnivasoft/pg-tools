@@ -3,6 +3,7 @@ import type { AclGrant } from "./AclGrant";
 import type { ColumnGrant } from "./ColumnGrant";
 import type { ForeignGrant } from "./ForeignGrant";
 import type { ObjectKind } from "./ObjectKind";
+import type { Privilege } from "./Privilege";
 
 /**
  * Bir nesnenin etkin ACL'si.
@@ -23,4 +24,8 @@ viewer: string,
 /**
  * ACL sütunu NULL değil (NULL ise etkin değer `acldefault` ile gösterilir).
  */
-explicit: boolean, grants: Array<AclGrant>, foreign: Array<ForeignGrant>, columns: Array<ColumnGrant>, editable: boolean, unsupported: Array<string>, };
+explicit: boolean, grants: Array<AclGrant>, foreign: Array<ForeignGrant>, columns: Array<ColumnGrant>, editable: boolean, unsupported: Array<string>, 
+/**
+ * Sunucu sürümünde bu türün alabileceği yetkiler, kanonik sırada (`privileges_for`); kimlik alanıdır.
+ */
+available: Array<Privilege>, };

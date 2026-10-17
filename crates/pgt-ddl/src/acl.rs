@@ -132,6 +132,8 @@ pub struct AclDef {
     pub columns: Vec<ColumnGrant>,
     pub editable: bool,
     pub unsupported: Vec<String>,
+    /// Sunucu sürümünde bu türün alabileceği yetkiler, kanonik sırada (`privileges_for`); kimlik alanıdır.
+    pub available: Vec<Privilege>,
 }
 
 /// Varsayılan yetki nesne türü (PG harfleri `r, S, f, T, n`).
@@ -154,6 +156,8 @@ pub struct DefaultAclSection {
     pub grants: Vec<AclGrant>,
     /// Şema kapsamında genel kapsamın etkin değeri (salt okunur); genel kapsamda boş.
     pub baseline: Vec<AclGrant>,
+    /// Sunucu sürümünde bu bölümün yetkileri, kanonik sırada (`default_privileges_for`); kimlik alanıdır.
+    pub available: Vec<Privilege>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

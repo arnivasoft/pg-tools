@@ -110,6 +110,7 @@ fn same_identity(a: &AclDef, b: &AclDef) -> bool {
         && a.owner == b.owner
         && a.viewer == b.viewer
         && a.explicit == b.explicit
+        && a.available == b.available
 }
 
 pub(crate) fn find<'a>(grants: &'a [AclGrant], who: Option<&str>) -> Option<&'a AclGrant> {
@@ -408,6 +409,7 @@ mod tests {
             columns: vec![],
             editable: true,
             unsupported: vec![],
+            available: all.to_vec(),
         }
     }
     fn table() -> AclDef {
@@ -758,6 +760,15 @@ mod tests {
         assert_eq!(sqls(&privileges(&ctx(), &owner_less, &back, false).unwrap()), ["GRANT INSERT ON TABLE s.t TO own"]);
         let back_go = AclDef { grants: vec![row(Some("own"), &[(Select, false), (Insert, true)])], ..table() };
         assert_eq!(paths(privileges(&ctx(), &owner_less, &back_go, false).unwrap_err()), ["grants[0].privileges[1].grantOption"]);
+    }
+
+    #[test]
+    fn available_is_identity() {
+        let mut other = table();
+        other.available.pop();
+        assert_eq!(paths(privileges(&ctx(), &table(), &other, false).unwrap_err()), ["object"]);
+        assert_eq!(paths(privileges(&ctx(), &other, &table(), false).unwrap_err()), ["object"]);
+        assert!(ok(&table(), &table(), false).statements.is_empty());
     }
 
     #[test]

@@ -114,6 +114,8 @@ fn assert_default(env: &Env, d: &AclDef, kind: ObjectKind, want: Vec<AclGrant>) 
     assert_eq!(d.grants, canonical(kind, want), "{kind:?}");
     assert!(d.foreign.is_empty() && d.columns.is_empty(), "{d:?}");
     assert!(d.editable && d.unsupported.is_empty(), "{d:?}");
+    // Kullanılabilir yetkiler sunucu sürümüne göre: MAINTAIN yalnız PG 17+ (tablo benzeri türlerde).
+    assert_eq!(d.available, pgt_ddl::acl::privileges_for(kind, env.version), "{kind:?}");
     assert_fixed(env, d);
 }
 
@@ -819,6 +821,10 @@ async fn def_defaults_body(ts: TestServer, tag: &'static str) {
     assert_eq!(section(&d, Types).grants, [row(None, &[Usage]), row(Some(&me), &[Usage])]);
     assert_eq!(section(&d, Schemas).grants, [row(Some(&me), &[Usage, Create])]);
     assert!(d.sections.iter().all(|x| x.baseline.is_empty()));
+    for x in &d.sections {
+        assert_eq!(x.available, pgt_ddl::acl::default_privileges_for(x.object_type, env.version), "{:?}", x.object_type);
+    }
+    assert_eq!(section(&d, Tables).available.contains(&Maintain), major >= 17);
     assert_def_fixed(&env, &d);
 
     // Şema kapsamı: girdi yok → boş grants; baseline genel etkin değer; Schemas bölümü yok.

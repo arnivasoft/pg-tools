@@ -371,7 +371,7 @@ fn acl_json(kind: &str) -> Value {
            ],
            "foreign": [{"grantor": "g", "grantee": null, "privilege": "usage", "grantOption": false}],
            "columns": [{"column": "c", "grantor": "me", "grantee": "r", "privilege": "update", "grantOption": false}],
-           "editable": true, "unsupported": []})
+           "editable": true, "unsupported": [], "available": ["select", "insert"]})
 }
 
 #[test]
@@ -382,7 +382,7 @@ fn privileges_requests_roundtrip() {
     assert_eq!(old.grants[1].privileges[0], PrivilegeGrant { privilege: Privilege::Temporary, grant_option: true });
     assert_eq!(old.foreign[0].privilege, Privilege::Usage);
 
-    let sec = |t: &str| json!({"objectType": t, "grants": [], "baseline": [{"grantee": null, "privileges": []}]});
+    let sec = |t: &str| json!({"objectType": t, "grants": [], "baseline": [{"grantee": null, "privileges": []}], "available": ["usage"]});
     let def = json!({"role": "me", "schema": null, "viewer": "me", "sections": [sec("tables"), sec("schemas")], "editable": true, "unsupported": []});
     let d: PlanRequest = roundtrip(json!({"op": "default_privileges", "scope": {"role": null, "schemaOid": 2200}, "old": def, "new": def}));
     assert!(matches!(&d, PlanRequest::DefaultPrivileges { scope, .. } if scope.schema_oid == Some(2200) && scope.role.is_none()));

@@ -1555,6 +1555,7 @@ mod tests {
             columns: vec![],
             editable: true,
             unsupported: vec![],
+            available: vec![],
         }
     }
 
@@ -1743,7 +1744,7 @@ mod tests {
         loaded.foreign = vec![crate::acl::ForeignGrant { grantor: "c".into(), grantee: Some("b".into()), privilege: Select, grant_option: true }];
         assert!(acl_grants_differ(&want, &loaded));
         // Varsayılan yetkiler: bölüm bölüm.
-        let sec = |t, grants| DefaultAclSection { object_type: t, grants, baseline: vec![] };
+        let sec = |t, grants| DefaultAclSection { object_type: t, grants, baseline: vec![], available: vec![] };
         let mut new = dacl_def("r");
         new.sections = vec![sec(DefaultAclObjectType::Tables, vec![row(Some("x"), vec![pg(Insert, false), pg(Select, false)]), row(Some("y"), vec![])])];
         let req = PlanRequest::DefaultPrivileges { scope: DefaultAclScope { role: None, schema_oid: None }, old: dacl_def("r"), new };
@@ -1765,7 +1766,7 @@ mod tests {
             viewer: "r".into(),
             sections: crate::acl::default_sections(false)
                 .iter()
-                .map(|&t| DefaultAclSection { object_type: t, grants: if t == Schemas { grants.clone() } else { vec![] }, baseline: vec![] })
+                .map(|&t| DefaultAclSection { object_type: t, grants: if t == Schemas { grants.clone() } else { vec![] }, baseline: vec![], available: vec![] })
                 .collect(),
             editable: true,
             unsupported: vec![],

@@ -61,7 +61,8 @@ pub fn default_privileges(ctx: &BuildCtx, old: &DefaultAclDef, new: &DefaultAclD
     if old.role != new.role || old.schema != new.schema || old.viewer != new.viewer {
         return Err(vec![err("object", IDENTITY_MSG)]);
     }
-    if !sections_match(old) || !sections_match(new) {
+    // Bölüm kümesi, sırası ve `available` listeleri kimliktir (eski ≠ yeni → `sections`).
+    if !sections_match(old) || !sections_match(new) || old.sections.iter().zip(&new.sections).any(|(o, n)| o.available != n.available) {
         return Err(vec![err("sections", SECTIONS_MSG)]);
     }
     // Kanonik sıra: tüm sürümlerin kümesi (MAINTAIN dahil); geçersiz yetki doğrulamada reddedilir.
@@ -152,7 +153,7 @@ mod tests {
                     }
                     grants.push(row(Some("own"), &plain(all)));
                 }
-                DefaultAclSection { object_type: t, grants, baseline: vec![] }
+                DefaultAclSection { object_type: t, grants, baseline: vec![], available: default_privileges_for(t, 160000).to_vec() }
             })
             .collect();
         DefaultAclDef { role: "own".into(), schema: schema.map(Into::into), viewer: "app".into(), sections, editable: true, unsupported: vec![] }
@@ -306,7 +307,7 @@ mod tests {
             (
                 "şema kapsamında Schemas bölümü",
                 scoped.clone(),
-                edit(&scoped, &|n| n.sections.push(DefaultAclSection { object_type: Schemas, grants: vec![], baseline: vec![] })),
+                edit(&scoped, &|n| n.sections.push(DefaultAclSection { object_type: Schemas, grants: vec![], baseline: vec![], available: default_privileges_for(Schemas, 160000).to_vec() })),
                 vec!["sections"],
             ),
             (
@@ -340,6 +341,7 @@ mod tests {
             ("kimlik: rol", base.clone(), edit(&base, &|n| n.role = "x".into()), vec!["object"]),
             ("kimlik: şema", base.clone(), edit(&base, &|n| n.schema = Some("s".into())), vec!["object"]),
             ("kimlik: viewer", base.clone(), edit(&base, &|n| n.viewer = "x".into()), vec!["object"]),
+            ("kimlik: available", base.clone(), edit(&base, &|n| n.sections[0].available.pop().map(drop).unwrap_or(())), vec!["sections"]),
             (
                 "editable = false",
                 DefaultAclDef { editable: false, ..base.clone() },

@@ -184,14 +184,14 @@ pub async fn load_acl(mgr: &ConnectionManager, server: Uuid, database_oid: impl 
     };
     let with_columns = matches!(kind, ObjectKind::Table | ObjectKind::View | ObjectKind::MaterializedView);
     let oid = obj.oid;
-    let (head, cols) = mgr
+    let (head, cols, version_num) = mgr
         .run(server, target, move |c| async move {
             let params: [&(dyn ToSql + Sync); 1] = [&oid];
             let head = c.client.query(sql.pick(PgVersion(c.version_num())), &params).await?;
             // Kolon yetkileri yalnız Table/View/MV ve tür eşleştiyse (uyuşmazlık NotFound döner; boşuna sorgu yok).
             let matched = head.first().is_some_and(|h| kind_matches(kind, &h.get::<_, String>("subkind")));
             let cols = if with_columns && matched { c.client.query(COLUMNS_SQL, &params).await? } else { Vec::new() };
-            Ok((head, cols))
+            Ok((head, cols, c.version_num()))
         })
         .await?;
     let h = head.first().ok_or_else(not_found)?;
@@ -265,6 +265,7 @@ pub async fn load_acl(mgr: &ConnectionManager, server: Uuid, database_oid: impl 
         columns: sort_columns(kind, keyed),
         editable: false,
         unsupported,
+        available: privileges_for(kind, version_num).to_vec(),
     };
     builder_gate(&mut def);
     Ok(def)
@@ -316,10 +317,10 @@ fn note(reason: String, unsupported: &mut Vec<String>) {
 /// genel satırlar `baseline`'a (şema kapsamında `Schemas` bölümü yok: genel `n` satırları sessizce düşer).
 /// Desteklenmeyen tür (`L` → bilgi notu; diğerleri `varsayılan yetki türü <harf>`), türün kümesi dışındaki ya da
 /// tanınmayan yetki (`yetki <metin>`) ve rolden farklı veren → `unsupported` (bir kez).
-fn assemble_sections(schema_scoped: bool, entries: Vec<DefaultEntry>, unsupported: &mut Vec<String>) -> Vec<DefaultAclSection> {
+fn assemble_sections(schema_scoped: bool, entries: Vec<DefaultEntry>, version_num: u32, unsupported: &mut Vec<String>) -> Vec<DefaultAclSection> {
     let mut sections: Vec<DefaultAclSection> = default_sections(schema_scoped)
         .iter()
-        .map(|&object_type| DefaultAclSection { object_type, grants: vec![], baseline: vec![] })
+        .map(|&object_type| DefaultAclSection { object_type, grants: vec![], baseline: vec![], available: default_privileges_for(object_type, version_num).to_vec() })
         .collect();
     for e in entries {
         let known = object_type_of(&e.objtype);
@@ -367,7 +368,7 @@ fn default_editable(unsupported: &[String]) -> bool {
 pub async fn load_default_acl(mgr: &ConnectionManager, server: Uuid, database_oid: u32, scope: DefaultAclScope) -> Result<DefaultAclDef> {
     let target = target_for(ObjectKind::Schema, Some(database_oid))?;
     let DefaultAclScope { role, schema_oid } = scope;
-    let (head, rows) = mgr
+    let (head, rows, version_num) = mgr
         .run(server, target, move |c| {
             let role = role.clone();
             async move {
@@ -376,12 +377,12 @@ pub async fn load_default_acl(mgr: &ConnectionManager, server: Uuid, database_oi
                 let head = c.client.query(DEFAULT_SCOPE_SQL.pick(v), &params).await?;
                 // Rol ya da şema yoksa girdi sorgusu çalışmaz.
                 let Some(h) = head.first().filter(|h| h.get::<_, bool>("schema_found") || schema_oid.is_none()) else {
-                    return Ok((head, Vec::new()));
+                    return Ok((head, Vec::new(), v.0));
                 };
                 let role_oid: u32 = h.get("role_oid");
                 let params: [&(dyn ToSql + Sync); 2] = [&role_oid, &schema_oid];
                 let rows = c.client.query(DEFAULT_ACL_SQL.pick(v), &params).await?;
-                Ok((head, rows))
+                Ok((head, rows, v.0))
             }
         })
         .await?;
@@ -410,7 +411,7 @@ pub async fn load_default_acl(mgr: &ConnectionManager, server: Uuid, database_oi
             })
         })
         .collect();
-    let sections = assemble_sections(schema_oid.is_some(), entries, &mut unsupported);
+    let sections = assemble_sections(schema_oid.is_some(), entries, version_num, &mut unsupported);
     let mut def = DefaultAclDef {
         role: lossy(h, "role"),
         schema: lossy_opt(h, "schema"),
@@ -458,10 +459,16 @@ mod tests {
                 de(false, "n", Some("o"), "CREATE", false),
                 de(false, "n", Some("o"), "USAGE", false),
             ],
+            170000,
             &mut u,
         );
         assert!(u.is_empty() && default_editable(&u), "{u:?}");
         use DefaultAclObjectType::*;
+        // `available`: bölümün sürüm kümesi, kanonik sırada (PG 17 → MAINTAIN dahil).
+        for sec in &s {
+            assert_eq!(sec.available, default_privileges_for(sec.object_type, 170000));
+        }
+        assert!(s[0].available.contains(&Privilege::Maintain));
         assert_eq!(s.iter().map(|x| x.object_type).collect::<Vec<_>>(), [Tables, Sequences, Functions, Types, Schemas]);
         let who = |i: usize| s[i].grants.iter().map(|g| g.grantee.as_deref()).collect::<Vec<_>>();
         assert_eq!(who(0), [Some("a"), Some("o")]);
@@ -485,6 +492,7 @@ mod tests {
                 de(true, "S", Some("b"), "USAGE", true),
                 de(false, "T", None, "USAGE", false),
             ],
+            170000,
             &mut u,
         );
         assert!(u.is_empty(), "genel Schemas satırı şema kapsamında sessizce düşer: {u:?}");
@@ -500,7 +508,7 @@ mod tests {
     fn default_unsupported_reasons() {
         // PG 18 large object: bilgi notu, düzenlenebilir.
         let mut u = vec![];
-        assemble_sections(false, vec![de(false, "L", Some("o"), "SELECT", false), de(false, "L", None, "UPDATE", false)], &mut u);
+        assemble_sections(false, vec![de(false, "L", Some("o"), "SELECT", false), de(false, "L", None, "UPDATE", false)], 170000, &mut u);
         assert_eq!(u, [LARGE_OBJECTS_REASON]);
         assert!(default_editable(&u));
         // Bilinmeyen tür, tür dışı ve tanınmayan yetki, rolden farklı veren: salt okunur.
@@ -516,6 +524,7 @@ mod tests {
                 de(false, "r", Some("o"), "SET", false),
                 foreign,
             ],
+            170000,
             &mut u,
         );
         assert_eq!(u, ["varsayılan yetki türü Z", "yetki TRUNCATE", "yetki SET", DEFAULT_GRANTOR_REASON]);
@@ -523,7 +532,7 @@ mod tests {
         assert!(s.iter().all(|x| x.grants.is_empty()));
         // Şema kapsamında şema girdisi olarak gelen `n` desteklenmeyen türdür.
         let mut u = vec![];
-        assemble_sections(true, vec![de(true, "n", Some("o"), "USAGE", false)], &mut u);
+        assemble_sections(true, vec![de(true, "n", Some("o"), "USAGE", false)], 170000, &mut u);
         assert_eq!(u, ["varsayılan yetki türü n"]);
         let mut u = vec![LARGE_OBJECTS_REASON.to_string(), SYSTEM_SCHEMA_REASON.to_string()];
         assert!(!default_editable(&u));
@@ -627,6 +636,7 @@ mod tests {
             columns: vec![],
             editable: true,
             unsupported: vec![],
+            available: privileges_for(ObjectKind::Table, 170000).to_vec(),
         }
     }
 
@@ -662,6 +672,7 @@ mod tests {
                     object_type,
                     grants: vec![AclGrant { grantee: Some(grantee.into()), privileges: vec![] }],
                     baseline: vec![],
+                    available: default_privileges_for(object_type, 170000).to_vec(),
                 })
                 .collect(),
             editable: true,
