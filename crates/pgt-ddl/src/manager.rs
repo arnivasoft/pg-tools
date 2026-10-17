@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::acl::{AclDef, DefaultAclDef, DefaultAclScope};
 use crate::apply::{self, CancelMap, ExecSql, ExecStatement, RunResult};
 use crate::build::{self, BuildCtx, role};
 use crate::error_codes::{
@@ -60,6 +61,10 @@ pub enum PlanRequest {
         #[serde(default)]
         force: bool,
     },
+    /// Nesne yetkileri (GRANT/REVOKE; Plan 20). `old` yüklenen etkin ACL'ye eşit olmalı (bkz. `Alter`).
+    Privileges { object: ObjectRef, old: AclDef, new: AclDef, cascade: bool },
+    /// Varsayılan yetkiler (ALTER DEFAULT PRIVILEGES; Plan 20). Veritabanı kapsamlıdır.
+    DefaultPrivileges { scope: DefaultAclScope, old: DefaultAclDef, new: DefaultAclDef },
 }
 
 impl PlanRequest {
@@ -68,6 +73,8 @@ impl PlanRequest {
             PlanRequest::Create { .. } => "create",
             PlanRequest::Alter { .. } => "alter",
             PlanRequest::Drop { .. } => "drop",
+            PlanRequest::Privileges { .. } => "privileges",
+            PlanRequest::DefaultPrivileges { .. } => "default_privileges",
         }
     }
 
@@ -75,6 +82,9 @@ impl PlanRequest {
         match self {
             PlanRequest::Create { def, .. } | PlanRequest::Drop { def, .. } => def.kind(),
             PlanRequest::Alter { new, .. } => new.kind(),
+            PlanRequest::Privileges { object, .. } => object.kind,
+            // Veritabanı kapsamlı vekil: hedef çözümü `Schema` ile aynı kuraldır (veritabanı OID'i gerekir).
+            PlanRequest::DefaultPrivileges { .. } => ObjectKind::Schema,
         }
     }
 }
@@ -338,7 +348,7 @@ fn routine_identity_changed(kind: ObjectKind, a: &FunctionDef, b: &FunctionDef) 
 /// İstemci `editable`'ı değiştirse bile nesne denetimi (4) yüklenen tanımla eşitliği ister, üretici de reddeder.
 fn read_only_refusal(req: &PlanRequest) -> Option<String> {
     let def = match req {
-        PlanRequest::Create { .. } => return None,
+        PlanRequest::Create { .. } | PlanRequest::Privileges { .. } | PlanRequest::DefaultPrivileges { .. } => return None,
         PlanRequest::Alter { old, .. } => old,
         PlanRequest::Drop { def, .. } => def,
     };
@@ -1305,7 +1315,8 @@ impl DdlManager {
 /// Sunucudaki güncel tanımla karşılaştırılacak (nesne, istemci tanımı); `Create` için yok.
 fn object_check(req: &PlanRequest) -> Option<(ObjectRef, &ObjectDef)> {
     match req {
-        PlanRequest::Create { .. } => None,
+        // Yetki istekleri `ObjectDef` taşımaz; kendi nesne denetimleri sonraki görevde eklenir.
+        PlanRequest::Create { .. } | PlanRequest::Privileges { .. } | PlanRequest::DefaultPrivileges { .. } => None,
         PlanRequest::Alter { object, old, .. } => Some((*object, old)),
         PlanRequest::Drop { object, def, .. } => Some((*object, def)),
     }
@@ -1315,6 +1326,10 @@ fn object_check(req: &PlanRequest) -> Option<(ObjectRef, &ObjectDef)> {
 pub(crate) fn plan_view(req: &PlanRequest, version_num: u32) -> PlanView {
     let ctx = |concurrently| BuildCtx { version_num, concurrently };
     PlanView::from_build(match req {
+        // Geçici (Plan 20 Task 1): üreticiler sonraki görevlerde bağlanır.
+        PlanRequest::Privileges { .. } | PlanRequest::DefaultPrivileges { .. } => {
+            Err(vec![FieldError { path: String::new(), message: "henüz desteklenmiyor".into() }])
+        }
         PlanRequest::Create { def, concurrently } => build::create(def, &ctx(*concurrently)),
         PlanRequest::Alter { old, new, .. } => build::alter(old, new, &ctx(false)),
         PlanRequest::Drop { def, cascade, force, .. } => {
@@ -1339,6 +1354,44 @@ mod tests {
 
     fn schema(name: &str) -> ObjectDef {
         ObjectDef::Schema(SchemaDef { name: name.into(), owner: None, comment: None })
+    }
+
+    #[test]
+    fn privilege_requests_op_kind_and_temporary_refusal() {
+        let acl = |kind| AclDef {
+            kind,
+            schema: None,
+            name: "d".into(),
+            signature: None,
+            owner: "o".into(),
+            viewer: "o".into(),
+            explicit: false,
+            grants: vec![],
+            foreign: vec![],
+            columns: vec![],
+            editable: true,
+            unsupported: vec![],
+        };
+        let p = PlanRequest::Privileges {
+            object: ObjectRef { kind: ObjectKind::Database, oid: 1 },
+            old: acl(ObjectKind::Database),
+            new: acl(ObjectKind::Database),
+            cascade: false,
+        };
+        assert_eq!((p.op(), p.kind()), ("privileges", ObjectKind::Database));
+        let d = PlanRequest::DefaultPrivileges {
+            scope: DefaultAclScope { role: None, schema_oid: None },
+            old: DefaultAclDef { role: "r".into(), schema: None, viewer: "r".into(), sections: vec![], editable: true, unsupported: vec![] },
+            new: DefaultAclDef { role: "r".into(), schema: None, viewer: "r".into(), sections: vec![], editable: true, unsupported: vec![] },
+        };
+        assert_eq!((d.op(), d.kind()), ("default_privileges", ObjectKind::Schema));
+        for r in [&p, &d] {
+            assert!(read_only_refusal(r).is_none() && object_check(r).is_none());
+            assert_eq!(HintCtx::of(r), HintCtx::default());
+            // Geçici: üretici bağlanana dek hata görünümü, ifade yok.
+            let v = plan_view(r, 170000);
+            assert!(v.statements.is_empty() && v.errors.len() == 1);
+        }
     }
 
     #[test]

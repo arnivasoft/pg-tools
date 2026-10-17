@@ -362,3 +362,31 @@ fn password_intent_deserialize_error_does_not_echo_value() {
         assert!(serde_json::from_value::<ObjectDef>(v).is_ok(), "{ok}");
     }
 }
+
+fn acl_json(kind: &str) -> Value {
+    json!({"kind": kind, "schema": "public", "name": "t", "signature": null, "owner": "me", "viewer": "me", "explicit": true,
+           "grants": [
+               {"grantee": null, "privileges": [{"privilege": "select", "grantOption": false}]},
+               {"grantee": "r", "privileges": [{"privilege": "temporary", "grantOption": true}]}
+           ],
+           "foreign": [{"grantor": "g", "grantee": null, "privilege": "usage", "grantOption": false}],
+           "columns": [{"column": "c", "grantor": "me", "grantee": "r", "privilege": "update", "grantOption": false}],
+           "editable": true, "unsupported": []})
+}
+
+#[test]
+fn privileges_requests_roundtrip() {
+    let r: PlanRequest = roundtrip(json!({"op": "privileges", "object": {"kind": "table", "oid": 16384},
+        "old": acl_json("table"), "new": acl_json("table"), "cascade": true}));
+    let PlanRequest::Privileges { old, cascade: true, .. } = &r else { panic!("{r:?}") };
+    assert_eq!(old.grants[1].privileges[0], PrivilegeGrant { privilege: Privilege::Temporary, grant_option: true });
+    assert_eq!(old.foreign[0].privilege, Privilege::Usage);
+
+    let sec = |t: &str| json!({"objectType": t, "grants": [], "baseline": [{"grantee": null, "privileges": []}]});
+    let def = json!({"role": "me", "schema": null, "viewer": "me", "sections": [sec("tables"), sec("schemas")], "editable": true, "unsupported": []});
+    let d: PlanRequest = roundtrip(json!({"op": "default_privileges", "scope": {"role": null, "schemaOid": 2200}, "old": def, "new": def}));
+    assert!(matches!(&d, PlanRequest::DefaultPrivileges { scope, .. } if scope.schema_oid == Some(2200) && scope.role.is_none()));
+    // `cascade` zorunlu; bilinmeyen yetki adı reddedilir.
+    assert!(serde_json::from_value::<PlanRequest>(json!({"op": "privileges", "object": {"kind": "table", "oid": 1}, "old": acl_json("table"), "new": acl_json("table")})).is_err());
+    assert!(serde_json::from_value::<Privilege>(json!("TEMPORARY")).is_err());
+}
