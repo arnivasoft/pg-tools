@@ -42,8 +42,8 @@
 
 ## 4. Arayüz (Plan 19 özeti)
 
-- Menü: Functions / Procedures / Trigger Functions / Types / Domains / Triggers koleksiyonlarında **Oluştur…**; düğümlerde **Düzenle… / Yeniden adlandır… / Sil…**; eklentiye ait ve sistem nesnelerinde eylem yok.
-- Gövde düzenleyicisi: tembel form içinde **düzenlenebilir CodeMirror** (paylaşılan `codemirror-setup` parçasının `sqlLookExtensions()`'ı); ana paketin `__vite__mapDeps` listesi değişmemelidir (ölçülür); aksi hâlde `textarea` (Plan 15 Karar 1).
+- Menü: Functions / Procedures / Trigger Functions / Types / Domains / Triggers koleksiyonlarında **Oluştur…**; düğümlerde **Düzenle… / Yeniden adlandır… / Sil…**. Menüler eklentiye ait ve sistem nesnelerinde de gösterilir: nesne salt okunur açılır, Yeniden adlandır/Sil arka uçtan açık ret iletisi alır.
+- Gövde düzenleyicisi: tembel form içinde **düzenlenebilir CodeMirror** (Plan 19: textarea'ya düştü, bkz. notlar) (paylaşılan `codemirror-setup` parçasının `sqlLookExtensions()`'ı); ana paketin `__vite__mapDeps` listesi değişmemelidir (ölçülür); aksi hâlde `textarea` (Plan 15 Karar 1).
 - Argüman ve composite öznitelik listeleri, enum değerleri, domain kısıtları satır düzenleyicisi (ekle / sil / geri al / sırala); `SET` listesi mevcut `SettingsEditor`.
 - Ana paket bütçesi (232,343 B, pay 0): menü kancası (`ddl-kinds.ts`'e altı tür) aynı görevde adı konmuş bir telafiyle (`t.query.grid` + `t.query.cell` → tembel modül) karşılanır.
 
@@ -53,7 +53,7 @@
 - **`recreateNeeds` aynası:** istemci `crates/pgt-ddl/src/build/routine.rs` `needs_recreate` kurallarını aynalar ama arka uç yetkilidir; tip karşılaştırması metindir, yani kanonik karşılaştırmanın üst kümesi (`int4` ↔ `integer` kutuyu gereksiz gösterebilir; zararsız). Aynı metin karşılaştırması composite öznitelik DataLoss uyarısında da geçerlidir.
 - **Salt okunur gösterim:** `editable = false` nesneler `ReadOnlyReasons` şeridi + kapalı denetimlerle açılır; boş enum/composite editörü gösterilmez; Yeniden adlandır/Sil açık ret iletisi verir.
 - **Telafi:** menü kancası (+6 tür) için `t.query.grid` + `t.query.cell` → tembel `src/features/query/strings-grid.ts`; ana paket 232,343 → 231,724 B, mapDeps 21. Beş formun tüm metinleri tembel parçalardadır (`strings-routine/trigger/type/domain`).
-- **Backlog:** CodeMirror gövde düzenleyicisi; view / `INSTEAD OF` trigger'lar; ertelenen arayüz maddeleri (satır silinince/taşınınca bayat satır hataları, SettingsEditor metninin Database/Role ağırlığı, silinen yüklü domain kısıtı için Geri al, trigger geçiş tablosu/UPDATE OF değerlerinin yeniden açılınca geri gelmesi, 'yeni' rozeti ekran okuyucu metni, trigger 'Seçin…' yer tutucusu).
+- **Backlog:** CodeMirror gövde düzenleyicisi; view / `INSTEAD OF` trigger'lar; ertelenen arayüz maddeleri (satır silinince/taşınınca bayat satır hataları, SettingsEditor metninin Database/Role ağırlığı, TypeForm'da gizli bölüme ait bayat hatalar, trigger fonksiyon lookup'ında `detail = null` öğe eşleşmesi).
 
 ## 5. Güvenlik
 

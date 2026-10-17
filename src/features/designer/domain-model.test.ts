@@ -3,7 +3,8 @@ import type { DomainCheck } from "../../ipc/bindings/DomainCheck";
 import type { DomainDef } from "../../ipc/bindings/DomainDef";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import {
-  asDomain, canValidate, checkAdd, checkRemove, checkRename, checkUpdate, domainPatch, needsName, newCheck, notValidAllowed,
+  asDomain, canValidate, checkAdd, checkRemove, checkRename, checkRestore, checkUpdate, domainPatch, needsName, newCheck, notValidAllowed,
+  removedChecks,
   type DomainDraft,
 } from "./domain-model";
 
@@ -103,5 +104,27 @@ describe("canValidate / notValidAllowed", () => {
     expect(checkUpdate(d, 0, { notValid: true }, null).constraints[0]!.notValid).toBe(false);
     expect(checkUpdate(d, 9, { expression: "x" }, original)).toBe(d);
     expect(d.constraints[0]!.notValid).toBe(true);
+  });
+});
+
+describe("removedChecks / checkRestore (silinen yüklü kısıtı geri al)", () => {
+  const orig = def([lc("a"), lc("b", "VALUE < 9", false)]);
+  it("removedChecks: taslakta eşi olmayan yüklü adlar (yüklü sırada); create (original yok) → boş", () => {
+    expect(removedChecks(orig, def([lc("a"), lc("b")]))).toEqual([]);
+    expect(removedChecks(orig, def([lc("b")]))).toEqual(["a"]);
+    expect(removedChecks(orig, def([nc("a")]))).toEqual(["a", "b"]);
+    // Yeniden adlandırılan yüklü kısıt (`original` korunur) silinmiş sayılmaz.
+    expect(removedChecks(orig, def([{ ...lc("a"), name: "a2" }, lc("b")]))).toEqual([]);
+    expect(removedChecks(null, def([]))).toEqual([]);
+  });
+  it("checkRestore: yüklü kısıt olduğu gibi sona eklenir; zaten varsa ya da bilinmiyorsa aynı nesne", () => {
+    const d = def([nc("x")]);
+    const r = checkRestore(d, orig, "b");
+    expect(r.constraints).toEqual([nc("x"), lc("b", "VALUE < 9", false)]);
+    expect(removedChecks(orig, r)).toEqual(["a"]);
+    expect(d.constraints).toHaveLength(1);
+    expect(checkRestore(r, orig, "b")).toBe(r);
+    expect(checkRestore(d, orig, "zz")).toBe(d);
+    expect(checkRestore(d, null, "a")).toBe(d);
   });
 });

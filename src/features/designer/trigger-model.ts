@@ -87,6 +87,54 @@ export function normalizeTrigger<T extends TriggerDef>(d: T): T {
   return out;
 }
 
+/** `normalizeTrigger`'ın kapatarak temizlediği, alan yeniden açılınca geri yüklenecek değerler (form örneği başına). */
+export interface TriggerStash {
+  updateColumns?: string[];
+  oldTable?: string;
+  newTable?: string;
+}
+
+/**
+ * Kapanıp açılan alanın değerini korur (saf; girişler değişmez). `next` normalize edilmiş tanımdır. `prev`'de dolu olup
+ * `next`'te kapandığı için boşalan UPDATE OF / OLD TABLE / NEW TABLE saklanır; `next`'te açık ve boş olan alanın saklı
+ * değeri geri yüklenir ve kaydı silinir. Önce UPDATE OF geri gelir (REFERENCING açıklığını etkiler), sonra geçiş tabloları.
+ * Açıkken elle boşaltılan alan saklanmaz.
+ */
+export function restoreCleared<T extends TriggerDef>(prev: TriggerDef, next: T, stash: TriggerStash): { def: T; stash: TriggerStash } {
+  const s: TriggerStash = { ...stash };
+  const def: T = { ...next, events: { ...next.events } };
+  const a0 = availability(def);
+  if (prev.events.updateColumns.length > 0 && def.events.updateColumns.length === 0 && !a0.updateColumns) {
+    s.updateColumns = [...prev.events.updateColumns];
+  }
+  if (prev.oldTable !== null && def.oldTable === null && !a0.oldTable) s.oldTable = prev.oldTable;
+  if (prev.newTable !== null && def.newTable === null && !a0.newTable) s.newTable = prev.newTable;
+
+  if (a0.updateColumns && def.events.updateColumns.length === 0 && s.updateColumns) {
+    def.events.updateColumns = s.updateColumns;
+    delete s.updateColumns;
+  }
+  const a1 = availability(def);
+  // Geri gelen UPDATE OF REFERENCING'i kapatırsa dolu geçiş tablosu da beklemeye alınır (tanım normalize kalır).
+  if (!a1.oldTable && def.oldTable !== null) {
+    s.oldTable = def.oldTable;
+    def.oldTable = null;
+  }
+  if (!a1.newTable && def.newTable !== null) {
+    s.newTable = def.newTable;
+    def.newTable = null;
+  }
+  if (a1.oldTable && def.oldTable === null && s.oldTable !== undefined) {
+    def.oldTable = s.oldTable;
+    delete s.oldTable;
+  }
+  if (a1.newTable && def.newTable === null && s.newTable !== undefined) {
+    def.newTable = s.newTable;
+    delete s.newTable;
+  }
+  return { def, stash: s };
+}
+
 /** Lookup öğesinden fonksiyon alanları (R1: `value` = ad, `detail` = şema; şema yoksa yedek). */
 export function functionFromLookup(item: LookupItem, fallbackSchema = ""): { functionSchema: string; functionName: string } {
   return { functionSchema: item.detail ?? fallbackSchema, functionName: item.value };

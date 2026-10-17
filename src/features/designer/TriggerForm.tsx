@@ -16,8 +16,8 @@ import { exactIssues, normalizeEmpty, orphanRowIssues } from "./forms-model";
 import { ReadOnlyReasons } from "./ReadOnlyReasons";
 import { RowList } from "./RowList";
 import {
-  asTrigger, availability, functionFromLookup, functionOptionIndex, normalizeTrigger, rebuildNote, setAt, toggleUpdateColumn,
-  triggerPatch, updateColumnChoices,
+  asTrigger, availability, functionFromLookup, functionOptionIndex, normalizeTrigger, rebuildNote, restoreCleared, setAt,
+  toggleUpdateColumn, triggerPatch, updateColumnChoices, type TriggerStash,
 } from "./trigger-model";
 
 function Section(props: { title: string; children: JSX.Element }) {
@@ -42,7 +42,7 @@ function ListErrors(props: { messages: string[]; id?: string }) {
   );
 }
 
-/** Radyo/onay kutusu satırı; kapalıysa gerekçe `title` ile (ve görünür kısa metin olarak `reason`). */
+/** Radyo/onay kutusu satırı; kapalıysa gerekçe `title` ile (görünür gerekçe çağıranda, `describedBy` ile bağlı). */
 function Choice(props: {
   type: "radio" | "checkbox";
   name?: string;
@@ -78,10 +78,16 @@ export default function TriggerForm(props: FormProps) {
   /** Sekme salt okunur ya da tanım düzenlenemez (Karar 3): her denetim kapalı. */
   const locked = () => props.readOnly || !(draft()?.editable ?? true);
 
+  /** Kapanınca temizlenen UPDATE OF / OLD TABLE / NEW TABLE değerleri; alan yeniden açılınca geri gelir. */
+  let stash: TriggerStash = {};
   const patch = (p: Partial<TriggerDef>) =>
     props.designer.edit(props.tabId, (x) => {
+      const prev = asTrigger(x);
       const n = asTrigger(triggerPatch(x, p));
-      return n ? normalizeTrigger(n) : x;
+      if (!prev || !n) return x;
+      const r = restoreCleared(prev, normalizeTrigger(n), stash);
+      stash = r.stash;
+      return r.def;
     });
   const patchEvents = (p: Partial<TriggerEvents>) => {
     const d = draft();
@@ -93,6 +99,8 @@ export default function TriggerForm(props: FormProps) {
   const timingErrId = createUniqueId();
   const eventsErrId = createUniqueId();
   const levelErrId = createUniqueId();
+  const beforeWhyId = createUniqueId();
+  const truncateWhyId = createUniqueId();
   const whenNoteId = createUniqueId();
   const whenEscId = createUniqueId();
   const fnPickId = createUniqueId();
@@ -129,7 +137,21 @@ export default function TriggerForm(props: FormProps) {
         const timingErrors = () => issuesFor(props.issues, "timing");
         const eventErrors = () => [...exactIssues(props.issues, "events"), ...exactIssues(props.issues, "events.truncate")];
         const levelErrors = () => issuesFor(props.issues, "level");
-        const updateColErrors = () => issuesFor(props.issues, "events.updateColumns");
+        // Çip başına hata (`events.updateColumns[i]`) kolon adıyla; listenin kendi hataları olduğu gibi.
+        const updateColErrors = () => {
+          const out: string[] = [];
+          for (const [p, msgs] of props.issues.byPath) {
+            const m = /^events\.updateColumns\[(\d+)\]$/.exec(p);
+            if (m) {
+              const i = Number(m[1]);
+              const col = d().events.updateColumns[i];
+              for (const msg of msgs) out.push(`${col ?? "#" + (i + 1)}: ${msg}`);
+            } else if (p === "events.updateColumns" || p.startsWith("events.updateColumns.") || p.startsWith("events.updateColumns[")) {
+              out.push(...msgs);
+            }
+          }
+          return out;
+        };
         return (
           <form class="flex max-w-3xl flex-col gap-5" onSubmit={(ev) => ev.preventDefault()}>
             <ReadOnlyReasons def={d()} />
@@ -208,6 +230,7 @@ export default function TriggerForm(props: FormProps) {
                     checked={d().timing === "before"}
                     disabled={locked() || !a().before}
                     reason={a().before ? undefined : ttrg.timing.beforeClosed}
+                    describedBy={a().before ? undefined : beforeWhyId}
                     onChange={(on) => on && patch({ timing: "before" })}
                   />
                   <Choice
@@ -219,6 +242,11 @@ export default function TriggerForm(props: FormProps) {
                     onChange={(on) => on && patch({ timing: "after" })}
                   />
                 </div>
+                <Show when={!a().before}>
+                  <p id={beforeWhyId} class="text-xs text-muted">
+                    {ttrg.timing.beforeClosed}
+                  </p>
+                </Show>
                 <ListErrors id={timingErrId} messages={timingErrors()} />
               </fieldset>
 
@@ -233,11 +261,17 @@ export default function TriggerForm(props: FormProps) {
                         checked={d().events[k]}
                         disabled={locked() || (k === "truncate" && !a().truncate)}
                         reason={k === "truncate" && !a().truncate ? ttrg.timing.truncateClosed : undefined}
+                        describedBy={k === "truncate" && !a().truncate ? truncateWhyId : undefined}
                         onChange={(on) => patchEvents({ [k]: on })}
                       />
                     )}
                   </For>
                 </div>
+                <Show when={!a().truncate}>
+                  <p id={truncateWhyId} class="text-xs text-muted">
+                    {ttrg.timing.truncateClosed}
+                  </p>
+                </Show>
                 <ListErrors id={eventsErrId} messages={eventErrors()} />
               </fieldset>
 
@@ -254,8 +288,14 @@ export default function TriggerForm(props: FormProps) {
                           const on = () => d().events.updateColumns.includes(c);
                           return (
                             <label
-                              class="inline-flex h-6 cursor-pointer items-center gap-1 rounded-full border px-2 font-mono text-[12px] focus-within:border-accent"
-                              classList={{ "border-accent": on(), "border-border": !on(), "text-muted": locked() }}
+                              class="inline-flex h-6 items-center gap-1 rounded-full border px-2 font-mono text-[12px] focus-within:border-accent"
+                              classList={{
+                                "border-accent": on(),
+                                "border-border": !on(),
+                                "text-muted": locked(),
+                                "cursor-pointer": !locked(),
+                                "cursor-default": locked(),
+                              }}
                             >
                               <input
                                 type="checkbox"
@@ -354,7 +394,7 @@ export default function TriggerForm(props: FormProps) {
                 >
                   <Show when={fnIndex() < 0}>
                     <option value="-1" selected>
-                      {ttrg.fn.pickNone}
+                      {d().functionName.trim() === "" ? ttrg.fn.pickEmpty : ttrg.fn.pickNone}
                     </option>
                   </Show>
                   <For each={fnItems()}>
@@ -438,7 +478,9 @@ export default function TriggerForm(props: FormProps) {
                   </FieldRow>
                 )}
               </RowList>
-              <ListErrors messages={orphanRowIssues(props.issues, "args", d().args.length)} />
+              <ListErrors
+                messages={[...exactIssues(props.issues, "args"), ...orphanRowIssues(props.issues, "args", d().args.length)]}
+              />
               <p id={argsHintId} class="text-xs text-muted">
                 {ttrg.args.hint}
               </p>

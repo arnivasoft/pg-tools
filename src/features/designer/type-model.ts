@@ -4,6 +4,7 @@
 // eşlenir (`null` = yeni). Enum: yüklü değer silinemez, yüklülerin göreli sırası değişmez (yeni değer her yere girebilir;
 // arka uç konumu taslak sırasından `AFTER`/`BEFORE` olarak türetir). Composite: yüklü öznitelik taşınamaz, yeni öznitelik
 // yalnız sona (PG `ADD ATTRIBUTE` sona ekler). SQL üretmez; diğer kurallar arka ucun alan hatasıdır.
+// enumAdd/enumRemove/enumMove/attrAdd/attrRemove/attrMove/attrMoveAllowed: RowList kapılarının test edilmiş başvurusu (form çağırmaz).
 import type { CompositeAttr } from "../../ipc/bindings/CompositeAttr";
 import type { EnumValue } from "../../ipc/bindings/EnumValue";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";

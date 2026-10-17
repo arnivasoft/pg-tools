@@ -58,6 +58,7 @@ export const ttrg = {
   fn: {
     pick: "Listeden seç",
     pickNone: "(listede yok — elle yazıldı)",
+    pickEmpty: "Seçin…",
     pickHint: "Dönüşü trigger olan, argümansız fonksiyonlar.",
     schema: "Fonksiyon şeması",
     name: "Fonksiyon adı",

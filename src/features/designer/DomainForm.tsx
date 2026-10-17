@@ -4,14 +4,18 @@
 // doğrulanmamış ve ifadesi değişmeyen kısıtta); diğer kurallar arka ucun alan hatasıdır. `editable = false` tanım (ya
 // da `readOnly` sekme) tamamen salt okunurdur (`ReadOnlyReasons`). Serbest SQL alanlarının (DEFAULT, CHECK) altında
 // `FreeSqlNote` + `E'…'` ipucu (spec §8.7). Kobalte yok; metinler tembel `strings-domain`.
+import { Undo } from "lucide-solid";
 import { For, Show, createResource, createSignal, createUniqueId, type JSX } from "solid-js";
 import { tdom } from "../../app/strings-domain";
 import type { DomainCheck } from "../../ipc/bindings/DomainCheck";
 import type { DomainDef } from "../../ipc/bindings/DomainDef";
 import type { LookupItem } from "../../ipc/bindings/LookupItem";
+import { Button } from "../../ui/Button";
 import { inputClass } from "../../ui/Field";
 import { issuesFor } from "./designer-model";
-import { asDomain, canValidate, checkRename, checkUpdate, domainPatch, needsName, newCheck, notValidAllowed } from "./domain-model";
+import {
+  asDomain, canValidate, checkRename, checkRestore, checkUpdate, domainPatch, needsName, newCheck, notValidAllowed, removedChecks,
+} from "./domain-model";
 import { CheckRow, CommentField, FieldRow, FreeSqlNote, OwnerSelect, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
 import { exactIssues, normalizeEmpty, orphanRowIssues } from "./forms-model";
 import { ReadOnlyReasons } from "./ReadOnlyReasons";
@@ -40,7 +44,8 @@ function ListErrors(props: { messages: string[] }) {
   );
 }
 
-function Badge(props: { text: string; sr?: string; warn?: boolean }) {
+/** Rozet; `id` verilirse sr metni o id ile satır girişine `aria-describedby` olarak bağlanır. */
+function Badge(props: { text: string; sr?: string; id?: string; warn?: boolean }) {
   return (
     <span
       class="inline-flex h-5 w-fit shrink-0 items-center rounded border px-1.5 text-[11px]"
@@ -48,7 +53,10 @@ function Badge(props: { text: string; sr?: string; warn?: boolean }) {
     >
       {props.text}
       <Show when={props.sr}>
-        <span class="sr-only"> — {props.sr}</span>
+        <span id={props.id} class="sr-only">
+          {" "}
+          — {props.sr}
+        </span>
       </Show>
     </span>
   );
@@ -266,6 +274,8 @@ export default function DomainForm(props: FormProps) {
               >
                 {(c, i) => {
                   const loaded = () => loadedCheck(c());
+                  const badgeId = createUniqueId();
+                  const isNew = () => alter() && c().original === null;
                   const exprChanged = () => {
                     const o = loaded();
                     return o !== undefined && o.expression !== c().expression;
@@ -294,7 +304,7 @@ export default function DomainForm(props: FormProps) {
                             required={alter()}
                             aria-required={alter() ? "true" : undefined}
                             placeholder={alter() ? tdom.checks.namePlaceholderAlter : tdom.checks.namePlaceholderCreate}
-                            aria-describedby={f.describedBy}
+                            aria-describedby={[f.describedBy, isNew() ? badgeId : null].filter(Boolean).join(" ") || undefined}
                             aria-invalid={f.invalid}
                             disabled={locked()}
                             value={c().name ?? ""}
@@ -333,8 +343,8 @@ export default function DomainForm(props: FormProps) {
                         )}
                       </FieldRow>
                       <div class="flex flex-wrap items-center gap-2">
-                        <Show when={alter() && c().original === null}>
-                          <Badge text={tdom.checks.newBadge} />
+                        <Show when={isNew()}>
+                          <Badge text={tdom.checks.newBadge} sr={tdom.checks.newBadgeSr} id={badgeId} />
                         </Show>
                         <Show when={c().original !== null && !c().validated}>
                           <Badge text={tdom.checks.notValidated} sr={tdom.checks.notValidatedSr} warn />
@@ -366,6 +376,30 @@ export default function DomainForm(props: FormProps) {
                   );
                 }}
               </RowList>
+              <Show when={removedChecks(original(), d()).length > 0}>
+                <div role="note" class="flex flex-col gap-1 rounded border border-border px-3 py-2 text-xs">
+                  <p class="font-medium text-warn-text">{tdom.checks.removedTitle}</p>
+                  <ul class="flex flex-col gap-1">
+                    <For each={removedChecks(original(), d())}>
+                      {(n) => (
+                        <li class="flex items-center gap-2">
+                          <span class="min-w-0 flex-1 font-mono text-warn-text">{tdom.checks.removed(n)}</span>
+                          <Show when={!locked()}>
+                            <Button
+                              variant="ghost"
+                              aria-label={tdom.checks.restore(n)}
+                              title={tdom.checks.restore(n)}
+                              onClick={() => edit((x) => checkRestore(x, original(), n))}
+                            >
+                              <Undo size={14} aria-hidden="true" /> {tdom.checks.restoreShort}
+                            </Button>
+                          </Show>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </div>
+              </Show>
               <FreeSqlNote id={checksNoteId} />
               <p id={checksEscId} class="text-xs text-muted">
                 {tdom.escapeHint}

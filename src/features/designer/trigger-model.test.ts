@@ -3,7 +3,8 @@ import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import type { TriggerDef } from "../../ipc/bindings/TriggerDef";
 import type { TriggerEvents } from "../../ipc/bindings/TriggerEvents";
 import {
-  asTrigger, availability, functionFromLookup, functionOptionIndex, normalizeTrigger, rebuildNote, setAt, structureChanged, toggleUpdateColumn,
+  asTrigger, availability, functionFromLookup, functionOptionIndex, normalizeTrigger, rebuildNote, restoreCleared, setAt, structureChanged,
+  toggleUpdateColumn, type TriggerStash,
   triggerPatch, updateColumnChoices,
 } from "./trigger-model";
 
@@ -182,5 +183,66 @@ describe("UPDATE OF çipleri / argümanlar", () => {
     const l = ["x"];
     expect(setAt(l, 0, "y")).toEqual(["y"]);
     expect(setAt(l, 3, "y")).toBe(l);
+  });
+});
+
+describe("restoreCleared (kapanıp açılan alanların değeri geri gelir)", () => {
+  /** Formun `patch` akışı: alanı uygula → normalize et → restoreCleared. */
+  const step = (prev: TriggerDef, p: Partial<TriggerDef>, stash: TriggerStash) =>
+    restoreCleared(prev, normalizeTrigger({ ...prev, ...p }), stash);
+
+  it("UPDATE kapat/aç: UPDATE OF kolonları geri gelir, stash boşalır", () => {
+    const d0 = t({ events: ev({ insert: true, update: true, updateColumns: ["a", "b"] }) });
+    const s1 = step(d0, { events: { ...d0.events, update: false } }, {});
+    expect(s1.def.events.updateColumns).toEqual([]);
+    expect(s1.stash.updateColumns).toEqual(["a", "b"]);
+    const s2 = step(s1.def, { events: { ...s1.def.events, update: true } }, s1.stash);
+    expect(s2.def.events.updateColumns).toEqual(["a", "b"]);
+    expect(s2.stash.updateColumns).toBeUndefined();
+  });
+  it("ikinci olay aç/kapa: OLD/NEW TABLE geri gelir", () => {
+    const d0 = t({ events: ev({ update: true }), oldTable: "o", newTable: "n" });
+    const s1 = step(d0, { events: { ...d0.events, insert: true } }, {});
+    expect(s1.def.oldTable).toBeNull();
+    expect(s1.def.newTable).toBeNull();
+    expect(s1.stash).toEqual({ oldTable: "o", newTable: "n" });
+    const s2 = step(s1.def, { events: { ...s1.def.events, insert: false } }, s1.stash);
+    expect(s2.def.oldTable).toBe("o");
+    expect(s2.def.newTable).toBe("n");
+    expect(s2.stash).toEqual({});
+  });
+  it("constraint aç/kapa: NEW TABLE geri gelir", () => {
+    const d0 = t({ events: ev({ insert: true }), newTable: "n" });
+    const s1 = step(d0, { constraint: true }, {});
+    expect(s1.def.newTable).toBeNull();
+    expect(s1.stash).toEqual({ newTable: "n" });
+    const s2 = step(s1.def, { constraint: false }, s1.stash);
+    expect(s2.def.newTable).toBe("n");
+    expect(s2.stash).toEqual({});
+  });
+  it("açıkken elle boşaltılan alan saklanmaz; olaya uymayan alan açılana dek bekler", () => {
+    const d0 = t({ events: ev({ insert: true }), newTable: "n" });
+    expect(step(d0, { newTable: null }, {}).stash).toEqual({});
+    // DELETE'e geçiş: NEW TABLE kapanır, saklanır; OLD TABLE boş olduğundan geri gelmez.
+    const s1 = step(d0, { events: ev({ delete: true }) }, {});
+    expect(s1.def.newTable).toBeNull();
+    expect(s1.stash).toEqual({ newTable: "n" });
+    const s2 = step(s1.def, { events: ev({ delete: true, update: false }) }, s1.stash);
+    expect(s2.stash).toEqual({ newTable: "n" });
+    const s3 = step(s2.def, { events: ev({ insert: true }) }, s2.stash);
+    expect(s3.def.newTable).toBe("n");
+  });
+  it("geri gelen tanım normalize edilmiş kalır; giriş nesneleri değişmez", () => {
+    const stash: TriggerStash = { updateColumns: ["a"], newTable: "n" };
+    const prev = t({ events: ev({ insert: true }) });
+    const next = normalizeTrigger(t({ events: ev({ update: true }) }));
+    const r = restoreCleared(prev, next, stash);
+    expect(r.def.events.updateColumns).toEqual(["a"]);
+    // UPDATE OF geri gelince REFERENCING kapalıdır: NEW TABLE beklemede kalır.
+    expect(r.def.newTable).toBeNull();
+    expect(r.stash).toEqual({ newTable: "n" });
+    expect(normalizeTrigger(r.def)).toEqual(r.def);
+    expect(stash).toEqual({ updateColumns: ["a"], newTable: "n" });
+    expect(next.events.updateColumns).toEqual([]);
   });
 });

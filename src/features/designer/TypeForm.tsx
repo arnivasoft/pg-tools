@@ -47,9 +47,15 @@ function ListErrors(props: { messages: string[] }) {
   );
 }
 
-function NewBadge(props: { text: string }) {
+/** "yeni" rozeti; satırın girişine `id` + `aria-describedby` ile bağlanır (ekran okuyucu tam metni okur). */
+function NewBadge(props: { text: string; sr: string; id: string }) {
   return (
-    <span class="inline-flex h-5 shrink-0 items-center rounded border border-accent px-1.5 text-[11px] text-accent">{props.text}</span>
+    <span class="inline-flex h-5 shrink-0 items-center rounded border border-accent px-1.5 text-[11px] text-accent">
+      <span aria-hidden="true">{props.text}</span>
+      <span id={props.id} class="sr-only">
+        {props.sr}
+      </span>
+    </span>
   );
 }
 
@@ -282,7 +288,10 @@ export default function TypeForm(props: FormProps) {
                   removeLocked={(i) => !enumRemoveAllowed(d(), i)}
                   moveAllowed={(i, dir) => enumMoveAllowed(d(), i, dir)}
                 >
-                  {(v, i) => (
+                  {(v, i) => {
+                    const badgeId = createUniqueId();
+                    const isNew = () => alter() && v().original === null;
+                    return (
                     <div class="flex items-end gap-2">
                       <div class="min-w-0 flex-1">
                         <FieldRow
@@ -300,7 +309,7 @@ export default function TypeForm(props: FormProps) {
                               required
                               aria-required="true"
                               placeholder={ttyp.values.placeholder}
-                              aria-describedby={[f.describedBy, valuesHintId].filter(Boolean).join(" ")}
+                              aria-describedby={[f.describedBy, valuesHintId, isNew() ? badgeId : null].filter(Boolean).join(" ")}
                               aria-invalid={f.invalid}
                               disabled={locked()}
                               value={v().label}
@@ -312,13 +321,14 @@ export default function TypeForm(props: FormProps) {
                           )}
                         </FieldRow>
                       </div>
-                      <Show when={alter() && v().original === null}>
+                      <Show when={isNew()}>
                         <div class="pb-1.5">
-                          <NewBadge text={ttyp.values.newBadge} />
+                          <NewBadge text={ttyp.values.newBadge} sr={ttyp.values.newBadgeSr} id={badgeId} />
                         </div>
                       </Show>
                     </div>
-                  )}
+                    );
+                  }}
                 </RowList>
                 <div id={valuesHintId} class="flex flex-col gap-1">
                   <Show when={!locked()}>
@@ -357,6 +367,8 @@ export default function TypeForm(props: FormProps) {
                 >
                   {(a, i) => {
                     const retyped = () => a().original !== null && loss().retyped.includes(a().name);
+                    const badgeId = createUniqueId();
+                    const isNew = () => alter() && a().original === null;
                     return (
                       <div class="flex flex-col gap-1">
                         <div class="grid grid-cols-[1fr_1fr_10rem] items-start gap-2">
@@ -376,7 +388,7 @@ export default function TypeForm(props: FormProps) {
                                 required
                                 aria-required="true"
                                 placeholder={ttyp.attributes.namePlaceholder}
-                                aria-describedby={f.describedBy}
+                                aria-describedby={[f.describedBy, isNew() ? badgeId : null].filter(Boolean).join(" ") || undefined}
                                 aria-invalid={f.invalid}
                                 disabled={locked()}
                                 value={a().name}
@@ -430,8 +442,8 @@ export default function TypeForm(props: FormProps) {
                           </FieldRow>
                         </div>
                         <div class="flex items-center gap-2">
-                          <Show when={alter() && a().original === null}>
-                            <NewBadge text={ttyp.attributes.newBadge} />
+                          <Show when={isNew()}>
+                            <NewBadge text={ttyp.attributes.newBadge} sr={ttyp.attributes.newBadgeSr} id={badgeId} />
                           </Show>
                           <ListErrors messages={exactIssues(props.issues, `body.attributes[${i}].original`)} />
                         </div>

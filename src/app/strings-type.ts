@@ -21,18 +21,18 @@ export const ttyp = {
     enum: "Enum",
     composite: "Composite",
     range: "Range",
-    other: "Diğer (base, array, pseudo, shell ya da multirange)",
+    other: "Düzenlenemeyen tip",
     alterHint: "Oluşturulmuş tipin türü değiştirilemez.",
     createHint: "Tür değişince diğer türün alanları saklanır; geri dönünce geri gelir.",
   },
-  readOnlyKind:
-    "Bu tip türü (base, array, pseudo, shell ya da multirange) bu diyalogda düzenlenemez; yalnızca genel bilgiler gösterilir.",
+  readOnlyKind: "Bu tip bu diyalogda düzenlenemez (ör. base, array, pseudo, shell, multirange); gerekçeler yukarıda.",
   values: {
     label: "Etiket",
     placeholder: "değer",
     add: "Değer ekle",
     empty: "Değer yok.",
     newBadge: "yeni",
+    newBadgeSr: "yeni, henüz uygulanmadı",
     renamedFrom: (o: string) => `Yüklü etiket: ${o} (RENAME VALUE)`,
     addHint: "Yeni değer imleçteki satırın altına eklenir (satır seçilmemişse sona).",
     loadedHint:
@@ -49,6 +49,7 @@ export const ttyp = {
     add: "Öznitelik ekle",
     empty: "Öznitelik yok.",
     newBadge: "yeni",
+    newBadgeSr: "yeni, henüz uygulanmadı",
     renamedFrom: (o: string) => `Yüklü ad: ${o} (RENAME ATTRIBUTE)`,
     orderHint: "Yüklü öznitelikler yeniden sıralanamaz; yeni öznitelikler yalnızca sona eklenir.",
     usedHint:

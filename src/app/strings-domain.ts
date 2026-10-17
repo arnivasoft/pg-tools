@@ -44,6 +44,11 @@ export const tdom = {
     notValidated: "doğrulanmamış",
     notValidatedSr: "Bu kısıt NOT VALID: mevcut veri henüz denetlenmedi.",
     newBadge: "yeni",
+    newBadgeSr: "yeni, henüz uygulanmadı",
     removeHint: "Yüklü kısıtı silmek DROP CONSTRAINT üretir (Yıkıcı).",
+    removedTitle: "Kaldırılacak kısıtlar",
+    removed: (n: string) => `${n} (DROP CONSTRAINT)`,
+    restore: (n: string) => `${n} kısıtını geri al`,
+    restoreShort: "Geri al",
   },
 };

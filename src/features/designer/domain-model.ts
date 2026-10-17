@@ -91,3 +91,17 @@ export function checkUpdate<T extends DomainDef>(
     }),
   };
 }
+
+/** Taslakta eşi (`c.original === ad`) kalmayan yüklü kısıtların adları, yüklü sırada (silinecekler). Create → boş. */
+export function removedChecks(original: DomainDef | null, d: DomainDef): string[] {
+  if (!original) return [];
+  const kept = new Set(d.constraints.map((c) => c.original).filter((n): n is string => n !== null));
+  return original.constraints.map((o) => o.name).filter((n): n is string => n !== null && !kept.has(n));
+}
+
+/** Silinen yüklü kısıtı yüklü hâliyle sona geri ekler ("Geri al"). Zaten eşlenmişse ya da bulunamazsa aynı nesne. */
+export function checkRestore<T extends DomainDef>(d: T, original: DomainDef | null, name: string): T {
+  const o = original?.constraints.find((c) => c.name === name);
+  if (!o || d.constraints.some((c) => c.original === name)) return d;
+  return { ...d, constraints: [...d.constraints, { ...o, original: name }] };
+}
