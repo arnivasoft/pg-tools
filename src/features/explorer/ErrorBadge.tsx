@@ -1,36 +1,44 @@
 // Hata rozeti (ana paket): yalnız ikon + düğme. HoverCard'lı tam bileşen tembel parçadadır; yüklenene dek fallback aynı rozettir.
 import { CircleAlert } from "lucide-solid";
-import { Suspense, lazy } from "solid-js";
+import { type Component, Show, createSignal } from "solid-js";
+import { t } from "../../app/strings";
+import { toast } from "../../app/toast";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
-import { BADGE_CLASS, badgeLabel, cardActionLabel, cardTitle, isGone } from "./error-badge-model";
+import { BADGE_CLASS, badgeLabel, cardActionLabel, cardTitle, createCardLoader, isGone } from "./error-badge-model";
+import type { ErrorBadgeCardProps } from "./ErrorBadgeCard";
 
 /** Yükleyici (tek tanım): `lazy` ve ileride önyükleme aynı içe aktarmayı paylaşır. */
 export const loadErrorBadgeCard = () => import("./ErrorBadgeCard");
-const ErrorBadgeCard = lazy(loadErrorBadgeCard);
+
+// Parça modül düzeyinde bir kez yüklenir (ilk rozet oluşunca başlar); yüklenene dek ya da yükleme reddedilirse
+// çalışan fallback rozet kalır (ret önbelleğe alınmaz: sonraki rozet yeniden dener, bildirim ret başına bir kez).
+const [Card, setCard] = createSignal<Component<ErrorBadgeCardProps> | null>(null);
+const ensureCard = createCardLoader(
+  loadErrorBadgeCard,
+  (m) => setCard(() => m.default),
+  () => toast.show(t.app.chunkLoadFailed, "error"),
+);
 
 export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; onRefreshParent?: () => void; onSelect?: () => void }) {
   // Düğme odağı tutarsa ağacın klavye işleyicisi (e.target === currentTarget) tuşları yok sayar.
   const focusTree = (el: HTMLElement | undefined) => el?.closest<HTMLElement>('[role="tree"]')?.focus();
-  const run = () => {
+  const action = (el: HTMLElement | undefined) => {
     if (isGone(props.error)) props.onRefreshParent?.();
     else props.onRetry();
+    focusTree(el);
   };
   const activate = (el: HTMLElement | undefined) => {
     props.onSelect?.();
-    run();
-    focusTree(el);
+    action(el);
   };
-  const action = (el: HTMLElement | undefined) => {
-    run();
-    focusTree(el);
-  };
+  ensureCard();
   const fallback = () => {
     let el: HTMLButtonElement | undefined;
     return (
       <button
         type="button"
         ref={el}
-        aria-label={badgeLabel(props.error)}
+        aria-label={badgeLabel()}
         class={BADGE_CLASS}
         onClick={(e) => {
           e.stopPropagation();
@@ -43,17 +51,22 @@ export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; on
     );
   };
   return (
-    <Suspense fallback={fallback()}>
-      <ErrorBadgeCard
-        label={badgeLabel(props.error)}
-        badgeClass={BADGE_CLASS}
-        title={cardTitle(props.error)}
-        detail={props.error.detail ?? null}
-        hint={props.error.hint ?? null}
-        actionLabel={cardActionLabel(props.error)}
-        onActivate={activate}
-        onAction={action}
-      />
-    </Suspense>
+    <Show when={Card()} fallback={fallback()}>
+      {(C) => {
+        const View = C();
+        return (
+        <View
+          label={badgeLabel()}
+          badgeClass={BADGE_CLASS}
+          title={cardTitle(props.error)}
+          detail={props.error.detail ?? null}
+          hint={props.error.hint ?? null}
+          actionLabel={cardActionLabel(props.error)}
+          onActivate={activate}
+          onAction={action}
+        />
+        );
+      }}
+    </Show>
   );
 }
