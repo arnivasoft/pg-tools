@@ -48,8 +48,8 @@ Kobalte ve bağımlılıkları toplam ≈ **101 KB**, yani paketin %44'ü. Bunla
 
 | Ölçüm | Başlangıç | Sonuç |
 | --- | --- | --- |
-| Ana paket (`index-*.js`) | 231,724 B | **130,252 B** (-101,472 B, -%43,8; son düzeltme dalgası +162 B: sessiz ve yeniden denenebilir hata kartı, menü çapası görünürlük denetimi, aria-controls) |
-| Açılış kümesi (index + solid + web) | 255,213 B (index+solid+web+Icon) | **157,925 B** (3 parça) |
+| Ana paket (`index-*.js`) | 231,724 B | **130,090 B** (-101,634 B, -%43,9) |
+| Açılış kümesi (index + solid + web) | 255,213 B (index+solid+web+Icon) | **157,763 B** (3 parça) |
 | `__vite__mapDeps` girdisi | 21 | 34 |
 | `index.html` preload | solid, web, Icon | solid, web |
 | Ana pakette Kobalte/floating-ui/corvu | ≈101 KB | 0 (betik denetler, `enforceForbidden: true`) |
