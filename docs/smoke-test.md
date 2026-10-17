@@ -614,3 +614,23 @@ Bilinen sınırlar:
 - Tablespace, dil, FDW/sunucu, large object ve parametre (PG 15+ `GRANT SET`) yetkileri yok; yabancı tablo backlog.
 - Tüm aggregate'ler yetki düzenlemede salt okunurdur (window fonksiyonları düzenlenebilir); sistem şeması nesneleri, dizi/multirange tipleri ve tablo satır tipleri salt okunurdur.
 - PG 18 LARGE OBJECTS varsayılan yetkileri modellenmez (`unsupported` notu; tanım düzenlenebilir kalır, bu girdilere dokunulmaz).
+
+## Yetkiler arayüzü (Plan 22)
+
+Ön koşul: Plan 20 smoke ortamı (Docker PG; birkaç rol, tablo, görünüm, fonksiyon, aggregate; bir rolün `WITH GRANT OPTION` ile başkasına verdiği yetki; kolon yetkisi). Yetki formu tembel parçadadır (`PrivilegesForm-*.js`); ilk açılışta kısa yükleme normaldir. Task 4 yalnız "Yetkiler…" formunu içerir; "Varsayılan yetkiler…" menüsü şimdilik "hazırlanıyor" yer tutucusunu açar (form Task 5).
+
+- [ ] Menü görünürlüğü: "Yetkiler…" tablo, bölüm, görünüm, MV, dizi, fonksiyon, procedure, trigger fonksiyonu, şema, veritabanı, tip ve domain düğümlerinde "Yeniden adlandır…" ile "Sil…" arasında; "Varsayılan yetkiler…" yalnız veritabanı ve şemada ondan hemen sonra. İndeks, trigger, eklenti, rol, kolon/kısıt satırları, politika, tablespace ve koleksiyonlarda yok. **[—]**
+- [ ] Kilit: salt okunur kilitli sunucuda iki öğe görünür ama devre dışıdır ve gerekçe ("Bu sunucu salt okunur kilitli.") gösterilir; açık sekmede kilit açılırsa sekme salt okunur olur. **[—]**
+- [ ] Izgara — fare: hücre tıklaması yok → var → devredilebilir → yok döngüsü; önizleme GRANT / REVOKE / `WITH GRANT OPTION` ifadelerini gösterir; hücreyi eski hâline döndürmek kirli durumu temizler ve plan boşalır. **[—]**
+- [ ] Izgara — klavye: ızgaraya Tab ile tek durak; ok tuşları, Home/End hücreler arasında gezer (kenarda sarmaz); Space/Enter durumu değiştirir; ekran okuyucu "<alıcı> — <yetki>: yok/var/devredilebilir" okur; IME bileşimi sırasında tuşlar etkisiz. **[—]**
+- [ ] PUBLIC ve sahip satırında GRANT OPTION adımı yoktur (var → yok); sahip satırında "sahip" rozeti. **[—]**
+- [ ] Alıcı ekle: datalist'te listede olmayan roller ve (PUBLIC satırı yoksa) "PUBLIC"; Enter ya da "Ekle" satırı sona ekler, alan temizlenir; boş girişte "Alıcı adı girin.", yinelenen alıcıda "Bu alıcı zaten listede." satır içi iletisi (alan `aria-invalid`). Var olmayan rol adı yazılırsa önizleme/uygulama arka uç hatasını gösterir. **[—]**
+- [ ] Alıcı kaldır: çöp kutusu satırı (tüm yetkileriyle) kaldırır ve önizlemede REVOKE çıkar; odak aynı sıradaki (yoksa önceki) satırın ilk hücresine, son satır kaldırılınca "Alıcı ekle" alanına gider. **[—]**
+- [ ] CASCADE: planda REVOKE yokken onay kutusu devre dışı ("Yalnız planda REVOKE varken etkilidir."); REVOKE varken işaretlenince önizleme `CASCADE` ile yenilenir, risk veri kaybına çıkar, onay kutusu istenir; üretim etiketli sunucuda ayrıca sunucu adı yazılması istenir. Uygulama/yeniden yükleme sonrası kutu temizlenir. **[—]**
+- [ ] `explicit` notu: ACL'si NULL olan nesnede (yeni fonksiyon/şema) "Varsayılan (açık ACL yok) yetkiler gösteriliyor; ilk değişiklik ACL'yi açık hâle getirir." notu ve etkin değer (ör. `PUBLIC EXECUTE`); düzenlemeden önce sekme kirli değildir. **[—]**
+- [ ] Salt okunur listeler: başka verenlerin yetkileri (veren, alıcı, yetki, devredilebilir) ve kolon yetkileri (kolon, veren, alıcı, yetki) yalnız doluysa görünür; düzenlenemez. **[—]**
+- [ ] Hata şeridi: hücre/satır hataları (ör. MAINTAIN PG < 17, PUBLIC'e GRANT OPTION zorlanırsa) ilgili satırın altında; diğer yollar (`object`, `foreign`, `columns`, `old.*`, bilinmeyen yetki) SQL önizlemesinin üstündeki genel şeritte. **[—]**
+- [ ] `ACL_WARNING`: uygulama sonrası istenen ile gerçek ACL farklıysa (ör. başka verenin yetkisi kalıyor) "uygulama sonrası uyarılar" şeridinde görünür; tanım yeniden yüklenir. **[—]**
+- [ ] Bayat tanım: sekme açıkken nesnenin yetkisi başka yerden (psql) değiştirilirse uygulama "plan değişti" ile reddedilir ve yeniden yükleme ipucu çıkar; yeniden yükleme kirli taslakta onay ister. **[—]**
+- [ ] Salt okunur nesne: aggregate ve sistem şeması nesnesinde (`pg_catalog`) "Bu nesne buradan düzenlenemez" gerekçe şeridi; ızgara hücreleri, "Alıcı ekle", kaldırma ve CASCADE devre dışı. **[—]**
+- [ ] Paket: "Yetkiler…" ilk kez açıldığında ağ sekmesinde yalnız designer parçaları (`PrivilegesForm-*.js` dahil) iner; açılışta inmez. Inspector DDL sekmesi uygulama sonrası kendiliğinden yenilenmez (bilinen; düğümü yeniden seçin). **[—]**

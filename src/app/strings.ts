@@ -91,6 +91,8 @@ export const t = {
     createObject: "Oluştur…",
     editObject: "Düzenle…",
     renameObject: "Yeniden adlandır…",
+    privilegesObject: "Yetkiler…",
+    defaultPrivilegesObject: "Varsayılan yetkiler…",
     dropObject: "Sil…",
     gone: "Bu öğe artık yok.",
     disconnected: "Bağlantı kesildi.",
@@ -186,27 +188,12 @@ export const t = {
       tx: { inTransaction: "açık", failed: "hatalı", idle: "" },
       busy: "çalışıyor",
     },
-    env: {
-      title: "Bu sunucunun ortamı?",
-      message: (name: string) => `‘${name}’ için bir ortam etiketi seçin. Üretim sunucusunda yazma ifadeleri onay ister ve sekmeler Manuel modda açılır.`,
-      skip: "Atla",
-      save: "Kaydet",
-      lock: "Salt okunur kilidi aç (önerilir)",
-    },
     hint: {
       autocommit: "Bu ifade transaction bloğunda çalışamaz; sekmeyi autocommit kipine alın.",
       rollback: "Transaction hata durumunda; yalnızca ROLLBACK yapılabilir.",
       sessionReset:
         "Bağlantı yeniden kuruldu; oturum durumu (SET, geçici tablolar, advisory kilitler) kaybolmuş olabilir. Sorguyu tekrar çalıştırın.",
       locked: "Bu sunucu salt okunur kilitli.",
-    },
-    strip: {
-      ariaLabel: "İfade sonuçları",
-      status: { running: "Çalışıyor", ok: "Başarılı", failed: "Hata", cancelled: "İptal edildi" },
-      kind: { select: "SELECT", write: "Yazma", ddl: "DDL", tx: "Transaction", other: "Diğer" },
-      rows: (n: number) => `${n.toLocaleString("tr-TR")} satır`,
-      affected: (n: number) => `${n.toLocaleString("tr-TR")} etkilendi`,
-      ms: (n: number) => (n < 1000 ? `${n} ms` : `${(n / 1000).toFixed(2)} sn`),
     },
   },
 } as const;

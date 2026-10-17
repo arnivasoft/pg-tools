@@ -2,6 +2,7 @@
 // `privileges` dizisi kanonik (`available`) sırada tutulur: arka uç hata yolu `grants[i].privileges[j]` bu sıraya göre
 // hücreye eşlenir. `available` dışı (bilinmeyen) yetkiler korunur ve kanonik olanların ardına, özgün sırayla eklenir.
 import type { AclGrant } from "../../ipc/bindings/AclGrant";
+import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Privilege } from "../../ipc/bindings/Privilege";
 
 /** Hücre durumu: yok / var / var + GRANT OPTION. */
@@ -42,6 +43,23 @@ export function addGrantee(grants: AclGrant[], grantee: string | null): AclGrant
   if (name === "") return null;
   if (grants.some((g) => g.grantee === name)) return null;
   return [...grants.map((g) => ({ ...g })), { grantee: name, privileges: [] }];
+}
+
+/**
+ * Form "Alıcı ekle" girdisi: kırpılır; boş → `empty`; `public` (harf duyarsız; datalist'teki "PUBLIC" seçeneği) →
+ * PUBLIC satırı (`grantee = null`); yinelenen → `duplicate`. Not: `"PUBLIC"`/`"Public"` adlı gerçek roller bu alandan
+ * eklenemez (PUBLIC sayılır; spec E2'deki kenar durum, yüklü satırlar etkilenmez).
+ */
+export function addGranteeInput(grants: AclGrant[], input: string): { grants: AclGrant[] } | { error: "empty" | "duplicate" } {
+  const name = input.trim();
+  if (name === "") return { error: "empty" };
+  const next = addGrantee(grants, name.toLowerCase() === "public" ? null : name);
+  return next ? { grants: next } : { error: "duplicate" };
+}
+
+/** Planda REVOKE var mı (CASCADE onay kutusu yalnız o zaman anlamlıdır; arka uç REVOKE yokken `cascade`'i yok sayar). */
+export function planHasRevoke(view: PlanView | null): boolean {
+  return !!view && view.statements.some((s) => /^REVOKE\s/i.test(s.sql));
 }
 
 export function removeGrantee(grants: AclGrant[], row: number): AclGrant[] {

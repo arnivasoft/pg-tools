@@ -8,7 +8,7 @@ import { ROOT, ancestorOfKind, isCollection, serverOf, type TreeState } from "./
 import { canOpenQueryTool } from "../query/open-kinds";
 import { canOpenDashboard } from "../dashboard/open-kinds";
 import { canOpenData } from "../data/open-kinds";
-import { canCreateIn, canEditObject, isTableRowKind } from "../designer/ddl-kinds";
+import { ACL_KINDS, DEFAULT_ACL_KINDS, canCreateIn, canEditObject, isTableRowKind } from "../designer/ddl-kinds";
 
 /** Kolon/kısıt düğümünün sahibi (koleksiyonlar atlanarak ilk ata) tablo mu (görünüm/MV kolonu ya da domain kısıtı değil). */
 function ownedByTable(s: TreeState, id: string): boolean {
@@ -25,11 +25,11 @@ function ownedByTable(s: TreeState, id: string): boolean {
 export type ActionId =
   | "refresh" | "connect" | "disconnect" | "editServer" | "deleteServer"
   | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool" | "openDashboard" | "openData"
-  | "createObject" | "editObject" | "renameObject" | "dropObject";
+  | "createObject" | "editObject" | "renameObject" | "privilegesObject" | "defaultPrivilegesObject" | "dropObject";
 
 /**
- * Nesne diyaloğu (designer) eylemleri: adı `Object` ile biten dört eylem (ana paket bütçesi için liste yerine sonek);
- * kip, adın `Object` öncesidir (`createObject` → `create`). Yeni bir eylem adı bu soneki kullanmamalıdır.
+ * Nesne diyaloğu (designer) eylemleri: adı `Object` ile biten eylemler (ana paket bütçesi için liste yerine sonek);
+ * kip, adın `Object` öncesidir (`createObject` → `create`, `privilegesObject` → `privileges`). Yeni bir eylem adı bu soneki kullanmamalıdır.
  */
 export type DesignerOpenMode = "create" | "edit" | "rename" | "drop" | "privileges" | "defaultPrivileges";
 
@@ -109,7 +109,13 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
   if (isCollection(node.kind)) return canCreateIn(node.kind) ? ["createObject", "refresh", "copyName"] : ["refresh", "copyName"];
   const out: ActionId[] = [...q];
   // Önceden tanımlı pg_* rolleri arka uçta da reddedilir; menü göstermez.
-  if (canEditObject(node.kind) && !(node.kind === "role" && node.flags.system)) out.push("editObject", "renameObject", "dropObject");
+  if (canEditObject(node.kind) && !(node.kind === "role" && node.flags.system)) {
+    // Plan 22: yetkiler düzenlemenin yanında (spec §8 türleri; salt okunur kararını arka uç verir).
+    out.push("editObject", "renameObject");
+    if (ACL_KINDS.includes(node.kind)) out.push("privilegesObject");
+    if (DEFAULT_ACL_KINDS.includes(node.kind)) out.push("defaultPrivilegesObject");
+    out.push("dropObject");
+  }
   else if (isTableRowKind(node.kind) && ownedByTable(s, node.id)) out.push("editObject");
   if (node.hasChildren) out.push("refresh");
   out.push("copyName");
@@ -160,6 +166,8 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
       case "createObject":
       case "editObject":
       case "renameObject":
+      case "privilegesObject":
+      case "defaultPrivilegesObject":
       case "dropObject":
         // Savunma: menü kilitli sunucuda bu öğeleri gerekçesiyle zaten kapatır (açıcı da kaydı yeniden denetler).
         if (!disabledReason(action, deps, id)) deps.openDesigner?.(id, action.slice(0, -6) as DesignerOpenMode);

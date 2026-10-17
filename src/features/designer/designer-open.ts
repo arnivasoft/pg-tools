@@ -74,9 +74,13 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
         notify(tdes.open.rowInTable, "info");
         return;
       }
-      // Plan 22: varsayılan yetkiler yalnız veritabanı ve şema düğümünde.
+      // Plan 22: varsayılan yetkiler yalnız veritabanı ve şema düğümünde; kolon/kısıt odak hedefi (tabloya çözülür)
+      // yetki sekmesi açmaz (menü göstermez; savunma).
       const defAcl = mode === "defaultPrivileges";
-      if (kind === undefined || (target.databaseOid === null && !isServerScoped(kind)) || (defAcl && kind !== "database" && kind !== "schema")) {
+      if (
+        kind === undefined || (target.databaseOid === null && !isServerScoped(kind))
+        || (defAcl && kind !== "database" && kind !== "schema") || ((defAcl || mode === "privileges") && target.focus)
+      ) {
         notify(tdes.open.none, "info");
         return;
       }

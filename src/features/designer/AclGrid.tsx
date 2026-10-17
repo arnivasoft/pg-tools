@@ -48,7 +48,11 @@ export interface AclGridProps {
   readOnly: boolean;
   labels: AclGridLabels;
   onChange: (grants: AclGrant[]) => void;
-  /** Satır kaldırma (tüm yetkileri kaldırmak demektir); verilmezse düğme yok. Alıcı ekleme denetimi `footer`'dadır. */
+  /**
+   * Satır kaldırma (tüm yetkileri kaldırmak demektir); verilmezse düğme yok. Alıcı ekleme denetimi `footer`'dadır.
+   * Kaldırma sonrası odak aynı sıradaki (yoksa önceki) satırın ilk hücresine, satır kalmadıysa `footer` içindeki
+   * `data-acl-add` öğesine gider.
+   */
   onRemove?: (row: number) => void;
   footer?: JSX.Element;
 }
@@ -58,6 +62,7 @@ const NAV_KEYS = new Set<string>(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRig
 export function AclGrid(props: AclGridProps) {
   const gid = createUniqueId();
   let root: HTMLTableElement | undefined;
+  let box: HTMLDivElement | undefined;
   const [active, setActive] = createSignal<[number, number]>([0, 0]);
   const cols = () => props.available.length;
   // Satır/sütun azalınca etkin hücre ızgara içinde kalır (yoksa hiçbir hücre sekme durağı olmazdı).
@@ -81,6 +86,18 @@ export function AclGrid(props: AclGridProps) {
     props.onChange(setCell(props.grants, r, p, next, props.available));
   };
 
+  const remove = (r: number) => {
+    props.onRemove?.(r);
+    // Kaldırılan düğme DOM'dan gidince odak kaybolmasın: komşu satır ya da ekleme denetimi (çizim sonrası).
+    queueMicrotask(() => {
+      const nr = Math.min(r, props.grants.length - 1);
+      const cell = nr < 0 ? null : root?.querySelector<HTMLElement>(`[data-r="${nr}"][data-c="0"]`);
+      if (cell) setActive([nr, 0]);
+      (cell ?? box?.querySelector<HTMLElement>("[data-acl-add]"))?.focus();
+    });
+  };
+  const removable = () => !!props.onRemove && !props.readOnly;
+
   const onKeyDown = (ev: KeyboardEvent, r: number, c: number) => {
     if (ev.isComposing || ev.keyCode === 229) return;
     if (!NAV_KEYS.has(ev.key) || ev.ctrlKey || ev.altKey || ev.metaKey) return;
@@ -91,7 +108,7 @@ export function AclGrid(props: AclGridProps) {
   };
 
   return (
-    <div class="flex flex-col gap-2">
+    <div ref={box} class="flex flex-col gap-2">
       <Show when={props.grants.length === 0}>
         <p class="text-xs text-muted">{props.labels.empty}</p>
       </Show>
@@ -110,7 +127,7 @@ export function AclGrid(props: AclGridProps) {
                     </th>
                   )}
                 </For>
-                <Show when={props.onRemove && !props.readOnly}>
+                <Show when={removable()}>
                   <th scope="col" class="px-2 py-1">
                     <span class="sr-only">{props.labels.actions}</span>
                   </th>
@@ -175,13 +192,13 @@ export function AclGrid(props: AclGridProps) {
                           );
                         }}
                       </Index>
-                      <Show when={props.onRemove && !props.readOnly}>
+                      <Show when={removable()}>
                         <td class="px-1 py-1">
                           <Button
                             variant="ghost"
                             aria-label={props.labels.remove(name(g()))}
                             title={props.labels.remove(name(g()))}
-                            onClick={() => props.onRemove?.(r)}
+                            onClick={() => remove(r)}
                           >
                             <Trash2 size={14} aria-hidden="true" />
                           </Button>
@@ -190,7 +207,7 @@ export function AclGrid(props: AclGridProps) {
                     </tr>
                     <Show when={rowIssues(r).length > 0 || props.available.some((p) => cellIssues(r, p).length > 0)}>
                       <tr>
-                        <td id={errId(r)} colSpan={cols() + 2} class="px-2 pb-1 text-xs text-danger">
+                        <td id={errId(r)} colSpan={cols() + (removable() ? 2 : 1)} class="px-2 pb-1 text-xs text-danger">
                           <For each={rowIssues(r)}>{(m) => <div>{m}</div>}</For>
                           <For each={props.available}>
                             {(p) => (

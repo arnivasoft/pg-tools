@@ -2,6 +2,7 @@
 // ilk gerekli olduğunda `loadTxDialogs` ile tembel iner.
 import { For, Show, createSignal } from "solid-js";
 import { t } from "../../app/strings";
+import { tenv } from "./strings-env";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import type { QueryController } from "./query-controller";
@@ -101,7 +102,7 @@ export function BulkTxDialog(props: { ctl: QueryController }) {
 
 export function EnvDialog(props: { ctl: QueryController }) {
   const g = props.ctl.envGate;
-  const e = t.query.env;
+  const e = tenv;
   const [choice, setChoice] = createSignal<EnvChoice | null>(null);
   const [lock, setLock] = createSignal(false);
   const config = () => g.request()?.config ?? null;

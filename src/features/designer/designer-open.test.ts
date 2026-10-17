@@ -459,4 +459,14 @@ describe("designer-open: yetkiler (Plan 22)", () => {
     expect(b.deps.connect).not.toHaveBeenCalled();
     expect(b.store.state.designers).toHaveLength(0);
   });
+  it("savunma: kolon/kısıt odak hedefinde (tabloya çözülen) yetki sekmesi açılmaz", async () => {
+    for (const mode of ["privileges", "defaultPrivileges"] as const) {
+      const { opener, deps, store, designer } = setup({ ...tblTarget, focus: { kind: "column", id: 1 } });
+      await opener.open("col", mode);
+      expect(deps.notify).toHaveBeenCalledWith(tdes.open.none, "info");
+      expect(deps.connect).not.toHaveBeenCalled();
+      expect(store.state.designers).toHaveLength(0);
+      expect(designer.openAcl).not.toHaveBeenCalled();
+    }
+  });
 });

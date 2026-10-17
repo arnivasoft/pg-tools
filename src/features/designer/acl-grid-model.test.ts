@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AclGrant } from "../../ipc/bindings/AclGrant";
 import type { Privilege } from "../../ipc/bindings/Privilege";
 import {
-  addGrantee, allowGrantOption, cellPath, cellState, nextCellFocus, nextCellState, removeGrantee, setCell, unknownPrivileges,
+  addGrantee, addGranteeInput, allowGrantOption, cellPath, cellState, nextCellFocus, nextCellState, removeGrantee, setCell, planHasRevoke, unknownPrivileges,
 } from "./acl-grid-model";
 
 const avail: Privilege[] = ["select", "insert", "update", "delete"];
@@ -112,5 +112,42 @@ describe("nextCellFocus", () => {
   });
   it("boş ızgara", () => {
     expect(nextCellFocus(0, 0, 0, 0, "End")).toEqual([0, 0]);
+  });
+});
+
+describe("alıcı ekleme girdisi (form)", () => {
+  const base = [g(null, ["select"]), g("app", ["insert"])];
+  it("boş/boşluk → empty", () => {
+    expect(addGranteeInput(base, "")).toEqual({ error: "empty" });
+    expect(addGranteeInput(base, "   ")).toEqual({ error: "empty" });
+  });
+  it("kırpılmış rol adı sona eklenir; girdi değişmez", () => {
+    const r = addGranteeInput(base, "  report ");
+    expect(r).toEqual({ grants: [...base, { grantee: "report", privileges: [] }] });
+    expect(base).toHaveLength(2);
+  });
+  it("yinelenen alıcı → duplicate (büyük/küçük harf duyarlı rol adları)", () => {
+    expect(addGranteeInput(base, "app")).toEqual({ error: "duplicate" });
+    expect("grants" in addGranteeInput(base, "App")).toBe(true);
+  });
+  it("PUBLIC (harf duyarsız) → PUBLIC satırı (grantee null); zaten varsa duplicate", () => {
+    const noPublic = [g("app")];
+    expect(addGranteeInput(noPublic, "PUBLIC")).toEqual({ grants: [g("app"), { grantee: null, privileges: [] }] });
+    expect(addGranteeInput(noPublic, " public ")).toEqual({ grants: [g("app"), { grantee: null, privileges: [] }] });
+    expect(addGranteeInput(base, "Public")).toEqual({ error: "duplicate" });
+  });
+});
+
+describe("planHasRevoke", () => {
+  const st = (sql: string) => ({ sql, risk: "safe" as const, transactional: true, note: null, redacted: false });
+  const view = (...sql: string[]) => ({ statements: sql.map(st), warnings: [], errors: [], hash: "h", risk: "safe" as const, empty: sql.length === 0 });
+  it("REVOKE ile başlayan ifade varsa true", () => {
+    expect(planHasRevoke(view("GRANT SELECT ON TABLE t TO a", "REVOKE INSERT ON TABLE t FROM b"))).toBe(true);
+    expect(planHasRevoke(view("REVOKE GRANT OPTION FOR SELECT ON TABLE t FROM a"))).toBe(true);
+  });
+  it("yoksa / görünüm yoksa false", () => {
+    expect(planHasRevoke(view("GRANT SELECT ON TABLE t TO a"))).toBe(false);
+    expect(planHasRevoke(view())).toBe(false);
+    expect(planHasRevoke(null)).toBe(false);
   });
 });

@@ -3,7 +3,7 @@
 import { For, Show, createEffect, createResource, createUniqueId, type Component, type JSX } from "solid-js";
 import { tdes } from "../../app/strings-designer";
 import { inputClass } from "../../ui/Field";
-import type { DesignerController, ObjectDesignerModel } from "./designer-controller";
+import type { DesignerController, DesignerModel, ObjectDesignerModel } from "./designer-controller";
 import { issuesFor, type FieldIssues } from "./designer-model";
 import { normalizeEmpty } from "./forms-model";
 
@@ -13,6 +13,18 @@ export interface FormProps {
   tabId: string;
   /** Nesne sekmesinin modeli (yetki sekmeleri kendi formlarını kullanır). */
   model: ObjectDesignerModel;
+  issues: FieldIssues;
+  readOnly: boolean;
+}
+
+/**
+ * Plan 22: yetki formlarının prop'ları. Model daraltılmamıştır (`variant` acl/default_acl); form kendi tanımını
+ * `isAclDef` / `isDefaultAclDef` ile okur (nesne formlarının `ObjectDesignerModel` dönüşümü kullanılmaz).
+ */
+export interface AclFormProps {
+  designer: DesignerController;
+  tabId: string;
+  model: DesignerModel;
   issues: FieldIssues;
   readOnly: boolean;
 }
