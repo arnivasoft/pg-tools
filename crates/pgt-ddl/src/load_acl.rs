@@ -42,7 +42,8 @@ static DATABASE_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_a
 static TYPE_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_acl_type.sql"))]);
 const COLUMNS_SQL: &str = include_str!("sql/load_acl_columns.sql");
 
-const UNSUPPORTED_KIND_MSG: &str = "Bu nesne türünün yetkileri yoktur.";
+/// Karar 1: yetkisi olmayan tür (yükleyici ve yönetici kapısı aynı ileti).
+pub const UNSUPPORTED_KIND_MSG: &str = "Bu nesne türünün yetkileri yoktur.";
 /// Karar 11 gerekçeleri (sabit metin; ad içermez).
 pub const SYSTEM_SCHEMA_REASON: &str = "sistem şeması";
 pub const SIGNATURE_REASON: &str = "imza";

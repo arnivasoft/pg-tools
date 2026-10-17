@@ -100,6 +100,8 @@ fn main() {
             ddl::ddl_target_of,
             ddl::ddl_defaults,
             ddl::ddl_load,
+            ddl::ddl_load_acl,
+            ddl::ddl_load_default_acl,
             ddl::ddl_lookup,
             ddl::ddl_preview,
             ddl::ddl_apply,

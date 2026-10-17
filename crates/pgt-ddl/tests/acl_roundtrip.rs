@@ -3,8 +3,8 @@
 //!
 //! Her test kendi geçici veritabanını (`pgt_ddl_acl_<ana sürüm>_<etiket>`), şemasını (`pgt_ddl_rt_<etiket>…`) ve küme
 //! rollerini (`pgt_acl_rt_<etiket>_<n>`) kurar; başarısız doğrulamadan sonra bile önce veritabanı, sonra roller silinir
-//! (`cleanup_acl`). Yönetici `Privileges` isteğini henüz uygulamadığından (geçici kapı) planın ifadeleri uygulayıcı gibi
-//! tek transaction'da düz istemciyle çalıştırılır (`Env::exec_tx`). Sürüme bağlı kısımlar (procedure PG 11+, MAINTAIN
+//! (`cleanup_acl`). Üretici ↔ yükleyici sözleşmesini yöneticiden bağımsız sınamak için planın ifadeleri uygulayıcı gibi
+//! tek transaction'da düz istemciyle çalıştırılır (`Env::exec_tx`); yönetici akışı `tests/manager.rs`'te. Sürüme bağlı kısımlar (procedure PG 11+, MAINTAIN
 //! PG 17+, multirange PG 14+) atlandığında yazdırılır.
 //!
 //! Varsayılan yetkiler (`load_default_acl` ↔ `default_privileges`) aynı kalıpla sınanır (`apply_def`); `FOR ROLE`
