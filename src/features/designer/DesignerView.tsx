@@ -16,12 +16,11 @@ import SqlPreview from "./SqlPreview";
 
 // Tür → form (tembel bileşen + bilinen alan yolları; kök yol alt yolları da kapsar: `columns` ⊃ `columns[1].key`).
 // Table formu kendi parçasıdır (TableForm-*.js). View ve MV aynı parçayı paylaşır (`model.kind`'e göre); tek `lazy`
-// (aynı bileşen, tek parça). Geçici `Partial`: domain formu Plan 19'da gelir; o zamana
-// dek formu olmayan tür tek satır şerit gösterir (Plan 19 kaldırır; metin bu tembel parçada, ana paket değişmez).
+// (aynı bileşen, tek parça). Her `ObjectKind` için bir form vardır (tam `Record`).
 const viewForm = lazy(() => import("./ViewForm"));
 // Function ve Procedure aynı parçayı paylaşır (RoutineForm-*.js; `model.kind`'e göre).
 const routineForm = lazy(() => import("./RoutineForm"));
-const FORMS: Partial<Record<ObjectKind, FormEntry>> = {
+const FORMS: Record<ObjectKind, FormEntry> = {
   schema: { view: lazy(() => import("./SchemaForm")), paths: FORM_PATHS.schema },
   extension: { view: lazy(() => import("./ExtensionForm")), paths: FORM_PATHS.extension },
   sequence: { view: lazy(() => import("./SequenceForm")), paths: FORM_PATHS.sequence },
@@ -35,10 +34,8 @@ const FORMS: Partial<Record<ObjectKind, FormEntry>> = {
   procedure: { view: routineForm, paths: FORM_PATHS.procedure },
   trigger: { view: lazy(() => import("./TriggerForm")), paths: FORM_PATHS.trigger },
   type: { view: lazy(() => import("./TypeForm")), paths: FORM_PATHS.type },
+  domain: { view: lazy(() => import("./DomainForm")), paths: FORM_PATHS.domain },
 };
-
-const NO_PATHS: ReadonlySet<string> = new Set();
-const FORM_MISSING = "Bu nesne türü için form henüz yok.";
 
 type StatusKey = keyof typeof tdes.view.status;
 
@@ -81,7 +78,7 @@ export default function DesignerView(props: {
         const [askReload, setAskReload] = createSignal(false);
         const entry = () => FORMS[m().kind];
         // Genel hatalar: `old.`, üst-düzey `columns` ve formun bilmediği yollar.
-        const issues = createMemo(() => groupIssues(m().view?.errors ?? [], entry()?.paths ?? NO_PATHS));
+        const issues = createMemo(() => groupIssues(m().view?.errors ?? [], entry().paths));
         const done = () => m().mode === "create" && m().outcome?.outcome === "applied";
         const readOnly = () => m().locked || m().status !== "ready" || m().applying || done();
         const canReload = () => !m().applying && m().status !== "gone" && m().status !== "loading";
@@ -146,21 +143,17 @@ export default function DesignerView(props: {
             </Show>
             <div class="flex min-h-0 flex-1">
               <section aria-label={kindLabel(m().kind)} class="min-w-0 flex-1 overflow-auto p-3">
-                <Show when={entry()} fallback={<p role="status" class="text-muted">{FORM_MISSING}</p>}>
-                  {(e) => (
-                    <Show when={m().draft !== null}>
-                      <Suspense fallback={<p class="text-muted">{tdes.loading}</p>}>
-                        <Dynamic
-                          component={e().view}
-                          designer={props.designer}
-                          tabId={props.tabId}
-                          model={m()}
-                          issues={issues()}
-                          readOnly={readOnly()}
-                        />
-                      </Suspense>
-                    </Show>
-                  )}
+                <Show when={m().draft !== null}>
+                  <Suspense fallback={<p class="text-muted">{tdes.loading}</p>}>
+                    <Dynamic
+                      component={entry().view}
+                      designer={props.designer}
+                      tabId={props.tabId}
+                      model={m()}
+                      issues={issues()}
+                      readOnly={readOnly()}
+                    />
+                  </Suspense>
                 </Show>
                 <Show when={m().draft === null && m().status === "loading"}>
                   <p class="text-muted">{tdes.loading}</p>

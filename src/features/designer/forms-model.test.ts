@@ -4,11 +4,12 @@ import type { ExtensionDef } from "../../ipc/bindings/ExtensionDef";
 import type { IndexColumn } from "../../ipc/bindings/IndexColumn";
 import type { IndexDef } from "../../ipc/bindings/IndexDef";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
+import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
 import type { SchemaDef } from "../../ipc/bindings/SchemaDef";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
 import { addColumn, groupIssues, issuesFor, moveColumn, removeColumn, updateColumn } from "./designer-model";
 import {
-  DATABASE_PATHS, EXTENSION_PATHS, FORM_PATHS, ROLE_PATHS, ROUTINE_PATHS, TRIGGER_PATHS, TYPE_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
+  DATABASE_PATHS, DOMAIN_PATHS, EXTENSION_PATHS, FORM_PATHS, ROLE_PATHS, ROUTINE_PATHS, TRIGGER_PATHS, TYPE_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
   columnKeyLabel, exactIssues, extensionEditPatch, extensionOptionLabel, extensionVersionNote, fillfactorEnabled,
   fillfactorFromInput, findExtension, incrementEditPatch, incrementSign, indexEditPatch, indexMethodPatch, indexReadOnlyReason,
   newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect, orphanRowIssues, ownedByHint, restrictedControlDisabled, schemaEditPatch, sequenceSchemaPatch, tablespaceChoices,
@@ -444,14 +445,11 @@ describe("DATABASE_PATHS", () => {
 });
 
 describe("ROLE_PATHS", () => {
-  it("Plan 15 Task 5 yol kümesi; FORM_PATHS Plan 14 dokuz türü için tanımlı (Plan 18 türleri Plan 19 formlarıyla gelir)", () => {
+  it("Plan 15 Task 5 yol kümesi; FORM_PATHS.role === ROLE_PATHS", () => {
     expect([...ROLE_PATHS].sort()).toEqual(
       ["name", "login", "superuser", "createdb", "createrole", "inherit", "replication", "bypassrls", "connectionLimit", "validUntil", "password", "memberOf", "settings", "comment"].sort(),
     );
     expect(FORM_PATHS.role).toBe(ROLE_PATHS);
-    const kinds = ["schema", "sequence", "extension", "index", "table", "view", "materialized_view", "database", "role", "function", "procedure", "trigger", "type"] as const;
-    expect(Object.keys(FORM_PATHS).sort()).toEqual([...kinds].sort());
-    expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
   });
   it("memberOf[i].role ve settings[i].value kökte; cascade/old.* genel", () => {
     const g = groupIssues(
@@ -534,5 +532,43 @@ describe("TYPE_PATHS (Plan 19 Task 5)", () => {
     expect(g.byPath.get("body.subtype")).toEqual(["f"]);
     expect(g.byPath.get("object")).toEqual(["i"]);
     expect(g.general).toEqual(["g", "h"]);
+  });
+});
+
+describe("DOMAIN_PATHS (Plan 19 Task 6)", () => {
+  it("spec §8.5 kök anahtarları; FORM_PATHS.domain === DOMAIN_PATHS", () => {
+    expect([...DOMAIN_PATHS].sort()).toEqual(
+      ["schema", "name", "owner", "comment", "baseType", "collation", "default", "constraints", "object"].sort(),
+    );
+    expect(FORM_PATHS.domain).toBe(DOMAIN_PATHS);
+  });
+  it("groupIssues: constraints[1].expression doğru satıra; liste düzeyi constraints ayrı; old.constraints[0].name genel", () => {
+    const g = groupIssues(
+      [
+        { path: "constraints[1].expression", message: "a" }, { path: "constraints", message: "b" }, { path: "constraints[0].validate", message: "c" },
+        { path: "constraints[7].name", message: "d" }, { path: "old.constraints[0].name", message: "e" }, { path: "baseType", message: "f" },
+        { path: "defaultX", message: "g" },
+      ] as never,
+      DOMAIN_PATHS,
+    );
+    expect(issuesFor(g, "constraints[1]")).toEqual(["a"]);
+    expect(exactIssues(g, "constraints")).toEqual(["b"]);
+    expect(g.byPath.get("constraints[0].validate")).toEqual(["c"]);
+    expect(orphanRowIssues(g, "constraints", 2)).toEqual(["d"]);
+    expect(g.byPath.get("baseType")).toEqual(["f"]);
+    expect(g.general).toEqual(["e", "g"]);
+  });
+});
+
+describe("FORM_PATHS tam eşleme (Plan 19 Task 6: Partial yok)", () => {
+  it("her ObjectKind (14 tür) için boş olmayan yol kümesi", () => {
+    const all: Record<ObjectKind, true> = {
+      schema: true, sequence: true, extension: true, index: true, table: true, view: true, materialized_view: true, database: true,
+      role: true, function: true, procedure: true, trigger: true, type: true, domain: true,
+    };
+    const kinds = Object.keys(all) as ObjectKind[];
+    expect(kinds).toHaveLength(14);
+    expect(Object.keys(FORM_PATHS).sort()).toEqual([...kinds].sort());
+    expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
   });
 });

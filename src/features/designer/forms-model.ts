@@ -80,13 +80,18 @@ export const TRIGGER_PATHS: ReadonlySet<string> = new Set([
  */
 export const TYPE_PATHS: ReadonlySet<string> = new Set(["schema", "name", "owner", "comment", "body", "object"]);
 /**
- * Tür → bilinen yollar (testte denetlenir). Geçici `Partial`: domain yolları Plan 19 formuyla gelir.
+ * Domain (spec §8.5): `constraints` kökü `constraints[i].name|expression|notValid|validate|original` alt yollarını kapsar;
+ * `old.*` (ör. `old.constraints[i].name`) genel şeride düşer. `object` (salt okunur) kök listededir (formun üstünde).
  */
-export const FORM_PATHS = {
+export const DOMAIN_PATHS: ReadonlySet<string> = new Set([
+  "schema", "name", "owner", "comment", "baseType", "collation", "default", "constraints", "object",
+]);
+/** Tür → bilinen yollar (testte denetlenir; her `ObjectKind` için tanımlı). */
+export const FORM_PATHS: Record<ObjectKind, ReadonlySet<string>> = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
   view: VIEW_PATHS, materialized_view: MATVIEW_PATHS, database: DATABASE_PATHS, role: ROLE_PATHS,
-  function: ROUTINE_PATHS, procedure: ROUTINE_PATHS, trigger: TRIGGER_PATHS, type: TYPE_PATHS,
-} satisfies Partial<Record<ObjectKind, ReadonlySet<string>>>;
+  function: ROUTINE_PATHS, procedure: ROUTINE_PATHS, trigger: TRIGGER_PATHS, type: TYPE_PATHS, domain: DOMAIN_PATHS,
+};
 
 /**
  * İsteğe bağlı alan: boş ya da yalnızca boşluk → `null`; aksi halde metin OLDUĞU GİBİ (kırpılmaz — kullanıcının yazdığı
