@@ -52,32 +52,26 @@ try {
 
   const mapDeps = countMapDeps(code);
   const preloads = parseModulePreloads(html);
-  // Geçici izinli adlar ("Task 5 kaldırır"): beklenmeyen sayılmaz, zorunlu da değildir.
-  const temporary = budget.htmlPreloadsTemporary ?? [];
-  const pre = preloadViolations(preloads, budget.htmlPreloads).filter(
-    (v) => !temporary.some((n) => v === `beklenmeyen: ${n}`),
-  );
+  const pre = preloadViolations(preloads, budget.htmlPreloads);
 
   // Açılış kümesi: giriş + statik içe aktarma kapanışı (dinamik import() ve mapDeps hariç). Gerçek açılış maliyeti budur.
-  const entryName = path.basename(entry);
-  const dir = path.dirname(jsPath);
+  // Adlar çıktı köküne göreli (`assets/x.js`); eksik parça ya da çözülemeyen belirteç hata verir (yanlış "temiz" yok).
   const readChunk = (n) => {
-    const f = path.join(dir, n);
+    const f = path.join(tmp, n);
     return fs.existsSync(f) ? fs.readFileSync(f, "utf8") : null;
   };
-  const startup = staticClosure(entryName, readChunk);
+  const startup = staticClosure(entry, readChunk);
   const startupRows = [];
   const startupPackages = new Map();
   let startupBytes = 0;
   for (const n of startup) {
-    const c = readChunk(n);
-    if (c === null) continue;
-    const stripped = stripSourceMapComment(c);
+    const stripped = stripSourceMapComment(readChunk(n));
     const bytes = Buffer.byteLength(stripped);
     startupBytes += bytes;
-    startupRows.push([n, bytes]);
-    const mp = path.join(dir, `${n}.map`);
-    if (!fs.existsSync(mp)) continue;
+    startupRows.push([path.basename(n), bytes]);
+    // Haritasız parçada yasak paket atfı yapılamaz: sessizce atlamak yerine düş.
+    const mp = path.join(tmp, `${n}.map`);
+    if (!fs.existsSync(mp)) throw new Error(`açılış parçasının kaynak haritası yok: ${mp}`);
     const g = groupSources(attributeSizes(stripped, JSON.parse(fs.readFileSync(mp, "utf8"))));
     for (const [k, v] of g.packages) startupPackages.set(k, (startupPackages.get(k) ?? 0) + v);
   }

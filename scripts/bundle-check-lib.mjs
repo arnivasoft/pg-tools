@@ -123,33 +123,54 @@ export function stripSourceMapComment(code) {
   return code.replace(/\r?\n\/\/# sourceMappingURL=[^\n]*\s*$/, "");
 }
 
-/** Koddaki statik içe aktarma kaynakları (`import{a as b}from"./x.js"`, `import"./x.js"`, `export{a}from"./x.js"`); dinamik `import()` ve mapDeps girdileri sayılmaz. */
+/**
+ * Koddaki statik içe aktarma belirteçleri, olduğu gibi (`import{a as b}from"./x.js"`, `import"./x.js"`, `export{a}from"./x.js"`,
+ * `export*from"./x.js"`, yorum önekli `/*!x*\/import"./x.js"`); dinamik `import()` ve mapDeps girdileri sayılmaz.
+ * Belirteçler çözülmez: `resolveChunk` çözer, çözülemeyende hata verir (yanlış "temiz" yok).
+ */
 export function parseStaticImports(code) {
   const out = [];
-  const re = /(?:^|[;}\s])(?:import|export)\s*(?:[\w$*{][^"'`;]*?\s*from\s*)?(["'])(\.\/[^"']+)\1/g;
-  for (const m of code.matchAll(re)) out.push(m[2].replace(/^\.\//, ""));
+  const re = /(?:^|[;{}\s/])(?:import|export)\s*(?:[\w$*{][^"'`;]*?\s*from\s*)?(["'])([^"'\n]+)\1/g;
+  for (const m of code.matchAll(re)) out.push(m[2]);
   return [...new Set(out)];
 }
 
 /**
- * Giriş parçasının statik içe aktarma kapanışı (kendisi dahil). `read(name)` parça kodunu döner (yoksa null);
- * adlar giriş dizinine göre göreli dosya adlarıdır.
+ * Belirteci, içe aktaran parçanın yoluna göre çıktı köküne göreli yola çözer (`assets/index.js` + `./a.js` -> `assets/a.js`,
+ * `/assets/a.js` -> `assets/a.js`). Çıplak belirteç ya da kökün dışına çıkan yol hata verir.
+ */
+export function resolveChunk(from, spec) {
+  const fail = () => {
+    throw new Error(`çözülemeyen statik içe aktarma: "${spec}" (${from})`);
+  };
+  let parts;
+  if (spec.startsWith("/")) parts = [];
+  else if (spec.startsWith("./") || spec.startsWith("../")) parts = from.split("/").slice(0, -1);
+  else fail();
+  for (const seg of spec.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (parts.length === 0) fail();
+      parts.pop();
+    } else parts.push(seg);
+  }
+  return parts.join("/");
+}
+
+/**
+ * Giriş parçasının statik içe aktarma kapanışı (kendisi dahil). Adlar çıktı köküne göreli yollardır (`assets/index-x.js`);
+ * `read(name)` parça kodunu döner, yoksa null — eksik parça ya da çözülemeyen belirteç hata verir.
  */
 export function staticClosure(entryName, read) {
   const seen = new Set();
-  const stack = [entryName];
+  const stack = [[entryName, null]];
   while (stack.length) {
-    const name = stack.pop();
+    const [name, by] = stack.pop();
     if (seen.has(name)) continue;
     seen.add(name);
     const code = read(name);
-    if (code == null) continue;
-    for (const dep of parseStaticImports(code)) stack.push(dep);
+    if (code == null) throw new Error(`parça bulunamadı: ${name}${by ? ` (${by} içe aktarıyor)` : ""}`);
+    for (const spec of parseStaticImports(code)) stack.push([resolveChunk(name, spec), name]);
   }
   return [...seen];
-}
-
-/** Önyükleme bütçesi: izin verilen + geçici ad kümesine göre sapmalar. */
-export function allowedPreloads(htmlPreloads, temporary = []) {
-  return [...htmlPreloads, ...temporary];
 }

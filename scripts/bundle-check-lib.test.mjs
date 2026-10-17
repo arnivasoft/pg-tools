@@ -8,6 +8,7 @@ import {
   groupSources,
   packageOf,
   parseStaticImports,
+  resolveChunk,
   staticClosure,
   parseModulePreloads,
   preloadViolations,
@@ -112,11 +113,20 @@ describe("stripSourceMapComment", () => {
 describe("parseStaticImports", () => {
   it("küçültülmüş adlandırılmış, yan etkili ve yeniden dışa aktarma içe aktarmalarını bulur", () => {
     const code = 'import{a as b,c as d}from"./x-1.js";import"./side.js";import e from"./def.js";import*as ns from"./ns.js";export{f}from"./re.js";const z=1;';
-    expect(parseStaticImports(code).sort()).toEqual(["def.js", "ns.js", "re.js", "side.js", "x-1.js"]);
+    expect(parseStaticImports(code).sort()).toEqual(["./def.js", "./ns.js", "./re.js", "./side.js", "./x-1.js"]);
+  });
+  it("export* ve export*as biçimlerini bulur", () => {
+    expect(parseStaticImports('export*from"./x.js";export*as n from"./y.js";').sort()).toEqual(["./x.js", "./y.js"]);
+  });
+  it("yorum önekli içe aktarmayı tanır", () => {
+    expect(parseStaticImports('/*!x*/import"./c.js";/* a */import{a}from"./d.js";').sort()).toEqual(["./c.js", "./d.js"]);
+  });
+  it("./ dışı göreli, kök göreli ve çıplak belirteçleri olduğu gibi döner", () => {
+    expect(parseStaticImports('import"../x.js";import{a}from"/assets/y.js";import"solid-js";').sort()).toEqual(["../x.js", "/assets/y.js", "solid-js"]);
   });
   it("dinamik import() ve mapDeps girdilerini yok sayar", () => {
     const code = 'import{a}from"./x.js";const l=()=>import("./y.js");m.f=["assets/z.js"];import("./w.js").then(()=>1);';
-    expect(parseStaticImports(code)).toEqual(["x.js"]);
+    expect(parseStaticImports(code)).toEqual(["./x.js"]);
   });
   it("çok satırlı biçimi ve yinelenenleri ele alır", () => {
     const code = `import {
@@ -124,18 +134,40 @@ describe("parseStaticImports", () => {
   b
 } from "./m.js";
 import { c } from "./m.js";`;
-    expect(parseStaticImports(code)).toEqual(["m.js"]);
+    expect(parseStaticImports(code)).toEqual(["./m.js"]);
+  });
+});
+
+describe("resolveChunk", () => {
+  it("./, ../ ve / belirteçlerini çıktı köküne göre çözer", () => {
+    expect(resolveChunk("assets/index.js", "./a.js")).toBe("assets/a.js");
+    expect(resolveChunk("assets/index.js", "../x.js")).toBe("x.js");
+    expect(resolveChunk("assets/sub/b.js", "../c.js")).toBe("assets/c.js");
+    expect(resolveChunk("assets/index.js", "/assets/y.js")).toBe("assets/y.js");
+  });
+  it("çıplak ya da kökün dışına çıkan belirteçte hata verir", () => {
+    expect(() => resolveChunk("assets/index.js", "solid-js")).toThrow(/çözülemeyen/);
+    expect(() => resolveChunk("assets/index.js", "../../x.js")).toThrow(/çözülemeyen/);
   });
 });
 
 describe("staticClosure", () => {
   it("geçişli statik bağımlılıkları toplar, döngü ve dinamik bağı atlar", () => {
     const files = {
-      "e.js": 'import{a}from"./a.js";const d=()=>import("./lazy.js");',
-      "a.js": 'import{b}from"./b.js";import"./e.js";',
-      "b.js": "export const b=1;",
-      "lazy.js": 'import"./never.js";',
+      "assets/e.js": 'import{a}from"./a.js";const d=()=>import("./lazy.js");export*from"./r.js";',
+      "assets/a.js": 'import{b}from"/assets/b.js";import"./e.js";',
+      "assets/b.js": "export const b=1;",
+      "assets/r.js": "export const r=1;",
+      "assets/lazy.js": 'import"./never.js";',
     };
-    expect(staticClosure("e.js", (n) => files[n] ?? null).sort()).toEqual(["a.js", "b.js", "e.js"]);
+    expect(staticClosure("assets/e.js", (n) => files[n] ?? null).sort()).toEqual(["assets/a.js", "assets/b.js", "assets/e.js", "assets/r.js"]);
+  });
+  it("eksik parça dosyasında hata verir (sessizce atlamaz)", () => {
+    const files = { "assets/e.js": 'import"./gone.js";' };
+    expect(() => staticClosure("assets/e.js", (n) => files[n] ?? null)).toThrow(/assets\/gone\.js/);
+  });
+  it("çözülemeyen belirteçte hata verir", () => {
+    const files = { "assets/e.js": 'import"solid-js";' };
+    expect(() => staticClosure("assets/e.js", (n) => files[n] ?? null)).toThrow(/çözülemeyen/);
   });
 });
