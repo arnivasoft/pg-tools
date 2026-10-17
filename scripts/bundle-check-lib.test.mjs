@@ -49,6 +49,13 @@ describe("attributeSizes", () => {
     const sizes = attributeSizes("xxyy", { sources: ["a.ts"], mappings: "AAAA,C,CAAA" });
     expect(sizes.get("<unmapped>")).toBe(1);
   });
+  it("ilk segmentten önceki metin ve eşlemesiz satırlar <unmapped>; toplam kod baytına eşit", () => {
+    const code = ["zzab", "cd", "ef"].join("\n");
+    const sizes = attributeSizes(code, { sources: ["a.ts"], mappings: "EAAA;" });
+    const total = [...sizes.values()].reduce((a, b) => a + b, 0);
+    expect(total).toBe(Buffer.byteLength(code));
+    expect(sizes.get("a.ts")).toBe(2);
+  });
 });
 
 describe("groupSources", () => {

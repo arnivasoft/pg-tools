@@ -1,23 +1,17 @@
 // Hata rozeti (ana paket): yalnız ikon + düğme. HoverCard'lı tam bileşen tembel parçadadır; yüklenene dek fallback aynı rozettir.
 import { CircleAlert } from "lucide-solid";
 import { type Component, Show, createSignal } from "solid-js";
-import { t } from "../../app/strings";
-import { toast } from "../../app/toast";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
-import { createLoader } from "../../ui/lazy-load";
-import { BADGE_CLASS, badgeLabel, cardActionLabel, cardTitle, isGone } from "./error-badge-model";
+import { BADGE_CLASS, badgeLabel, createBadgeCardLoader, cardActionLabel, cardTitle, isGone } from "./error-badge-model";
 import type { ErrorBadgeCardProps } from "./ErrorBadgeCard";
 
 /** Yükleyici (tek tanım): `lazy` ve ileride önyükleme aynı içe aktarmayı paylaşır. */
 export const loadErrorBadgeCard = () => import("./ErrorBadgeCard");
 
 // Parça modül düzeyinde bir kez yüklenir (ilk rozet oluşunca başlar); yüklenene dek ya da yükleme reddedilirse
-// çalışan fallback rozet kalır (ret önbelleğe alınmaz: sonraki rozet yeniden dener, bildirim ret başına bir kez).
+// çalışan fallback rozet kalır. Ret sessizdir (kart süstür); yeniden deneme yalnız rozete gelme/odaklanma ile olur.
 const [Card, setCard] = createSignal<Component<ErrorBadgeCardProps> | null>(null);
-const ensureCard = createLoader(
-  () => loadErrorBadgeCard().then((m) => void setCard(() => m.default)),
-  () => toast.show(t.app.chunkLoadFailed, "error"),
-);
+const cardLoader = createBadgeCardLoader(() => loadErrorBadgeCard().then((m) => void setCard(() => m.default)));
 
 export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; onRefreshParent?: () => void; onSelect?: () => void }) {
   // Düğme odağı tutarsa ağacın klavye işleyicisi (e.target === currentTarget) tuşları yok sayar.
@@ -31,27 +25,27 @@ export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; on
     props.onSelect?.();
     action(el);
   };
-  ensureCard();
-  const fallback = () => {
-    let el: HTMLButtonElement | undefined;
-    return (
-      <button
-        type="button"
-        ref={el}
-        aria-label={badgeLabel()}
-        class={BADGE_CLASS}
-        onClick={(e) => {
-          e.stopPropagation();
-          activate(el);
-        }}
-        onDblClick={(e) => e.stopPropagation()}
-      >
-        <CircleAlert size={13} />
-      </button>
-    );
-  };
+  cardLoader.start();
+  let el: HTMLButtonElement | undefined;
   return (
-    <Show when={Card()} fallback={fallback()}>
+    <Show when={Card()} fallback={
+        // JSX prop'u Solid'de getter'a derlenir: düğme yalnız fallback gerektiğinde (tembel) oluşur.
+        <button
+          type="button"
+          ref={el}
+          aria-label={badgeLabel()}
+          class={BADGE_CLASS}
+          onClick={(e) => {
+            e.stopPropagation();
+            activate(el);
+          }}
+          onPointerEnter={cardLoader.retry}
+          onFocus={cardLoader.retry}
+          onDblClick={(e) => e.stopPropagation()}
+        >
+          <CircleAlert size={13} />
+        </button>
+      }>
       {(C) => {
         const View = C();
         return (

@@ -21,9 +21,10 @@ export function anchorFromEvent(
   const nodeId = rowId ?? selected;
   if (nodeId === null) return null;
   if (!keyboard) return { x: e.clientX, y: e.clientY, nodeId, source: "pointer" };
-  const row = rowRect(nodeId);
-  if (row) return { x: row.left, y: row.bottom, nodeId, source: "keyboard" };
   const box = containerRect?.() ?? null;
+  const row = rowRect(nodeId);
+  // Satır DOM'da ama kaydırma kapsayıcısının görünür alanı dışındaysa (overscan satırı) kapsayıcıya düşülür.
+  if (row && (box === null || (row.bottom > box.top && row.top < box.bottom))) return { x: row.left, y: row.bottom, nodeId, source: "keyboard" };
   return box ? { x: box.left, y: box.top, nodeId, source: "keyboard" } : null;
 }
 

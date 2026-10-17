@@ -29,6 +29,13 @@ describe("anchorFromEvent", () => {
     expect(anchorFromEvent({ clientX: 0, clientY: 0 }, null, "zz", rowRect, true, container)).toEqual({ x: 5, y: 50, nodeId: "zz", source: "keyboard" });
   });
 
+  it("klavye: satır görünür alan dışında (overscan) → kapsayıcının sol üstü; içindeyse satır", () => {
+    const container = () => rect(5, 50, 900);
+    expect(anchorFromEvent({ clientX: 0, clientY: 0 }, null, "o", (id) => (id === "o" ? rect(10, 920, 942) : null), true, container)).toEqual({ x: 5, y: 50, nodeId: "o", source: "keyboard" });
+    expect(anchorFromEvent({ clientX: 0, clientY: 0 }, null, "o", (id) => (id === "o" ? rect(10, 10, 32) : null), true, container)).toEqual({ x: 5, y: 50, nodeId: "o", source: "keyboard" });
+    expect(anchorFromEvent({ clientX: 0, clientY: 0 }, null, "a", rowRect, true, container)).toEqual({ x: 10, y: 122, nodeId: "a", source: "keyboard" });
+  });
+
   it("klavye: satır da kapsayıcı da yoksa null", () => {
     expect(anchorFromEvent({ clientX: 0, clientY: 0 }, null, "zz", rowRect, true)).toBeNull();
     expect(anchorFromEvent({ clientX: 0, clientY: 0 }, null, "zz", rowRect, true, () => null)).toBeNull();

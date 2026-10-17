@@ -36,7 +36,10 @@ export function attributeSizes(code, map) {
     const text = lines[li] ?? "";
     let col = 0;
     let prev = null;
-    for (const seg of ln ? ln.split(",").map(decodeVlq) : []) {
+    const segs = ln ? ln.split(",").map(decodeVlq) : [];
+    // İlk segmentten önceki metin (ve eşleme satırı olmayan satırlar) eşlenmemiş sayılır: toplam = ana paket baytı.
+    add("<unmapped>", Buffer.byteLength(text.slice(0, segs.length ? Math.max(0, segs[0][0]) : text.length)));
+    for (const seg of segs) {
       col += seg[0];
       if (seg.length > 1) src += seg[1];
       if (prev) add(name(prev.src), Buffer.byteLength(text.slice(prev.col, col)));
@@ -44,6 +47,11 @@ export function attributeSizes(code, map) {
     }
     if (prev) add(name(prev.src), Buffer.byteLength(text.slice(prev.col)));
   });
+  // Eşleme satırlarından fazla kod satırları (satır sonu hariç) eşlenmemiştir.
+  const mapped = map.mappings.split(";").length;
+  for (let i = mapped; i < lines.length; i++) add("<unmapped>", Buffer.byteLength(lines[i]));
+  // Satır ayırıcıları (LF) da kodun parçasıdır.
+  if (lines.length > 1) add("<unmapped>", lines.length - 1);
   return sizes;
 }
 

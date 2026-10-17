@@ -44,7 +44,7 @@ export function TabStrip(props: {
                   role="tab"
                   id={tabId(base, tab.value)}
                   aria-selected={selected()}
-                  aria-controls={panelId(base, tab.value)}
+                  aria-controls={selected() ? panelId(base, tab.value) : undefined}
                   tabindex={selected() ? 0 : -1}
                   class="border-b-2 px-2 py-1.5 text-[13px]"
                   classList={{

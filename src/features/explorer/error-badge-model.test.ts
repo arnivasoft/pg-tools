@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { t } from "../../app/strings";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
-import { badgeLabel, cardActionLabel, cardTitle, isGone } from "./error-badge-model";
+import { createBadgeCardLoader, badgeLabel, cardActionLabel, cardTitle, isGone } from "./error-badge-model";
 
 const err = (over: Partial<ErrorPayload>): ErrorPayload => ({ code: "x", message: "boom", detail: null, hint: null, ...over }) as ErrorPayload;
 
@@ -25,3 +25,36 @@ describe("error-badge-model", () => {
 });
 
 // createCardLoader testleri src/ui/lazy-load.test.ts'e taşındı (createLoader ile birleştirildi).
+
+describe("createBadgeCardLoader", () => {
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it("başarısızlıktan sonra start yeniden denemez, retry dener; ret sessizdir", async () => {
+    const load = vi.fn(() => Promise.reject(new Error("ağ")));
+    const l = createBadgeCardLoader(load);
+    l.start();
+    await flush();
+    expect(load).toHaveBeenCalledTimes(1);
+    l.start();
+    l.start();
+    await flush();
+    expect(load).toHaveBeenCalledTimes(1);
+    l.retry();
+    await flush();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it("retry başarılı olunca başarısızlık temizlenir; start sonrası yeniden yüklemez (yüklü)", async () => {
+    let ok = false;
+    const load = vi.fn(() => (ok ? Promise.resolve() : Promise.reject(new Error("x"))));
+    const l = createBadgeCardLoader(load);
+    l.start();
+    await flush();
+    ok = true;
+    l.retry();
+    await flush();
+    l.start();
+    await flush();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+});

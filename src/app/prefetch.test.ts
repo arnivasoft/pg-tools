@@ -25,6 +25,8 @@ describe("prefetchIdle", () => {
     prefetchIdle([bad, throws, ok], (cb) => cb());
     await new Promise((r) => setTimeout(r, 10));
     proc.off("unhandledRejection", unhandled);
+    expect(bad).toHaveBeenCalledTimes(1);
+    expect(throws).toHaveBeenCalledTimes(1);
     expect(ok).toHaveBeenCalledTimes(1);
     expect(unhandled).not.toHaveBeenCalled();
   });
