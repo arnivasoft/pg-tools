@@ -380,3 +380,17 @@ Arka uç `crates/pgt-ddl` altındadır; saf testler (insta anlık görüntüleri
 | `crates/pgt-ddl/tests/manager.rs` | Yönetici entegrasyonu: `find_created`, `defaults(…, preset)`, salt okunur kapısı, ipuçları (2BP01/42P13/42809/0A000/42501), sahte `editable` -> `plan_changed` |
 | `crates/pgt-ddl/src/lookup.rs` (birim + DB) | `languages` ve `triggerFunctions` açılır listeleri |
 | `crates/pgt-ddl/tests/logging.rs` | Gövde/ad/değerlerin günlüğe düşmediği (yakalama testi) |
+
+## Yetkiler testleri (Plan 20)
+
+Arka uç `crates/pgt-ddl` altındadır; saf testler (insta: `src/build/snapshots`) sunucusuzdur, Docker testleri `PGT_TEST_URLS` ister ve `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf` ile PG 10–18'de koşar (sürüme bağlı adımlar atlanır: `MAINTAIN` PG 17+, Procedure PG 11+).
+
+| Dosya | Kapsam |
+|---|---|
+| `crates/pgt-ddl/src/acl.rs` (birim) | Yetki kataloğu: `privileges_for`/`default_privileges_for`, `acl_supported`, ACL harf eşlemesi, kanonik sıralama |
+| `crates/pgt-ddl/src/build/{acl,default_acl}.rs` (birim) | Saf üreticiler: GRANT/REVOKE/`REVOKE GRANT OPTION FOR` farkı ve sırası, CASCADE riski, sahip/PUBLIC kuralları, kendini kilitleme uyarıları, sürüm kapıları, hostile adlar |
+| `crates/pgt-ddl/tests/acl_roundtrip.rs` | Nesne ve varsayılan yetki yükleyicileri: `apply → load → beklenen`, sabit nokta, NULL ACL, yabancı veren, kolon ACL'leri, aggregate/salt okunur yüklemeler, `FOR ROLE` 42501, PG 18 LARGE OBJECTS |
+| `crates/pgt-ddl/tests/manager.rs` (ACL bölümü) | Yönetici kapıları, 2BP01/42501/42704 ipuçları, uygulama sonrası `ACL_WARNING`, sahte `editable` -> `plan_changed` |
+| `crates/pgt-ddl/tests/logging.rs` | Rol adı/yetki/SQL'in günlüğe düşmediği (yakalama testi) |
+
+**Test rolleri:** roller küme geneldir; test rolleri `pgt_acl_rt_<etiket>_<n>` adını taşır ve nesneler benzersiz önekli şemada (`pgt_ddl_rt_<etiket>`) kurulur. Temizlik (`common::cleanup_acl`) başarısız doğrulamadan sonra bile çalışır: önce veritabanı/şema silinir, sonra her veritabanında `DROP OWNED BY` + `DROP ROLE IF EXISTS` ile roller temizlenir.
