@@ -7,6 +7,8 @@ import {
   findForbidden,
   groupSources,
   packageOf,
+  parseStaticImports,
+  staticClosure,
   parseModulePreloads,
   preloadViolations,
   stripSourceMapComment,
@@ -104,5 +106,36 @@ describe("stripSourceMapComment", () => {
     const withMap = body + "\n//# sourceMappingURL=index-x.js.map";
     expect(stripSourceMapComment(withMap)).toBe(body);
     expect(stripSourceMapComment(body)).toBe(body);
+  });
+});
+
+describe("parseStaticImports", () => {
+  it("küçültülmüş adlandırılmış, yan etkili ve yeniden dışa aktarma içe aktarmalarını bulur", () => {
+    const code = 'import{a as b,c as d}from"./x-1.js";import"./side.js";import e from"./def.js";import*as ns from"./ns.js";export{f}from"./re.js";const z=1;';
+    expect(parseStaticImports(code).sort()).toEqual(["def.js", "ns.js", "re.js", "side.js", "x-1.js"]);
+  });
+  it("dinamik import() ve mapDeps girdilerini yok sayar", () => {
+    const code = 'import{a}from"./x.js";const l=()=>import("./y.js");m.f=["assets/z.js"];import("./w.js").then(()=>1);';
+    expect(parseStaticImports(code)).toEqual(["x.js"]);
+  });
+  it("çok satırlı biçimi ve yinelenenleri ele alır", () => {
+    const code = `import {
+  a,
+  b
+} from "./m.js";
+import { c } from "./m.js";`;
+    expect(parseStaticImports(code)).toEqual(["m.js"]);
+  });
+});
+
+describe("staticClosure", () => {
+  it("geçişli statik bağımlılıkları toplar, döngü ve dinamik bağı atlar", () => {
+    const files = {
+      "e.js": 'import{a}from"./a.js";const d=()=>import("./lazy.js");',
+      "a.js": 'import{b}from"./b.js";import"./e.js";',
+      "b.js": "export const b=1;",
+      "lazy.js": 'import"./never.js";',
+    };
+    expect(staticClosure("e.js", (n) => files[n] ?? null).sort()).toEqual(["a.js", "b.js", "e.js"]);
   });
 });

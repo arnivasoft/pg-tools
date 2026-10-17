@@ -122,3 +122,34 @@ export function preloadViolations(actual, expected) {
 export function stripSourceMapComment(code) {
   return code.replace(/\r?\n\/\/# sourceMappingURL=[^\n]*\s*$/, "");
 }
+
+/** Koddaki statik içe aktarma kaynakları (`import{a as b}from"./x.js"`, `import"./x.js"`, `export{a}from"./x.js"`); dinamik `import()` ve mapDeps girdileri sayılmaz. */
+export function parseStaticImports(code) {
+  const out = [];
+  const re = /(?:^|[;}\s])(?:import|export)\s*(?:[\w$*{][^"'`;]*?\s*from\s*)?(["'])(\.\/[^"']+)\1/g;
+  for (const m of code.matchAll(re)) out.push(m[2].replace(/^\.\//, ""));
+  return [...new Set(out)];
+}
+
+/**
+ * Giriş parçasının statik içe aktarma kapanışı (kendisi dahil). `read(name)` parça kodunu döner (yoksa null);
+ * adlar giriş dizinine göre göreli dosya adlarıdır.
+ */
+export function staticClosure(entryName, read) {
+  const seen = new Set();
+  const stack = [entryName];
+  while (stack.length) {
+    const name = stack.pop();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const code = read(name);
+    if (code == null) continue;
+    for (const dep of parseStaticImports(code)) stack.push(dep);
+  }
+  return [...seen];
+}
+
+/** Önyükleme bütçesi: izin verilen + geçici ad kümesine göre sapmalar. */
+export function allowedPreloads(htmlPreloads, temporary = []) {
+  return [...htmlPreloads, ...temporary];
+}

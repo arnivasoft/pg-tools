@@ -13,6 +13,7 @@ import {
   groupSources,
   parseModulePreloads,
   preloadViolations,
+  staticClosure,
   stripSourceMapComment,
 } from "./bundle-check-lib.mjs";
 
@@ -51,8 +52,36 @@ try {
 
   const mapDeps = countMapDeps(code);
   const preloads = parseModulePreloads(html);
-  const pre = preloadViolations(preloads, budget.htmlPreloads);
-  const forbidden = findForbidden(packages, budget.forbiddenInMain);
+  // Geçici izinli adlar ("Task 5 kaldırır"): beklenmeyen sayılmaz, zorunlu da değildir.
+  const temporary = budget.htmlPreloadsTemporary ?? [];
+  const pre = preloadViolations(preloads, budget.htmlPreloads).filter(
+    (v) => !temporary.some((n) => v === `beklenmeyen: ${n}`),
+  );
+
+  // Açılış kümesi: giriş + statik içe aktarma kapanışı (dinamik import() ve mapDeps hariç). Gerçek açılış maliyeti budur.
+  const entryName = path.basename(entry);
+  const dir = path.dirname(jsPath);
+  const readChunk = (n) => {
+    const f = path.join(dir, n);
+    return fs.existsSync(f) ? fs.readFileSync(f, "utf8") : null;
+  };
+  const startup = staticClosure(entryName, readChunk);
+  const startupRows = [];
+  const startupPackages = new Map();
+  let startupBytes = 0;
+  for (const n of startup) {
+    const c = readChunk(n);
+    if (c === null) continue;
+    const stripped = stripSourceMapComment(c);
+    const bytes = Buffer.byteLength(stripped);
+    startupBytes += bytes;
+    startupRows.push([n, bytes]);
+    const mp = path.join(dir, `${n}.map`);
+    if (!fs.existsSync(mp)) continue;
+    const g = groupSources(attributeSizes(stripped, JSON.parse(fs.readFileSync(mp, "utf8"))));
+    for (const [k, v] of g.packages) startupPackages.set(k, (startupPackages.get(k) ?? 0) + v);
+  }
+  const forbidden = findForbidden(startupPackages, budget.forbiddenInMain);
 
   console.log(`Giriş parçası: ${entry}`);
   console.log(`Ana paket:     ${fmt(mainBytes)} B  (tavan ${fmt(budget.mainMaxBytes)} B)`);
@@ -60,6 +89,8 @@ try {
   console.log(`__vite__mapDeps girdisi: ${mapDeps}`);
   console.log(`modulepreload: ${preloads.join(", ") || "(yok)"}  (beklenen ${budget.htmlPreloads.join(", ")})`);
 
+  console.log(`Açılış kümesi: ${fmt(startupBytes)} B  (tavan ${fmt(budget.startupMaxBytes)} B)  ${startupRows.length} parça`);
+  for (const [n, b] of startupRows.sort((a, b) => b[1] - a[1])) console.log(`${fmt(b)}  ${n}`);
   console.log("\nEn büyük 25 kaynak ve paket (bayt):");
   const rows = [
     ...[...packages].map(([k, v]) => [`npm:${k}`, v]),
@@ -69,10 +100,11 @@ try {
     .slice(0, 25);
   for (const [k, v] of rows) console.log(`${fmt(v)}  ${k}`);
 
-  console.log(`\nYasak paketler (${budget.enforceForbidden ? "zorunlu" : "yalnız bilgi"}): ${forbidden.length || "yok"}`);
+  console.log(`\nYasak paketler, açılış kümesinde (${budget.enforceForbidden ? "zorunlu" : "yalnız bilgi"}): ${forbidden.length || "yok"}`);
   for (const [k, v] of forbidden) console.log(`${fmt(v)}  ${k}`);
 
   if (mainBytes > budget.mainMaxBytes) fail.push(`ana paket tavanı aşıldı: ${mainBytes} > ${budget.mainMaxBytes}`);
+  if (startupBytes > budget.startupMaxBytes) fail.push(`açılış kümesi tavanı aşıldı: ${startupBytes} > ${budget.startupMaxBytes}`);
   if (budget.enforceForbidden && forbidden.length > 0) fail.push(`ana pakette yasak paket var: ${forbidden.map(([k]) => k).join(", ")}`);
   for (const v of pre) fail.push(`preload ihlali: ${v}`);
   if (mapped < mainBytes * 0.9) fail.push(`kaynak haritası eşlemesi yetersiz: ${mapped} < ${(mainBytes * 0.9).toFixed(0)} (harita ana paketle eşleşmiyor olabilir)`);

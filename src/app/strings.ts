@@ -83,7 +83,6 @@ export const t = {
     testOk: (version: string) => `Bağlantı başarılı (PostgreSQL ${version})`,
     save: "Kaydet",
     cancel: "Vazgeç",
-    close: "Kapat",
   },
   password: {
     title: (server: string) => `${server} için parola`,
