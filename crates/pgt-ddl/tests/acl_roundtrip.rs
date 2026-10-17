@@ -313,6 +313,66 @@ async fn function_body(ts: TestServer, tag: &'static str) {
 // veren ayrımı (foreign), RESTRICT 2BP01, CASCADE
 // ================================================================================================================
 
+// ================================================================================================================
+// boş ACL ('{}'): sahip dahil herkesten her yetki kaldırılınca
+// ================================================================================================================
+
+docker_test!(acl_empty_acl_loads_without_rows, empty_body, "empty");
+
+async fn empty_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag, &[]).await;
+    let s = format!("pgt_ddl_rt_{tag}");
+    env.sql(&format!("CREATE SCHEMA {s}; CREATE TABLE {s}.t (a int); CREATE FUNCTION {s}.f() RETURNS int LANGUAGE sql AS 'SELECT 1'")).await;
+    let me = Some(env.me.as_str());
+    for (kind, oid) in [(ObjectKind::Table, env.class_oid(&s, "t").await), (ObjectKind::Function, env.proc_oid(&s, "f", "").await)] {
+        let l = ld(&env, kind, oid).await;
+        // Sahip satırı boş + PUBLIC yok → `aclexplode('{}')` hiç satır vermez.
+        let e = apply(&env, &l, oid, vec![row(me, &[])], false).await;
+        let raw: String = env
+            .admin
+            .query_one("SELECT coalesce((SELECT relacl::text FROM pg_class WHERE oid = $1), (SELECT proacl::text FROM pg_proc WHERE oid = $1))", &[&oid])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(raw, "{}", "{kind:?}");
+        assert!(e.grants.is_empty() && e.foreign.is_empty() && e.explicit && e.editable, "{kind:?}: {e:?}");
+        assert_fixed(&env, &e);
+        // Geri verme de çalışır.
+        apply(&env, &e, oid, vec![owner_all(&env, kind)], false).await;
+    }
+}
+
+// ================================================================================================================
+// aggregate salt okunur (R4a); pencere fonksiyonu düzenlenebilir
+// ================================================================================================================
+
+docker_test!(acl_aggregates_are_read_only, aggregate_body, "aggregate");
+
+async fn aggregate_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag, &[]).await;
+    let s = format!("pgt_ddl_rt_{tag}");
+    env.sql(&format!("CREATE SCHEMA {s}; CREATE AGGREGATE {s}.ag(integer) (sfunc = int4pl, stype = integer)")).await;
+    let oid = env.proc_oid(&s, "ag", "integer").await;
+    let d = ld(&env, ObjectKind::Function, oid).await;
+    assert!(!d.editable && d.unsupported.len() == 1 && d.unsupported[0].starts_with("AGGREGATE"), "{d:?}");
+    assert_fixed(&env, &d);
+    let e = privileges(&env.ctx(false), &d, &AclDef { grants: vec![], ..d.clone() }, false).unwrap_err();
+    assert_eq!(paths(&e), ["object"]);
+    // Sıralı küme aggregate'i (imzası ORDER BY içerir) ve sistem pencere fonksiyonu.
+    let sys = |name: &'static str| {
+        let env = &env;
+        async move {
+            let sql = "SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'pg_catalog' AND p.proname = $1::text ORDER BY p.oid LIMIT 1";
+            env.admin.query_one(sql, &[&name]).await.unwrap().get::<_, u32>(0)
+        }
+    };
+    let pd = ld(&env, ObjectKind::Function, sys("percentile_disc").await).await;
+    assert!(pd.unsupported.iter().any(|u| u.starts_with("AGGREGATE")), "{pd:?}");
+    assert!(pd.signature.as_deref().unwrap_or_default().contains("ORDER BY"), "{pd:?}");
+    let rn = ld(&env, ObjectKind::Function, sys("row_number").await).await;
+    assert_eq!(rn.unsupported, ["sistem şeması"], "pencere fonksiyonu yalnız sistem şeması nedeniyle salt okunur");
+}
+
 docker_test!(acl_foreign_grants_restrict_and_cascade, foreign_body, "foreign");
 
 async fn foreign_body(ts: TestServer, tag: &'static str) {

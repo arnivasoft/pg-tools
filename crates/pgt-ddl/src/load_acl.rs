@@ -7,8 +7,8 @@
 //! - Kolon ACL'leri (yalnız Table/View/MV, açık `attacl`) `columns`'a: kolon `attnum`, alıcı, veren, yetki sırasıyla.
 //! - Adlar ham metin (tırnaklama üreticide); imza `pg_get_function_identity_arguments` (yalnız Function/Procedure).
 //! - Tür uyuşmazlığı (Table istenip relkind 'S', Function istenip procedure, Type istenip domain …) → `NotFound`.
-//! - `unsupported` (doluysa `editable = false`): `sistem şeması`, dizi/multirange/tablo satır tipi, bilinmeyen yetki
-//!   (`yetki <metin>`), denetim karakterli imza (`imza`), geçersiz UTF-8 ad (`INVALID_UTF8_REASON`; adlar kayıplı).
+//! - `unsupported` (doluysa `editable = false`): `sistem şeması`, aggregate (`AGGREGATE …`; R4a), dizi/multirange/tablo
+//!   satır tipi, bilinmeyen yetki (`yetki <metin>`), denetim karakterli imza (`imza`), geçersiz UTF-8 ad (`INVALID_UTF8_REASON`; adlar kayıplı).
 //!
 //! Database bakım bağlantısından okunur (`database_oid` yok sayılır); diğerleri veritabanı gerektirir. Adlar/yetkiler
 //! günlüğe yazılmaz.
@@ -42,6 +42,9 @@ pub const SIGNATURE_REASON: &str = "imza";
 pub const ARRAY_REASON: &str = "dizi tipi (yetkiler öğe tipinden yönetilir)";
 pub const MULTIRANGE_REASON: &str = "MULTIRANGE (yetkiler range tipinden yönetilir)";
 pub const ROW_TYPE_REASON: &str = "tablo satır tipi (yetkiler ilişkiden yönetilir)";
+/// R4a: aggregate salt okunur (Plan 18 `read_only_reason` "AGGREGATE" önekini tanır). Sıralı küme/varsayımsal
+/// aggregate imzası `ORDER BY` içerir ve `ON FUNCTION` hedefinde ayrıştırılamaz; Explorer/Plan 18 de salt okunur sayar.
+pub const AGGREGATE_REASON: &str = "AGGREGATE (aggregate yetkileri buradan düzenlenmez)";
 
 fn not_found() -> Error {
     Error::NotFound("nesne".to_string())
@@ -112,7 +115,7 @@ fn kind_matches(kind: ObjectKind, subkind: &str) -> bool {
         ObjectKind::View => subkind == "v",
         ObjectKind::MaterializedView => subkind == "m",
         ObjectKind::Sequence => subkind == "S",
-        // Aggregate/window da `ON FUNCTION` ile yetkilendirilir.
+        // Aggregate/window da Function olarak yüklenir (aggregate salt okunur: `routine_reason`).
         ObjectKind::Function => matches!(subkind, "f" | "a" | "w"),
         ObjectKind::Procedure => subkind == "p",
         ObjectKind::Type => subkind != "d",
@@ -133,6 +136,11 @@ fn type_reason(subkind: &str, is_array: bool, row_relkind: Option<&str>) -> Opti
     } else {
         None
     }
+}
+
+/// Fonksiyon alt türünün salt okunurluk gerekçesi: aggregate (`prokind 'a'`; PG 10 `proisagg`). Pencere düzenlenebilir.
+fn routine_reason(subkind: &str) -> Option<&'static str> {
+    (subkind == "a").then_some(AGGREGATE_REASON)
 }
 
 /// Nesnenin etkin ACL'sini okur. Yetkisi olmayan tür → `Invalid`; yok ya da tür uyuşmazlığı → `NotFound`;
@@ -156,7 +164,9 @@ pub async fn load_acl(mgr: &ConnectionManager, server: Uuid, database_oid: impl 
         .run(server, target, move |c| async move {
             let params: [&(dyn ToSql + Sync); 1] = [&oid];
             let head = c.client.query(sql.pick(PgVersion(c.version_num())), &params).await?;
-            let cols = if with_columns && !head.is_empty() { c.client.query(COLUMNS_SQL, &params).await? } else { Vec::new() };
+            // Kolon yetkileri yalnız Table/View/MV ve tür eşleştiyse (uyuşmazlık NotFound döner; boşuna sorgu yok).
+            let matched = head.first().is_some_and(|h| kind_matches(kind, &h.get::<_, String>("subkind")));
+            let cols = if with_columns && matched { c.client.query(COLUMNS_SQL, &params).await? } else { Vec::new() };
             Ok((head, cols))
         })
         .await?;
@@ -170,6 +180,11 @@ pub async fn load_acl(mgr: &ConnectionManager, server: Uuid, database_oid: impl 
     note_invalid_utf8(&[&head, &cols], &mut unsupported);
     if h.get::<_, bool>("is_system") {
         unsupported.push(SYSTEM_SCHEMA_REASON.to_string());
+    }
+    if kind == ObjectKind::Function
+        && let Some(r) = routine_reason(&subkind)
+    {
+        unsupported.push(r.to_string());
     }
     if kind == ObjectKind::Type {
         let row_relkind: Option<String> = h.get("row_relkind");
@@ -186,12 +201,14 @@ pub async fn load_acl(mgr: &ConnectionManager, server: Uuid, database_oid: impl 
     let entries = head
         .iter()
         .filter_map(|r| {
-            let privilege: Option<String> = r.get("privilege");
+            // Boş ACL ('{}'): `aclexplode` satır vermez; LEFT JOIN'in tek satırında tüm girdi sütunları NULL'dur →
+            // önce yetki okunur, diğer (NULL olamayan) sütunlara dokunulmaz.
+            let privilege: String = r.get::<_, Option<String>>("privilege")?;
             Some(Entry {
                 grantee: lossy_opt(r, "grantee"),
                 grantor: lossy(r, "grantor"),
                 by_owner: r.get("by_owner"),
-                privilege: privilege?,
+                privilege,
                 grantable: r.get("grantable"),
             })
         })
@@ -303,6 +320,15 @@ mod tests {
         assert!(kind_matches(K::Type, "e") && !kind_matches(K::Type, "d"));
         assert!(kind_matches(K::Domain, "d") && !kind_matches(K::Domain, "e"));
         assert!(!kind_matches(K::Index, "i"));
+    }
+
+    #[test]
+    fn aggregates_read_only_windows_editable() {
+        let r = routine_reason("a").unwrap();
+        assert!(r.starts_with("AGGREGATE"), "{r}");
+        for k in ["f", "w", "p"] {
+            assert_eq!(routine_reason(k), None, "{k}");
+        }
     }
 
     #[test]
