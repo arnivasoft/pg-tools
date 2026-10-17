@@ -1,0 +1,7 @@
+---
+source: crates/pgt-ddl/src/build/acl.rs
+expression: render(&p)
+---
+[DataLoss] REVOKE SELECT ON TABLE s.t FROM r CASCADE  -- Alıcının bu yetkiyle başkalarına verdiği yetkiler de geri alınır.
+[DataLoss] REVOKE GRANT OPTION FOR INSERT ON TABLE s.t FROM r CASCADE  -- Alıcının bu yetkiyle başkalarına verdiği yetkiler de geri alınır.
+[Safe] GRANT SELECT ON TABLE s.t TO s

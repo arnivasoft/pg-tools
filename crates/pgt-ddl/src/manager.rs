@@ -14,6 +14,11 @@
 //! çalıştırma listesinde istemci tarafı SCRAM doğrulayıcısıyla kurulur; `PlanView`'e, özete ve günlüğe girmez).
 //! Plan istemciden alınmaz; her seferinde tanımdan yeniden üretilir. `preview` nesne denetimi yapmaz.
 //!
+//! Yetki istekleri (Plan 20): (2c) istek biçimi (`!acl_supported` → Karar 1 iletisi; `object.kind ≠ old.kind` ya da
+//! kapsam rolü ≠ `old.role` → `INVALID_DEF`) salt okunur kapısından önce; (2b) `editable = false` ACL/varsayılan ACL de
+//! reddedilir; (4) `old` ilgili yükleyicinin (`load_acl`/`load_default_acl`) çıktısına birebir eşit olmalı; (4a)
+//! uygulanmaz. Başarılı uygulamadan sonra yetkiler yeniden yüklenir; `grants` istenenden farklıysa `ACL_WARNING`.
+//!
 //! Günlük yalnızca işlem/nesne türü, ifade sayısı, süre ve sonuç kodunu içerir; SQL, ad, değer ve parola asla.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -26,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
+use crate::acl::{AclDef, AclGrant, DefaultAclDef, DefaultAclScope, acl_supported, default_privileges_for, privileges_for, sort_grants};
 use crate::apply::{self, CancelMap, ExecSql, ExecStatement, RunResult};
 use crate::build::{self, BuildCtx, role};
 use crate::error_codes::{
@@ -60,6 +66,10 @@ pub enum PlanRequest {
         #[serde(default)]
         force: bool,
     },
+    /// Nesne yetkileri (GRANT/REVOKE; Plan 20). `old` yüklenen etkin ACL'ye eşit olmalı (bkz. `Alter`).
+    Privileges { object: ObjectRef, old: AclDef, new: AclDef, cascade: bool },
+    /// Varsayılan yetkiler (ALTER DEFAULT PRIVILEGES; Plan 20). Veritabanı kapsamlıdır.
+    DefaultPrivileges { scope: DefaultAclScope, old: DefaultAclDef, new: DefaultAclDef },
 }
 
 impl PlanRequest {
@@ -68,6 +78,8 @@ impl PlanRequest {
             PlanRequest::Create { .. } => "create",
             PlanRequest::Alter { .. } => "alter",
             PlanRequest::Drop { .. } => "drop",
+            PlanRequest::Privileges { .. } => "privileges",
+            PlanRequest::DefaultPrivileges { .. } => "default_privileges",
         }
     }
 
@@ -75,6 +87,9 @@ impl PlanRequest {
         match self {
             PlanRequest::Create { def, .. } | PlanRequest::Drop { def, .. } => def.kind(),
             PlanRequest::Alter { new, .. } => new.kind(),
+            PlanRequest::Privileges { object, .. } => object.kind,
+            // Veritabanı kapsamlı vekil: hedef çözümü `Schema` ile aynı kuraldır (veritabanı OID'i gerekir).
+            PlanRequest::DefaultPrivileges { .. } => ObjectKind::Schema,
         }
     }
 }
@@ -282,6 +297,19 @@ const REDACTED_FAILURE_MESSAGE: &str = "Parola ifadesi uygulanamadı.";
 /// kaydedilebilir. Yeniden yüklenen üyelikler istenenden farklıysa.
 pub const MEMBERSHIP_WARNING: &str = "Üyelikler uygulama sonrasında istenenden farklı: bazı GRANT/REVOKE işlemleri başka bir \
      grantor'a ait üyelikleri etkilemedi (PG 16+). Rolü yeniden yükleyip kontrol edin.";
+/// Plan 20 Karar 14: yeniden yüklenen yetkiler (`grants`) istenenden farklı.
+pub const ACL_WARNING: &str = "Yetkiler uygulama sonrasında istenenden farklı: bağlı rol nesnenin sahibi değilse yetkiler onun \
+     adıyla kaydedilir ya da bazı GRANT/REVOKE işlemleri etkisiz kalır (PG uyarısı). Yetkileri yeniden yükleyip kontrol edin.";
+/// Plan 20 Karar 15: bağımlı yetkiler (2BP01; PG'nin "Use CASCADE" ipucunun yerine arayüzdeki seçenek).
+pub const ACL_DEPENDENTS_HINT: &str =
+    "Alıcı bu yetkiyi başkalarına devretmiş; 'Bağımlı yetkilerle birlikte geri al (CASCADE)' seçin.";
+/// Plan 20 Karar 15: nesne yetkisi verme/geri alma yetkisizliği (42501).
+pub const ACL_PRIVILEGE_HINT: &str = "Yetki vermek/geri almak için nesnenin sahibi, sahip rolün üyesi ya da ilgili yetkide \
+     GRANT OPTION sahibi olmak gerekir.";
+/// Plan 20 Karar 15: `ALTER DEFAULT PRIVILEGES FOR ROLE` yetkisizliği (42501).
+pub const DEFAULT_ACL_PRIVILEGE_HINT: &str = "FOR ROLE için o rolün üyesi (ya da süper kullanıcı) olmak gerekir.";
+/// Plan 20 Karar 15: alıcı rol yok (42704).
+pub const ACL_ROLE_MISSING_HINT: &str = "Alıcı rol bulunamadı; rol listesini yenileyin.";
 
 /// Çağıran gelecek düşerse sunucudaki ifadeyi iptal eder (`armed` yalnızca çalıştırıcı bitince kapanır).
 pub(crate) struct CancelOnDrop {
@@ -333,12 +361,33 @@ fn routine_identity_changed(kind: ObjectKind, a: &FunctionDef, b: &FunctionDef) 
     (&a.schema, &a.name) != (&b.schema, &b.name) || (b.recreate && !build::routine::needs_recreate(kind, a, b).is_empty())
 }
 
+/// (2c) Yetki isteğinin biçimi (Plan 20 Karar 1, 13): bağlantıdan önce. Yetkisi olmayan tür → Karar 1 iletisi;
+/// `object.kind ≠ old.kind` ya da (varsayılan yetkilerde) verilen kapsam rolü ≠ `old.role` → `INVALID_DEF`.
+fn request_shape_refusal(req: &PlanRequest) -> Option<&'static str> {
+    match req {
+        PlanRequest::Privileges { object, .. } if !acl_supported(object.kind) => Some(crate::load_acl::UNSUPPORTED_KIND_MSG),
+        PlanRequest::Privileges { object, old, .. } if object.kind != old.kind => Some(INVALID_DEF),
+        PlanRequest::DefaultPrivileges { scope, old, .. } if scope.role.as_ref().is_some_and(|r| *r != old.role) => Some(INVALID_DEF),
+        _ => None,
+    }
+}
+
 /// Salt okunur kapısı (Plan 18 Karar 4): `editable = false` nesnede alter/drop, bağlantı açılmadan kodsuz `invalid`.
 /// Gerekçe istemcinin gönderdiği (yüklenmiş) tanımın ilk `unsupported` girdisinden genel metindir; ad/değer içermez.
 /// İstemci `editable`'ı değiştirse bile nesne denetimi (4) yüklenen tanımla eşitliği ister, üretici de reddeder.
+/// Plan 20: yetki isteklerinde `old` (ACL / varsayılan ACL) aynı kurala tabidir; varsayılan yetkilerin LARGE OBJECTS
+/// bilgi notu gerekçe sayılmaz (tek başına `editable`'ı kapatmaz).
 fn read_only_refusal(req: &PlanRequest) -> Option<String> {
+    let refuse = |editable: bool, first: Option<&String>| {
+        (!editable).then(|| format!("{READ_ONLY_PREFIX}{}", read_only_reason(first.map(String::as_str))))
+    };
     let def = match req {
         PlanRequest::Create { .. } => return None,
+        PlanRequest::Privileges { old, .. } => return refuse(old.editable, old.unsupported.first()),
+        PlanRequest::DefaultPrivileges { old, .. } => {
+            let first = old.unsupported.iter().find(|u| *u != crate::load_acl::LARGE_OBJECTS_REASON);
+            return refuse(old.editable, first);
+        }
         PlanRequest::Alter { old, .. } => old,
         PlanRequest::Drop { def, .. } => def,
     };
@@ -349,7 +398,7 @@ fn read_only_refusal(req: &PlanRequest) -> Option<String> {
         ObjectDef::Domain(d) => (d.editable, &d.unsupported),
         _ => return None,
     };
-    (!editable).then(|| format!("{READ_ONLY_PREFIX}{}", read_only_reason(unsupported.first().map(String::as_str))))
+    refuse(editable, unsupported.first())
 }
 
 /// Yükleyicinin `unsupported` girdisini (bazıları ad/değer taşır: `EXTENSION <ad>`, `tip <tip>`, `CHECK <ad> …`) ad ve
@@ -358,7 +407,7 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
     const GENERIC: &str = "desteklenmeyen özellik";
     let Some(e) = entry else { return GENERIC };
     // (önek, gerekçe): ilk eşleşen kazanır; sabit girdiler kendi metniyle.
-    const PREFIXES: [(&str, &str); 33] = [
+    const PREFIXES: [(&str, &str); 39] = [
         ("LANGUAGE ", "desteklenmeyen dil (C/internal)"),
         ("BEGIN ATOMIC", "BEGIN ATOMIC (SQL standart gövde)"),
         ("AGGREGATE", "aggregate fonksiyonu"),
@@ -391,6 +440,13 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
         ("PSEUDO TYPE", "PSEUDO TYPE"),
         ("CHECK ", "desteklenmeyen CHECK kısıtı"),
         ("NOT NULL ", "doğrulanmamış NOT NULL kısıtı"),
+        // Plan 20 yetki yükleyicileri (`load_acl`): `yetki <metin>`, `imza`, `varsayılan yetki türü <harf>`.
+        ("yetki ", "bilinmeyen yetki"),
+        ("imza", "imza çözülemedi"),
+        ("varsayılan yetki türü ", "desteklenmeyen varsayılan yetki türü"),
+        ("veren rolden farklı", "veren rolden farklı (beklenmeyen varsayılan yetki girdisi)"),
+        ("üreticinin kabul etmediği", "üreticinin kabul etmediği ad ya da şema"),
+        ("geçerli UTF-8 olmayan ad", "geçerli UTF-8 olmayan ad"),
         // Yükleyicinin `'<kod>' türü …` biçimleri (ilişki/tip/kısıt türü).
         ("'", ""),
     ];
@@ -519,11 +575,18 @@ fn materialize_for<'a>(statements: &'a [Statement], role: Option<&str>, secret: 
 /// İfadeye ve SQLSTATE'e göre ipucu (Karar 1/8/9, inceleme m-2: kod tek başına yetmez, başarısız ifade de eşleşmeli).
 fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> Option<&'static str> {
     let routine = matches!(kind, ObjectKind::Function | ObjectKind::Procedure);
+    let acl_op = op == "privileges" || op == "default_privileges";
+    // 42704 rol eksikliği yalnız yetki ifadesinde; Type/Domain'de aynı kod nesnenin kaybolması da olabilir (yeniden
+    // yükleme eşitliğinden sonra yarış) — orada yanıltıcı ipucu verilmez, PG iletisi yeterlidir.
+    let role_missing = acl_op
+        && !matches!(kind, ObjectKind::Type | ObjectKind::Domain)
+        && ["GRANT ", "REVOKE ", "ALTER DEFAULT PRIVILEGES "].iter().any(|p| sql.starts_with(p));
     Some(match (code, kind) {
         ("2BP01", ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Type | ObjectKind::Domain) if op == "drop" => {
             VIEW_DEPENDENTS_HINT
         }
-        ("42809", _) if routine => ROUTINE_KIND_HINT,
+        // Yeniden kurma ipucu yalnız tanım işlemlerinde (yetki ifadesinde 42809 yeniden kurmayla çözülmez).
+        ("42809", _) if routine && !acl_op => ROUTINE_KIND_HINT,
         ("0A000", ObjectKind::Type) if sql.starts_with("ALTER TYPE ") && sql.contains(" ALTER ATTRIBUTE ") => TYPE_COLUMN_RETYPE_HINT,
         // Fonksiyon tanımı (CREATE [OR REPLACE]) LEAKPROOF isterken yetki hatası; sahip/yorum ifadeleri genel ipucu alır.
         // Ödünleşim: aynı CREATE ifadesindeki başka bir 42501 (ör. şemada CREATE yetkisi yok, dil USAGE yok) da
@@ -536,6 +599,10 @@ fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> 
         ("55006", ObjectKind::Database) if sql.starts_with("CREATE DATABASE ") => TEMPLATE_IN_USE_HINT,
         ("55006", ObjectKind::Database) if sql.starts_with("DROP DATABASE ") && sql.ends_with(" WITH (FORCE)") => FORCE_LIMITS_HINT,
         ("55006", ObjectKind::Database) => DATABASE_IN_USE_HINT,
+        // Plan 20 Karar 15: yetki istekleri işleme (`op`) göre; genel 42501 kolundan önce.
+        ("42501", _) if op == "privileges" => ACL_PRIVILEGE_HINT,
+        ("42501", _) if op == "default_privileges" => DEFAULT_ACL_PRIVILEGE_HINT,
+        ("42704", _) if role_missing => ACL_ROLE_MISSING_HINT,
         ("42501", _) => PRIVILEGE_HINT,
         ("2BP01", ObjectKind::Role) => ROLE_DEPENDENTS_HINT,
         // Düzenlemedeki DROP (yeniden kurma) CASCADE sunmaz; yalnızca silme akışında CASCADE önerilir.
@@ -554,6 +621,8 @@ fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> 
 fn override_hint_for(kind: ObjectKind, op: &str, sql: &str, code: &str, pg_hint: bool) -> Option<&'static str> {
     let routine = matches!(kind, ObjectKind::Function | ObjectKind::Procedure);
     Some(match (code, kind) {
+        // Plan 20 Karar 15: PG bağımlı yetkilerde "Use CASCADE to revoke them too." der; arayüzdeki karşılığı söylenir.
+        ("2BP01", _) if op == "privileges" => ACL_DEPENDENTS_HINT,
         ("2BP01", _) if routine && op == "alter" && (sql.starts_with("DROP FUNCTION ") || sql.starts_with("DROP PROCEDURE ")) => {
             ROUTINE_REBUILD_DEPENDENTS_HINT
         }
@@ -617,6 +686,53 @@ fn memberships_differ(intended: &RoleDef, loaded: &RoleDef) -> bool {
     a != b
 }
 
+/// Karşılaştırma biçimi: boş satırlar (alıcının tüm yetkileri kaldırıldı) düşer, satırlar/yetkiler kanonik sırada.
+fn canonical_grants(grants: &[AclGrant], order: &[crate::acl::Privilege]) -> Vec<AclGrant> {
+    let mut v: Vec<AclGrant> = grants.iter().filter(|g| !g.privileges.is_empty()).cloned().collect();
+    sort_grants(&mut v, order);
+    v
+}
+
+/// Plan 20 Karar 14: uygulama sonrası yeniden yüklenip karşılaştırılacak istenen `grants` (kanonik).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VerifyAcl {
+    /// Nesne ACL'si: nesne ve istenen `grants`.
+    Object(ObjectRef, Vec<AclGrant>),
+    /// Varsayılan yetkiler: kapsam ve bölüm sırasıyla istenen `grants`.
+    Default(DefaultAclScope, Vec<Vec<AclGrant>>),
+}
+
+impl VerifyAcl {
+    fn of(req: &PlanRequest) -> Option<Self> {
+        // `170000`: yalnız kanonik sıra için tüm sürümlerin kümesi (MAINTAIN dahil); sürüm kapısı değildir.
+        match req {
+            PlanRequest::Privileges { object, new, .. } => {
+                Some(VerifyAcl::Object(*object, canonical_grants(&new.grants, privileges_for(object.kind, 170000))))
+            }
+            PlanRequest::DefaultPrivileges { scope, new, .. } => Some(VerifyAcl::Default(
+                scope.clone(),
+                new.sections.iter().map(|s| canonical_grants(&s.grants, default_privileges_for(s.object_type, 170000))).collect(),
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// Yeniden yüklenen nesne ACL'sinin `grants`'ı istenenden farklı mı (`foreign`/`columns` karşılaştırılmaz: sahip
+/// olmayan bağlı rolün GRANT'ı `foreign`'a düşer ve burada fark olarak görünür).
+fn acl_grants_differ(intended: &[AclGrant], loaded: &AclDef) -> bool {
+    // `170000`: yalnız kanonik sıra (tüm sürümlerin kümesi).
+    intended != canonical_grants(&loaded.grants, privileges_for(loaded.kind, 170000))
+}
+
+/// Yeniden yüklenen varsayılan yetkilerin bölüm `grants`'ı istenenden farklı mı (`baseline` karşılaştırılmaz).
+fn default_acl_grants_differ(intended: &[Vec<AclGrant>], loaded: &DefaultAclDef) -> bool {
+    // `170000`: yalnız kanonik sıra (tüm sürümlerin kümesi).
+    let got: Vec<Vec<AclGrant>> =
+        loaded.sections.iter().map(|s| canonical_grants(&s.grants, default_privileges_for(s.object_type, 170000))).collect();
+    intended != got.as_slice()
+}
+
 const SCHEMA_NAME_SQL: &str = "SELECT nspname::text AS name FROM pg_namespace WHERE oid = $1";
 const TABLE_NAME_SQL: &str = "SELECT n.nspname::text AS schema, c.relname::text AS name \
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1 AND c.relkind IN ('r', 'm', 'p')";
@@ -652,6 +768,8 @@ struct Job {
     release: Vec<u32>,
     /// Uygulama sonrası üyelikleri denetlenecek rol tanımı (Role create/alter).
     verify_role: Option<RoleDef>,
+    /// Uygulama sonrası yetkileri denetlenecek istek (Plan 20 Karar 14).
+    verify_acl: Option<VerifyAcl>,
     /// Hata ipucu bağlamı (istekten).
     hint: HintCtx,
 }
@@ -697,6 +815,10 @@ impl DdlManager {
         if guard.locked {
             return Err(Error::Invalid(LOCKED_MESSAGE.into()));
         }
+        // (2c) yetki isteğinin biçimi (Plan 20): bağlantıdan önce.
+        if let Some(m) = request_shape_refusal(req) {
+            return Err(Error::Invalid(m.into()));
+        }
         // (2b) salt okunur nesne (Plan 18 Karar 4): alter/drop, bağlantı ve plan üretiminden önce kodsuz `invalid`.
         if let Some(m) = read_only_refusal(req) {
             return Err(Error::Invalid(m));
@@ -713,14 +835,26 @@ impl DdlManager {
         }
         // (4) nesne denetimi: istemcinin `old`/`def`'i sunucudaki güncel tanımla birebir aynı olmalı (sunucu kapsamlı
         // türler bakım bağlantısında yüklenir; rolde yüklü parola niyeti her zaman `keep`'tir).
-        if let Some((object, expected)) = object_check(req) {
-            if object.kind != expected.kind() {
-                return Err(Error::Invalid(INVALID_DEF.into()));
+        // Yetki isteklerinde `old` ilgili yükleyicinin çıktısıyla karşılaştırılır (`viewer` dahil).
+        let unchanged = match object_check(req) {
+            None => true,
+            Some(Expected::Def(object, expected)) => {
+                if object.kind != expected.kind() {
+                    return Err(Error::Invalid(INVALID_DEF.into()));
+                }
+                load::load(&self.mgr, server, database_oid, object).await? == *expected
             }
-            let loaded = load::load(&self.mgr, server, database_oid, object).await?;
-            if loaded != *expected {
-                return Err(Error::Invalid(PLAN_CHANGED.into()));
+            Some(Expected::Acl(object, expected)) => {
+                crate::load_acl::load_acl(&self.mgr, server, database_oid, object).await? == *expected
             }
+            Some(Expected::DefaultAcl(scope, expected)) => {
+                // (2a) veritabanı kapsamlı hedefi doğruladı.
+                let Target::Database(db) = target else { return Err(Error::Invalid(INVALID_DEF.into())) };
+                crate::load_acl::load_default_acl(&self.mgr, server, db, scope.clone()).await? == *expected
+            }
+        };
+        if !unchanged {
+            return Err(Error::Invalid(PLAN_CHANGED.into()));
         }
         // (4a) Oturumun gerçekten bağlı olduğu bakım veritabanı da (kayıt bağlantıdan sonra değişmiş olabilir; inceleme
         // G-7) kayıttaki ad da korunur.
@@ -763,9 +897,10 @@ impl DdlManager {
             lock_timeout_ms: opts.lock_timeout_ms,
             apply_id: opts.apply_id,
             created,
-            object: object_check(req).map(|(o, _)| o),
+            object: object_check(req).and_then(|e| e.object()),
             release: self.databases_to_release(server, req).await,
             verify_role,
+            verify_acl: VerifyAcl::of(req),
             hint: HintCtx::of(req),
         };
         self.execute(server, &view.statements, exec, job).await
@@ -774,7 +909,7 @@ impl DdlManager {
     /// Bağlantı açar, ifadeleri blok blok çalıştırır, sonucu günlüğe (yalnızca tür/sayı/süre/sonuç) yazar.
     /// `statements` plandaki (gizlenmiş) metinlerdir: ipucu/konum kararları bunlara bakar; `exec` çalıştırılan listedir.
     async fn execute(&self, server: Uuid, statements: &[Statement], exec: Vec<ExecStatement<'_>>, job: Job) -> Result<ApplyOutcome> {
-        let Job { op, kind, target, lock_timeout_ms, apply_id, created, object, release, verify_role, hint } = job;
+        let Job { op, kind, target, lock_timeout_ms, apply_id, created, object, release, verify_role, verify_acl, hint } = job;
         let rt = tokio::runtime::Handle::current();
         *self.rt.lock().unwrap_or_else(PoisonError::into_inner) = Some(rt.clone());
         let started = Instant::now();
@@ -834,6 +969,12 @@ impl DdlManager {
                     tracing::info!(op, ?kind, outcome = "membership_mismatch", "DDL sonrası üyelik farkı");
                     warnings.push(MEMBERSHIP_WARNING.to_string());
                 }
+                if let Some(v) = &verify_acl
+                    && self.acl_mismatch(server, target, v).await
+                {
+                    tracing::info!(op, ?kind, outcome = "acl_mismatch", "DDL sonrası yetki farkı");
+                    warnings.push(ACL_WARNING.to_string());
+                }
                 ApplyOutcome::Applied { statements: count, elapsed_ms, created, warnings: (!warnings.is_empty()).then_some(warnings) }
             }
             RunResult::Failed { failed_index, committed, error, outcome_unknown, position } => {
@@ -886,9 +1027,30 @@ impl DdlManager {
             object: None,
             release: vec![],
             verify_role: None,
+            verify_acl: None,
             hint: HintCtx::default(),
         };
         self.execute(server, statements, exec, job).await
+    }
+
+    /// Plan 20 Karar 14: yetkileri uygulama hedefinden yeniden yükleyip istenenle karşılaştırır. En iyi çaba:
+    /// yeniden yükleme hatası uyarı üretmez (`false`).
+    async fn acl_mismatch(&self, server: Uuid, target: Target, v: &VerifyAcl) -> bool {
+        let db = match target {
+            Target::Database(db) => Some(db),
+            Target::Maintenance => None,
+        };
+        match v {
+            VerifyAcl::Object(object, want) => crate::load_acl::load_acl(&self.mgr, server, db, *object)
+                .await
+                .is_ok_and(|loaded| acl_grants_differ(want, &loaded)),
+            VerifyAcl::Default(scope, want) => match db {
+                Some(db) => crate::load_acl::load_default_acl(&self.mgr, server, db, scope.clone())
+                    .await
+                    .is_ok_and(|loaded| default_acl_grants_differ(want, &loaded)),
+                None => false,
+            },
+        }
     }
 
     /// Süren uygulamayı iptal eder; bilinmeyen/bitmiş kimlik → `Ok` (idempotent). Kimlik henüz kayıtlı değilse
@@ -1013,6 +1175,20 @@ impl DdlManager {
     /// Tanımı yükler (Database/Role için `database_oid` yok sayılır; diğerlerinde `None` → `Invalid`).
     pub async fn load(&self, server: Uuid, database_oid: impl Into<Option<u32>> + Send, obj: ObjectRef) -> Result<ObjectDef> {
         load::load(&self.mgr, server, database_oid, obj).await
+    }
+
+    /// Nesnenin etkin ACL'si (Plan 20; Database için `database_oid` yok sayılır; diğerlerinde `None` → `Invalid`).
+    pub async fn load_acl(&self, server: Uuid, database_oid: impl Into<Option<u32>> + Send, obj: ObjectRef) -> Result<AclDef> {
+        let r = crate::load_acl::load_acl(&self.mgr, server, database_oid, obj).await;
+        tracing::debug!(op = "load_acl", kind = ?obj.kind, outcome = if r.is_ok() { "ok" } else { "error" }, "DDL yetki yüklemesi");
+        r
+    }
+
+    /// Bir rolün (genel ya da şema kapsamlı) varsayılan yetkileri (Plan 20; veritabanı kapsamlı).
+    pub async fn load_default_acl(&self, server: Uuid, database_oid: u32, scope: DefaultAclScope) -> Result<DefaultAclDef> {
+        let r = crate::load_acl::load_default_acl(&self.mgr, server, database_oid, scope).await;
+        tracing::debug!(op = "load_default_acl", outcome = if r.is_ok() { "ok" } else { "error" }, "DDL varsayılan yetki yüklemesi");
+        r
     }
 
     /// Açılır liste; `database_oid = None` yalnızca sunucu genelindeki isteklerde (`LookupRequest::server_wide`).
@@ -1302,12 +1478,34 @@ impl DdlManager {
     }
 }
 
-/// Sunucudaki güncel tanımla karşılaştırılacak (nesne, istemci tanımı); `Create` için yok.
-fn object_check(req: &PlanRequest) -> Option<(ObjectRef, &ObjectDef)> {
+/// (4) Sunucudaki güncel tanımla karşılaştırılacak istemci tanımı ve onu üreten yükleyicinin girdisi.
+enum Expected<'a> {
+    /// Alter/Drop: `load::load(object)`.
+    Def(ObjectRef, &'a ObjectDef),
+    /// Privileges: `load_acl(object)`.
+    Acl(ObjectRef, &'a AclDef),
+    /// DefaultPrivileges: `load_default_acl(scope)`.
+    DefaultAcl(&'a DefaultAclScope, &'a DefaultAclDef),
+}
+
+impl Expected<'_> {
+    /// Değiştirilen nesne (varsayılan yetkilerde yok).
+    fn object(&self) -> Option<ObjectRef> {
+        match self {
+            Expected::Def(o, _) | Expected::Acl(o, _) => Some(*o),
+            Expected::DefaultAcl(..) => None,
+        }
+    }
+}
+
+/// Nesne denetiminin girdisi; `Create` için yok.
+fn object_check(req: &PlanRequest) -> Option<Expected<'_>> {
     match req {
         PlanRequest::Create { .. } => None,
-        PlanRequest::Alter { object, old, .. } => Some((*object, old)),
-        PlanRequest::Drop { object, def, .. } => Some((*object, def)),
+        PlanRequest::Alter { object, old, .. } => Some(Expected::Def(*object, old)),
+        PlanRequest::Drop { object, def, .. } => Some(Expected::Def(*object, def)),
+        PlanRequest::Privileges { object, old, .. } => Some(Expected::Acl(*object, old)),
+        PlanRequest::DefaultPrivileges { scope, old, .. } => Some(Expected::DefaultAcl(scope, old)),
     }
 }
 
@@ -1315,6 +1513,8 @@ fn object_check(req: &PlanRequest) -> Option<(ObjectRef, &ObjectDef)> {
 pub(crate) fn plan_view(req: &PlanRequest, version_num: u32) -> PlanView {
     let ctx = |concurrently| BuildCtx { version_num, concurrently };
     PlanView::from_build(match req {
+        PlanRequest::Privileges { old, new, cascade, .. } => build::acl::privileges(&ctx(false), old, new, *cascade),
+        PlanRequest::DefaultPrivileges { old, new, .. } => build::default_acl::default_privileges(&ctx(false), old, new),
         PlanRequest::Create { def, concurrently } => build::create(def, &ctx(*concurrently)),
         PlanRequest::Alter { old, new, .. } => build::alter(old, new, &ctx(false)),
         PlanRequest::Drop { def, cascade, force, .. } => {
@@ -1339,6 +1539,247 @@ mod tests {
 
     fn schema(name: &str) -> ObjectDef {
         ObjectDef::Schema(SchemaDef { name: name.into(), owner: None, comment: None })
+    }
+
+    fn acl_def(kind: ObjectKind) -> AclDef {
+        AclDef {
+            kind,
+            schema: None,
+            name: "d".into(),
+            signature: None,
+            owner: "o".into(),
+            viewer: "o".into(),
+            explicit: false,
+            grants: vec![],
+            foreign: vec![],
+            columns: vec![],
+            editable: true,
+            unsupported: vec![],
+        }
+    }
+
+    fn dacl_def(role: &str) -> DefaultAclDef {
+        DefaultAclDef { role: role.into(), schema: None, viewer: role.into(), sections: vec![], editable: true, unsupported: vec![] }
+    }
+
+    fn privileges_req(object_kind: ObjectKind, old: AclDef, new: AclDef) -> PlanRequest {
+        PlanRequest::Privileges { object: ObjectRef { kind: object_kind, oid: 1 }, old, new, cascade: false }
+    }
+
+    #[test]
+    fn privilege_requests_op_kind_plan_and_object_check() {
+        let p = privileges_req(ObjectKind::Database, acl_def(ObjectKind::Database), acl_def(ObjectKind::Database));
+        assert_eq!((p.op(), p.kind()), ("privileges", ObjectKind::Database));
+        let scope = DefaultAclScope { role: None, schema_oid: None };
+        let d = PlanRequest::DefaultPrivileges { scope: scope.clone(), old: dacl_def("r"), new: dacl_def("r") };
+        assert_eq!((d.op(), d.kind()), ("default_privileges", ObjectKind::Schema));
+        for r in [&p, &d] {
+            assert!(read_only_refusal(r).is_none() && request_shape_refusal(r).is_none());
+            assert_eq!(HintCtx::of(r), HintCtx::default());
+        }
+        // Nesne denetimi yetki isteklerinde ilgili yükleyicinin tanımıyla yapılır; `created`/üyelik denetimi yok.
+        assert!(matches!(object_check(&p), Some(Expected::Acl(o, old)) if o.kind == ObjectKind::Database && *old == acl_def(ObjectKind::Database)));
+        assert!(matches!(object_check(&d), Some(Expected::DefaultAcl(s, old)) if *s == scope && *old == dacl_def("r")));
+        assert_eq!(object_check(&p).and_then(|e| e.object()).map(|o| o.oid), Some(1));
+        assert_eq!(object_check(&d).and_then(|e| e.object()), None);
+        // Nesne yetkileri üreticiye bağlı: fark yok → boş plan; yeni alıcı → GRANT; kimlik değişimi → `object`.
+        let v = plan_view(&p, 170000);
+        assert!(v.statements.is_empty() && v.errors.is_empty() && v.empty, "{v:?}");
+        use crate::acl::{AclGrant, Privilege, PrivilegeGrant};
+        let mut granted = acl_def(ObjectKind::Database);
+        granted.grants.push(AclGrant { grantee: None, privileges: vec![PrivilegeGrant { privilege: Privilege::Connect, grant_option: false }] });
+        let g = PlanRequest::Privileges { object: ObjectRef { kind: ObjectKind::Database, oid: 1 }, old: acl_def(ObjectKind::Database), new: granted, cascade: true };
+        let v = plan_view(&g, 170000);
+        assert_eq!(v.statements.iter().map(|s| s.sql.as_str()).collect::<Vec<_>>(), ["GRANT CONNECT ON DATABASE d TO PUBLIC"]);
+        let renamed = privileges_req(ObjectKind::Database, acl_def(ObjectKind::Database), AclDef { name: "e".into(), ..acl_def(ObjectKind::Database) });
+        assert_eq!(plan_view(&renamed, 170000).errors[0].path, "object");
+        // Bölümsüz varsayılan yetki tanımı üreticide alan hatasıdır.
+        let v = plan_view(&d, 170000);
+        assert!(v.statements.is_empty() && v.errors.len() == 1);
+        // Uygulama sonrası denetim: istenen `grants` kanonik biçimde saklanır.
+        assert!(matches!(VerifyAcl::of(&g), Some(VerifyAcl::Object(o, want)) if o.oid == 1 && want.len() == 1));
+        assert!(matches!(VerifyAcl::of(&d), Some(VerifyAcl::Default(s, want)) if s == scope && want.is_empty()));
+        assert!(VerifyAcl::of(&PlanRequest::Create { def: schema("a"), concurrently: false }).is_none());
+    }
+
+    /// Yetki isteklerinin kapıları bağlantı açmadan çalışır (bağlantısız yönetici: kapı geçilirse `not_connected`).
+    #[tokio::test]
+    async fn privilege_gates_refuse_before_connecting() {
+        use crate::error_codes::ddl_payload;
+        use pgt_core::config::ServerConfig;
+        use pgt_core::registry::Registry;
+        let run = |locked: bool, req: PlanRequest, db: Option<u32>| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let mut registry = Registry::load(dir.path().join("servers.json")).unwrap().registry;
+            let mut config = ServerConfig::new("x", "127.0.0.1", 1, "u");
+            config.read_only_lock = locked;
+            let server = config.id;
+            registry.upsert(config).unwrap();
+            let dm = DdlManager::new(Arc::new(ConnectionManager::new()), Arc::new(RwLock::new(registry)));
+            let o = ApplyOptions {
+                apply_id: Uuid::new_v4(),
+                lock_timeout_ms: 5000,
+                expected_hash: String::new(),
+                confirmed: true,
+                confirmed_production: true,
+                password: None,
+            };
+            dm.apply(server, db, &req, o).await
+        };
+        let message = |r: Result<ApplyOutcome>| match r {
+            Err(Error::Invalid(m)) => m,
+            other => panic!("Invalid bekleniyordu: {other:?}"),
+        };
+        let schema_acl = || privileges_req(ObjectKind::Schema, acl_def(ObjectKind::Schema), acl_def(ObjectKind::Schema));
+        let scope = |role: Option<&str>| DefaultAclScope { role: role.map(Into::into), schema_oid: None };
+        let default_req = |role: Option<&str>| PlanRequest::DefaultPrivileges { scope: scope(role), old: dacl_def("r"), new: dacl_def("r") };
+        // Kilit her şeyden önce.
+        for r in [schema_acl(), default_req(None)] {
+            assert_eq!(message(run(true, r, Some(1)).await), LOCKED_MESSAGE);
+        }
+        // Karar 1: yetkisi olmayan tür.
+        let index = privileges_req(ObjectKind::Index, acl_def(ObjectKind::Index), acl_def(ObjectKind::Index));
+        assert_eq!(message(run(false, index, Some(1)).await), crate::load_acl::UNSUPPORTED_KIND_MSG);
+        // Kimlik uyuşmazlıkları: `object.kind ≠ old.kind`; kapsam rolü ≠ `old.role`.
+        let mismatched = privileges_req(ObjectKind::Schema, acl_def(ObjectKind::Table), acl_def(ObjectKind::Table));
+        assert_eq!(message(run(false, mismatched, Some(1)).await), INVALID_DEF);
+        assert_eq!(message(run(false, default_req(Some("baska")), Some(1)).await), INVALID_DEF);
+        // Salt okunur ACL: genel gerekçe, ad/değer yok.
+        let ro = AclDef { editable: false, unsupported: vec!["yetki ZZ_GIZLI".into()], ..acl_def(ObjectKind::Schema) };
+        let m = message(run(false, privileges_req(ObjectKind::Schema, ro.clone(), ro), Some(1)).await);
+        assert!(m.starts_with(READ_ONLY_PREFIX) && !m.contains("ZZ_GIZLI"), "{m}");
+        // Varsayılan yetkiler veritabanı kapsamlıdır.
+        assert_eq!(message(run(false, default_req(None), None).await), NEEDS_DATABASE);
+        // Geçerli istekler kapıları geçer (geçici kapı yok): bağlantısız sunucuda sürüm okunamaz.
+        for (r, db) in [(default_req(None), Some(1)), (default_req(Some("r")), Some(1)), (schema_acl(), Some(1))] {
+            let e = run(false, r, db).await.unwrap_err();
+            assert_eq!(ddl_payload(&e).code, "not_connected", "{e:?}");
+        }
+        // Database ACL bakım bağlantısında: `database_oid` gerekmez.
+        let dbacl = privileges_req(ObjectKind::Database, acl_def(ObjectKind::Database), acl_def(ObjectKind::Database));
+        assert_eq!(ddl_payload(&run(false, dbacl, None).await.unwrap_err()).code, "not_connected");
+    }
+
+    #[test]
+    fn acl_read_only_gate_uses_first_real_reason() {
+        let ro = AclDef { editable: false, unsupported: vec!["imza".into(), "yetki X".into()], ..acl_def(ObjectKind::Function) };
+        let r = privileges_req(ObjectKind::Function, ro.clone(), ro);
+        assert_eq!(read_only_refusal(&r).unwrap(), format!("{READ_ONLY_PREFIX}{}", read_only_reason(Some("imza"))));
+        // Varsayılan yetkiler: LARGE OBJECTS bilgi notu gerekçe sayılmaz; düzenlenebilir tanım geçer.
+        let lo = crate::load_acl::LARGE_OBJECTS_REASON.to_string();
+        let mut d = dacl_def("r");
+        d.unsupported = vec![lo.clone()];
+        let ok = PlanRequest::DefaultPrivileges { scope: DefaultAclScope { role: None, schema_oid: None }, old: d.clone(), new: d.clone() };
+        assert_eq!(read_only_refusal(&ok), None);
+        d.editable = false;
+        d.unsupported = vec![lo, crate::load_acl::DEFAULT_GRANTOR_REASON.into()];
+        let ro = PlanRequest::DefaultPrivileges { scope: DefaultAclScope { role: None, schema_oid: None }, old: d.clone(), new: d };
+        assert_eq!(
+            read_only_refusal(&ro).unwrap(),
+            format!("{READ_ONLY_PREFIX}{}", read_only_reason(Some(crate::load_acl::DEFAULT_GRANTOR_REASON)))
+        );
+        // Yetki isteği bakım veritabanı korumasına girmez (yetki değişimi veritabanını kapatmaz; Karar 9 yalnız uyarı).
+        let dbacl = AclDef { name: "postgres".into(), ..acl_def(ObjectKind::Database) };
+        let r = privileges_req(ObjectKind::Database, dbacl.clone(), dbacl);
+        assert_eq!(maintenance_refusal(&r, "postgres"), None);
+        assert_eq!(database_to_release(&r), None);
+    }
+
+    #[test]
+    fn privilege_hints_follow_op() {
+        let st = |sql: &str| Statement { sql: sql.into(), risk: Risk::Safe, transactional: true, note: None, redacted: false };
+        let revoke = st("REVOKE SELECT ON TABLE public.t FROM r");
+        let adp = st("ALTER DEFAULT PRIVILEGES FOR ROLE r GRANT SELECT ON TABLES TO x");
+        let hint = |kind, op: &str, s: &Statement, code: &str, pg: Option<&str>| failure_payload_for(kind, op, Some(s), 0, &q(code, pg)).hint;
+        // 2BP01: PG "Use CASCADE…" ipucunun yerine arayüzdeki karşılık.
+        for pg in [None, Some("Use CASCADE to revoke them too.")] {
+            assert_eq!(hint(ObjectKind::Table, "privileges", &revoke, "2BP01", pg).as_deref(), Some(ACL_DEPENDENTS_HINT));
+        }
+        assert_eq!(hint(ObjectKind::Table, "privileges", &revoke, "42501", None).as_deref(), Some(ACL_PRIVILEGE_HINT));
+        assert_eq!(hint(ObjectKind::Database, "privileges", &revoke, "42501", None).as_deref(), Some(ACL_PRIVILEGE_HINT));
+        assert_eq!(hint(ObjectKind::Schema, "default_privileges", &adp, "42501", None).as_deref(), Some(DEFAULT_ACL_PRIVILEGE_HINT));
+        for (kind, op, s) in [(ObjectKind::Table, "privileges", &revoke), (ObjectKind::Schema, "default_privileges", &adp)] {
+            assert_eq!(hint(kind, op, s, "42704", None).as_deref(), Some(ACL_ROLE_MISSING_HINT));
+            // PG'nin kendi ipucu (2BP01 dışında) korunur.
+            assert_eq!(hint(kind, op, s, "42501", Some("pg")).as_deref(), Some("pg"));
+        }
+        // 42704 yalnız GRANT/REVOKE/ALTER DEFAULT PRIVILEGES ifadesinde ve Type/Domain dışında rol eksikliğidir;
+        // Type/Domain'de nesnenin kendisi kaybolmuş olabilir (`type … does not exist` da 42704).
+        for kind in [ObjectKind::Type, ObjectKind::Domain] {
+            assert_eq!(hint(kind, "privileges", &st("REVOKE USAGE ON TYPE public.e FROM r"), "42704", None), None, "{kind:?}");
+        }
+        assert_eq!(hint(ObjectKind::Table, "privileges", &st("SELECT 1"), "42704", None), None);
+        assert_eq!(hint(ObjectKind::Function, "privileges", &st("GRANT EXECUTE ON FUNCTION public.f() TO r"), "42704", None).as_deref(), Some(ACL_ROLE_MISSING_HINT));
+        // 42809 (Function ↔ Procedure) yeniden kurma ipucu yetki işlemlerinde verilmez.
+        for (kind, op) in [(ObjectKind::Function, "privileges"), (ObjectKind::Procedure, "privileges"), (ObjectKind::Function, "default_privileges")] {
+            assert_eq!(hint(kind, op, &st("GRANT EXECUTE ON FUNCTION public.f() TO r"), "42809", None), None, "{kind:?} {op}");
+        }
+        // Genel 42501 diğer işlemlerde değişmez; 42704 başka işlemde ipucu almaz.
+        let alter = st("ALTER VIEW v OWNER TO r");
+        assert_eq!(hint(ObjectKind::View, "alter", &alter, "42501", None).as_deref(), Some(PRIVILEGE_HINT));
+        assert_eq!(hint(ObjectKind::Table, "alter", &alter, "42704", None), None);
+        assert_eq!(hint(ObjectKind::Table, "drop", &st("DROP TABLE t"), "2BP01", Some("pg")).as_deref(), Some("pg"));
+        // İpuçları ad/değer içermez.
+        for h in [ACL_DEPENDENTS_HINT, ACL_PRIVILEGE_HINT, DEFAULT_ACL_PRIVILEGE_HINT, ACL_ROLE_MISSING_HINT, ACL_WARNING] {
+            assert!(!h.is_empty() && !h.contains("public.t"));
+        }
+    }
+
+    #[test]
+    fn acl_verification_compares_canonical_grants() {
+        use crate::acl::{AclGrant, DefaultAclObjectType, DefaultAclSection, Privilege::*, PrivilegeGrant};
+        let pg = |p, g| PrivilegeGrant { privilege: p, grant_option: g };
+        let row = |who: Option<&str>, ps: Vec<PrivilegeGrant>| AclGrant { grantee: who.map(Into::into), privileges: ps };
+        // İstenen: sırasız, boş satırlı (alıcının tüm yetkileri kaldırıldı).
+        let mut new = acl_def(ObjectKind::Table);
+        new.grants = vec![row(Some("b"), vec![pg(Insert, false), pg(Select, true)]), row(Some("a"), vec![]), row(None, vec![pg(Select, false)])];
+        let req = privileges_req(ObjectKind::Table, acl_def(ObjectKind::Table), new);
+        let Some(VerifyAcl::Object(_, want)) = VerifyAcl::of(&req) else { panic!() };
+        let mut loaded = acl_def(ObjectKind::Table);
+        loaded.grants = vec![row(None, vec![pg(Select, false)]), row(Some("b"), vec![pg(Select, true), pg(Insert, false)])];
+        assert!(!acl_grants_differ(&want, &loaded));
+        // Sahip olmayan bağlı rolün GRANT'ı `foreign`'a düşer → `grants` farklı.
+        loaded.grants.pop();
+        loaded.foreign = vec![crate::acl::ForeignGrant { grantor: "c".into(), grantee: Some("b".into()), privilege: Select, grant_option: true }];
+        assert!(acl_grants_differ(&want, &loaded));
+        // Varsayılan yetkiler: bölüm bölüm.
+        let sec = |t, grants| DefaultAclSection { object_type: t, grants, baseline: vec![] };
+        let mut new = dacl_def("r");
+        new.sections = vec![sec(DefaultAclObjectType::Tables, vec![row(Some("x"), vec![pg(Insert, false), pg(Select, false)]), row(Some("y"), vec![])])];
+        let req = PlanRequest::DefaultPrivileges { scope: DefaultAclScope { role: None, schema_oid: None }, old: dacl_def("r"), new };
+        let Some(VerifyAcl::Default(_, want)) = VerifyAcl::of(&req) else { panic!() };
+        let mut loaded = dacl_def("r");
+        loaded.sections = vec![sec(DefaultAclObjectType::Tables, vec![row(Some("x"), vec![pg(Select, false), pg(Insert, false)])])];
+        assert!(!default_acl_grants_differ(&want, &loaded));
+        loaded.sections[0].grants.clear();
+        assert!(default_acl_grants_differ(&want, &loaded));
+    }
+
+    #[test]
+    fn plan_view_builds_default_privileges() {
+        use crate::acl::{AclGrant, DefaultAclSection, Privilege, PrivilegeGrant};
+        use crate::acl::DefaultAclObjectType::Schemas;
+        let mk = |grants: Vec<AclGrant>| DefaultAclDef {
+            role: "r".into(),
+            schema: None,
+            viewer: "r".into(),
+            sections: crate::acl::default_sections(false)
+                .iter()
+                .map(|&t| DefaultAclSection { object_type: t, grants: if t == Schemas { grants.clone() } else { vec![] }, baseline: vec![] })
+                .collect(),
+            editable: true,
+            unsupported: vec![],
+        };
+        let new_grants = vec![AclGrant { grantee: Some("x".into()), privileges: vec![PrivilegeGrant { privilege: Privilege::Usage, grant_option: false }] }];
+        let req = PlanRequest::DefaultPrivileges {
+            scope: DefaultAclScope { role: None, schema_oid: None },
+            old: mk(vec![]),
+            new: mk(new_grants),
+        };
+        let view = plan_view(&req, 160000);
+        assert_eq!(view.statements.len(), 1);
+        assert_eq!(view.statements[0].sql, "ALTER DEFAULT PRIVILEGES FOR ROLE r GRANT USAGE ON SCHEMAS TO x");
+        assert_eq!(view.warnings.len(), 1);
     }
 
     #[test]
@@ -1986,6 +2427,17 @@ mod tests {
             "CHECK zz_gizli (ayrıştırılamadı)",
             "NOT NULL zz_gizli (NOT VALID)",
             "'zz_gizli' türü kısıt zz_gizli",
+            // Plan 20 yetki yükleyicileri.
+            crate::load_acl::ARRAY_REASON,
+            crate::load_acl::MULTIRANGE_REASON,
+            crate::load_acl::ROW_TYPE_REASON,
+            crate::load_acl::AGGREGATE_REASON,
+            crate::load_acl::SIGNATURE_REASON,
+            crate::load_acl::DEFAULT_GRANTOR_REASON,
+            crate::load_acl::BUILDER_REJECTS_REASON,
+            crate::load::INVALID_UTF8_REASON,
+            "yetki zz_gizli",
+            "varsayılan yetki türü zz_gizli",
             "zz_gizli bilinmeyen",
         ];
         let generic = read_only_reason(None);

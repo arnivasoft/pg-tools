@@ -1,0 +1,13 @@
+---
+source: crates/pgt-ddl/src/build/acl.rs
+expression: render(&p)
+---
+[Destructive] REVOKE INSERT ON TABLE s.t FROM PUBLIC
+[Destructive] REVOKE UPDATE ON TABLE s.t FROM b
+[Destructive] REVOKE GRANT OPTION FOR SELECT ON TABLE s.t FROM b
+[Destructive] REVOKE SELECT, TRIGGER ON TABLE s.t FROM gone
+[Safe] GRANT TRUNCATE ON TABLE s.t TO PUBLIC
+[Safe] GRANT SELECT ON TABLE s.t TO "Yeni"
+[Safe] GRANT INSERT ON TABLE s.t TO a
+[Safe] GRANT DELETE ON TABLE s.t TO a WITH GRANT OPTION
+[Safe] GRANT REFERENCES ON TABLE s.t TO b WITH GRANT OPTION

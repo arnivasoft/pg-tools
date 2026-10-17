@@ -7,6 +7,8 @@
 //! kapanmamış tırnak/yorum) REDDEDİLİR; ayrıca alanlar birleştirildikten sonra **nihai ifade** de taranmalıdır
 //! (alan sınırlarında kapanma/açılma kaymasını yakalamak için). Tarayıcı `standard_conforming_strings = on` varsayar.
 
+pub mod acl;
+pub mod default_acl;
 pub mod database;
 pub mod domain;
 pub mod extension;

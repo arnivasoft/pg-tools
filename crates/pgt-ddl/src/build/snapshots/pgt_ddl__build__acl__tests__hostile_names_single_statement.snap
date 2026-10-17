@@ -1,0 +1,6 @@
+---
+source: crates/pgt-ddl/src/build/acl.rs
+expression: render(&p)
+---
+[Destructive] REVOKE EXECUTE ON FUNCTION "Şema ""x"""."f; DROP TABLE t --"("My Type"[], VARIADIC integer[]) FROM PUBLIC
+[Safe] GRANT EXECUTE ON FUNCTION "Şema ""x"""."f; DROP TABLE t --"("My Type"[], VARIADIC integer[]) TO "a ""b"" ç" WITH GRANT OPTION

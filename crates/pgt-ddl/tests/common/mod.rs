@@ -189,6 +189,46 @@ pub async fn cleanup_cluster(ts: &TestServer, tag: &str) {
     }
 }
 
+// ---- yetki testlerinin küme rolleri ----
+
+/// Yetki testi rolü: `pgt_acl_rt_<etiket>_<n>` (`n` tırnak gerektiren ad olabilir). Roller küme geneldir: etiket
+/// test başına benzersizdir ve `_` içermez (başka etiketin rollerini temizliğe katmasın).
+pub fn acl_role(tag: &str, n: &str) -> String {
+    assert!(!tag.contains('_'), "yetki etiketi '_' içeremez: {tag}");
+    format!("pgt_acl_rt_{tag}_{n}")
+}
+
+/// Etiketin yetki test rollerini siler. Rollerin test veritabanındaki yetkileri/nesneleri veritabanıyla birlikte
+/// gider (önce veritabanı silinmelidir); bakım veritabanındakiler `DROP OWNED BY` ile; PG 16+ veren bağımlılıkları
+/// için birkaç tur.
+pub async fn drop_acl_roles(ts: &TestServer, tag: &str) {
+    let admin = admin_client(ts, &ts.config.maintenance_db).await;
+    let prefix = acl_role(tag, "");
+    let sql = "SELECT rolname::text FROM pg_roles WHERE left(rolname::text, length($1::text)) = $1::text";
+    let mut left: Vec<String> = admin.query(sql, &[&prefix]).await.unwrap().iter().map(|r| r.get(0)).collect();
+    for _ in 0..3 {
+        let mut failed = vec![];
+        for name in left {
+            if try_drop_test_role(&admin, &name).await.is_err() {
+                failed.push(name);
+            }
+        }
+        if failed.is_empty() {
+            return;
+        }
+        left = failed;
+    }
+    for name in &left {
+        drop_test_role(&admin, name).await;
+    }
+}
+
+/// Yetki testi temizliği: önce veritabanı (`cleanup_in`), sonra etiketin rolleri.
+pub async fn cleanup_acl(ts: &TestServer, prefix: &str, tag: &str) {
+    cleanup_in(ts, prefix, tag).await;
+    drop_acl_roles(ts, tag).await;
+}
+
 pub struct Env {
     pub admin: Client,
     pub mgr: Arc<ConnectionManager>,
@@ -284,6 +324,12 @@ impl Env {
         let sig = format!("{}({args})", pgt_ddl::qualified(schema, name));
         let v: Option<u32> = self.admin.query_one("SELECT to_regprocedure($1::text)::oid", &[&sig]).await.unwrap().get(0);
         v.is_some()
+    }
+
+    /// Tip/domain oid'i (`şema.ad`; `regtype` değil: dizi adları `_x` biçiminde de bulunsun).
+    pub async fn type_oid(&self, schema: &str, name: &str) -> u32 {
+        let sql = "SELECT t.oid FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE n.nspname = $1::text AND t.typname = $2::text";
+        self.admin.query_one(sql, &[&schema, &name]).await.unwrap_or_else(|e| panic!("{schema}.{name} bulunamadı: {e}")).get(0)
     }
 
     pub async fn schema_oid(&self, name: &str) -> u32 {

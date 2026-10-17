@@ -12,7 +12,7 @@
 
 use pgt_core::ErrorPayload;
 use pgt_ddl::{
-    ApplyOptions, ApplyOutcome, CreateContext, CreatePreset, DdlTarget, LookupItem, LookupRequest, ObjectDef, ObjectKind, ObjectRef, PlanRequest, PlanView,
+    AclDef, ApplyOptions, ApplyOutcome, CreateContext, CreatePreset, DdlTarget, DefaultAclDef, DefaultAclScope, LookupItem, LookupRequest, ObjectDef, ObjectKind, ObjectRef, PlanRequest, PlanView,
     ddl_payload,
 };
 use tauri::State;
@@ -44,6 +44,23 @@ pub async fn ddl_defaults(
 #[tauri::command]
 pub async fn ddl_load(state: State<'_, AppState>, server_id: Uuid, database_oid: Option<u32>, object: ObjectRef) -> CmdResult<ObjectDef> {
     Box::pin(state.ddl.load(server_id, database_oid, object)).await.map_err(|e| ddl_payload(&e))
+}
+
+/// Nesnenin etkin yetkileri (Plan 20). Database için `databaseOid` `null` olabilir (bakım veritabanı).
+#[tauri::command]
+pub async fn ddl_load_acl(state: State<'_, AppState>, server_id: Uuid, database_oid: Option<u32>, object: ObjectRef) -> CmdResult<AclDef> {
+    Box::pin(state.ddl.load_acl(server_id, database_oid, object)).await.map_err(|e| ddl_payload(&e))
+}
+
+/// Bir rolün varsayılan yetkileri (Plan 20; veritabanı kapsamlı).
+#[tauri::command]
+pub async fn ddl_load_default_acl(
+    state: State<'_, AppState>,
+    server_id: Uuid,
+    database_oid: u32,
+    scope: DefaultAclScope,
+) -> CmdResult<DefaultAclDef> {
+    Box::pin(state.ddl.load_default_acl(server_id, database_oid, scope)).await.map_err(|e| ddl_payload(&e))
 }
 
 #[tauri::command]

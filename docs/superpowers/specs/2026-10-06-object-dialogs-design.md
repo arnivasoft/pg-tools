@@ -21,7 +21,7 @@ Object Explorer salt okunurdu; Query Tool SQL yazdırır ama nesne tanımlamak i
 | Uygulama | **SQL önizleme + onay**; isteğe bağlı "Query Tool'da aç" |
 | Korumalar | Query Tool ile aynı: kilitli sunucuda tümü kapalı; üretimde yıkıcı işlemlerde sunucu adını yazarak onay; manuel transaction modu yok |
 | Düzenleme | Mevcut tanım katalogdan yüklenir, **fark `ALTER …` olarak üretilir** |
-| Alanlar | Her diyalogda **Sahip** ve **Yorum**; GRANT/REVOKE (yetki matrisi) sonraki iş |
+| Alanlar | Her diyalogda **Sahip** ve **Yorum**; GRANT/REVOKE (yetki matrisi) ayrı alt proje: `docs/superpowers/specs/2026-10-17-privileges-design.md` |
 | Giriş noktası | Sağ tık menüsü ve koleksiyonda "Oluştur…"; diyalog **sağ panelde ayrı sekme** (modal değil) |
 | Teknoloji | Mevcut yığın (Rust, Tauri 2, SolidJS, Kobalte, Tailwind 4, CodeMirror 6) |
 
@@ -37,7 +37,7 @@ Object Explorer salt okunurdu; Query Tool SQL yazdırır ama nesne tanımlamak i
 
 ### 1.3 Kapsam dışı
 
-- GRANT/REVOKE matrisi, varsayılan yetkiler (`ALTER DEFAULT PRIVILEGES`), RLS politikaları, FDW/publication/subscription diyalogları (trigger, fonksiyon, procedure, type ve domain diyalogları artık kapsamdadır: bkz. `docs/superpowers/specs/2026-10-16-object-dialogs-routines-types-design.md`).
+- RLS politikaları, FDW/publication/subscription diyalogları (trigger, fonksiyon, procedure, type ve domain diyalogları artık kapsamdadır: bkz. `docs/superpowers/specs/2026-10-16-object-dialogs-routines-types-design.md`; GRANT/REVOKE yetki matrisi ve varsayılan yetkiler (`ALTER DEFAULT PRIVILEGES`) de artık kapsamdadır: bkz. `docs/superpowers/specs/2026-10-17-privileges-design.md`).
 - Partition oluşturma/bağlama (tablo diyaloğu yalnızca partitioned tablo **tanımlar**), inheritance, EXCLUDE kısıtları, tablespace oluşturma.
 - Kolon sırası değiştirme (PostgreSQL desteklemez; arayüz uyarır), toplu/şablonlu iş akışları, DDL geçmişi/geri alma.
 - Rol üyeliklerinde PG 16+ seçenekleri (`INHERIT`/`SET` per grant): yalnızca salt okunur gösterilir (yükleyici doldurur, üretici yazmaz; yeni üyelik sunucu varsayılanlarıyla verilir).

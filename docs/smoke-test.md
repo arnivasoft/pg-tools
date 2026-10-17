@@ -598,3 +598,19 @@ Bilinen sınırlar:
 - [ ] Sağ tık menüsü — ilk etkileşim yarışı: uygulama açılır açılmaz ilk sağ tık menüyü (parça indikten sonra) açar, olay kaybolmaz; parça yüklenemezse (ağ/dosya yok simülasyonu) menü açılmaz, "Pencere yüklenemedi." bildirimi bir kez çıkar, sonraki sağ tık parçayı yeniden dener. **[—]**
 - [ ] Sağ tık menüsü — hedef düğüm kalkınca: menü açıkken menünün düğümü ağaçtan kalkarsa (ör. silme/yenileme/sunucu kesilmesi) menü kapanır ve odak ağaca döner (boşa düşmez). **[—]**
 - [ ] Boşta ısıtma: uygulama açıldıktan ≈1,5 sn sonra (ya da tarayıcı boştayken) ilk sağ tık, ilk silme onayı, ilk parola istemi ve ilk işlem diyaloğu **gecikmesiz** açılır; ağ sekmesinde (dev araçları) menü/diyalog/kart parçaları kullanıcı etkileşiminden önce iner; ısıtma hatası (parça yok simülasyonu) hiçbir bildirim göstermez. **[—]**
+
+## Yetkiler arka ucu (Plan 20)
+
+Plan 20 yalnızca arka uçtur; **GUI maddeleri Plan 22'de eklenecektir** (menüde "Yetkiler…" / "Varsayılan yetkiler…" henüz yok). Arka uç elle sınanmaz; Docker testleriyle (`acl_roundtrip`, `manager`, `logging`) PG 10–18'de doğrulanır.
+
+- Nesne yetkileri (Table/View/MV, Sequence, Function, Procedure, Schema, Database, Type, Domain) için `load → alter → apply → load` gidiş-dönüşü ve sabit nokta (`alter(loaded, loaded)` boş plan) PG 10–18'de yeşil; NULL ACL etkin gösterilir (`PUBLIC EXECUTE`, `PUBLIC CONNECT, TEMPORARY`, `PUBLIC USAGE`), ilk değişiklik ACL'yi açık yapar.
+- Varsayılan yetkiler (genel ve şema kapsamı; Tables/Sequences/Functions/Types/Schemas) için yükleme/üretim/uygulama yeşil; yeni oluşturulan nesneye varsayılan yetki uygulanır; şema kapsamında `baseline` salt okunur.
+- Veren ayrımı (`WITH GRANT OPTION` alan rolün verdiği yetki `foreign`'da, değişmez), `RESTRICT` (2BP01 + ipucu) / `CASCADE` (DataLoss), düşmanca ad ve imzalar, aşırı yüklenmiş fonksiyonlar, kendini kilitleme uyarıları, uygulama sonrası `ACL_WARNING`.
+- Kapılar: kilitli sunucu, salt okunur nesne (`editable = false`), bayat tanım (`PLAN_CHANGED`), üretimde ad yazma onayı; günlükte rol adı/yetki/SQL yok (yakalama testi).
+- Sürüm kapılı atlamalar: `MAINTAIN` yetkisi PG 17+ (PG < 17'de alan hatası), Procedure PG 11+ (PG 10'da atlanır); Procedure imza metni PG 11–13 ile 14+ arasında farklıdır (`IN a integer`).
+
+Bilinen sınırlar:
+- Kolon yetkileri **salt okunur** listelenir; başka verenlerin (grantor ≠ sahip) yetkileri **salt okunur** listelenir (veren adıyla); `GRANTED BY` yok.
+- Tablespace, dil, FDW/sunucu, large object ve parametre (PG 15+ `GRANT SET`) yetkileri yok; yabancı tablo backlog.
+- Tüm aggregate'ler yetki düzenlemede salt okunurdur (window fonksiyonları düzenlenebilir); sistem şeması nesneleri, dizi/multirange tipleri ve tablo satır tipleri salt okunurdur.
+- PG 18 LARGE OBJECTS varsayılan yetkileri modellenmez (`unsupported` notu; tanım düzenlenebilir kalır, bu girdilere dokunulmaz).
