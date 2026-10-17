@@ -230,6 +230,14 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
     add("mv-1", "coll-mvs", "materializedView", "m");
     add("coll-vcols", "view-1", "columnCollection", "Columns", { hasChildren: true });
     add("vcol-1", "coll-vcols", "column", "id");
+    add("coll-proc", "sch-app", "procedureCollection", "Procedures", { hasChildren: true });
+    add("proc-1", "coll-proc", "procedure", "p(integer)");
+    add("coll-tfn", "sch-app", "triggerFunctionCollection", "Trigger Functions", { hasChildren: true });
+    add("tfn-1", "coll-tfn", "triggerFunction", "audit()");
+    add("coll-type", "sch-app", "typeCollection", "Types", { hasChildren: true });
+    add("type-1", "coll-type", "type", "mood");
+    add("coll-dom", "sch-app", "domainCollection", "Domains", { hasChildren: true });
+    add("dom-1", "coll-dom", "domain", "email");
     return s;
   }
   const s = ddlTree();
@@ -283,9 +291,31 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
     lockedTree.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
     expect(disabledReason("dropObject", { state: () => lockedTree } as unknown as ActionDeps, "db-app")).toBe(t.query.hint.locked);
   });
+  it("Function/Procedure/Trigger Function/Type/Domain/Trigger koleksiyonlarında createObject", () => {
+    for (const id of ["coll-fn", "coll-proc", "coll-tfn", "coll-type", "coll-dom", "coll-trg"]) {
+      expect(actionsFor(s, node(s, id))).toEqual(["createObject", "refresh", "copyName"]);
+    }
+  });
+  it("function, procedure, triggerFunction, type, domain ve trigger düğümünde edit/rename/drop", () => {
+    for (const id of ["fn-fmt-int", "proc-1", "tfn-1", "type-1", "dom-1", "trg-1"]) {
+      expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual(["editObject", "renameObject", "dropObject"]);
+    }
+  });
+  it("kilitli sunucuda yeni türlerin designer eylemleri gerekçeli kapalı", () => {
+    const lockedTree = ddlTree();
+    const srv = lockedTree.nodes.get("srv-up")!;
+    lockedTree.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
+    const viaTree = { state: () => lockedTree } as unknown as ActionDeps;
+    for (const id of ["fn-fmt-int", "proc-1", "tfn-1", "type-1", "dom-1", "trg-1"]) {
+      for (const a of ["editObject", "renameObject", "dropObject"] as ActionId[]) expect(disabledReason(a, viaTree, id)).toBe(t.query.hint.locked);
+    }
+    for (const id of ["coll-fn", "coll-proc", "coll-tfn", "coll-type", "coll-dom", "coll-trg"]) {
+      expect(disabledReason("createObject", viaTree, id)).toBe(t.query.hint.locked);
+    }
+  });
   it("diğer düğümlerde designer eylemi yok", () => {
     for (const id of [
-      "srv-up", "srv-down", "trg-1", "fn-fmt-int", "coll-cols", "coll-fn", "coll-con",
+      "srv-up", "srv-down", "coll-cols", "coll-con",
     ]) {
       expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual([]);
     }

@@ -55,13 +55,43 @@ export const ROLE_PATHS: ReadonlySet<string> = new Set([
   "password", "memberOf", "settings", "comment",
 ]);
 /**
- * Tür → bilinen yollar (testte denetlenir). Geçici `Partial`: function/procedure/trigger/type/domain yolları Plan 19
- * formlarıyla gelir.
+ * Function / Procedure (spec §8.5): `args` kökü `args[i].name|typeName|default|mode`, `returns` kökü `returns.typeName`,
+ * `returns.columns[i].name|typeName`, `settings` kökü `settings[i].name|value` alt yollarını kapsar; `old.*` genel şeride
+ * düşer. `kind` (Procedure PG < 11) ve `object` (salt okunur) genel bilgi olsa da kök listededir (formun üstünde gösterilir).
  */
-export const FORM_PATHS = {
+export const ROUTINE_PATHS: ReadonlySet<string> = new Set([
+  "schema", "name", "owner", "comment", "language", "body", "cost", "rows", "volatility", "strict", "leakproof", "parallel",
+  "kind", "object", "args", "returns", "settings", "recreate", "securityDefiner",
+]);
+/**
+ * Trigger (spec §8.5): `events` kökü `events.updateColumns`, `events.updateColumns[i]`, `events.truncate`; `args` kökü
+ * `args[i]` alt yollarını kapsar; `old.*` genel şeride düşer. `schema`/`table`/`object` salt okunur bilgi olsa da kök
+ * listededir (formun üstünde gösterilir).
+ */
+export const TRIGGER_PATHS: ReadonlySet<string> = new Set([
+  "schema", "table", "name", "timing", "events", "level", "when", "functionSchema", "functionName", "args", "oldTable",
+  "newTable", "deferrable", "initiallyDeferred", "comment", "object",
+]);
+/**
+ * Type (spec §8.5): `body` kökü `body.values`, `body.values[i].label|original`, `body.attributes`,
+ * `body.attributes[i].name|typeName|collation|original` ve range `body.subtype|subtypeOpclass|collation|canonical|
+ * subtypeDiff|multirangeTypeName` alt yollarını kapsar; `old.*` genel şeride düşer. `object` (salt okunur) kök listededir
+ * (formun üstünde gösterilir).
+ */
+export const TYPE_PATHS: ReadonlySet<string> = new Set(["schema", "name", "owner", "comment", "body", "object"]);
+/**
+ * Domain (spec §8.5): `constraints` kökü `constraints[i].name|expression|notValid|validate|original` alt yollarını kapsar;
+ * `old.*` (ör. `old.constraints[i].name`) genel şeride düşer. `object` (salt okunur) kök listededir (formun üstünde).
+ */
+export const DOMAIN_PATHS: ReadonlySet<string> = new Set([
+  "schema", "name", "owner", "comment", "baseType", "collation", "default", "constraints", "object",
+]);
+/** Tür → bilinen yollar (testte denetlenir; her `ObjectKind` için tanımlı). */
+export const FORM_PATHS: Record<ObjectKind, ReadonlySet<string>> = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
   view: VIEW_PATHS, materialized_view: MATVIEW_PATHS, database: DATABASE_PATHS, role: ROLE_PATHS,
-} satisfies Partial<Record<ObjectKind, ReadonlySet<string>>>;
+  function: ROUTINE_PATHS, procedure: ROUTINE_PATHS, trigger: TRIGGER_PATHS, type: TYPE_PATHS, domain: DOMAIN_PATHS,
+};
 
 /**
  * İsteğe bağlı alan: boş ya da yalnızca boşluk → `null`; aksi halde metin OLDUĞU GİBİ (kırpılmaz — kullanıcının yazdığı

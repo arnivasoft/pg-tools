@@ -10,6 +10,7 @@ import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { PlanRequest } from "../../ipc/bindings/PlanRequest";
 import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { CreateContext } from "../../ipc/bindings/CreateContext";
+import type { CreatePreset } from "../../ipc/bindings/CreatePreset";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import type { RoleDef } from "../../ipc/bindings/RoleDef";
 import type { Risk } from "../../ipc/bindings/Risk";
@@ -42,7 +43,7 @@ function setup(extra: Partial<DesignerControllerDeps> = {}) {
     S2: { name: "other", locked: false, production: false },
   };
   const api = {
-    ddlDefaults: vi.fn(async (_s: string, _db: number | null, _k: ObjectKind, _c: CreateContext): Promise<ObjectDef> => schema({ name: "", owner: null })),
+    ddlDefaults: vi.fn(async (_s: string, _db: number | null, _k: ObjectKind, _c: CreateContext, _p: CreatePreset | null = null): Promise<ObjectDef> => schema({ name: "", owner: null })),
     ddlLoad: vi.fn(async (_s: string, _db: number | null, _o: ObjectRef): Promise<ObjectDef> => schema()),
     ddlLookup: vi.fn(async (_s: string, _db: number | null, _r: LookupRequest): Promise<LookupItem[]> => [{ value: "alice", detail: null }]),
     ddlPreview: vi.fn(async (_s: string, _db: number | null, _r: PlanRequest): Promise<PlanView> => view()),
@@ -99,7 +100,7 @@ describe("designer-controller açılış", () => {
   it("openCreate: defaults yüklenir, dirty=false, önizleme zamanlanmaz", async () => {
     const s = setup();
     const id = await openCreate(s);
-    expect(s.api.ddlDefaults).toHaveBeenCalledWith("S1", 5, "schema", { schemaOid: null, tableOid: null });
+    expect(s.api.ddlDefaults).toHaveBeenCalledWith("S1", 5, "schema", { schemaOid: null, tableOid: null }, null);
     const m = s.ctl.model(id)!;
     expect(m).toMatchObject({ mode: "create", kind: "schema", status: "ready", original: null, object: null, dirty: false, pending: false });
     expect(m.draft).toEqual(schema({ name: "", owner: null }));
@@ -1410,7 +1411,7 @@ describe("designer-controller Plan 15: sunucu kapsamı", () => {
       providerLocale: null, tablespace: null, connectionLimit: -1, isTemplate: false, allowConnections: true, settings: [], comment: null,
     });
     await s.ctl.openCreate({ tabId: "D1", serverId: "S1", databaseOid: null, create: { kind: "database", context: { schemaOid: null, tableOid: null }, preset: null }, refreshNodeId: "dbs" });
-    expect(s.api.ddlDefaults).toHaveBeenLastCalledWith("S1", null, "database", { schemaOid: null, tableOid: null });
+    expect(s.api.ddlDefaults).toHaveBeenLastCalledWith("S1", null, "database", { schemaOid: null, tableOid: null }, null);
     // objectDropped null ile eşleşir
     s.ctl.objectDropped("S1", null, ROLE);
     expect(s.ctl.model(id)!.status).toBe("gone");
@@ -1604,5 +1605,61 @@ describe("designer-controller Plan 15: uygulama sonrası akışlar", () => {
     expect(s.refreshNode).toHaveBeenCalledWith("N-parent");
     expect(s.ctl.model(id)).toMatchObject({ mode: "alter", object: moved, needsReload: true, gateError: tdes.gate.partialChanged, partialCreated: null });
     expect(s.ctl.peekApplyGate(id)).toEqual({ kind: "blocked", reason: "stale" });
+  });
+});
+
+describe("designer-controller Plan 19: preset ve editable/unsupported", () => {
+  const fn = (p: Record<string, unknown> = {}): ObjectDef => ({
+    kind: "function", schema: "public", name: "", owner: null, comment: null, language: "plpgsql", args: [],
+    returns: { kind: "trigger" }, body: "BEGIN\n  RETURN NEW;\nEND;", volatility: "volatile", strict: false, securityDefiner: false,
+    leakproof: false, parallel: "unsafe", cost: null, rows: null, settings: [], recreate: false, editable: true, unsupported: [], ...p,
+  } as ObjectDef);
+
+  it("create preset ddlDefaults'a aynen geçer (trigger_function); reload aynı preset'i gönderir", async () => {
+    const s = setup();
+    s.api.ddlDefaults.mockResolvedValue(fn());
+    await s.ctl.openCreate({
+      tabId: "F1", serverId: "S1", databaseOid: 5, create: { kind: "function", context: { schemaOid: 2200, tableOid: null }, preset: "trigger_function" },
+      refreshNodeId: "coll-tf",
+    });
+    expect(s.api.ddlDefaults).toHaveBeenLastCalledWith("S1", 5, "function", { schemaOid: 2200, tableOid: null }, "trigger_function");
+    await s.ctl.reload("F1", { force: true });
+    expect(s.api.ddlDefaults).toHaveBeenCalledTimes(2);
+    expect(s.api.ddlDefaults).toHaveBeenLastCalledWith("S1", 5, "function", { schemaOid: 2200, tableOid: null }, "trigger_function");
+  });
+
+  it("ddl_defaults'ın editable/unsupported alanları düzenleme sonrası PlanRequest'te korunur", async () => {
+    const s = setup();
+    s.api.ddlDefaults.mockResolvedValue(fn());
+    await s.ctl.openCreate({
+      tabId: "F2", serverId: "S1", databaseOid: 5, create: { kind: "function", context: { schemaOid: 2200, tableOid: null }, preset: null }, refreshNodeId: null,
+    });
+    s.ctl.edit("F2", (d) => {
+      if (d.kind === "function") d.name = "f";
+    });
+    await settle();
+    const req = s.api.ddlPreview.mock.calls.at(-1)![2];
+    expect(req.op).toBe("create");
+    const def = (req as Extract<PlanRequest, { op: "create" }>).def as Record<string, unknown>;
+    expect(def).toMatchObject({ kind: "function", name: "f", editable: true, unsupported: [], recreate: false });
+    // Varsayılana dönen düzenleme kirli değil (editable/unsupported karşılaştırmada korunur)
+    s.ctl.edit("F2", (d) => {
+      if (d.kind === "function") d.name = "";
+    });
+    expect(s.ctl.isDirty("F2")).toBe(false);
+  });
+
+  it("alter: yüklenen editable=false + unsupported old/new'de aynen gider", async () => {
+    const s = setup();
+    const loaded = fn({ name: "f", editable: false, unsupported: ["C dili"] });
+    s.api.ddlLoad.mockResolvedValue(loaded);
+    await s.ctl.openAlter({ tabId: "F3", serverId: "S1", databaseOid: 5, object: { kind: "function", oid: 9 }, refreshNodeId: null });
+    s.ctl.edit("F3", (d) => {
+      if (d.kind === "function") d.comment = "x";
+    });
+    await settle();
+    const req = s.api.ddlPreview.mock.calls.at(-1)![2] as Extract<PlanRequest, { op: "alter" }>;
+    expect(req.old).toMatchObject({ editable: false, unsupported: ["C dili"] });
+    expect(req.new).toMatchObject({ editable: false, unsupported: ["C dili"], comment: "x" });
   });
 });

@@ -277,4 +277,25 @@ export const tdes = {
     constraint: (c: string) => `Bu indeks '${c}' kısıtına aittir; kısıtı tablo düzenleyicisinden değiştirin.`,
     invalid: "Geçersiz indeks (başarısız CONCURRENTLY inşası); silip yeniden oluşturun.",
   },
+  /** Plan 19: `editable = false` nesnenin gerekçe şeridi (`ReadOnlyReasons`). */
+  readOnly: {
+    title: "Bu nesne buradan düzenlenemez",
+    note: "Tanım salt okunur gösterilir; aşağıdaki özellikler bu diyalogda modellenmez.",
+    reasons: "Salt okunurluk gerekçeleri",
+  },
+  /** Plan 19: düzenlenebilir gövde düzenleyicisi (`SqlBodyEditor`). */
+  body: {
+    keyboardHint: "Tab girinti ekler; düzenleyiciden çıkmak için önce Esc, ardından Tab'a basın.",
+  },
+  /** Plan 19: genel satır listesi (`RowList`); `name`: satırın görünen adı (boşsa sıra numarası). */
+  rows: {
+    rowName: (i: number, name: string) => (name.trim() ? `${i + 1}. satır (${name})` : `${i + 1}. satır`),
+    add: "Ekle",
+    remove: (row: string) => `${row} sil`,
+    up: "Yukarı",
+    down: "Aşağı",
+    moveUp: (row: string) => `${row} yukarı taşı`,
+    moveDown: (row: string) => `${row} aşağı taşı`,
+    empty: "Satır yok.",
+  },
 } as const;

@@ -402,7 +402,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     const prev = m.draft ? "ready" : m.status;
     patch(e, { status: "loading", error: null, pending: false });
     try {
-      const def = await api.ddlDefaults(m.serverId, m.databaseOid, c.kind, c.context);
+      const def = await api.ddlDefaults(m.serverId, m.databaseOid, c.kind, c.context, c.preset ?? null);
       if (!alive(tabId, e, gen)) return;
       e.base = cloneDef(def);
       setBase(e, null, cloneDef(def));

@@ -7,8 +7,9 @@ import type { NodeKind } from "../../ipc/bindings/NodeKind";
  */
 export const DDL_OBJECT_KINDS: NodeKind[] = [
   "schema", "sequence", "extension", "index", "table", "view", "materializedView", "database", "role",
+  "function", "procedure", "triggerFunction", "type", "domain", "trigger",
 ];
-/** …Collection: schema, sequence, extension, index, table, view, materializedView, database, role. */
+/** …Collection: yukarıdaki her tür (ör. functionCollection, triggerFunctionCollection, triggerCollection). */
 export const DDL_CREATE_COLLECTIONS = DDL_OBJECT_KINDS.map((k) => `${k}Collection` as NodeKind);
 
 /** "Oluştur…" bu koleksiyonda gösterilir mi? */
