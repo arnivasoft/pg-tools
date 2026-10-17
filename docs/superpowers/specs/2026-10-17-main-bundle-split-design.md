@@ -1,7 +1,7 @@
 # pg-tools — Ana Paket Bölme Tasarımı
 
 - **Tarih:** 2026-10-17
-- **Durum:** Taslak (Plan 21 yazıldı)
+- **Durum:** Uygulandı (feat/main-bundle-split; `main`'e birleştirme kullanıcı onayı bekliyor, elle UI kontrolü bekliyor)
 - **Kapsam:** Açılışta yüklenen ana JS paketini (`dist/assets/index-*.js`) küçültmek. Kobalte ve floating-ui'yi tembel parçalara taşımak. Paket bütçesini elle ölçmek yerine betikle denetlemek. Görünür davranış değişmez.
 - **Gerekçe:** proje hedefi "açılış hızı, bellek" (bkz. `project-goal`). Her ön yüz planı ana pakete eklenen her baytı başka yerden telafi etmek zorunda kaldı (231,724 B sınırı); bu, Plan 21+ (yetki ekranları vb.) için de engel.
 - **Teslim:** tek plan, Plan 21 (yalnız ön yüz). Yetki ekranları Plan 22 olur.
@@ -43,3 +43,25 @@ Kobalte ve bağımlılıkları toplam ≈ **101 KB**, yani paketin %44'ü. Bunla
 - **Sağ tık ilk açılış gecikmesi:** önceden yükleme ile kapanır; yüklenmeden sağ tıklanırsa menü yüklenince açılır (tek seferlik, yerel diskten ms düzeyinde).
 - **Kobalte sanal çapa ve odak:** menü kapanınca odak ağaca (seçili satıra) döner; mevcut davranış testle ve elle kontrol listesiyle doğrulanır.
 - **Sınama:** GUI ajanlarca test edilemez; `docs/smoke-test.md`'ye "Ana paket bölme (Plan 21)" elle kontrol bölümü eklenir (sağ tık fare/klavye, hata kartı, diyaloglar, Inspector sekmeleri klavye, tema).
+
+## 4. Sonuçlar (Plan 21 sonu)
+
+| Ölçüm | Başlangıç | Sonuç |
+| --- | --- | --- |
+| Ana paket (`index-*.js`) | 231,724 B | **130,090 B** (-101,634 B, -%43,9) |
+| Açılış kümesi (index + solid + web) | 255,213 B (index+solid+web+Icon) | **157,763 B** (3 parça) |
+| `__vite__mapDeps` girdisi | - | 34 |
+| `index.html` preload | solid, web, Icon | solid, web |
+| Ana pakette Kobalte/floating-ui/corvu | ≈101 KB | 0 (betik denetler, `enforceForbidden: true`) |
+
+Tavanlar (`bundle-budget.json`) bu değerlere çekildi. Gerçek açılış süresi yalnız `tauri build` exe ile ölçülür (elle).
+
+Kararlar ve hükümler:
+- **R3a:** Bütçe metriği açılış kümesidir (girişin statik içe aktarma kapanışı), yalnız giriş parçası değil.
+- **R3b:** Diyalog metinleri `dialog-strings.ts` tek kaynağındadır (ana paket ile tembel parça aynı metni paylaşır).
+- **R4b:** Hata kartı tembel; yüklenene dek ya da ret halinde çalışan fallback rozet, bildirim ret başına bir kez.
+- **R5a:** `index.html` preload'ları ⊆ solid/web/Icon; Icon ana pakete katlandı, son durumda yalnız solid/web.
+- **R5b:** Seçili düğüm yokken boş alana sağ tık eski davranışı korur (menü açmaz); seçili düğüm varken seçili düğümün menüsü işaretçide açılır.
+- **Sanal çapa seçildi (yedek yok):** menü çapası konumdan türetilen sanal çapadır; ağaç asla yeniden bağlanmaz.
+- **`createLoader` birleştirildi:** tek paylaşılan yükleyici (tek uçuş, ret önbelleğe alınmaz, `onFail` ret başına bir kez, `load()`'ın eşzamanlı fırlatması da ret sayılır).
+- **Boşta ısıtma:** `prefetchIdle` (`requestIdleCallback ?? setTimeout 1500 ms`) beş tembel parçayı sessizce ısıtır; yükleyicileri `App.tsx` verir, `prefetch.ts` içe aktarma içermez. Maliyet: ana pakete +261 B (App.tsx içe aktarmaları + zamanlayıcı). Açılış kümesine parça eklemez (bundle:check doğruladı).

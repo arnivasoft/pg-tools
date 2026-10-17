@@ -25,6 +25,12 @@ import { t } from "./strings";
 import { Toaster } from "./Toaster";
 import { toast } from "./toast";
 import { Toolbar } from "./Toolbar";
+import { prefetchIdle } from "./prefetch";
+import { loadExplorerMenuPopup } from "../features/explorer/ExplorerMenu";
+import { loadErrorBadgeCard } from "../features/explorer/ErrorBadge";
+import { loadTxDialogs } from "../features/query/QueryTabs";
+import { loadConfirmDialogView } from "../ui/ConfirmDialog";
+import { loadPasswordPromptView } from "../features/servers/PasswordPrompt";
 import { readStorage, writeStorage } from "./storage";
 import { applyTheme, loadThemePreference, nextPreference, saveThemePreference, watchSystemTheme } from "./theme";
 
@@ -136,6 +142,8 @@ export default function App() {
   };
 
   onMount(async () => {
+    // İlk boyamadan sonra, boşta: tembel parçalar sessizce ısıtılır (ilk sağ tık/diyalog gecikmesiz açılsın).
+    prefetchIdle([loadExplorerMenuPopup, loadConfirmDialogView, loadPasswordPromptView, loadTxDialogs, loadErrorBadgeCard]);
     void query.restore();
     await commands.setShowSystem(showSystem()).catch(() => {
       // Arka uç varsayılanı kapalıdır: anahtar ve kayıtlı tercih buna uysun.

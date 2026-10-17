@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { t } from "../../app/strings";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import { badgeLabel, cardActionLabel, cardTitle, isGone } from "./error-badge-model";

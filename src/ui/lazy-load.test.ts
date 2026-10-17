@@ -78,4 +78,18 @@ describe("createLoader", () => {
     expect(await ensure()).toBe(true);
     expect(loaded).toHaveBeenCalledWith("mod");
   });
+
+  it("load() eşzamanlı fırlatırsa ret gibi işlenir: bir onFail, ensure fırlatmaz, sonraki istek yeniden dener", async () => {
+    let fail = true;
+    const load = vi.fn((): Promise<string> => {
+      if (fail) throw new Error("eşzamanlı");
+      return Promise.resolve("mod");
+    });
+    const onFail = vi.fn();
+    const ensure = createLoader(load, onFail);
+    expect(await ensure()).toBe(false);
+    expect(onFail).toHaveBeenCalledTimes(1);
+    fail = false;
+    expect(await ensure()).toBe(true);
+  });
 });
