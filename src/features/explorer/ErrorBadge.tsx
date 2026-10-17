@@ -1,55 +1,59 @@
-import { HoverCard } from "@kobalte/core/hover-card";
+// Hata rozeti (ana paket): yalnız ikon + düğme. HoverCard'lı tam bileşen tembel parçadadır; yüklenene dek fallback aynı rozettir.
 import { CircleAlert } from "lucide-solid";
-import { Show } from "solid-js";
-import { t } from "../../app/strings";
+import { Suspense, lazy } from "solid-js";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
+import { BADGE_CLASS, badgeLabel, cardActionLabel, cardTitle, isGone } from "./error-badge-model";
+
+/** Yükleyici (tek tanım): `lazy` ve ileride önyükleme aynı içe aktarmayı paylaşır. */
+export const loadErrorBadgeCard = () => import("./ErrorBadgeCard");
+const ErrorBadgeCard = lazy(loadErrorBadgeCard);
 
 export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; onRefreshParent?: () => void; onSelect?: () => void }) {
-  const gone = () => props.error.code === "not_found";
-  let trigger: HTMLElement | undefined;
   // Düğme odağı tutarsa ağacın klavye işleyicisi (e.target === currentTarget) tuşları yok sayar.
-  const focusTree = () => trigger?.closest<HTMLElement>('[role="tree"]')?.focus();
-  return (
-    <HoverCard openDelay={150} closeDelay={100} placement="bottom-end">
-      <HoverCard.Trigger
-        as="button"
+  const focusTree = (el: HTMLElement | undefined) => el?.closest<HTMLElement>('[role="tree"]')?.focus();
+  const run = () => {
+    if (isGone(props.error)) props.onRefreshParent?.();
+    else props.onRetry();
+  };
+  const activate = (el: HTMLElement | undefined) => {
+    props.onSelect?.();
+    run();
+    focusTree(el);
+  };
+  const action = (el: HTMLElement | undefined) => {
+    run();
+    focusTree(el);
+  };
+  const fallback = () => {
+    let el: HTMLButtonElement | undefined;
+    return (
+      <button
         type="button"
-        ref={(el: HTMLButtonElement) => { trigger = el; }}
-        aria-label={t.error.badge}
-        class="ml-auto shrink-0 rounded text-danger outline-none focus-visible:ring-1 focus-visible:ring-accent"
-        onClick={(e: MouseEvent) => {
+        ref={el}
+        aria-label={badgeLabel(props.error)}
+        class={BADGE_CLASS}
+        onClick={(e) => {
           e.stopPropagation();
-          props.onSelect?.();
-          if (gone()) props.onRefreshParent?.();
-          else props.onRetry();
-          focusTree();
+          activate(el);
         }}
-        onDblClick={(e: MouseEvent) => e.stopPropagation()}
+        onDblClick={(e) => e.stopPropagation()}
       >
         <CircleAlert size={13} />
-      </HoverCard.Trigger>
-      <HoverCard.Portal>
-        <HoverCard.Content class="z-50 max-w-[360px] rounded-md border border-border bg-bg p-3 text-sm shadow-xl">
-          <p class="font-semibold">{gone() ? t.error.gone : props.error.message}</p>
-          <Show when={props.error.detail}>
-            <p class="mt-1 select-text break-words">{props.error.detail}</p>
-          </Show>
-          <Show when={props.error.hint}>
-            <p class="mt-1 break-words text-muted">{props.error.hint}</p>
-          </Show>
-          <button
-            type="button"
-            class="mt-2 rounded border border-border px-2 py-0.5 hover:bg-hover"
-            onClick={() => {
-              if (gone()) props.onRefreshParent?.();
-              else props.onRetry();
-              focusTree();
-            }}
-          >
-            {gone() ? t.error.refreshParent : t.error.retry}
-          </button>
-        </HoverCard.Content>
-      </HoverCard.Portal>
-    </HoverCard>
+      </button>
+    );
+  };
+  return (
+    <Suspense fallback={fallback()}>
+      <ErrorBadgeCard
+        label={badgeLabel(props.error)}
+        badgeClass={BADGE_CLASS}
+        title={cardTitle(props.error)}
+        detail={props.error.detail ?? null}
+        hint={props.error.hint ?? null}
+        actionLabel={cardActionLabel(props.error)}
+        onActivate={activate}
+        onAction={action}
+      />
+    </Suspense>
   );
 }

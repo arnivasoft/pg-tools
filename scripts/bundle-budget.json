@@ -1,8 +1,8 @@
 {
-  "mainMaxBytes": 193413,
+  "mainMaxBytes": 182494,
   "forbiddenInMain": ["@kobalte/", "@floating-ui/", "@corvu/", "solid-prevent-scroll", "solid-presence"],
   "enforceForbidden": false,
-  "startupMaxBytes": 244976,
-  "htmlPreloadsTemporary": ["dist"],
+  "startupMaxBytes": 241054,
+  "htmlPreloadsTemporary": ["dist", "errors", "tree-model", "strings", "core"],
   "htmlPreloads": ["solid", "web", "Icon"]
 }
