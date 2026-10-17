@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 5b: Fonksiyon / Procedure / Trigger / Type / Domain Diyalogları Tasarımı
 
 - **Tarih:** 2026-10-16
-- **Durum:** Plan 18 arka ucu uygulandı (sözleşme notları §8); Plan 19 ön yüzü kalan
+- **Durum:** Plan 18 arka ucu uygulandı (sözleşme notları §8); Plan 19 ön yüzü yazıldı (`docs/superpowers/plans/2026-10-17-object-dialogs-p19-routines-types-on-yuz.md`), uygulanmadı
 - **Kapsam:** Object Explorer'dan **Function** (trigger fonksiyonları dahil), **Procedure** (PG 11+), **Trigger** (tablo/bölüm), **Type** (enum, composite, range) ve **Domain** için oluşturma, düzenleme, yeniden adlandırma ve silme; önizlemeli, korumalı DDL uygulaması.
 - **Temel:** `docs/superpowers/specs/2026-10-06-object-dialogs-design.md` (Plan 10–15). Oradaki mimari (§2), risk modeli (§3), arayüz (§4), güvenlik (§6), test stratejisi (§7) ve tüm sözleşme notları **aynen geçerlidir**. Bu belge yalnızca yeni türlerin alanlarını, kurallarını ve kararlarını ekler; o spec'in §1.3 "kapsam dışı" listesinden bu beş tür çıkarılır.
 - **Teslim planları:** Plan 18 (arka uç: modeller, saf üreticiler, yükleyiciler, hedefler, açılır listeler, yönetici entegrasyonu, PG 10–18 Docker matrisi) → Plan 19 (ön yüz: menü kancası + adı konmuş telafi, beş form, gövde düzenleyicisi).
