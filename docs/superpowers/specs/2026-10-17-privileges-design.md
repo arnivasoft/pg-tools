@@ -1,10 +1,10 @@
 # pg-tools — Alt Proje 7: Yetkiler (GRANT/REVOKE) ve Varsayılan Yetkiler Tasarımı
 
 - **Tarih:** 2026-10-17
-- **Durum:** Plan 20 arka ucu uygulandı (PG 10–18 matrisi yeşil); Plan 21 ön yüzü kalan
+- **Durum:** Plan 20 arka ucu uygulandı (PG 10–18 matrisi yeşil); Plan 22 ön yüzü yazıldı (bkz. §8)
 - **Kapsam:** Explorer'dan bir nesnenin **yetkilerini** görüntüleme ve düzenleme (GRANT/REVOKE; `WITH GRANT OPTION`) ve **varsayılan yetkileri** (`ALTER DEFAULT PRIVILEGES`) düzenleme; önizlemeli, korumalı uygulama.
 - **Temel:** `docs/superpowers/specs/2026-10-06-object-dialogs-design.md` (mimari §2, risk modeli §3, arayüz §4, güvenlik §6) — `pgt-ddl` çerçevesi aynen kullanılır; bu belge yalnız yetki modelini, kurallarını ve kararlarını ekler. O spec'in §1.3 "GRANT/REVOKE matrisi, varsayılan yetkiler" kapsam dışı maddesi buraya taşınır.
-- **Teslim planları:** Plan 20 (arka uç: model, yetki kataloğu, saf üreticiler, yükleyiciler, yönetici entegrasyonu, PG 10–18 Docker matrisi) → Plan 21 (ön yüz: "Yetkiler…" ve "Varsayılan yetkiler…" sekmeleri, yetki ızgarası).
+- **Teslim planları:** Plan 20 (arka uç: model, yetki kataloğu, saf üreticiler, yükleyiciler, yönetici entegrasyonu, PG 10–18 Docker matrisi) → Plan 22 (ön yüz; Plan 21 numarası ana paket bölmeye verildi: "Yetkiler…" ve "Varsayılan yetkiler…" sekmeleri, yetki ızgarası).
 
 ---
 
@@ -31,7 +31,7 @@
 - `DefaultAclDef { role, schema: string | null, viewer, sections: [{ objectType, grants: [AclGrant], baseline: [AclGrant] (yalnız şema kapsamında; salt okunur genel taban) }], editable, unsupported }`; kapsam `DefaultAclScope { role: string | null (null → bağlı rol), schemaOid: number | null }`.
 - Plan istekleri `PlanRequest::Privileges { object, old, new, cascade }` ve `PlanRequest::DefaultPrivileges { scope, old, new }`; önizleme/uygulama mevcut `ddl_preview`/`ddl_apply` kapılarından geçer (kilit, yeniden yükleme eşitliği, plan özeti, onay, üretimde ad yazma). Uygulama sonrası ACL yeniden yüklenir; istenenden farklıysa (ör. bağlı rol sahip değil ve yetki kendi adıyla "veren" olarak kaydedildi) uyarı döner (Plan 14 üyelik uyarısı kalıbı).
 
-## 3. Arayüz (Plan 21 özeti)
+## 3. Arayüz (Plan 22 özeti)
 
 - Explorer: desteklenen nesne düğümlerinde **"Yetkiler…"**; veritabanı ve şema düğümünde **"Varsayılan yetkiler…"**.
 - Yetki ızgarası: satır = alıcı (PUBLIC, roller; "Alıcı ekle" — `grantable_roles` lookup), sütun = türün yetkileri; hücre üç durumlu (yok / var / var + GRANT OPTION); sahip satırı işaretli; başka verenlerin yetkileri ve kolon yetkileri salt okunur bölümde; CASCADE seçeneği; önizleme + kapılı uygulama (mevcut designer çerçevesi).
@@ -50,9 +50,9 @@
 ## 6. Planlama notu
 
 - **Plan 20 (arka uç):** model + istekler → yetki kataloğu + nesne ACL üreticisi → varsayılan yetki üreticisi → nesne ACL yükleyicisi → varsayılan yetki yükleyicisi → yönetici/komut entegrasyonu → belgeler ve matris.
-- **Plan 21 (ön yüz):** menü kancası + telafi → yetki ızgarası modeli → "Yetkiler…" sekmesi → "Varsayılan yetkiler…" sekmesi → smoke listesi.
+- **Plan 22 (ön yüz):** menü kancası + telafi → yetki ızgarası modeli → "Yetkiler…" sekmesi → "Varsayılan yetkiler…" sekmesi → smoke listesi.
 
-## 7. Plan 20 sözleşme notları (Plan 21 için)
+## 7. Plan 20 sözleşme notları (Plan 22 için)
 
 Kaynak: `crates/pgt-ddl/src/{acl.rs, build/acl.rs, build/default_acl.rs, load_acl.rs, manager.rs}` ve `src-tauri/src/ddl.rs`. Tüm tipler `#[ts(export)]`, camelCase; bindingler `src/ipc/bindings` altındadır.
 
@@ -91,7 +91,7 @@ Kaynak: `crates/pgt-ddl/src/{acl.rs, build/acl.rs, build/default_acl.rs, load_ac
 - `ddl_load_acl(server_id: Uuid, database_oid: Option<u32>, object: ObjectRef) -> AclDef` (Database için `database_oid` verilmez; bakım bağlantısı).
 - `ddl_load_default_acl(server_id: Uuid, database_oid: u32, scope: DefaultAclScope) -> DefaultAclDef`.
 - Önizleme/uygulama mevcut `ddl_preview`/`ddl_apply`'dır; istekler `PlanRequest::Privileges { object, old, new, cascade }` (`op = "privileges"`) ve `PlanRequest::DefaultPrivileges { scope, old, new }` (`op = "default_privileges"`). `old`, yeniden yüklenen tanıma birebir eşit olmalıdır (`viewer` dahil), değilse `PLAN_CHANGED`.
-- İki komut `src/ipc/commands.ts`'e **henüz eklenmedi** (Plan 21).
+- İki komut `src/ipc/commands.ts`'e **henüz eklenmedi** (Plan 22).
 
 ### 7.4 Uygulama kararları ve errata
 
@@ -109,10 +109,26 @@ Kaynak: `crates/pgt-ddl/src/{acl.rs, build/acl.rs, build/default_acl.rs, load_ac
 
 Kolon yetkileri salt okunur; başka verenlerin yetkileri salt okunur; `GRANTED BY` yok; tablespace, dil, FDW/sunucu, large object ve parametre yetkileri yok; PG 18 LARGE OBJECTS varsayılan yetkileri modellenmez; yabancı tablo backlog.
 
-### 7.6 Ön yüz bütçe notu (Plan 21)
+### 7.6 Ön yüz bütçe notu (Plan 22; Plan 21 sonrası geçersiz — bkz. §8)
 
 Ana paket `index-*.js` **231,724 B**'tır (Plan 20'de değişmedi; yeni TS yalnızca bindingler). Plan 21'de `src/ipc/commands.ts` eklemesi ve Explorer menü kancası ana pakete bayt ekler; **telafi gerektirir** (ör. başka bir kodun tembel dosyaya taşınması). `__vite__mapDeps` 21 girdi ve `index.html` modulepreload yalnız solid/web/Icon kalmalıdır.
 
 ### 7.7 Doğrulama (Plan 20)
 
 Tam Docker matrisi `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf` fd5163e üzerinde yeşildir (çıkış 0; 47 test-result satırı ok, 0 failed). Sürüm kapılı atlamalar: MAINTAIN PG < 17, procedure PG 10. Son inceleme düzeltmelerinden (E2–E4, başka role ait nesne gidiş-dönüşü) sonra matris yeniden yeşil (çıkış 0; 47 test-result satırı ok, 0 failed).
+
+## 8. Plan 22 ön yüz kararları
+
+| Konu | Karar |
+|---|---|
+| Giriş noktaları | Explorer menüsünde, ACL destekleyen nesne düğümlerinde (`tbl`, `view`, `mv`, `seq`, `fn`, `proc`, `tfn`, `sch`, `db`, `typ`, `dom`) **"Yetkiler…"** bulunur. `db` ve `sch` düğümlerinde ek olarak **"Varsayılan yetkiler…"** bulunur. İkisi de nesne düzenleme grubundadır (grup 3) ve kilitli sunucuda devre dışıdır (aynı gerekçe metni). Eylem kimlikleri `privilegesObject` / `defaultPrivilegesObject`; açma kipleri `privileges` / `defaultPrivileges`. |
+| Sekme | Mevcut designer sekmesi kullanılır. Model `variant: "object" | "acl" | "default_acl"` alır, `original`/`draft` bu üç tanımın birleşimi olur. Önizleme, kapılar, onay, üretimde ad yazma, kilit ve uygulama sonucu mevcut akıştan geçer. Sekme anahtarları: `acl:<kind>:<server>:<db>:<oid>` ve `defacl:<server>:<db>:<schemaOid|0>`. |
+| Kullanılabilir yetkiler | Sunucu sürümüne göre sütun listesi arka uçtan gelir (tek doğruluk kaynağı). `AclDef.available` ve `DefaultAclSection.available` (`privileges_for` / `default_privileges_for` sonucu) eklenir. Ön yüz yetki kümesi kopyalamaz. |
+| Yetki ızgarası | Satır = alıcı (önce PUBLIC, sonra roller; sahip satırı "sahip" rozetiyle). Sütun = `available`. Hücre üç durumlu bir düğmedir ve tıklama/Space ile döngüye girer: yok → var → var + GRANT OPTION → yok. PUBLIC satırında ve sahip satırında GRANT OPTION adımı atlanır. Her hücrenin erişilebilir adı "<alıcı> — <yetki>: yok/var/devredilebilir" biçimindedir. Izgara içinde ok tuşlarıyla gezinilir (gezgin tabindex). Satır başında "Tümünü ver / kaldır" yoktur. |
+| Alıcı ekleme/kaldırma | "Alıcı ekle": rol seçici (`roles` lookup, datalist + serbest yazım) ve listede yoksa "PUBLIC". Yinelenen alıcı eklenemez. Satır kaldırma tüm yetkileri kaldırmak demektir. Yeni satır sona eklenir. |
+| Salt okunur bölümler | "Başka verenlerin yetkileri" (veren, alıcı, yetki, devredilebilir) ve "Kolon yetkileri" (kolon, veren, alıcı, yetki) yalnız doluysa gösterilir. `ReadOnlyReasons` yeniden kullanılır. `explicit = false` iken not gösterilir: "Varsayılan (açık ACL yok) yetkiler gösteriliyor; ilk değişiklik ACL'yi açık hâle getirir." |
+| CASCADE | "Bağımlı yetkilerle birlikte geri al (CASCADE)" onay kutusu: yalnız plan REVOKE içerdiğinde etkindir; risk/onay mevcut akıştandır. |
+| Varsayılan yetkiler | Üstte kapsam satırı bulunur: rol seçici (varsayılan `viewer`) ve "Veritabanı geneli" ya da "Şema: <ad>". Rol değişince tanım yeniden yüklenir; taslak kirliyse önce onay istenir. Nesne türü başına bir ızgara gösterilir (Tablolar, Diziler, Fonksiyonlar, Tipler[, Şemalar]). Şema kapsamında her türün altında "Genel varsayılan (salt okunur)" ızgarası yer alır. |
+| Hata yolları | `grants[i].grantee`, `grants[i].privileges[j](.privilege\|.grantOption)` → ilgili satır/hücre. `sections[i]…` → ilgili tür ızgarası. `object`, `schema`, `name`, `signature`, `foreign`, `columns`, `sections`, `sections[i].baseline`, `old.*` → üst hata şeridi. |
+| Uygulama sonrası | Tanım yeniden yüklenir. `ACL_WARNING` mevcut "uygulama sonrası uyarılar" şeridinde gösterilir. Inspector DDL'i yenilenir (seçili düğüm aynıysa). |
+| Paket | Ana pakete yalnız menü kancası (eylem kuralları, `ddl-kinds` ACL kümeleri, iki menü metni) ve iki `commands.ts` sarıcısı girer. Kalan her şey tembel designer parçalarına ve `strings-privileges.ts`'e gider. `bundle:check` tavanı ya aynı planda geri ödenir ya da gerekçesiyle en çok ölçülen artış kadar yükseltilir. |
