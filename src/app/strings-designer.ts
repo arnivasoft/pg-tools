@@ -9,6 +9,9 @@ export const tdes = {
     create: (kind: string, server: string, database?: string | null) =>
       `Oluştur: ${kind} · ${database ? `${server}/${database}` : server}`,
     edit: (_kind: string, name: string) => `Düzenle: ${name}`,
+    /** Plan 22: yetki sekmeleri (`label`: düğüm etiketi). */
+    privileges: (label: string) => `Yetkiler: ${label}`,
+    defaultPrivileges: (label: string) => `Varsayılan yetkiler: ${label}`,
     dirty: "kaydedilmemiş değişiklikler",
   },
   /** Kirli sekmeyi kapatma / yeniden yükleme onayı (odak Vazgeç'te). */
@@ -21,6 +24,9 @@ export const tdes = {
   },
   /** Üst çubuk ve şeritler. */
   view: {
+    /** Plan 22: yetki sekmelerinin başlık rozeti (`kindLabel` yerine) ve formlar gelene kadar yer tutucu. */
+    variant: { acl: "Yetkiler", default_acl: "Varsayılan yetkiler" },
+    preparing: "Hazırlanıyor",
     statusLabel: "Durum",
     status: {
       loading: "Yükleniyor",

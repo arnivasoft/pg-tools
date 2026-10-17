@@ -8,8 +8,8 @@ import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
 import { Button } from "../../ui/Button";
 import { ConfirmDialog } from "../../ui/ConfirmDialogView";
 import ApplyBar from "./ApplyBar";
-import type { DesignerController, DesignerModel } from "./designer-controller";
-import { groupIssues, kindLabel } from "./designer-model";
+import type { DesignerController, DesignerModel, ObjectDesignerModel } from "./designer-controller";
+import { groupIssues, kindLabel, type DesignerVariant } from "./designer-model";
 import type { FormEntry } from "./FormParts";
 import { FORM_PATHS } from "./forms-model";
 import SqlPreview from "./SqlPreview";
@@ -35,6 +35,15 @@ const FORMS: Record<ObjectKind, FormEntry> = {
   trigger: { view: lazy(() => import("./TriggerForm")), paths: FORM_PATHS.trigger },
   type: { view: lazy(() => import("./TypeForm")), paths: FORM_PATHS.type },
   domain: { view: lazy(() => import("./DomainForm")), paths: FORM_PATHS.domain },
+};
+
+// Plan 22: yetki sekmelerinin formları (`variant !== "object"`). Task 4/5 gerçek formlarla (PrivilegesForm /
+// DefaultPrivilegesForm, ayrı tembel parçalar) değiştirir; şimdilik ayrı dosya olmadan yer tutucu.
+const preparing = lazy(async () => ({ default: () => <p class="text-muted">{tdes.view.preparing}</p> }));
+const NO_PATHS: ReadonlySet<string> = new Set();
+const ACL_FORMS: Record<Exclude<DesignerVariant, "object">, FormEntry> = {
+  acl: { view: preparing, paths: NO_PATHS },
+  default_acl: { view: preparing, paths: NO_PATHS },
 };
 
 type StatusKey = keyof typeof tdes.view.status;
@@ -76,9 +85,20 @@ export default function DesignerView(props: {
       {(m) => {
         const v = tdes.view;
         const [askReload, setAskReload] = createSignal(false);
-        const entry = () => FORMS[m().kind];
+        const variant = () => m().variant;
+        const entry = (): FormEntry => {
+          const x = variant();
+          return x === "object" ? FORMS[m().kind] : ACL_FORMS[x];
+        };
+        // Başlık rozeti: nesne sekmesinde tür, yetki sekmelerinde "Yetkiler" / "Varsayılan yetkiler".
+        const badge = () => {
+          const x = variant();
+          return x === "object" ? kindLabel(m().kind) : v.variant[x];
+        };
         // Genel hatalar: `old.`, üst-düzey `columns` ve formun bilmediği yollar.
         const issues = createMemo(() => groupIssues(m().view?.errors ?? [], entry().paths));
+        // Tablo formu geniş (önizleme dar); yetki sekmeleri tablo türünde de normal genişlikte.
+        const wideForm = () => variant() === "object" && m().kind === "table";
         const done = () => m().mode === "create" && m().outcome?.outcome === "applied";
         const readOnly = () => m().locked || m().status !== "ready" || m().applying || done();
         const canReload = () => !m().applying && m().status !== "gone" && m().status !== "loading";
@@ -91,7 +111,7 @@ export default function DesignerView(props: {
           <div class="flex h-full min-h-0 flex-col">
             <div class="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-panel px-2">
               <span class="inline-flex h-5 shrink-0 items-center rounded border border-border px-1.5 text-[11px] font-medium">
-                {kindLabel(m().kind)}
+                {badge()}
               </span>
               <span class="shrink-0 text-[12px] text-muted">{v.mode[m().mode]}</span>
               <span class="min-w-0 truncate text-[13px]" title={props.where ?? m().serverName}>
@@ -142,14 +162,15 @@ export default function DesignerView(props: {
               </div>
             </Show>
             <div class="flex min-h-0 flex-1">
-              <section aria-label={kindLabel(m().kind)} class="min-w-0 flex-1 overflow-auto p-3">
+              <section aria-label={badge()} class="min-w-0 flex-1 overflow-auto p-3">
                 <Show when={m().draft !== null}>
                   <Suspense fallback={<p class="text-muted">{tdes.loading}</p>}>
                     <Dynamic
                       component={entry().view}
                       designer={props.designer}
                       tabId={props.tabId}
-                      model={m()}
+                      // Nesne formu yalnız nesne sekmesinde seçilir (`entry`); yetki formları kendi tanımlarını varyanta göre okur.
+                      model={m() as ObjectDesignerModel}
                       issues={issues()}
                       readOnly={readOnly()}
                     />
@@ -161,7 +182,7 @@ export default function DesignerView(props: {
               </section>
               <div
                 class="flex min-w-80 shrink-0 flex-col border-l border-border"
-                classList={{ "w-[46%]": m().kind !== "table", "w-[38%]": m().kind === "table" }}
+                classList={{ "w-[46%]": !wideForm(), "w-[38%]": wideForm() }}
               >
                 <SqlPreview model={m()} general={issues().general} />
                 <ApplyBar

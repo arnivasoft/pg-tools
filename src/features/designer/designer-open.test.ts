@@ -8,6 +8,7 @@ import type { TreeNode } from "../../ipc/bindings/TreeNode";
 import { ROOT, emptyTree, type TreeState } from "../explorer/tree-model";
 import { createTabsStore } from "../query/tabs-store";
 import type { DesignerController } from "./designer-controller";
+import { aclTabKey, defaultAclTabKey } from "./designer-model";
 import { createDesignerOpener, type DesignerOpenDeps } from "./designer-open";
 
 const flags = { connected: true, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false, locked: false };
@@ -64,6 +65,8 @@ function setup(target: DdlTarget | ((id: string) => Promise<DdlTarget>), cfg: Se
   const designer = {
     openCreate: vi.fn(async (i: { tabId: string }) => void log.push(`create:${i.tabId}`)),
     openAlter: vi.fn(async (i: { tabId: string }) => void log.push(`alter:${i.tabId}`)),
+    openAcl: vi.fn(async (tabId: string) => void log.push(`acl:${tabId}`)),
+    openDefaultAcl: vi.fn(async (tabId: string) => void log.push(`defacl:${tabId}`)),
     findAlter: vi.fn((): string | null => null),
     ids: vi.fn((): string[] => []),
     requestFocus: vi.fn((tabId: string, field: string) => void log.push(`focus:${tabId}:${field}`)),
@@ -393,5 +396,67 @@ describe("designer-open Plan 19: preset", () => {
       tabId: tab.id, serverId: "S1", databaseOid: 5, create: { kind: "function", context: { schemaOid: 10, tableOid: null }, preset: "trigger_function" },
       refreshNodeId: "coll-seq",
     });
+  });
+});
+
+describe("designer-open: yetkiler (Plan 22)", () => {
+  const tblTarget: DdlTarget = { serverId: "S1", databaseOid: 5, object: { kind: "table", oid: 42 }, create: null, focus: null, refreshNodeId: "coll-tbl" };
+  const dbTarget: DdlTarget = { serverId: "S1", databaseOid: null, object: { kind: "database", oid: 5 }, create: null, focus: null, refreshNodeId: "dbs" };
+  const schTarget: DdlTarget = { serverId: "S1", databaseOid: 5, object: { kind: "schema", oid: 2200 }, create: null, focus: null, refreshNodeId: "coll-sch" };
+
+  it("privileges: acl sekmesi + openAcl EŞZAMANLI; ikinci açılış aynı sekme", async () => {
+    const { opener, designer, store, log, deps } = setup(tblTarget);
+    await opener.open("tbl", "privileges");
+    expect(deps.connect).toHaveBeenCalledWith("S1");
+    const tab = store.state.designers[0];
+    expect(log).toEqual([`tab:${tab.id}:true`, `acl:${tab.id}`]);
+    expect(tab.key).toBe(aclTabKey("table", "S1", 5, 42));
+    expect(tab.title).toBe(tdes.tab.privileges("orders"));
+    expect(tab.where).toBe("srv/app");
+    expect(designer.openAcl).toHaveBeenCalledWith(tab.id, { serverId: "S1", databaseOid: 5, refreshNodeId: "coll-tbl" }, { kind: "table", oid: 42 });
+    await opener.open("tbl", "privileges");
+    expect(store.state.designers).toHaveLength(1);
+    expect(designer.openAcl).toHaveBeenCalledOnce();
+    expect(designer.openAlter).not.toHaveBeenCalled();
+  });
+
+  it("privileges: veritabanı nesnesi sunucu kapsamlı (databaseOid null)", async () => {
+    const { opener, designer, store } = setup(dbTarget);
+    await opener.open("db", "privileges");
+    const tab = store.state.designers[0];
+    expect(tab.key).toBe(aclTabKey("database", "S1", null, 5));
+    expect(tab.where).toBe("srv");
+    expect(designer.openAcl).toHaveBeenCalledWith(tab.id, { serverId: "S1", databaseOid: null, refreshNodeId: "dbs" }, { kind: "database", oid: 5 });
+  });
+
+  it("defaultPrivileges: db düğümünde databaseOid = object.oid, schemaOid = null", async () => {
+    const { opener, designer, store } = setup(dbTarget);
+    await opener.open("db", "defaultPrivileges");
+    const tab = store.state.designers[0];
+    expect(tab.key).toBe(defaultAclTabKey("S1", 5, null));
+    expect(tab.title).toBe(tdes.tab.defaultPrivileges("app"));
+    expect(tab.where).toBe("srv/app");
+    expect(designer.openDefaultAcl).toHaveBeenCalledWith(tab.id, { serverId: "S1", databaseOid: 5, refreshNodeId: "dbs" }, { role: null, schemaOid: null });
+  });
+
+  it("defaultPrivileges: sch düğümünde databaseOid = target.databaseOid, schemaOid = object.oid", async () => {
+    const { opener, designer, store } = setup(schTarget);
+    await opener.open("sch", "defaultPrivileges");
+    const tab = store.state.designers[0];
+    expect(tab.key).toBe(defaultAclTabKey("S1", 5, 2200));
+    expect(tab.title).toBe(tdes.tab.defaultPrivileges("public"));
+    expect(designer.openDefaultAcl).toHaveBeenCalledWith(tab.id, { serverId: "S1", databaseOid: 5, refreshNodeId: "coll-sch" }, { role: null, schemaOid: 2200 });
+  });
+
+  it("defaultPrivileges db/şema dışında → tdes.open.none; kilitli sunucu → tdes.open.locked", async () => {
+    const a = setup(tblTarget);
+    await a.opener.open("tbl", "defaultPrivileges");
+    expect(a.deps.notify).toHaveBeenCalledWith(tdes.open.none, "info");
+    expect(a.store.state.designers).toHaveLength(0);
+    const b = setup(tblTarget, server({ readOnlyLock: true }));
+    await b.opener.open("tbl", "privileges");
+    expect(b.deps.notify).toHaveBeenCalledWith(tdes.open.locked, "error");
+    expect(b.deps.connect).not.toHaveBeenCalled();
+    expect(b.store.state.designers).toHaveLength(0);
   });
 });

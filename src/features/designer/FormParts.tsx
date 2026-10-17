@@ -3,7 +3,7 @@
 import { For, Show, createEffect, createResource, createUniqueId, type Component, type JSX } from "solid-js";
 import { tdes } from "../../app/strings-designer";
 import { inputClass } from "../../ui/Field";
-import type { DesignerController, DesignerModel } from "./designer-controller";
+import type { DesignerController, ObjectDesignerModel } from "./designer-controller";
 import { issuesFor, type FieldIssues } from "./designer-model";
 import { normalizeEmpty } from "./forms-model";
 
@@ -11,7 +11,8 @@ import { normalizeEmpty } from "./forms-model";
 export interface FormProps {
   designer: DesignerController;
   tabId: string;
-  model: DesignerModel;
+  /** Nesne sekmesinin modeli (yetki sekmeleri kendi formlarını kullanır). */
+  model: ObjectDesignerModel;
   issues: FieldIssues;
   readOnly: boolean;
 }

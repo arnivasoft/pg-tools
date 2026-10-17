@@ -1,7 +1,7 @@
-import { t } from "../../app/strings";
+import { timp } from "../../app/strings-import";
 import type { ImportItem } from "../../ipc/bindings/ImportItem";
 
-export const UNGROUPED: string = t.import.ungrouped;
+export const UNGROUPED: string = timp.ungrouped;
 
 const importable = (i: ImportItem) => i.error === null;
 

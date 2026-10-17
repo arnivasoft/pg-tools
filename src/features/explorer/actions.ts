@@ -31,7 +31,7 @@ export type ActionId =
  * Nesne diyaloğu (designer) eylemleri: adı `Object` ile biten dört eylem (ana paket bütçesi için liste yerine sonek);
  * kip, adın `Object` öncesidir (`createObject` → `create`). Yeni bir eylem adı bu soneki kullanmamalıdır.
  */
-export type DesignerOpenMode = "create" | "edit" | "rename" | "drop";
+export type DesignerOpenMode = "create" | "edit" | "rename" | "drop" | "privileges" | "defaultPrivileges";
 
 export interface ActionDeps {
   state: () => TreeState;

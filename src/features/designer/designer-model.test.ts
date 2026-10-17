@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { AclDef } from "../../ipc/bindings/AclDef";
+import type { DefaultAclDef } from "../../ipc/bindings/DefaultAclDef";
 import type { FieldError } from "../../ipc/bindings/FieldError";
 import type { IndexColumn } from "../../ipc/bindings/IndexColumn";
 import type { IndexDef } from "../../ipc/bindings/IndexDef";
@@ -12,6 +14,7 @@ import {
   addColumn, addInclude, focusFieldOf, parseFocusField, applyGate, applyOptionsFor, canSubmit, cloneDef, confirmFlags, defName, defsEqual, groupIssues,
   isSafeIntegerString, issuesFor, kindLabel, localBlock, moveColumn, previewEmptyState, removeColumn, removeInclude, scriptWithRanges,
   statementRangesToLineRanges, updateColumn, isServerScoped, planHasRedacted, scriptActionsEnabled, designerTabKey,
+  aclTabKey, defaultAclTabKey, isObjectDef,
   type ApplyGate, type ConfirmState, type GateInput,
 } from "./designer-model";
 
@@ -574,5 +577,55 @@ describe("Plan 15: sunucu kapsamı, gizlenmiş plan, parola kapısı", () => {
     expect(designerTabKey([], { serverId: "s1", databaseOid: null, object: { kind: "role", oid: 16384 } })).toBe("alter:role:s1:null:16384");
     expect(designerTabKey([], { serverId: "s1", databaseOid: null, create: { kind: "database", context: { schemaOid: null, tableOid: null }, preset: null } }))
       .toBe("create:database:s1:null:::1");
+  });
+});
+
+// ---- Plan 22: yetki varyantları ----
+
+const aclDef = (p: Partial<AclDef> = {}): AclDef => ({
+  kind: "table", schema: "public", name: "orders", signature: null, owner: "alice", viewer: "alice", explicit: true,
+  grants: [{ grantee: null, privileges: [{ privilege: "select", grantOption: false }] }], foreign: [], columns: [],
+  editable: true, unsupported: [], available: ["select", "insert"], ...p,
+});
+const defAclDef = (p: Partial<DefaultAclDef> = {}): DefaultAclDef => ({
+  role: "alice", schema: null, viewer: "alice",
+  sections: [{ objectType: "tables", grants: [], baseline: [], available: ["select"] }], editable: true, unsupported: [], ...p,
+});
+
+describe("Plan 22: yetki tanımları (defName / anahtarlar / eşitlik)", () => {
+  it("defName: acl → şema.ad, imza varsa ad(imza); şemasız nesnede yalnız ad", () => {
+    expect(defName(aclDef())).toBe("public.orders");
+    expect(defName(aclDef({ kind: "function", name: "f", signature: "a integer" }))).toBe("public.f(a integer)");
+    expect(defName(aclDef({ kind: "function", name: "g", signature: "" }))).toBe("public.g()");
+    expect(defName(aclDef({ kind: "database", schema: null, name: "app" }))).toBe("app");
+  });
+  it("defName: default_acl → rol (+ / şema)", () => {
+    expect(defName(defAclDef())).toBe("alice");
+    expect(defName(defAclDef({ schema: "app" }))).toBe("alice / app");
+  });
+  it("isObjectDef: yalnız nesne tanımları", () => {
+    expect(isObjectDef({ kind: "schema", name: "a", owner: null, comment: null })).toBe(true);
+    expect(isObjectDef(aclDef())).toBe(false);
+    expect(isObjectDef(defAclDef())).toBe(false);
+  });
+  it("cloneDef / defsEqual birleşim tipiyle çalışır", () => {
+    const a = aclDef();
+    const c = cloneDef(a);
+    expect(c).toEqual(a);
+    expect(c).not.toBe(a);
+    expect(defsEqual(a, c)).toBe(true);
+    c.grants[0]!.privileges[0]!.grantOption = true;
+    expect(defsEqual(a, c)).toBe(false);
+    expect(defsEqual(defAclDef(), cloneDef(defAclDef()))).toBe(true);
+  });
+  it("localBlock yetki tanımlarında engel üretmez", () => {
+    expect(localBlock(aclDef({ kind: "sequence" }))).toBeNull();
+    expect(localBlock(defAclDef())).toBeNull();
+  });
+  it("aclTabKey / defaultAclTabKey", () => {
+    expect(aclTabKey("table", "S1", 5, 42)).toBe("acl:table:S1:5:42");
+    expect(aclTabKey("database", "S1", null, 7)).toBe("acl:database:S1:null:7");
+    expect(defaultAclTabKey("S1", 5, null)).toBe("defacl:S1:5:0");
+    expect(defaultAclTabKey("S1", 5, 2200)).toBe("defacl:S1:5:2200");
   });
 });

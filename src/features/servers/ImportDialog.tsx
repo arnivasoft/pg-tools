@@ -1,6 +1,7 @@
 import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { For, Show, createEffect, createSignal } from "solid-js";
 import { t } from "../../app/strings";
+import { timp } from "../../app/strings-import";
 import { toast } from "../../app/toast";
 import type { ImportItem } from "../../ipc/bindings/ImportItem";
 import { commands } from "../../ipc/commands";
@@ -35,7 +36,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
     const gen = generation;
     setError(null);
     try {
-      const picked = await openFile({ multiple: false, filters: [{ name: t.import.fileFilter, extensions: ["json"] }] });
+      const picked = await openFile({ multiple: false, filters: [{ name: timp.fileFilter, extensions: ["json"] }] });
       if (typeof picked !== "string" || gen !== generation) return;
       setReading(true);
       const list = await commands.previewPgadminImport(picked);
@@ -75,7 +76,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
     try {
       const valid = new Set(items().filter((i) => i.error === null).map((i) => i.index));
       const count = await commands.applyPgadminImport(p, [...selected()].filter((i) => valid.has(i)));
-      toast.show(t.import.done(count), "success");
+      toast.show(timp.done(count), "success");
       props.onImported();
       props.onClose();
     } catch (e) {
@@ -108,9 +109,9 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
       width="760px"
       footer={
         <>
-          <Button disabled={busy()} onClick={props.onClose}>{t.import.cancel}</Button>
+          <Button disabled={busy()} onClick={props.onClose}>{timp.cancel}</Button>
           <Button variant="primary" disabled={busy() || reading() || !canImport(items(), selected())} onClick={() => void apply()}>
-            {t.import.doImport(count())}
+            {timp.doImport(count())}
           </Button>
         </>
       }
@@ -118,7 +119,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
       <div class="flex flex-col gap-3">
         <div class="flex items-center gap-2">
           <Button disabled={reading() || busy()} onClick={() => void choose()}>
-            {reading() ? t.import.reading : t.import.choose}
+            {reading() ? timp.reading : timp.choose}
           </Button>
           <Show when={path()}>
             <span class="truncate text-xs text-muted" title={path() ?? ""}>
@@ -131,24 +132,24 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
         </Show>
         <Show when={items().length > 0}>
           <div class="flex items-center gap-2 text-[13px]">
-            <span class="text-muted">{t.import.summary(summarize(items()))}</span>
+            <span class="text-muted">{timp.summary(summarize(items()))}</span>
             <div class="flex-1" />
             <Button variant="ghost" onClick={() => setSelected(defaultSelection(items()))}>
-              {t.import.selectRecommended}
+              {timp.selectRecommended}
             </Button>
             <Button variant="ghost" onClick={() => setSelected(new Set<number>())}>
-              {t.import.selectNone}
+              {timp.selectNone}
             </Button>
           </div>
           <table class="w-full text-left text-[13px]">
             <thead class="text-xs text-muted">
               <tr>
                 <th class="w-8" />
-                <th>{t.import.colName}</th>
-                <th>{t.import.colGroup}</th>
-                <th>{t.import.colHost}</th>
-                <th>{t.import.colUser}</th>
-                <th>{t.import.colStatus}</th>
+                <th>{timp.colName}</th>
+                <th>{timp.colGroup}</th>
+                <th>{timp.colHost}</th>
+                <th>{timp.colUser}</th>
+                <th>{timp.colStatus}</th>
               </tr>
             </thead>
             <tbody>
@@ -176,7 +177,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
                           fallback={
                             <>
                               <Show when={it.duplicate}>
-                                <span class="text-muted">{t.import.duplicate}</span>
+                                <span class="text-muted">{timp.duplicate}</span>
                               </Show>
                               <Show when={it.warnings.length > 0}>
                                 <button
@@ -184,10 +185,10 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
                                   class="ml-1 rounded px-1 text-muted hover:bg-hover"
                                   aria-expanded={openWarnings().has(it.index)}
                                   aria-controls={openWarnings().has(it.index) ? `import-warnings-${it.index}` : undefined}
-                                  aria-label={(openWarnings().has(it.index) ? t.import.hideWarnings : t.import.showWarnings)(it.warnings.length)}
+                                  aria-label={(openWarnings().has(it.index) ? timp.hideWarnings : timp.showWarnings)(it.warnings.length)}
                                   onClick={() => toggleWarnings(it.index)}
                                 >
-                                  {t.import.warnBadge(it.warnings.length)}
+                                  {timp.warnBadge(it.warnings.length)}
                                 </button>
                               </Show>
                             </>
@@ -201,7 +202,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
                       <tr id={`import-warnings-${it.index}`}>
                         <td />
                         <td colSpan={5} class="pb-1">
-                          <p class="text-xs text-muted">{t.import.warnings}:</p>
+                          <p class="text-xs text-muted">{timp.warnings}:</p>
                           <ul class="list-disc pl-5 text-xs text-muted">
                             <For each={it.warnings}>{(w) => <li>{w}</li>}</For>
                           </ul>
