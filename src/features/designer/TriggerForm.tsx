@@ -17,7 +17,7 @@ import { ReadOnlyReasons } from "./ReadOnlyReasons";
 import { RowList } from "./RowList";
 import {
   asTrigger, availability, functionFromLookup, functionOptionIndex, normalizeTrigger, rebuildNote, restoreCleared, setAt,
-  toggleUpdateColumn, triggerPatch, updateColumnChoices, type TriggerStash,
+  stashFor, toggleUpdateColumn, triggerPatch, updateColumnChoices, type TriggerStash,
 } from "./trigger-model";
 
 function Section(props: { title: string; children: JSX.Element }) {
@@ -78,9 +78,15 @@ export default function TriggerForm(props: FormProps) {
   /** Sekme salt okunur ya da tanım düzenlenemez (Karar 3): her denetim kapalı. */
   const locked = () => props.readOnly || !(draft()?.editable ?? true);
 
-  /** Kapanınca temizlenen UPDATE OF / OLD TABLE / NEW TABLE değerleri; alan yeniden açılınca geri gelir. */
+  /**
+   * Kapanınca temizlenen UPDATE OF / OLD TABLE / NEW TABLE değerleri; alan yeniden açılınca geri gelir. Yalnız son
+   * `patch`'in ürettiği taslak sürümünde (`stashAt`) geçerlidir (`stashFor`): yükleme/yeniden yükleme sürümü değiştirir
+   * ve saklananlar düşer. Sekme yeniden açılınca form örneği yenidir.
+   */
   let stash: TriggerStash = {};
-  const patch = (p: Partial<TriggerDef>) =>
+  let stashAt: number | null = null;
+  const patch = (p: Partial<TriggerDef>) => {
+    stash = stashFor(stash, stashAt, props.model.version);
     props.designer.edit(props.tabId, (x) => {
       const prev = asTrigger(x);
       const n = asTrigger(triggerPatch(x, p));
@@ -89,6 +95,8 @@ export default function TriggerForm(props: FormProps) {
       stash = r.stash;
       return r.def;
     });
+    stashAt = props.model.version;
+  };
   const patchEvents = (p: Partial<TriggerEvents>) => {
     const d = draft();
     if (d) patch({ events: { ...d.events, ...p } });

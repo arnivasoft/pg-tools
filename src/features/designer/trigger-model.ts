@@ -95,6 +95,15 @@ export interface TriggerStash {
 }
 
 /**
+ * Sıfırlama kuralı: saklananlar yalnız formun son düzenlemesinin ürettiği taslak sürümünde (`at`) geçerlidir. Taslak
+ * başka yoldan değiştiyse (Yeniden yükle, uygulama sonrası yükleme, plan_changed yüklemesi) sürüm farklıdır → boş;
+ * bayat değer taze taslağa geri yüklenmez. `at = null`: henüz düzenleme yok.
+ */
+export function stashFor(stash: TriggerStash, at: number | null, version: number): TriggerStash {
+  return at === version ? stash : {};
+}
+
+/**
  * Kapanıp açılan alanın değerini korur (saf; girişler değişmez). `next` normalize edilmiş tanımdır. `prev`'de dolu olup
  * `next`'te kapandığı için boşalan UPDATE OF / OLD TABLE / NEW TABLE saklanır; `next`'te açık ve boş olan alanın saklı
  * değeri geri yüklenir ve kaydı silinir. Önce UPDATE OF geri gelir (REFERENCING açıklığını etkiler), sonra geçiş tabloları.

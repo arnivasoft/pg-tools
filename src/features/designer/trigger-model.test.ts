@@ -4,7 +4,7 @@ import type { TriggerDef } from "../../ipc/bindings/TriggerDef";
 import type { TriggerEvents } from "../../ipc/bindings/TriggerEvents";
 import {
   asTrigger, availability, functionFromLookup, functionOptionIndex, normalizeTrigger, rebuildNote, restoreCleared, setAt, structureChanged,
-  toggleUpdateColumn, type TriggerStash,
+  stashFor, toggleUpdateColumn, type TriggerStash,
   triggerPatch, updateColumnChoices,
 } from "./trigger-model";
 
@@ -244,5 +244,14 @@ describe("restoreCleared (kapanıp açılan alanların değeri geri gelir)", () 
     expect(normalizeTrigger(r.def)).toEqual(r.def);
     expect(stash).toEqual({ updateColumns: ["a"], newTable: "n" });
     expect(next.events.updateColumns).toEqual([]);
+  });
+});
+
+describe("stashFor (saklananlar yalnız üretildikleri taslak sürümünde geçerli)", () => {
+  it("sürüm eşleşirse saklananlar; değilse (yeniden yükleme, uygulama sonrası yükleme, başka yerden düzenleme) boş", () => {
+    const s: TriggerStash = { newTable: "n" };
+    expect(stashFor(s, 7, 7)).toBe(s);
+    expect(stashFor(s, 7, 8)).toEqual({});
+    expect(stashFor(s, null, 0)).toEqual({});
   });
 });
