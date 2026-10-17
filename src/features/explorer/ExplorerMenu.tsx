@@ -1,6 +1,6 @@
 // Explorer sağ tık menüsü (ana paket): ağacı saran div + olaylar + çapa. Menü içeriği (Kobalte) tembel parçadadır
 // (ExplorerMenuPopup) ve çapaya sanal olarak bağlanır; ağaç asla yeniden bağlanmaz.
-import { type Component, Show, createSignal } from "solid-js";
+import { type Component, Show, createEffect, createMemo, createSignal } from "solid-js";
 import { t } from "../../app/strings";
 import { toast } from "../../app/toast";
 import { createLoader } from "../../ui/lazy-load";
@@ -35,6 +35,11 @@ export function ExplorerMenu(props: { explorer: Explorer; deps: ActionDeps; tree
   let treeEl: HTMLElement | undefined;
 
   const open = createMenuOpener(ensurePopup, anchor, setAnchor);
+  // Hedef düğüm menü açıkken ağaçtan kalkarsa (yenileme, bağlantı kesilmesi) menü kapanır; odak ağaca döner (onCloseAutoFocus).
+  createEffect(() => {
+    const a = anchor();
+    if (a !== null && !ex.state().nodes.has(a.nodeId)) setAnchor(null);
+  });
   const rowRect = (id: string) => document.getElementById(rowDomId(id))?.getBoundingClientRect() ?? null;
 
   /** Satır yoksa (boş alan, ContextMenu / Shift+F10 tuşu) seçili düğüme düşer; düğüm yoksa menü açılmaz. */
@@ -82,10 +87,11 @@ export function ExplorerMenu(props: { explorer: Explorer; deps: ActionDeps; tree
             {(a) => {
               const View = P();
               const node = () => ex.state().nodes.get(a.nodeId) ?? null;
-              const items = () => {
+              // Bir kez hesaplanır (ayırıcı denetimi her satırda okur); durum değişince yenilenir.
+              const items = createMemo(() => {
                 const n = node();
                 return n ? actionsFor(ex.state(), n) : [];
-              };
+              });
               return (
                 <View
                   anchor={a}

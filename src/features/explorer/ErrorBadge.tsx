@@ -4,7 +4,8 @@ import { type Component, Show, createSignal } from "solid-js";
 import { t } from "../../app/strings";
 import { toast } from "../../app/toast";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
-import { BADGE_CLASS, badgeLabel, cardActionLabel, cardTitle, createCardLoader, isGone } from "./error-badge-model";
+import { createLoader } from "../../ui/lazy-load";
+import { BADGE_CLASS, badgeLabel, cardActionLabel, cardTitle, isGone } from "./error-badge-model";
 import type { ErrorBadgeCardProps } from "./ErrorBadgeCard";
 
 /** Yükleyici (tek tanım): `lazy` ve ileride önyükleme aynı içe aktarmayı paylaşır. */
@@ -13,9 +14,8 @@ export const loadErrorBadgeCard = () => import("./ErrorBadgeCard");
 // Parça modül düzeyinde bir kez yüklenir (ilk rozet oluşunca başlar); yüklenene dek ya da yükleme reddedilirse
 // çalışan fallback rozet kalır (ret önbelleğe alınmaz: sonraki rozet yeniden dener, bildirim ret başına bir kez).
 const [Card, setCard] = createSignal<Component<ErrorBadgeCardProps> | null>(null);
-const ensureCard = createCardLoader(
-  loadErrorBadgeCard,
-  (m) => setCard(() => m.default),
+const ensureCard = createLoader(
+  () => loadErrorBadgeCard().then((m) => void setCard(() => m.default)),
   () => toast.show(t.app.chunkLoadFailed, "error"),
 );
 

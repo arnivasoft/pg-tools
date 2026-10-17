@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { t } from "../../app/strings";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
-import { createCardLoader, badgeLabel, cardActionLabel, cardTitle, isGone } from "./error-badge-model";
+import { badgeLabel, cardActionLabel, cardTitle, isGone } from "./error-badge-model";
 
 const err = (over: Partial<ErrorPayload>): ErrorPayload => ({ code: "x", message: "boom", detail: null, hint: null, ...over }) as ErrorPayload;
 
@@ -24,27 +24,4 @@ describe("error-badge-model", () => {
   });
 });
 
-describe("createCardLoader", () => {
-  it("eşzamanlı istekler tek yüklemeyi paylaşır, başarıda bir kez bildirir", async () => {
-    const load = vi.fn(async () => "mod");
-    const loaded = vi.fn();
-    const ensure = createCardLoader(load, loaded, vi.fn());
-    expect(await Promise.all([ensure(), ensure(), ensure()])).toEqual([true, true, true]);
-    await ensure();
-    expect(load).toHaveBeenCalledTimes(1);
-    expect(loaded).toHaveBeenCalledWith("mod");
-  });
-  it("ret: onFail rozet sayısından bağımsız bir kez; sonraki istek yeniden dener", async () => {
-    let fail = true;
-    const load = vi.fn(async () => { if (fail) throw new Error("x"); return "mod"; });
-    const onFail = vi.fn();
-    const loaded = vi.fn();
-    const ensure = createCardLoader(load, loaded, onFail);
-    expect(await Promise.all([ensure(), ensure(), ensure()])).toEqual([false, false, false]);
-    expect(onFail).toHaveBeenCalledTimes(1);
-    expect(loaded).not.toHaveBeenCalled();
-    fail = false;
-    expect(await ensure()).toBe(true);
-    expect(loaded).toHaveBeenCalledWith("mod");
-  });
-});
+// createCardLoader testleri src/ui/lazy-load.test.ts'e taşındı (createLoader ile birleştirildi).

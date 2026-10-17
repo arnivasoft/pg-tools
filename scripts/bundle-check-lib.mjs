@@ -127,10 +127,13 @@ export function stripSourceMapComment(code) {
  * Koddaki statik içe aktarma belirteçleri, olduğu gibi (`import{a as b}from"./x.js"`, `import"./x.js"`, `export{a}from"./x.js"`,
  * `export*from"./x.js"`, yorum önekli `/*!x*\/import"./x.js"`); dinamik `import()` ve mapDeps girdileri sayılmaz.
  * Belirteçler çözülmez: `resolveChunk` çözer, çözülemeyende hata verir (yanlış "temiz" yok).
+ * Önek yalnız deyim sınırı (`;`, `{`, `}`, boşluk, satır başı) ya da blok yorum sonu olabilir; bu yüzden
+ * `fetch("/api/export")` gibi dize içerikleri eşleşmez. Bilinen kalan yanlış alarm: dize içinde boşluk + import/export +
+ * tırnak (ör. `"a import 'x'"`). Sessiz geçmez: denetim "çözülemeyen statik içe aktarma" hatasıyla açıkça düşer.
  */
 export function parseStaticImports(code) {
   const out = [];
-  const re = /(?:^|[;{}\s/])(?:import|export)\s*(?:[\w$*{][^"'`;]*?\s*from\s*)?(["'])([^"'\n]+)\1/g;
+  const re = /(?:^|[;{}\s]|\*\/)(?:import|export)\s*(?:[\w$*{][^"'`;]*?\s*from\s*)?(["'])([^"'\n]+)\1/g;
   for (const m of code.matchAll(re)) out.push(m[2]);
   return [...new Set(out)];
 }

@@ -118,6 +118,9 @@ describe("parseStaticImports", () => {
   it("export* ve export*as biçimlerini bulur", () => {
     expect(parseStaticImports('export*from"./x.js";export*as n from"./y.js";').sort()).toEqual(["./x.js", "./y.js"]);
   });
+  it("dize içeriğindeki / ile başlayan yolları içe aktarma saymaz", () => {
+    expect(parseStaticImports('fetch("/api/export");const u="/import";const v=a/export;import"./ok.js";')).toEqual(["./ok.js"]);
+  });
   it("yorum önekli içe aktarmayı tanır", () => {
     expect(parseStaticImports('/*!x*/import"./c.js";/* a */import{a}from"./d.js";').sort()).toEqual(["./c.js", "./d.js"]);
   });
