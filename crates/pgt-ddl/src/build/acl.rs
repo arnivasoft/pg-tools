@@ -112,32 +112,38 @@ fn same_identity(a: &AclDef, b: &AclDef) -> bool {
         && a.explicit == b.explicit
 }
 
-fn find<'a>(grants: &'a [AclGrant], who: Option<&str>) -> Option<&'a AclGrant> {
+pub(crate) fn find<'a>(grants: &'a [AclGrant], who: Option<&str>) -> Option<&'a AclGrant> {
     grants.iter().find(|g| g.grantee.as_deref() == who)
 }
 
 /// Alıcının yetkisi ve GRANT OPTION durumu (`None` = yok).
-fn grant_option(g: Option<&AclGrant>, p: Privilege) -> Option<bool> {
+pub(crate) fn grant_option(g: Option<&AclGrant>, p: Privilege) -> Option<bool> {
     g?.privileges.iter().find(|x| x.privilege == p).map(|x| x.grant_option)
 }
 
-/// Yeni tarafın alıcı/yetki kuralları (Karar 2, 8, 10) ve eski alıcı adlarının gevşek doğrulaması.
-fn validate_grants(ctx: &BuildCtx, old: &AclDef, new: &AclDef, e: &mut Vec<FieldError>) {
-    let allowed = privileges_for(new.kind, ctx.version_num);
-    let allowed_17 = privileges_for(new.kind, 170000);
-    for (i, g) in old.grants.iter().enumerate() {
+/// Yeni tarafın alıcı/yetki kuralları (Karar 2, 8, 10) ve eski alıcı adlarının gevşek doğrulaması. `prefix` alan yolu
+/// önekidir (`grants` ya da `sections[i].grants`); `owner` Karar 8'in GRANT OPTION kuralının sahibidir (varsayılan
+/// yetkilerde `role`). Varsayılan yetki üreticisi de aynı kuralları paylaşır.
+pub(crate) fn validate_rows(
+    prefix: &str,
+    (allowed, allowed_17): (&[Privilege], &[Privilege]),
+    owner: &str,
+    (old, new): (&[AclGrant], &[AclGrant]),
+    e: &mut Vec<FieldError>,
+) {
+    for (i, g) in old.iter().enumerate() {
         if let Some(n) = &g.grantee {
-            check_old_ref(&format!("old.grants[{i}].grantee"), n, e);
+            check_old_ref(&format!("old.{prefix}[{i}].grantee"), n, e);
         }
     }
     let mut seen = BTreeSet::new();
-    for (i, g) in new.grants.iter().enumerate() {
-        let path = format!("grants[{i}].grantee");
+    for (i, g) in new.iter().enumerate() {
+        let path = format!("{prefix}[{i}].grantee");
         if let Some(n) = &g.grantee {
             if n.eq_ignore_ascii_case("public") {
                 // PG `public` adlı rolü yasaklar; adla yazmak `PUBLIC` anlamına gelmez/hata verir.
                 e.push(err(&path, PUBLIC_MSG));
-            } else if find(&old.grants, Some(n)).is_some() {
+            } else if find(old, Some(n)).is_some() {
                 check_old_ref(&path, n, e);
             } else {
                 check_ident(&path, n, e);
@@ -146,11 +152,11 @@ fn validate_grants(ctx: &BuildCtx, old: &AclDef, new: &AclDef, e: &mut Vec<Field
         if !seen.insert(g.grantee.as_deref()) {
             e.push(err(&path, DUP_GRANTEE_MSG));
         }
-        let is_owner = g.grantee.as_deref() == Some(new.owner.as_str());
-        let old_row = find(&old.grants, g.grantee.as_deref());
+        let is_owner = g.grantee.as_deref() == Some(owner);
+        let old_row = find(old, g.grantee.as_deref());
         let mut privs = BTreeSet::new();
         for (j, p) in g.privileges.iter().enumerate() {
-            let pp = format!("grants[{i}].privileges[{j}]");
+            let pp = format!("{prefix}[{i}].privileges[{j}]");
             if !allowed.contains(&p.privilege) {
                 let m = if p.privilege == Privilege::Maintain && allowed_17.contains(&Privilege::Maintain) {
                     MAINTAIN_MSG
@@ -176,14 +182,14 @@ fn validate_grants(ctx: &BuildCtx, old: &AclDef, new: &AclDef, e: &mut Vec<Field
 
 /// Bir alıcının farkı (kanonik sırada): kaldırılan, GRANT OPTION'ı kaldırılan, eklenen, GRANT OPTION'lı verilecek.
 #[derive(Default)]
-struct GranteeDiff {
-    revoke: Vec<Privilege>,
-    revoke_option: Vec<Privilege>,
-    grant: Vec<Privilege>,
-    grant_option: Vec<Privilege>,
+pub(crate) struct GranteeDiff {
+    pub revoke: Vec<Privilege>,
+    pub revoke_option: Vec<Privilege>,
+    pub grant: Vec<Privilege>,
+    pub grant_option: Vec<Privilege>,
 }
 
-fn diff_grantee(order: &[Privilege], old: Option<&AclGrant>, new: Option<&AclGrant>) -> GranteeDiff {
+pub(crate) fn diff_grantee(order: &[Privilege], old: Option<&AclGrant>, new: Option<&AclGrant>) -> GranteeDiff {
     let mut d = GranteeDiff::default();
     for &p in order {
         match (grant_option(old, p), grant_option(new, p)) {
@@ -197,8 +203,53 @@ fn diff_grantee(order: &[Privilege], old: Option<&AclGrant>, new: Option<&AclGra
     d
 }
 
-fn list(ps: &[Privilege]) -> String {
+pub(crate) fn list(ps: &[Privilege]) -> String {
     ps.iter().map(|p| p.sql()).collect::<Vec<_>>().join(", ")
+}
+
+impl GranteeDiff {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.revoke.is_empty() && self.revoke_option.is_empty() && self.grant.is_empty() && self.grant_option.is_empty()
+    }
+}
+
+/// Eski ve yeni satırların alıcı bazında farkı: `PUBLIC` önce, sonra ad (bayt sırası).
+pub(crate) fn diff_rows<'a>(
+    order: &[Privilege],
+    old: &'a [AclGrant],
+    new: &'a [AclGrant],
+) -> Vec<(Option<&'a str>, GranteeDiff)> {
+    let grantees: BTreeSet<Option<&str>> = old.iter().chain(new).map(|g| g.grantee.as_deref()).collect();
+    grantees.into_iter().map(|who| (who, diff_grantee(order, find(old, who), find(new, who)))).collect()
+}
+
+/// Bir alıcı farkının ifadeleri (Karar 6): `(REVOKE'lar, GRANT'lar)`. `head` ifade başı (`""` ya da
+/// `ALTER DEFAULT PRIVILEGES … `), `on` hedef parçası (`ON TABLE s.t` / `ON TABLES`); `revoke` = (risk, not, son ek).
+pub(crate) fn grantee_statements(
+    d: &GranteeDiff,
+    who: Option<&str>,
+    (head, on): (&str, &str),
+    (revoke_risk, revoke_note, suffix): (Risk, Option<&str>, &str),
+) -> (Vec<Statement>, Vec<Statement>) {
+    let g = who.map_or_else(|| "PUBLIC".to_string(), quote_ident);
+    let (mut revokes, mut grants) = (vec![], vec![]);
+    if !d.revoke.is_empty() {
+        revokes.push(stmt(format!("{head}REVOKE {} {on} FROM {g}{suffix}", list(&d.revoke)), revoke_risk, revoke_note));
+    }
+    if !d.revoke_option.is_empty() {
+        revokes.push(stmt(
+            format!("{head}REVOKE GRANT OPTION FOR {} {on} FROM {g}{suffix}", list(&d.revoke_option)),
+            revoke_risk,
+            revoke_note,
+        ));
+    }
+    if !d.grant.is_empty() {
+        grants.push(stmt(format!("{head}GRANT {} {on} TO {g}", list(&d.grant)), Risk::Safe, None));
+    }
+    if !d.grant_option.is_empty() {
+        grants.push(stmt(format!("{head}GRANT {} {on} TO {g} WITH GRANT OPTION", list(&d.grant_option)), Risk::Safe, None));
+    }
+    (revokes, grants)
 }
 
 fn push_warning(w: &mut Vec<String>, msg: &str) {
@@ -219,15 +270,8 @@ pub fn privileges(ctx: &BuildCtx, old: &AclDef, new: &AclDef, cascade: bool) -> 
     }
     // Kanonik sıra: tüm sürümlerin kümesi (MAINTAIN dahil); geçersiz yetki zaten doğrulamada reddedilir.
     let order = privileges_for(old.kind, 170000);
-    let grantees: BTreeSet<Option<&str>> =
-        old.grants.iter().chain(&new.grants).map(|g| g.grantee.as_deref()).collect();
-    let diffs: Vec<(Option<&str>, GranteeDiff)> = grantees
-        .into_iter()
-        .map(|who| (who, diff_grantee(order, find(&old.grants, who), find(&new.grants, who))))
-        .collect();
-    let grants_changed = diffs
-        .iter()
-        .any(|(_, d)| !(d.revoke.is_empty() && d.revoke_option.is_empty() && d.grant.is_empty() && d.grant_option.is_empty()));
+    let diffs = diff_rows(order, &old.grants, &new.grants);
+    let grants_changed = diffs.iter().any(|(_, d)| !d.is_empty());
     if !old.editable {
         // Salt okunur: değişiklik yoksa boş plan (yüklü tanımın kendisiyle karşılaştırılması).
         // `new.editable`/`new.unsupported` karşılaştırılmaz: kapı yalnızca yüklenen (`old`) tanıma bakar.
@@ -244,7 +288,13 @@ pub fn privileges(ctx: &BuildCtx, old: &AclDef, new: &AclDef, cascade: bool) -> 
     if old.columns != new.columns {
         e.push(err("columns", COLUMNS_MSG));
     }
-    validate_grants(ctx, old, new, &mut e);
+    validate_rows(
+        "grants",
+        (privileges_for(new.kind, ctx.version_num), privileges_for(new.kind, 170000)),
+        &new.owner,
+        (&old.grants, &new.grants),
+        &mut e,
+    );
     let target = match object_target(old) {
         Ok(t) => Some(t),
         Err(te) => {
@@ -259,13 +309,15 @@ pub fn privileges(ctx: &BuildCtx, old: &AclDef, new: &AclDef, cascade: bool) -> 
 
     let suffix = if cascade { " CASCADE" } else { "" };
     let (revoke_risk, revoke_note) = if cascade { (Risk::DataLoss, Some(CASCADE_NOTE)) } else { (Risk::Destructive, None) };
+    let on = format!("ON {target}");
     let mut revokes: Vec<Statement> = vec![];
     let mut grants: Vec<Statement> = vec![];
     let mut warnings = vec![];
     for (who, d) in &diffs {
-        let g = who.map_or_else(|| "PUBLIC".to_string(), quote_ident);
+        let (r, g) = grantee_statements(d, *who, ("", &on), (revoke_risk, revoke_note, suffix));
+        revokes.extend(r);
+        grants.extend(g);
         if !d.revoke.is_empty() {
-            revokes.push(stmt(format!("REVOKE {} ON {target} FROM {g}{suffix}", list(&d.revoke)), revoke_risk, revoke_note));
             let is_viewer = *who == Some(old.viewer.as_str());
             if *who == Some(old.owner.as_str()) {
                 push_warning(&mut warnings, OWNER_REVOKE_WARNING);
@@ -282,19 +334,6 @@ pub fn privileges(ctx: &BuildCtx, old: &AclDef, new: &AclDef, cascade: bool) -> 
                     push_warning(&mut warnings, USAGE_WARNING);
                 }
             }
-        }
-        if !d.revoke_option.is_empty() {
-            revokes.push(stmt(
-                format!("REVOKE GRANT OPTION FOR {} ON {target} FROM {g}{suffix}", list(&d.revoke_option)),
-                revoke_risk,
-                revoke_note,
-            ));
-        }
-        if !d.grant.is_empty() {
-            grants.push(stmt(format!("GRANT {} ON {target} TO {g}", list(&d.grant)), Risk::Safe, None));
-        }
-        if !d.grant_option.is_empty() {
-            grants.push(stmt(format!("GRANT {} ON {target} TO {g} WITH GRANT OPTION", list(&d.grant_option)), Risk::Safe, None));
         }
     }
     let statements: Vec<Statement> = revokes.into_iter().chain(grants).collect();

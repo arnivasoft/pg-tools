@@ -1335,10 +1335,7 @@ pub(crate) fn plan_view(req: &PlanRequest, version_num: u32) -> PlanView {
     let ctx = |concurrently| BuildCtx { version_num, concurrently };
     PlanView::from_build(match req {
         PlanRequest::Privileges { old, new, cascade, .. } => build::acl::privileges(&ctx(false), old, new, *cascade),
-        // Geçici (Plan 20 Task 1): varsayılan yetki üreticisi sonraki görevde bağlanır.
-        PlanRequest::DefaultPrivileges { .. } => {
-            Err(vec![FieldError { path: String::new(), message: "henüz desteklenmiyor".into() }])
-        }
+        PlanRequest::DefaultPrivileges { old, new, .. } => build::default_acl::default_privileges(&ctx(false), old, new),
         PlanRequest::Create { def, concurrently } => build::create(def, &ctx(*concurrently)),
         PlanRequest::Alter { old, new, .. } => build::alter(old, new, &ctx(false)),
         PlanRequest::Drop { def, cascade, force, .. } => {
@@ -1474,6 +1471,33 @@ mod tests {
             }
         }
         assert_eq!(ddl_payload(&Error::Invalid(PRIVILEGES_NOT_APPLICABLE.into())).code, "invalid");
+    }
+
+    #[test]
+    fn plan_view_builds_default_privileges() {
+        use crate::acl::{AclGrant, DefaultAclSection, Privilege, PrivilegeGrant};
+        use crate::acl::DefaultAclObjectType::Schemas;
+        let mk = |grants: Vec<AclGrant>| DefaultAclDef {
+            role: "r".into(),
+            schema: None,
+            viewer: "r".into(),
+            sections: crate::acl::default_sections(false)
+                .iter()
+                .map(|&t| DefaultAclSection { object_type: t, grants: if t == Schemas { grants.clone() } else { vec![] }, baseline: vec![] })
+                .collect(),
+            editable: true,
+            unsupported: vec![],
+        };
+        let new_grants = vec![AclGrant { grantee: Some("x".into()), privileges: vec![PrivilegeGrant { privilege: Privilege::Usage, grant_option: false }] }];
+        let req = PlanRequest::DefaultPrivileges {
+            scope: DefaultAclScope { role: None, schema_oid: None },
+            old: mk(vec![]),
+            new: mk(new_grants),
+        };
+        let view = plan_view(&req, 160000);
+        assert_eq!(view.statements.len(), 1);
+        assert_eq!(view.statements[0].sql, "ALTER DEFAULT PRIVILEGES FOR ROLE r GRANT USAGE ON SCHEMAS TO x");
+        assert_eq!(view.warnings.len(), 1);
     }
 
     #[test]

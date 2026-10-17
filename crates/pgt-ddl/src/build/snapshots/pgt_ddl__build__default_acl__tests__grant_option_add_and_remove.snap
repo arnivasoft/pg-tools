@@ -1,0 +1,7 @@
+---
+source: crates/pgt-ddl/src/build/default_acl.rs
+expression: render(&p)
+---
+[Safe] ALTER DEFAULT PRIVILEGES FOR ROLE own REVOKE GRANT OPTION FOR SELECT ON TABLES FROM r
+[Safe] ALTER DEFAULT PRIVILEGES FOR ROLE own GRANT INSERT ON TABLES TO r WITH GRANT OPTION
+WARN: Yalnızca bundan sonra oluşturulan nesneleri etkiler; mevcut nesnelerin yetkileri değişmez.
