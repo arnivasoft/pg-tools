@@ -24,6 +24,7 @@
 
 use pgt_catalog::version::{PgVersion, VersionedSql};
 use pgt_core::connection::{ConnectionManager, Target};
+use pgt_core::pgtext::{is_utf8, lossy, lossy_opt};
 use pgt_core::{Error, Result};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Row;
@@ -33,6 +34,11 @@ use uuid::Uuid;
 
 use crate::build::database::canonical_encoding;
 use crate::model::*;
+
+/// Yüklenen satırlarda geçerli UTF-8 olmayan metin (PG'nin kestiği tip adı ya da onu içeren `format_type`/ifade
+/// metni) varsa `unsupported` gerekçesi: tanım yalnızca gösterim için kayıplı çözülür (`pgt_core::pgtext`) ve
+/// üretici (`build`) bu gerekçeli tanımda her değişikliği, drop'u ve create'i reddeder — kayıplı ad SQL'e yazılmaz.
+pub const INVALID_UTF8_REASON: &str = "geçerli UTF-8 olmayan ad (PostgreSQL uzun çok baytlı adı kesmiş; salt okunur)";
 
 /// Yüklenecek nesne: tür + oid (şema için `pg_namespace`, sequence/indeks için `pg_class`, eklenti için `pg_extension`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -121,6 +127,19 @@ async fn fetch(mgr: &ConnectionManager, server: Uuid, db: u32, sql: &'static Ver
         c.client.query(sql.pick(PgVersion(c.version_num())), &params).await
     })
     .await
+}
+
+/// Satır kümelerinden birinde geçersiz UTF-8 metin varsa `INVALID_UTF8_REASON` (bir kez). Bu gerekçeyi taşıyan
+/// yükleyiciler adı/tip metnini taşıyabilen alanları kayıplı okur (`lossy*`; yalnızca gösterim).
+fn note_invalid_utf8(sets: &[&[Row]], unsupported: &mut Vec<String>) {
+    if sets.iter().any(|rows| !rows.iter().all(is_utf8)) && !unsupported.iter().any(|u| u == INVALID_UTF8_REASON) {
+        unsupported.push(INVALID_UTF8_REASON.to_string());
+    }
+}
+
+/// Gerekçe alanı olmayan (`unsupported`suz) tanımlar: geçersiz UTF-8 metin → `Invalid` (çökme ve kayıplı ad yok).
+fn refuse_invalid_utf8(sets: &[&[Row]]) -> Result<()> {
+    if sets.iter().all(|rows| rows.iter().all(is_utf8)) { Ok(()) } else { Err(Error::Invalid(pgt_core::pgtext::invalid_utf8_message())) }
 }
 
 fn not_found(what: &str) -> Error {
@@ -296,6 +315,7 @@ async fn load_index(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) ->
         .await?;
     let h = head.first().ok_or_else(|| not_found("indeks"))?;
     refuse_system(h)?;
+    refuse_invalid_utf8(&[&head, &cols])?;
     let method: String = h.get("method");
     let nkeyatts: i32 = h.get("nkeyatts");
 
@@ -417,7 +437,7 @@ fn constraint_from_row(r: &Row) -> LoadedConstraint {
         "p" => ConstraintKind::PrimaryKey { columns, include },
         "u" => ConstraintKind::Unique { columns, include, nulls_not_distinct: r.get("nulls_not_distinct") },
         "c" => ConstraintKind::Check {
-            expr: strip_outer_parens(&r.get::<_, Option<String>>("check_expr").unwrap_or_default()),
+            expr: strip_outer_parens(&lossy_opt(r, "check_expr").unwrap_or_default()),
             no_inherit: r.get("no_inherit"),
         },
         _ => {
@@ -460,7 +480,7 @@ fn column_from_row(r: &Row) -> ColumnDef {
         "d" => Some(IdentityKind::ByDefault),
         _ => None,
     };
-    let expr = r.get::<_, Option<String>>("expr").map(|x| strip_outer_parens(&x));
+    let expr = lossy_opt(r, "expr").map(|x| strip_outer_parens(&x));
     let generated = match r.get::<_, String>("generated").as_str() {
         "" => None,
         g => Some(GeneratedDef { expr: expr.clone().unwrap_or_default(), stored: g == "s" }),
@@ -468,7 +488,7 @@ fn column_from_row(r: &Row) -> ColumnDef {
     ColumnDef {
         attnum: Some(r.get("attnum")),
         name: r.get("name"),
-        data_type: r.get("data_type"),
+        data_type: lossy(r, "data_type"),
         not_null: r.get("not_null"),
         default: if identity.is_none() && generated.is_none() { expr } else { None },
         identity,
@@ -521,6 +541,7 @@ async fn load_table(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) ->
             unsupported.push(format!("kimlik dizisi seçenekleri ({})", c.name));
         }
     }
+    note_invalid_utf8(&[&head, &cols, &cons], &mut unsupported);
     let mut constraints = vec![];
     for r in &cons {
         match constraint_from_row(r) {
@@ -583,7 +604,7 @@ fn view_options(opts: &[String]) -> (Option<CheckOption>, bool, bool, Vec<String
 
 /// Kolon satırları → (kolonlar, varsayılanı olan kolon adları, yorumlu kolon adları); adlar ad sırasıyla.
 fn relation_columns(rows: &[Row]) -> (Vec<ViewColumn>, Vec<String>, Vec<String>) {
-    let columns = rows.iter().map(|r| ViewColumn { name: r.get("name"), data_type: r.get("data_type") }).collect();
+    let columns = rows.iter().map(|r| ViewColumn { name: r.get("name"), data_type: lossy(r, "data_type") }).collect();
     let mut defaults: Vec<String> =
         rows.iter().filter(|r| r.get::<_, bool>("has_default")).map(|r| r.get("name")).collect();
     let mut comments: Vec<String> = rows
@@ -636,11 +657,12 @@ async fn load_view(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> 
     unsupported.extend(defaults.into_iter().map(|c| format!("DEFAULT {c}")));
     unsupported.extend(comments.into_iter().map(|c| format!("COMMENT {c}")));
     unsupported.extend(other);
+    note_invalid_utf8(&[&head, &cols], &mut unsupported);
     Ok(ObjectDef::View(ViewDef {
         schema: h.get("schema"),
         name: h.get("name"),
         owner: Some(h.get("owner")),
-        query: view_query(&h.get::<_, Option<String>>("query").unwrap_or_default()),
+        query: view_query(&lossy_opt(h, "query").unwrap_or_default()),
         check_option,
         security_barrier,
         security_invoker,
@@ -664,11 +686,12 @@ async fn load_matview(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) 
         h.get::<_, Vec<String>>("other_options").into_iter().map(|o| format!("WITH ({o})")).collect();
     unsupported.extend(h.get::<_, Vec<String>>("indexes").into_iter().map(|i| format!("INDEX {i}")));
     unsupported.extend(comments.into_iter().map(|c| format!("COMMENT {c}")));
+    note_invalid_utf8(&[&head, &cols], &mut unsupported);
     Ok(ObjectDef::MaterializedView(MatViewDef {
         schema: h.get("schema"),
         name: h.get("name"),
         owner: Some(h.get("owner")),
-        query: view_query(&h.get::<_, Option<String>>("query").unwrap_or_default()),
+        query: view_query(&lossy_opt(h, "query").unwrap_or_default()),
         tablespace: h.get("tablespace"),
         fillfactor: h.get::<_, Option<String>>("fillfactor").and_then(|s| s.parse::<u32>().ok()),
         with_data: h.get("populated"),
@@ -964,9 +987,10 @@ async fn load_function(mgr: &ConnectionManager, server: Uuid, db: u32, kind: Obj
     }
     let rows: Vec<ProcArg> = arg_rows
         .iter()
-        .map(|r| ProcArg { mode: r.get("mode"), name: r.get("name"), type_name: r.get("type_name"), default: r.get("default") })
+        .map(|r| ProcArg { mode: r.get("mode"), name: r.get("name"), type_name: lossy(r, "type_name"), default: lossy_opt(r, "default") })
         .collect();
     let (args, table, mut unsupported) = routine_args(&rows);
+    note_invalid_utf8(&[&head, &arg_rows], &mut unsupported);
 
     let language: String = h.get("language");
     if matches!(language.as_str(), "c" | "internal") {
@@ -1003,7 +1027,7 @@ async fn load_function(mgr: &ConnectionManager, server: Uuid, db: u32, kind: Obj
     } else if h.get::<_, bool>("ret_void") && !retset {
         Some(FunctionReturn::Void)
     } else {
-        Some(FunctionReturn::Type { type_name: h.get("ret_type"), setof: retset })
+        Some(FunctionReturn::Type { type_name: lossy(h, "ret_type"), setof: retset })
     };
     // Üreticinin tip dilbilgisinden geçmeyen yüklü tip ifadeye yazılamaz (ALTER/DROP imzası dahil).
     let mut types: Vec<&str> = args.iter().map(|a| a.type_name.as_str()).collect();
@@ -1214,7 +1238,8 @@ async fn load_trigger(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) 
     }
     let (timing, level, mut events) = trigger_kind(r.get("tgtype"));
     events.update_columns = r.get("update_columns");
-    let when = match trigger_when(&r.get::<_, String>("def")) {
+    note_invalid_utf8(&[&rows], &mut unsupported);
+    let when = match trigger_when(&lossy(r, "def")) {
         Ok(w) => w,
         Err(()) => {
             unsupported.push("WHEN koşulu ayrıştırılamadı".to_string());
@@ -1302,7 +1327,7 @@ fn composite_attrs(rows: &[Row], unsupported: &mut Vec<String>) -> Vec<Composite
     rows.iter()
         .map(|r| {
             let name: String = r.get("name");
-            let type_name: String = r.get("type_name");
+            let type_name = lossy(r, "type_name");
             if crate::build::type_syntax::validate_type(&type_name).is_err() {
                 unsupported.push(format!("tip {type_name}"));
             }
@@ -1341,7 +1366,9 @@ async fn load_type(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> 
         .await?;
     let h = head.first().ok_or_else(|| not_found("tip"))?;
     let mut unsupported = vec![];
-    let name: String = h.get("name");
+    note_invalid_utf8(&[&head, &values, &attrs, &range], &mut unsupported);
+    // Multirange/dizi tipinin adı PG'nin kestiği ad olabilir (gösterim; gerekçe yukarıda).
+    let name = lossy(h, "name");
     let typtype: String = h.get("typtype");
     let empty = || TypeBody::Composite { attributes: vec![] };
     let body = match typtype.as_str() {
@@ -1369,7 +1396,7 @@ async fn load_type(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> 
                 empty()
             }
             Some(r) => {
-                let subtype: String = r.get("subtype");
+                let subtype = lossy(r, "subtype");
                 if crate::build::type_syntax::validate_type(&subtype).is_err() {
                     unsupported.push(format!("tip {subtype}"));
                 }
@@ -1471,7 +1498,8 @@ async fn load_domain(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -
         return Err(Error::Invalid("nesne bir domain değil".to_string()));
     }
     let mut unsupported = vec![];
-    let base_type: String = h.get("base_type");
+    note_invalid_utf8(&[&head, &cons], &mut unsupported);
+    let base_type = lossy(h, "base_type");
     if crate::build::type_syntax::validate_type(&base_type).is_err() {
         unsupported.push(format!("tip {base_type}"));
     }
@@ -1480,7 +1508,7 @@ async fn load_domain(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -
         let name: String = r.get("name");
         let validated: bool = r.get("validated");
         match r.get::<_, String>("contype").as_str() {
-            "c" => match domain_check_expr(&r.get::<_, String>("def")) {
+            "c" => match domain_check_expr(&lossy(r, "def")) {
                 Some(expression) => constraints.push(DomainCheck {
                     name: Some(name.clone()),
                     expression,
@@ -1510,7 +1538,7 @@ async fn load_domain(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -
         comment: h.get::<_, Option<String>>("comment").filter(|c| !c.is_empty()),
         base_type,
         collation: h.get("collation"),
-        default: h.get::<_, Option<String>>("default").map(|d| strip_outer_parens(&d)),
+        default: lossy_opt(h, "default").map(|d| strip_outer_parens(&d)),
         not_null: h.get("not_null"),
         constraints,
         editable: unsupported.is_empty(),

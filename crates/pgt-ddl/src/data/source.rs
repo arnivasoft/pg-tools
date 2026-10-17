@@ -96,7 +96,8 @@ pub async fn load_source(client: &Client, object: ObjectRef, major: u32) -> Resu
                 attnum: r.get("attnum"),
                 name: r.get("name"),
                 type_oid: r.get("type_oid"),
-                type_display: r.get("type_display"),
+                // Yalnızca gösterim: PG'nin kestiği tip adı kayıplı (`pgt_core::pgtext`).
+                type_display: pgt_core::pgtext::lossy(r, "type_display"),
                 not_null: r.get("not_null"),
                 has_default: r.get("has_default"),
                 identity,

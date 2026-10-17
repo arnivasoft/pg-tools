@@ -21,6 +21,7 @@ use std::time::Instant;
 
 use futures_util::StreamExt;
 use pgt_core::connection::{CancelHandle, DedicatedConn, Notice, ServerInfo};
+use pgt_core::pgtext::{PgText, is_invalid_utf8_error};
 use pgt_core::{Error, ErrorPayload, Result};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_postgres::SimpleQueryMessage;
@@ -265,7 +266,8 @@ impl Executor {
         let rows = result.map_err(Error::from_query)?;
         Ok(rows
             .iter()
-            .map(|r| (0..r.len()).map(|i| r.try_get::<_, Option<String>>(i).ok().flatten()).collect())
+            // Gösterim: PG'nin kestiği tip adı kayıplı (`pgt_core::pgtext`).
+            .map(|r| (0..r.len()).map(|i| r.try_get::<_, Option<PgText>>(i).ok().flatten().map(|t| t.lossy())).collect())
             .collect())
     }
 
@@ -499,7 +501,8 @@ impl Executor {
         .await;
         let failure = match result {
             Ok(rows) => {
-                let names = rows.iter().map(|r| r.try_get::<_, Option<String>>(0).ok().flatten()).collect();
+                // Gösterim adı: PG'nin kestiği tip adı kayıplı (`pgt_core::pgtext`).
+                let names = rows.iter().map(|r| r.try_get::<_, Option<PgText>>(0).ok().flatten().map(|t| t.lossy())).collect();
                 self.type_names.store(&missing, names);
                 self.type_name_failures = 0;
                 None
@@ -564,6 +567,12 @@ impl Executor {
             with_notices(self.conn.client.prepare(sql), &mut self.conn.notices, &mut self.notices).await;
         let stmt = match prepared {
             Ok(stmt) => stmt,
+            // Sunucu ifadeyi ayrıştırdı ama tokio-postgres bir sonuç tipini kendi tip sorgusuyla çözemedi (PG'nin
+            // kestiği geçersiz UTF-8 tip adı; `pgt_core::pgtext`): tip bilgisi olmadan metin protokolüyle çalışır.
+            Err(e) if is_invalid_utf8_error(&e) => {
+                self.last_path = Some(Path::Direct);
+                return self.run_undescribed(idx, sql, char_offset, kind, cfg, sink).await;
+            }
             Err(e) => return Outcome::failed(e, Some(0)),
         };
         let keys: Vec<TypeKey> = stmt.columns().iter().map(|c| (c.type_().oid(), c.type_modifier())).collect();
@@ -758,6 +767,72 @@ impl Executor {
         Outcome::Done { tag, rows_affected, rows_sent: kept, truncated }
     }
 
+    /// `prepare`'siz doğrudan yol: sütun adları sunucunun satır tanımından (`RowDescription`), tipler bilinmez
+    /// (`UNDESCRIBED_TYPE`); satır tanımı gelmezse (satırsız ifade) sütunsuz `Started` sonda gönderilir. `run_direct`
+    /// gibi `limit` sonrası atılır (imleç yok).
+    async fn run_undescribed(
+        &mut self,
+        idx: u32,
+        sql: &str,
+        char_offset: u32,
+        kind: StmtKind,
+        cfg: &ExecConfig,
+        sink: &mut dyn EventSink,
+    ) -> Outcome {
+        let opened =
+            with_notices(self.conn.client.simple_query_raw(sql), &mut self.conn.notices, &mut self.notices).await;
+        let stream = match opened {
+            Ok(s) => s,
+            Err(e) => return Outcome::failed(e, Some(0)),
+        };
+        let mut stream = std::pin::pin!(stream);
+        let (chunk, limit) = (cfg.chunk as usize, u64::from(cfg.limit));
+        let mut buf: TextRows = Vec::new();
+        let (mut kept, mut truncated, mut count, mut started) = (0u64, false, None, false);
+        while let Some(message) = with_notices(stream.next(), &mut self.conn.notices, &mut self.notices).await {
+            match message {
+                Ok(SimpleQueryMessage::RowDescription(cols)) if !started => {
+                    started = true;
+                    let columns = cols
+                        .iter()
+                        .map(|c| Column {
+                            name: c.name().to_string(),
+                            type_name: UNDESCRIBED_TYPE.to_string(),
+                            type_oid: 0,
+                            type_display: UNDESCRIBED_TYPE.to_string(),
+                        })
+                        .collect();
+                    if !sink.send(QueryEvent::Started { stmt_index: idx, kind, columns, char_offset }) {
+                        return Outcome::Gone;
+                    }
+                }
+                Ok(SimpleQueryMessage::Row(row)) if kept < limit => {
+                    buf.push(row_values(&row));
+                    kept += 1;
+                    self.peak_buffered = self.peak_buffered.max(buf.len());
+                    if buf.len() == chunk
+                        && !sink.send(QueryEvent::Rows { stmt_index: idx, rows: std::mem::take(&mut buf), more: true })
+                    {
+                        return Outcome::Gone;
+                    }
+                }
+                Ok(SimpleQueryMessage::Row(_)) => truncated = true,
+                Ok(SimpleQueryMessage::CommandComplete(n)) => count = Some(n),
+                Ok(_) => {}
+                Err(e) => return Outcome::failed(e, Some(0)),
+            }
+        }
+        if !started && !sink.send(QueryEvent::Started { stmt_index: idx, kind, columns: vec![], char_offset }) {
+            return Outcome::Gone;
+        }
+        if started && !sink.send(QueryEvent::Rows { stmt_index: idx, rows: buf, more: false }) {
+            return Outcome::Gone;
+        }
+        let tag = command_tag(sql);
+        let rows_affected = affected(&tag, count);
+        Outcome::Done { tag, rows_affected, rows_sent: kept, truncated }
+    }
+
     async fn run_without_rows(&mut self, sql: &str) -> Outcome {
         let opened =
             with_notices(self.conn.client.simple_query_raw(sql), &mut self.conn.notices, &mut self.notices).await;
@@ -808,9 +883,17 @@ fn text_rows(messages: &[SimpleQueryMessage]) -> TextRows {
         .collect()
 }
 
+/// Metin protokolü değerleri. Geçerli UTF-8 olmayan değer (ör. PG'nin kestiği katalog adı; `pgt_core::pgtext`)
+/// `SimpleQueryRow` ham baytlarını vermediği için tümüyle `INVALID_UTF8_VALUE` gösterilir (çökmez).
 fn row_values(row: &tokio_postgres::SimpleQueryRow) -> Vec<Option<String>> {
-    (0..row.len()).map(|i| row.get(i).map(str::to_string)).collect()
+    (0..row.len()).map(|i| row.try_get(i).unwrap_or(Some(INVALID_UTF8_VALUE)).map(str::to_string)).collect()
 }
+
+/// Geçerli UTF-8 olmayan metin değerinin gösterimi (U+FFFD).
+pub(crate) const INVALID_UTF8_VALUE: &str = "\u{FFFD}";
+
+/// `prepare`'siz yolda sütun tipinin iç ve gösterim adı (tip çözülemedi).
+pub(crate) const UNDESCRIBED_TYPE: &str = "?";
 
 /// Sözcük belirteçleri (yorumlar hariç), küçük harfle ve parantez derinliğiyle.
 fn words(sql: &str) -> Vec<(String, u32)> {

@@ -16,7 +16,7 @@ pub mod target;
 
 pub use build::{BuildCtx, ScanResult, scan_semicolons};
 pub use error_codes::{DDL_ERROR_CODES, DdlErrorCode, ddl_payload};
-pub use load::{ObjectRef, load, server_version};
+pub use load::{INVALID_UTF8_REASON, ObjectRef, load, server_version};
 pub use lookup::{LookupItem, LookupRequest, lookup};
 pub use manager::{ApplyOptions, ApplyOutcome, CreateContext, DdlManager, PlanRequest};
 pub use model::*;

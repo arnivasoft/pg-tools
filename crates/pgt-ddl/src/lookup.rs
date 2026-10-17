@@ -8,6 +8,7 @@
 use pgt_catalog::version::{PgVersion, VersionedSql};
 use pgt_core::Result;
 use pgt_core::connection::{ConnectionManager, Target};
+use pgt_core::pgtext::{PgText, lossy_opt};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Row;
 use tokio_postgres::types::ToSql;
@@ -125,8 +126,15 @@ async fn fetch(mgr: &ConnectionManager, server: Uuid, target: Target, sql: &'sta
     .await
 }
 
+/// `value` SQL'e yazılır: geçerli UTF-8 değilse (PG'nin kestiği ad; `pgt_core::pgtext`) satır atlanır; `detail` yalnızca
+/// gösterimdir (kayıplı).
 fn items(rows: &[Row]) -> Vec<LookupItem> {
-    rows.iter().map(|r| LookupItem { value: r.get("value"), detail: r.get("detail") }).collect()
+    rows.iter()
+        .filter_map(|r| {
+            let value = String::from_utf8(r.get::<_, PgText>("value").0).ok()?;
+            Some(LookupItem { value, detail: lossy_opt(r, "detail") })
+        })
+        .collect()
 }
 
 fn provider_param(p: LocaleProvider) -> &'static str {
@@ -196,7 +204,7 @@ pub(crate) async fn lookup_at(mgr: &ConnectionManager, server: Uuid, target: Tar
         // Boş/boşluk arama metni = filtre yok.
         LookupRequest::Types { query } => {
             let q = query.map(|q| q.trim().to_string()).filter(|q| !q.is_empty());
-            items(&fetch(mgr, server, db, &TYPES, vec![q]).await?)
+            items(&fetch(mgr, server, db, &TYPES, vec![q, Some(pgt_core::pgtext::VALID_UTF8_ESCAPED_RE.to_string())]).await?)
         }
         LookupRequest::Collations => items(&fetch(mgr, server, db, &COLLATIONS, vec![]).await?),
         LookupRequest::GrantableRoles => items(&fetch(mgr, server, db, &GRANTABLE_ROLES, vec![]).await?),

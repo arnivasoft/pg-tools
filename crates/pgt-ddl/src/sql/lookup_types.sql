@@ -4,6 +4,8 @@
 -- multirange/array). Dışarıda: sözde tipler (internal, record, any*…), tanımsız (kabuk) tipler, tablo/görünüm satır
 -- tipleri (yalnızca CREATE TYPE AS bileşik tipleri), pg_toast/information_schema/geçici şemalar, katalog iç tipleri.
 -- Sıra: önek eşleşmesi önce, sonra pg_catalog, dizi olmayan, kısa ad; en çok 200.
+-- $2 = `pgt_core::pgtext::VALID_UTF8_ESCAPED_RE`: adı geçerli UTF-8 olmayan multirange (PG'nin kestiği otomatik ad) ve
+-- dizisi dışarıda — `lower()` öyle bir adda sorgunun tamamını 22021 ile düşürür; ad SQL'e de yazılamaz.
 WITH usable AS (
     SELECT t.oid, t.typname::text AS typname, t.typarray, n.nspname::text AS nspname,
            CASE t.typtype WHEN 'b' THEN 'base' WHEN 'e' THEN 'enum' WHEN 'd' THEN 'domain' WHEN 'c' THEN 'composite'
@@ -12,6 +14,7 @@ WITH usable AS (
     JOIN pg_namespace n ON n.oid = t.typnamespace
     WHERE t.typisdefined
       AND t.typtype IN ('b', 'e', 'd', 'c', 'r', 'm')
+      AND (t.typtype <> 'm' OR encode(textsend(t.typname::text), 'escape') ~ $2::text)
       AND NOT (t.typcategory = 'A' AND t.typelem <> 0)
       AND n.nspname <> 'information_schema'
       AND (left(n.nspname, 3) <> 'pg_' OR n.nspname = 'pg_catalog')

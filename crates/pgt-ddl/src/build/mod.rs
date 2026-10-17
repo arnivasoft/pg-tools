@@ -262,12 +262,37 @@ pub(crate) fn validate_identity(def: &ObjectDef) -> Vec<FieldError> {
     e
 }
 
+/// Yükleyicinin `INVALID_UTF8_REASON` koyduğu tanım (her tür): gösterim için kayıplı çözülmüş ad/tip metni taşır →
+/// değiştirilemez, silinemez, yeniden oluşturulamaz (kayıplı ad SQL'e yazılmaz). `editable` alanı olan türlerde zaten
+/// kapalıdır; bu kapı aynı kuralı `editable`'ı olmayan tablo/görünüm/MV/rol için de uygular.
+fn invalid_utf8_locked(d: &ObjectDef) -> bool {
+    let unsupported = match d {
+        ObjectDef::Table(d) => &d.unsupported,
+        ObjectDef::View(d) => &d.unsupported,
+        ObjectDef::MaterializedView(d) => &d.unsupported,
+        ObjectDef::Role(d) => &d.unsupported,
+        ObjectDef::Function(d) | ObjectDef::Procedure(d) => &d.unsupported,
+        ObjectDef::Trigger(d) => &d.unsupported,
+        ObjectDef::Type(d) => &d.unsupported,
+        ObjectDef::Domain(d) => &d.unsupported,
+        _ => return false,
+    };
+    unsupported.iter().any(|u| u == crate::load::INVALID_UTF8_REASON)
+}
+
+fn read_only() -> Vec<FieldError> {
+    vec![err("object", routine::READ_ONLY_MSG)]
+}
+
 fn checked(def: &ObjectDef, ctx: &BuildCtx) -> Result<(), Vec<FieldError>> {
     let errs = validate(def, ctx);
     if errs.is_empty() { Ok(()) } else { Err(errs) }
 }
 
 pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
+    if invalid_utf8_locked(def) {
+        return Err(read_only());
+    }
     // Tablo: paylaşılan doğrulamaya ek olarak yalnızca oluşturmaya özgü kurallar ve nihai ifade taraması.
     let errs = match def {
         ObjectDef::Table(d) => table::validate_create(d, ctx),
@@ -299,6 +324,10 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
 pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
     if old.kind() != new.kind() {
         return Err(mismatch(old, new));
+    }
+    if invalid_utf8_locked(old) || invalid_utf8_locked(new) {
+        // Değişiklik yoksa boş plan (kayıplı eski adlar doğrulanmaz, hiçbir şey yazılmaz).
+        return if old == new { Ok(Plan::default()) } else { Err(read_only()) };
     }
     if let (ObjectDef::Table(o), ObjectDef::Table(n)) = (old, new) {
         // Tablo kendi doğrulamasını yapar: eski tarafta kimlik alanlarına kolon adları/attnum'lar da girer, yeni
@@ -364,6 +393,9 @@ pub fn drop(def: &ObjectDef, cascade: bool, ctx: &BuildCtx) -> Result<Plan, Vec<
 
 /// Silme; ortak kurallar: `force` yalnızca Database, `cascade` Database/Role'de yok.
 pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
+    if invalid_utf8_locked(def) {
+        return Err(read_only());
+    }
     let mut errs = validate_identity(def);
     let kind = def.kind();
     if o.force && kind != ObjectKind::Database {
@@ -465,6 +497,35 @@ mod tests {
         let errs = alter(&s, &e, &ctx()).unwrap_err();
         assert_eq!(errs[0].path, "kind");
         assert!(errs[0].message.contains("uyuşmazlığı"));
+    }
+
+    #[test]
+    fn invalid_utf8_reason_locks_every_kind_with_unsupported() {
+        let col = ColumnDef {
+            attnum: Some(1),
+            name: "m".into(),
+            data_type: "u8.\"a\u{FFFD}_multirange\"".into(),
+            not_null: false,
+            default: None,
+            identity: None,
+            generated: None,
+            collation: None,
+            comment: None,
+            using: None,
+        };
+        let ObjectDef::Table(t) = table() else { unreachable!() };
+        let locked = TableDef { columns: vec![col], unsupported: vec![crate::load::INVALID_UTF8_REASON.into()], ..t };
+        let l = ObjectDef::Table(locked.clone());
+        let paths = |e: Vec<FieldError>| e.into_iter().map(|e| (e.path, e.message)).collect::<Vec<_>>();
+        let ro = vec![("object".to_string(), routine::READ_ONLY_MSG.to_string())];
+        assert!(alter(&l, &l, &ctx()).unwrap().statements.is_empty(), "değişiklik yoksa boş plan");
+        let changed = ObjectDef::Table(TableDef { comment: Some("x".into()), ..locked.clone() });
+        assert_eq!(paths(alter(&l, &changed, &ctx()).unwrap_err()), ro);
+        assert_eq!(paths(drop(&l, false, &ctx()).unwrap_err()), ro);
+        assert_eq!(paths(create(&l, &ctx()).unwrap_err()), ro, "yüklü tanım yeniden oluşturulamaz");
+        // Başka gerekçe tabloyu kilitlemez (yalnızca bilgi): kapı yalnızca bu gerekçeye bakar.
+        let other = ObjectDef::Table(TableDef { unsupported: vec!["EXCLUDE ex".into()], ..locked });
+        assert!(!invalid_utf8_locked(&other) && invalid_utf8_locked(&l));
     }
 
     fn table() -> ObjectDef {

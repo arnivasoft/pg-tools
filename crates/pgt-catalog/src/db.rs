@@ -31,6 +31,19 @@ pub(crate) async fn query(mgr: &ConnectionManager, server: Uuid, target: Target,
     .await
 }
 
+/// DDL betiği için `query`: kayıplı ad betiğe giremez; metin sütunlarında geçersiz UTF-8 varsa `Error::Invalid`
+/// (`pgt_core::pgtext`).
+pub(crate) async fn query_ddl(mgr: &ConnectionManager, server: Uuid, target: Target, sql: &'static VersionedSql, params: Params) -> Result<Vec<Row>> {
+    let rows = query(mgr, server, target, sql, params).await?;
+    pgt_core::pgtext::ensure_utf8(&rows)?;
+    Ok(rows)
+}
+
+/// `query_one`'ın DDL betiği sürümü (`query_ddl`).
+pub(crate) async fn query_one_ddl(mgr: &ConnectionManager, server: Uuid, target: Target, sql: &'static VersionedSql, params: Params, what: &str) -> Result<Row> {
+    query_ddl(mgr, server, target, sql, params).await?.into_iter().next().ok_or_else(|| Error::NotFound(what.to_string()))
+}
+
 /// Tek satır bekler; satır yoksa `Error::NotFound(what)`.
 pub(crate) async fn query_one(mgr: &ConnectionManager, server: Uuid, target: Target, sql: &'static VersionedSql, params: Params, what: &str) -> Result<Row> {
     query(mgr, server, target, sql, params).await?.into_iter().next().ok_or_else(|| Error::NotFound(what.to_string()))
