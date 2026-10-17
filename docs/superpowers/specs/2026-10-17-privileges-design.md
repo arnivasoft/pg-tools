@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 7: Yetkiler (GRANT/REVOKE) ve Varsayılan Yetkiler Tasarımı
 
 - **Tarih:** 2026-10-17
-- **Durum:** Plan 20 arka ucu uygulandı (PG 10–18 matrisi yeşil); Plan 22 ön yüzü yazıldı (bkz. §8)
+- **Durum:** Plan 20 arka ucu uygulandı (PG 10–18 matrisi yeşil); Plan 22 ön yüzü uygulandı; elle kontrol bekliyor (bkz. §8, §8.1)
 - **Kapsam:** Explorer'dan bir nesnenin **yetkilerini** görüntüleme ve düzenleme (GRANT/REVOKE; `WITH GRANT OPTION`) ve **varsayılan yetkileri** (`ALTER DEFAULT PRIVILEGES`) düzenleme; önizlemeli, korumalı uygulama.
 - **Temel:** `docs/superpowers/specs/2026-10-06-object-dialogs-design.md` (mimari §2, risk modeli §3, arayüz §4, güvenlik §6) — `pgt-ddl` çerçevesi aynen kullanılır; bu belge yalnız yetki modelini, kurallarını ve kararlarını ekler. O spec'in §1.3 "GRANT/REVOKE matrisi, varsayılan yetkiler" kapsam dışı maddesi buraya taşınır.
 - **Teslim planları:** Plan 20 (arka uç: model, yetki kataloğu, saf üreticiler, yükleyiciler, yönetici entegrasyonu, PG 10–18 Docker matrisi) → Plan 22 (ön yüz; Plan 21 numarası ana paket bölmeye verildi: "Yetkiler…" ve "Varsayılan yetkiler…" sekmeleri, yetki ızgarası).
@@ -132,3 +132,20 @@ Tam Docker matrisi `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf` fd5163e 
 | Hata yolları | `grants[i].grantee`, `grants[i].privileges[j](.privilege\|.grantOption)` → ilgili satır/hücre. `sections[i]…` → ilgili tür ızgarası. `object`, `schema`, `name`, `signature`, `foreign`, `columns`, `sections`, `sections[i].baseline`, `old.*` → üst hata şeridi. |
 | Uygulama sonrası | Tanım yeniden yüklenir. `ACL_WARNING` mevcut "uygulama sonrası uyarılar" şeridinde gösterilir. Inspector DDL'i yenilenir (seçili düğüm aynıysa). |
 | Paket | Ana pakete yalnız menü kancası (eylem kuralları, `ddl-kinds` ACL kümeleri, iki menü metni) ve iki `commands.ts` sarıcısı girer. Kalan her şey tembel designer parçalarına ve `strings-privileges.ts`'e gider. `bundle:check` tavanı ya aynı planda geri ödenir ya da gerekçesiyle en çok ölçülen artış kadar yükseltilir. |
+
+### 8.1 Uygulama notları (Plan 22)
+
+**Ölçümler.** Plan başı: ana paket 130,252 B, açılış kümesi 157,925 B. Plan sonu: ana paket **129,562 B**, açılış kümesi **157,235 B** (net −690 B; menü kancası ve iki `commands.ts` sarıcısının baytı, tembel parçalara taşınan metin ve env ile geri ödendi). `scripts/bundle-budget.json` tavanları ölçülen değere eşittir (sıfır pay). Yasak paket yok; `index.html` preload'ları yalnız solid/web. Doğrulama: `bun run typecheck`, `bun run test` (83 dosya, 1518 test), `bun run build`, `bun run bundle:check`, `cargo test --workspace` (1397 test), `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build -p pg-tools` yeşil.
+
+**Kararlar.**
+- Variant modeli: `DesignerDef` `object | acl | default_acl` birleşimidir; sekme anahtarları `aclTabKey` / `defaultAclTabKey` ile üretilir.
+- CASCADE: yeni bir temel (yeniden yükleme) geldiğinde sıfırlanır ve seçilince önizleme yeniden alınır.
+- Varsayılan yetkilerde rol değişimi başarısız olursa önceki kapsam geri yüklenir; `not_found` seçicinin altında satır içi gösterilir, sekme kapanmaz.
+- "PUBLIC" / "Public" adlı gerçek roller: tam eşleşme (lookup'ta) kazanır; sözde seçenek "PUBLIC (herkes)" olarak ayrı gösterilir; "public" ya da "PUBLIC (herkes)" PUBLIC satırını ekler.
+- `aclGridPaths`: aynı hücreye düşen birden çok hatada ilk görülen kazanır.
+- Yetkiler, odak hedeflerinde ve ACL desteklemeyen türlerde gizlidir.
+
+**Bilinen eksikler.**
+- **Inspector DDL, yetki uygulandıktan sonra yenilenmez** (Inspector kaynağı seçili düğüm kimliği/sekme ile anahtarlıdır; ana pakette bir kanca gerekir; takip işi). Düğümü yeniden seçmek yeterlidir. (§8 "Uygulama sonrası" satırındaki Inspector yenilemesi bu yüzden uygulanmadı.)
+- Yeni bir önizleme beklerken CASCADE kutusu son önizlemenin durumunu yansıtır (uygulama kapısı bunu engeller).
+- Roller lookup'ı başarısız olursa gerçek bir "PUBLIC" rolü alan üzerinden eklenemez.

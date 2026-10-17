@@ -601,7 +601,7 @@ Bilinen sınırlar:
 
 ## Yetkiler arka ucu (Plan 20)
 
-Plan 20 yalnızca arka uçtur; **GUI maddeleri Plan 22'de eklenecektir** (menüde "Yetkiler…" / "Varsayılan yetkiler…" henüz yok). Arka uç elle sınanmaz; Docker testleriyle (`acl_roundtrip`, `manager`, `logging`) PG 10–18'de doğrulanır.
+Plan 20 yalnızca arka uçtur; GUI maddeleri aşağıdaki "Yetkiler arayüzü (Plan 22)" bölümündedir. Arka uç elle sınanmaz; Docker testleriyle (`acl_roundtrip`, `manager`, `logging`) PG 10–18'de doğrulanır.
 
 - Nesne yetkileri (Table/View/MV, Sequence, Function, Procedure, Schema, Database, Type, Domain) için `load → alter → apply → load` gidiş-dönüşü ve sabit nokta (`alter(loaded, loaded)` boş plan) PG 10–18'de yeşil; NULL ACL etkin gösterilir (`PUBLIC EXECUTE`, `PUBLIC CONNECT, TEMPORARY`, `PUBLIC USAGE`), ilk değişiklik ACL'yi açık yapar.
 - Varsayılan yetkiler (genel ve şema kapsamı; Tables/Sequences/Functions/Types/Schemas) için yükleme/üretim/uygulama yeşil; yeni oluşturulan nesneye varsayılan yetki uygulanır; şema kapsamında `baseline` salt okunur.
@@ -644,3 +644,4 @@ Bilinen sınırlar:
 - [ ] Varsayılan yetkiler — `FOR ROLE` yetkisizlik: üyesi olmadığın bir rol seçip değişiklik uygula → 42501 ve varsayılan yetki ipucu (`DEFAULT_ACL_PRIVILEGE_HINT`) gösterilir. **[—]**
 - [ ] Varsayılan yetkiler — PG 18: LARGE OBJECTS varsayılan girdisi olan rolde bilgi satırında "LARGE OBJECTS varsayılan yetkileri" notu (form düzenlenebilir kalır); veren rolden farklı girdi tanımı salt okunur yapar (gerekçe şeridi, tüm denetimler devre dışı). **[—]**
 - [ ] Varsayılan yetkiler — hata yolları: bölüm hücre/satır hataları ilgili bölümün ızgarasında; `sections`, `sections[i].baseline`, `old.*` genel şeritte. **[—]**
+- [ ] Bilinen sınır — Inspector DDL: bir yetki uygulandıktan sonra Inspector DDL sekmesi kendiliğinden yenilenmez (eski ACL satırları görünür); düğümü yeniden seçince güncel DDL gelir. Hata değildir, takip işidir (spec §8.1). **[—]**

@@ -400,3 +400,18 @@ Arka uç `crates/pgt-ddl` altındadır; saf testler (insta: `src/build/snapshots
 | `crates/pgt-ddl/tests/logging.rs` | Rol adı/yetki/SQL'in günlüğe düşmediği (yakalama testi) |
 
 **Test rolleri:** roller küme geneldir; test rolleri `pgt_acl_rt_<etiket>_<n>` adını taşır ve nesneler benzersiz önekli şemada (`pgt_ddl_rt_<etiket>`) kurulur. Temizlik (`common::cleanup_acl`) başarısız doğrulamadan sonra bile çalışır: önce veritabanı/şema silinir, sonra her veritabanında `DROP OWNED BY` + `DROP ROLE IF EXISTS` ile roller temizlenir.
+
+## Yetkiler ön yüzü testleri (Plan 22)
+
+Tümü `bun run test` (vitest) altında koşar; Docker gerekmez. Arka uç `available` alanı `crates/pgt-ddl/src/acl.rs` birim testlerindedir.
+
+| Dosya | Kapsam |
+|---|---|
+| `src/features/designer/acl-grid-model.test.ts` | Izgara modeli: hücre döngüsü (yok → var → devredilebilir), PUBLIC/sahip satırında GRANT OPTION atlama, alıcı ekle/kaldır ve yinelenen/boş giriş, erişilebilir ad, PUBLIC adlı gerçek rol ayrımı |
+| `src/features/designer/privileges-paths.test.ts` | `aclGridPaths`: `grants[i]…` hata yollarının hücre/satıra, kalanların genel şeride eşlenmesi; aynı hücrede ilk hata kazanır |
+| `src/features/designer/default-acl-model.test.ts` | Varsayılan yetkiler: kapsam satırı, bölüm ızgaraları, `sections[i]…` yolları, rol değişiminde kirli taslak kararı |
+| `src/features/designer/designer-controller.test.ts` | Variant'lı denetleyici: CASCADE sıfırlama/yeniden önizleme, başarısız rol değişiminde önceki kapsamın geri yüklenmesi, `not_found` satır içi hatası |
+| `src/features/designer/designer-open.test.ts` | `aclTabKey` / `defaultAclTabKey` ve `privileges` / `defaultPrivileges` açma kipleri |
+| `src/features/explorer/actions.test.ts` | Menü kuralları: `privilegesObject` / `defaultPrivilegesObject` görünürlüğü (ACL türleri, `db`/`sch`), odak hedefleri ve ACL dışı türlerde gizli, kilitte devre dışı |
+
+Elle kontrol: `docs/smoke-test.md` "Yetkiler arayüzü (Plan 22)".
