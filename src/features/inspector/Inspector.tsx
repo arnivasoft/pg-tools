@@ -7,7 +7,7 @@ import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import { commands } from "../../ipc/commands";
 import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
-import { TabPanel, Tabs } from "../../ui/Tabs";
+import { TabStrip, TabStripPanel } from "../../ui/TabStrip";
 import type { Explorer } from "../explorer/explorer-store";
 import { forNode } from "./for-node";
 import { kindLabel } from "./labels";
@@ -88,7 +88,7 @@ export function Inspector(props: { explorer: Explorer }) {
               </Button>
             </Show>
           </div>
-          <Tabs
+          <TabStrip
             value={tab()}
             onChange={setTab}
             class="min-h-0 flex-1"
@@ -97,7 +97,7 @@ export function Inspector(props: { explorer: Explorer }) {
               { value: "ddl", label: t.inspector.ddl },
             ]}
           >
-            <TabPanel value="properties" class="min-h-0 flex-1 overflow-auto">
+            <TabStripPanel value="properties" class="min-h-0 flex-1 overflow-auto">
               <Switch>
                 <Match when={properties.error}>
                   <ErrorView error={properties.error} />
@@ -110,8 +110,8 @@ export function Inspector(props: { explorer: Explorer }) {
                 </Match>
                 <Match when={propsData()}>{(sections) => <PropertiesView sections={sections()} />}</Match>
               </Switch>
-            </TabPanel>
-            <TabPanel value="ddl" class="relative min-h-0 flex-1">
+            </TabStripPanel>
+            <TabStripPanel value="ddl" class="relative min-h-0 flex-1">
               <Switch>
                 <Match when={ddl.error}>
                   <ErrorView error={ddl.error} />
@@ -130,8 +130,8 @@ export function Inspector(props: { explorer: Explorer }) {
                   )}
                 </Match>
               </Switch>
-            </TabPanel>
-          </Tabs>
+            </TabStripPanel>
+          </TabStrip>
         </div>
       )}
     </Show>

@@ -583,3 +583,7 @@ Bilinen sınırlar:
 - [ ] Bilinen arayüz pürüzü: Function/Procedure "SET" listesindeki ayar düzenleyicisinin metinleri Database/Role ağırlıklıdır ("yeni oturumlarda etkili", "RESET ile sıfırlanır"); davranış doğrudur, yalnız ifade genel. **[—]**
 - [ ] Trigger'da geçiş tablosu / UPDATE OF değerleri, ilgili seçenek kapanınca temizlenir ve seçenek yeniden açılınca **geri gelir** (UPDATE kapat/aç; ikinci olay aç/kapa; constraint aç/kapa). UPDATE OF çip hataları kolon adıyla gösterilir; kilitliyken çiplerde el imleci yok. **[—]**
 - [ ] Gizlilik: geliştirici konsolunda ve günlükte gövde / ad / değer yok; `localStorage`/`sessionStorage`'da form verisi yok. **[—]**
+
+## Ana paket bölme (Plan 21)
+
+- [ ] Inspector sekmeleri (Özellikler / DDL): fareyle geçiş; odak sekmedeyken ←/→ sekmeyi değiştirir ve odağı taşır, uçlarda sarar, Home/End çalışır; seçili olmayan sekmeye Tab ile girilmez (tabindex -1); ekran okuyucu "sekme, seçili" ve panel adını okur; görünüm (alt çizgi, renkler) eskisiyle aynı. DDL sekmesinden çıkıp dönünce DdlView yeniden kurulur (Kobalte ile aynı). **[—]**
