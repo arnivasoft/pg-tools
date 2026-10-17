@@ -380,3 +380,7 @@ Arka uç `crates/pgt-ddl` altındadır; saf testler (insta anlık görüntüleri
 | `crates/pgt-ddl/tests/manager.rs` | Yönetici entegrasyonu: `find_created`, `defaults(…, preset)`, salt okunur kapısı, ipuçları (2BP01/42P13/42809/0A000/42501), sahte `editable` -> `plan_changed` |
 | `crates/pgt-ddl/src/lookup.rs` (birim + DB) | `languages` ve `triggerFunctions` açılır listeleri |
 | `crates/pgt-ddl/tests/logging.rs` | Gövde/ad/değerlerin günlüğe düşmediği (yakalama testi) |
+
+## Ana paket bütçesi (Plan 21)
+
+`bun run bundle:check` geçici dizine kaynak haritalı bir `vite build` yapar (`dist/` değişmez), `index.html`'in giriş parçasını bulur ve `scripts/bundle-budget.json` ile karşılaştırır: ana paket baytı (`//# sourceMappingURL` yorumu düşülür; `bun run build` çıktısıyla aynıdır), `__vite__mapDeps` girdi sayısı, `modulepreload` adları (yalnız solid/web/Icon), kaynak haritasından VLQ çözülerek kaynak ve paket başına bayt tablosu (ilk 25) ve ana pakete sızan yasak paketler (Kobalte, floating-ui, corvu, …). Çıkış kodu 1: tavan aşımı, `enforceForbidden` açıkken yasak paket, preload ihlali, harita yok ya da eşlenen toplam ana baytın %90'ından az. Saf işlevler `scripts/bundle-check-lib.mjs`'tedir ve `scripts/bundle-check-lib.test.mjs` ile `bun run test`'te koşar (vitest `include`'u `scripts/**/*.test.mjs`'i kapsar).
