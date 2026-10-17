@@ -55,12 +55,21 @@ export const ROLE_PATHS: ReadonlySet<string> = new Set([
   "password", "memberOf", "settings", "comment",
 ]);
 /**
- * Tür → bilinen yollar (testte denetlenir). Geçici `Partial`: function/procedure/trigger/type/domain yolları Plan 19
- * formlarıyla gelir.
+ * Function / Procedure (spec §8.5): `args` kökü `args[i].name|typeName|default|mode`, `returns` kökü `returns.typeName`,
+ * `returns.columns[i].name|typeName`, `settings` kökü `settings[i].name|value` alt yollarını kapsar; `old.*` genel şeride
+ * düşer. `kind` (Procedure PG < 11) ve `object` (salt okunur) genel bilgi olsa da kök listededir (formun üstünde gösterilir).
+ */
+export const ROUTINE_PATHS: ReadonlySet<string> = new Set([
+  "schema", "name", "owner", "comment", "language", "body", "cost", "rows", "volatility", "strict", "leakproof", "parallel",
+  "kind", "object", "args", "returns", "settings", "recreate",
+]);
+/**
+ * Tür → bilinen yollar (testte denetlenir). Geçici `Partial`: trigger/type/domain yolları Plan 19 formlarıyla gelir.
  */
 export const FORM_PATHS = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
   view: VIEW_PATHS, materialized_view: MATVIEW_PATHS, database: DATABASE_PATHS, role: ROLE_PATHS,
+  function: ROUTINE_PATHS, procedure: ROUTINE_PATHS,
 } satisfies Partial<Record<ObjectKind, ReadonlySet<string>>>;
 
 /**

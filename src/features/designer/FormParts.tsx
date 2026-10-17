@@ -190,6 +190,8 @@ export function CheckRow(props: {
   checked: boolean;
   disabled: boolean;
   onChange: (v: boolean) => void;
+  /** Onay kutusu öğesi (odak isteği için; ör. Function "Yeniden oluştur"). */
+  ref?: (el: HTMLInputElement) => void;
 }) {
   const id = createUniqueId();
   const errors = () => issuesFor(props.issues, props.path);
@@ -201,6 +203,7 @@ export function CheckRow(props: {
     <div class="flex flex-col gap-1">
       <label class="flex items-center gap-2 text-[13px]">
         <input
+          ref={(el) => props.ref?.(el)}
           type="checkbox"
           aria-describedby={describedBy()}
           aria-invalid={errors().length > 0}

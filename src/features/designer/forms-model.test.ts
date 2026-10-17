@@ -8,7 +8,7 @@ import type { SchemaDef } from "../../ipc/bindings/SchemaDef";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
 import { addColumn, groupIssues, issuesFor, moveColumn, removeColumn, updateColumn } from "./designer-model";
 import {
-  DATABASE_PATHS, EXTENSION_PATHS, FORM_PATHS, ROLE_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
+  DATABASE_PATHS, EXTENSION_PATHS, FORM_PATHS, ROLE_PATHS, ROUTINE_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
   columnKeyLabel, exactIssues, extensionEditPatch, extensionOptionLabel, extensionVersionNote, fillfactorEnabled,
   fillfactorFromInput, findExtension, incrementEditPatch, incrementSign, indexEditPatch, indexMethodPatch, indexReadOnlyReason,
   newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect, orphanRowIssues, ownedByHint, restrictedControlDisabled, schemaEditPatch, sequenceSchemaPatch, tablespaceChoices,
@@ -449,7 +449,7 @@ describe("ROLE_PATHS", () => {
       ["name", "login", "superuser", "createdb", "createrole", "inherit", "replication", "bypassrls", "connectionLimit", "validUntil", "password", "memberOf", "settings", "comment"].sort(),
     );
     expect(FORM_PATHS.role).toBe(ROLE_PATHS);
-    const kinds = ["schema", "sequence", "extension", "index", "table", "view", "materialized_view", "database", "role"] as const;
+    const kinds = ["schema", "sequence", "extension", "index", "table", "view", "materialized_view", "database", "role", "function", "procedure"] as const;
     expect(Object.keys(FORM_PATHS).sort()).toEqual([...kinds].sort());
     expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
   });
@@ -461,5 +461,29 @@ describe("ROLE_PATHS", () => {
     expect(issuesFor(g, "memberOf")).toEqual(["a"]);
     expect(g.byPath.get("settings[0].value")).toEqual(["b"]);
     expect(g.general).toEqual(["c", "d"]);
+  });
+});
+
+describe("ROUTINE_PATHS (Plan 19 Task 3)", () => {
+  it("spec §8.5 kök anahtarları; FORM_PATHS.function === FORM_PATHS.procedure === ROUTINE_PATHS", () => {
+    expect([...ROUTINE_PATHS].sort()).toEqual(
+      ["schema", "name", "owner", "comment", "language", "body", "cost", "rows", "volatility", "strict", "leakproof", "parallel", "kind", "object", "args", "returns", "settings", "recreate"].sort(),
+    );
+    expect(FORM_PATHS.function).toBe(ROUTINE_PATHS);
+    expect(FORM_PATHS.procedure).toBe(ROUTINE_PATHS);
+  });
+  it("groupIssues: args[1].typeName / returns.columns[0].name / settings[0].value alan; old.args[0].typeName ve bilinmeyen genel", () => {
+    const g = groupIssues(
+      [
+        { path: "args[1].typeName", message: "a" }, { path: "returns.columns[0].name", message: "b" }, { path: "settings[0].value", message: "c" },
+        { path: "old.args[0].typeName", message: "d" }, { path: "securityDefinerX", message: "e" }, { path: "args", message: "f" },
+      ] as never,
+      ROUTINE_PATHS,
+    );
+    expect(g.byPath.get("args[1].typeName")).toEqual(["a"]);
+    expect(issuesFor(g, "returns")).toEqual(["b"]);
+    expect(issuesFor(g, "args")).toEqual(["a", "f"]);
+    expect(g.byPath.get("settings[0].value")).toEqual(["c"]);
+    expect(g.general).toEqual(["d", "e"]);
   });
 });
