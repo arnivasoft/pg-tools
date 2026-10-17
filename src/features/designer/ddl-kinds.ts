@@ -22,3 +22,12 @@ export const canEditObject = (kind: NodeKind) => DDL_OBJECT_KINDS.includes(kind)
  */
 export const DDL_ROW_KINDS: NodeKind[] = ["column", "constraint"];
 export const isTableRowKind = (kind: NodeKind) => DDL_ROW_KINDS.includes(kind);
+/**
+ * Plan 22 (spec §8): "Yetkiler…" menüsünün göründüğü (ACL destekleyen) nesne düğümleri. Kolon/kısıt (tablo odak
+ * hedefleri), indeks, trigger, eklenti ve rol yoktur. Salt okunur kararını (aggregate, sistem şeması…) arka uç verir.
+ */
+export const ACL_KINDS: NodeKind[] = [
+  "table", "view", "materializedView", "sequence", "function", "procedure", "triggerFunction", "schema", "database", "type", "domain",
+];
+/** "Varsayılan yetkiler…" yalnız veritabanı ve şema düğümlerinde. */
+export const DEFAULT_ACL_KINDS: NodeKind[] = ["database", "schema"];

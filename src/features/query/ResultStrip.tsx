@@ -1,5 +1,5 @@
 import { For } from "solid-js";
-import { t } from "../../app/strings";
+import { tstrip } from "./strings-strip";
 import type { ResultState, StmtResult } from "./result-model";
 
 const ICON: Record<StmtResult["status"], string> = { running: "…", ok: "✓", failed: "✗", cancelled: "⏹" };
@@ -12,7 +12,7 @@ const TONE: Record<StmtResult["status"], string> = {
 
 /** Satır sayısı / etkilenen satır: satır döndüren ifadede yüklenen, diğerlerinde `rowsAffected`. */
 function countText(s: StmtResult): string {
-  const c = t.query.strip;
+  const c = tstrip;
   if (s.status === "running" || s.status === "failed" || s.status === "cancelled") {
     return s.columns.length > 0 ? c.rows(s.rows.length) : "";
   }
@@ -22,7 +22,7 @@ function countText(s: StmtResult): string {
 
 /** İfade başına bir satır; tıklayınca `onSelect(index)` (ızgara o ifadeyi gösterir). */
 export function ResultStrip(props: { result: ResultState | null; selected: number | null; onSelect: (index: number) => void }) {
-  const c = t.query.strip;
+  const c = tstrip;
   return (
     <ul aria-label={c.ariaLabel} class="flex max-h-28 flex-col overflow-auto border-b border-border text-xs">
       <For each={props.result?.stmts ?? []}>

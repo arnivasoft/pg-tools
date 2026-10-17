@@ -1,0 +1,8 @@
+---
+source: crates/pgt-ddl/src/build/acl.rs
+expression: render(&p)
+---
+[Destructive] REVOKE CONNECT ON DATABASE d FROM PUBLIC
+[Destructive] REVOKE CREATE, TEMPORARY, CONNECT ON DATABASE d FROM own
+WARN: Bu veritabanına bağlanma yetkisi kaldırılıyor; bağlı rol (ve PUBLIC üzerinden bağlananlar) yeniden bağlanamayabilir.
+WARN: Sahip kendi yetkisini kaldırıyor; sahip bu yetkiyi istediği an geri verebilir.

@@ -1,5 +1,5 @@
 import { For, Show } from "solid-js";
-import { t } from "../../app/strings";
+import { tstrip } from "./strings-strip";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import { hintFor } from "./errors";
 import type { Message } from "./result-model";
@@ -50,7 +50,7 @@ export function MessagesView(props: { messages: Message[] }) {
                 </>
               ) : msg.level === "info" ? (
                 <div class={TONE.info}>
-                  [{m.statement(msg.stmtIndex + 1)}] {msg.tag} — {t.query.strip.ms(msg.elapsedMs)}
+                  [{m.statement(msg.stmtIndex + 1)}] {msg.tag} — {tstrip.ms(msg.elapsedMs)}
                 </div>
               ) : (
                 <>

@@ -1,10 +1,10 @@
 import { For, Show, createResource, createSignal, onCleanup } from "solid-js";
-import { t } from "../../app/strings";
+import { tstrip } from "./strings-strip";
 import { toast } from "../../app/toast";
 import type { HistoryEntry } from "../../ipc/bindings/HistoryEntry";
 import { commands, type Api } from "../../ipc/commands";
 import { toPayload } from "../../ipc/errors";
-import { ConfirmDialog } from "../../ui/ConfirmDialog";
+import { ConfirmDialog } from "../../ui/ConfirmDialogView";
 import { inputClass } from "../../ui/Field";
 import { Button } from "../../ui/Button";
 import { displaySql, searchQuery } from "./history-model";
@@ -74,7 +74,7 @@ export function HistoryView(props: {
                       <span class="text-danger">{h.failed}</span>
                     </Show>
                     <Show when={e.ok}>
-                      <span class="ml-auto">{t.query.strip.ms(e.elapsedMs)}</span>
+                      <span class="ml-auto">{tstrip.ms(e.elapsedMs)}</span>
                     </Show>
                   </div>
                   <pre class="mt-0.5 line-clamp-3 whitespace-pre-wrap break-all font-mono text-xs">{displaySql(e.sql)}</pre>

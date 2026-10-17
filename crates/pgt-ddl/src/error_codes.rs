@@ -37,6 +37,13 @@ pub const NEEDS_DATABASE: &str = "Bu nesne türü bir veritabanı gerektirir.";
 pub const ROW_CONFLICT_MESSAGE: &str =
     "Satır başka bir oturum tarafından değiştirilmiş ya da silinmiş; değişiklikler uygulanmadı.";
 
+/// `Error::NotFound` konusu: rol (rol tanımı yüklemesi ve varsayılan yetkilerde kapsamın rolü). İleti ad içermez.
+pub const ROLE_SUBJECT: &str = "rol";
+/// Rol yokluğunun ayrı kodu (`not_found` alt türü; ileti aynı, adsız). Arayüz varsayılan yetkilerde kapsamın rolünün
+/// yokluğunu (bağlı role düş / satır içi hata) şema/veritabanı yokluğundan (`not_found` → sekme düşer) böyle ayırır.
+/// Kodsuz `DdlErrorCode` listesinde değildir (kapı reddi değil, yokluk sınıfıdır).
+pub const ROLE_NOT_FOUND_CODE: &str = "role_not_found";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -89,12 +96,18 @@ impl DdlErrorCode {
     }
 }
 
-/// Komut katmanı hata eşlemesi: işaretli `Invalid` hataları ayrı koda, gerisi `ErrorPayload::from`.
+/// Komut katmanı hata eşlemesi: işaretli `Invalid` hataları ayrı koda, rol yokluğu (`NotFound(ROLE_SUBJECT)`)
+/// `role_not_found` koduna (ileti `not_found` ile aynı), gerisi `ErrorPayload::from`.
 pub fn ddl_payload(e: &Error) -> ErrorPayload {
     if let Error::Invalid(m) = e
         && let Some((code, message)) = DdlErrorCode::from_marker(m)
     {
         return ErrorPayload { code: code.as_str().to_string(), message: message.to_string(), detail: None, hint: None };
+    }
+    if let Error::NotFound(what) = e
+        && what == ROLE_SUBJECT
+    {
+        return ErrorPayload { code: ROLE_NOT_FOUND_CODE.to_string(), ..ErrorPayload::from(e) };
     }
     ErrorPayload::from(e)
 }
@@ -145,6 +158,18 @@ mod tests {
         for m in [PASSWORD_NOT_USED, MAINTENANCE_DATABASE, MAINTENANCE_TEMPLATE, NEEDS_DATABASE, NO_CHANGES, APPLY_ID_IN_USE] {
             assert_eq!(ddl_payload(&Error::Invalid(m.into())).code, "invalid", "{m}");
         }
+    }
+
+    #[test]
+    fn role_not_found_has_its_own_code_and_the_generic_message() {
+        let p = ddl_payload(&Error::NotFound(ROLE_SUBJECT.into()));
+        assert_eq!(p.code, ROLE_NOT_FOUND_CODE);
+        assert_eq!(p.message, ErrorPayload::from(&Error::NotFound(ROLE_SUBJECT.into())).message);
+        // Şema/veritabanı/nesne yokluğu düz `not_found` kalır.
+        for w in ["şema", "veritabanı", "nesne", "tablo"] {
+            assert_eq!(ddl_payload(&Error::NotFound(w.into())).code, "not_found", "{w}");
+        }
+        assert!(!DDL_ERROR_CODES.contains(&ROLE_NOT_FOUND_CODE));
     }
 
     #[test]

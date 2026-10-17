@@ -2744,3 +2744,260 @@ async fn new_hints_body(ts: TestServer) {
     assert_eq!((sqlstate.as_str(), hint.as_deref()), ("42501", Some(LEAKPROOF_HINT)));
     mgr.disconnect(config.id);
 }
+
+// ================================================================================================================
+// Plan 20: nesne yetkileri ve varsayılan yetkiler — kapılar, tam akış, uygulama sonrası denetim, ipuçları
+// ================================================================================================================
+
+use common::{RT_PREFIX, acl_role, cleanup_acl, setup_in};
+use pgt_ddl::manager::{ACL_DEPENDENTS_HINT, ACL_PRIVILEGE_HINT, ACL_ROLE_MISSING_HINT, ACL_WARNING, DEFAULT_ACL_PRIVILEGE_HINT};
+
+fn pgr(privilege: Privilege, grant_option: bool) -> PrivilegeGrant {
+    PrivilegeGrant { privilege, grant_option }
+}
+
+/// Alıcının satırını değiştirir (yoksa ekler); boş liste = alıcının tüm yetkileri kaldırılır.
+fn set_grant(d: &mut AclDef, who: Option<&str>, privileges: Vec<PrivilegeGrant>) {
+    match d.grants.iter_mut().find(|g| g.grantee.as_deref() == who) {
+        Some(g) => g.privileges = privileges,
+        None => d.grants.push(AclGrant { grantee: who.map(Into::into), privileges }),
+    }
+}
+
+fn row_of<'a>(d: &'a AclDef, who: Option<&str>) -> Option<&'a AclGrant> {
+    d.grants.iter().find(|g| g.grantee.as_deref() == who)
+}
+
+fn tables_mut(d: &mut DefaultAclDef) -> &mut DefaultAclSection {
+    d.sections.iter_mut().find(|s| s.object_type == DefaultAclObjectType::Tables).unwrap()
+}
+
+impl Fx {
+    /// Etkin ACL (Database bakım bağlantısından: `database_oid` verilmez).
+    async fn load_acl_of(&self, object: ObjectRef) -> AclDef {
+        let db = (object.kind != ObjectKind::Database).then_some(self.db);
+        self.dm.load_acl(self.server, db, object).await.unwrap_or_else(|e| panic!("{:?} yetkileri yüklenemedi: {e:?}", object.kind))
+    }
+
+    async fn privileges(&self, object: ObjectRef, edit: impl FnOnce(&mut AclDef), cascade: bool) -> PlanRequest {
+        let old = self.load_acl_of(object).await;
+        let mut new = old.clone();
+        edit(&mut new);
+        PlanRequest::Privileges { object, old, new, cascade }
+    }
+
+    async fn default_privileges(&self, scope: DefaultAclScope, edit: impl FnOnce(&mut DefaultAclDef)) -> PlanRequest {
+        let old = self.dm.load_default_acl(self.server, self.db, scope.clone()).await.unwrap();
+        let mut new = old.clone();
+        edit(&mut new);
+        PlanRequest::DefaultPrivileges { scope, old, new }
+    }
+}
+
+fn warnings_of(r: Result<ApplyOutcome>) -> Option<Vec<String>> {
+    match r {
+        Ok(ApplyOutcome::Applied { warnings, created, .. }) => {
+            assert_eq!(created, None, "yetki isteğinde `created` yok");
+            warnings
+        }
+        other => panic!("uygulanmalıydı: {other:?}"),
+    }
+}
+
+fn acl_hint_of(r: Result<ApplyOutcome>) -> (String, Option<String>) {
+    let (_, committed, sqlstate, error) = failed(r);
+    assert_eq!(committed, 0, "tek transaction: hiçbir şey kalıcı değil");
+    (sqlstate.unwrap_or_default(), error.hint)
+}
+
+#[tokio::test]
+async fn privileges_flow_gates_and_hints() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(acl_flow_body(ts.clone()), cleanup_acl(&ts, RT_PREFIX, "macl")).await;
+    }
+}
+
+async fn acl_flow_body(ts: TestServer) {
+    const TAG: &str = "macl";
+    cleanup_acl(&ts, RT_PREFIX, TAG).await;
+    let env = setup_in(&ts, RT_PREFIX, TAG).await;
+    let (r1, r2) = (acl_role(TAG, "1"), acl_role(TAG, "Büyük \"2\""));
+    let (q1, q2) = (quote_ident(&r1), quote_ident(&r2));
+    let s = format!("{RT_PREFIX}_{TAG}");
+    let qs = quote_ident(&s);
+    env.sql(&format!("CREATE ROLE {q1}; CREATE ROLE {q2}; CREATE SCHEMA {qs}; CREATE TABLE {qs}.t (id int); GRANT USAGE ON SCHEMA {qs} TO {q1}"))
+        .await;
+    let f = fx(&env, &ts, false, None);
+    let t = ObjectRef { kind: ObjectKind::Table, oid: env.class_oid(&s, "t").await };
+
+    // Tam akış: önizleme → hash'le uygulama; uyarı yok; yeniden yükleme istenen satırı gösterir.
+    let req = f.privileges(t, |d| set_grant(d, Some(&r1), vec![pgr(Privilege::Select, true)]), false).await;
+    let view = f.preview(&req).await;
+    assert_eq!((view.risk, view.statements.len()), (Risk::Safe, 1), "{view:?}");
+    assert_eq!(code(&f.dm.apply(f.server, f.db, &req, opts("yanlis")).await), "plan_changed");
+    assert_eq!(warnings_of(f.apply(&req).await), None);
+    let loaded = f.load_acl_of(t).await;
+    assert!(loaded.explicit, "{loaded:?}");
+    assert_eq!(row_of(&loaded, Some(&r1)).map(|g| g.privileges.clone()), Some(vec![pgr(Privilege::Select, true)]));
+    let PlanRequest::Privileges { new, .. } = &req else { unreachable!() };
+    let mut want = new.grants.clone();
+    sort_grants(&mut want, privileges_for(ObjectKind::Table, 170000));
+    assert_eq!(loaded.grants, want, "yeniden yüklenen tanım istenene (kanonik sırada) eşit");
+
+    // Kilitli sunucu: iki istek de `locked`; önizleme serbest.
+    let locked = fx(&env, &ts, true, None);
+    let grant_r2 = f.privileges(t, |d| set_grant(d, Some(&r2), vec![pgr(Privilege::Select, false)]), false).await;
+    let def_req = f
+        .default_privileges(DefaultAclScope { role: None, schema_oid: None }, |d| {
+            tables_mut(d).grants.push(AclGrant { grantee: Some(r1.clone()), privileges: vec![pgr(Privilege::Select, false)] })
+        })
+        .await;
+    for r in [&grant_r2, &def_req] {
+        assert_eq!(code(&locked.apply(r).await), "locked");
+        assert!(locked.preview(r).await.errors.is_empty());
+    }
+
+    // Bayat `old`: arada başka bağlantı GRANT etti → `plan_changed`, istek uygulanmaz.
+    env.sql(&format!("GRANT INSERT ON {qs}.t TO {q2}")).await;
+    assert_eq!(code(&f.apply(&grant_r2).await), "plan_changed");
+    assert_eq!(row_of(&f.load_acl_of(t).await, Some(&r2)).map(|g| g.privileges.clone()), Some(vec![pgr(Privilege::Insert, false)]));
+
+    // Alıcı rol yok: 42704 + ipucu.
+    let missing = acl_role(TAG, "yok");
+    let req = f.privileges(t, |d| set_grant(d, Some(&missing), vec![pgr(Privilege::Select, false)]), false).await;
+    let (sqlstate, hint) = acl_hint_of(f.apply(&req).await);
+    assert_eq!((sqlstate.as_str(), hint.as_deref()), ("42704", Some(ACL_ROLE_MISSING_HINT)));
+
+    // REVOKE: onay ister; alıcı yetkiyi devretmişse CASCADE'siz 2BP01 + ipucu, hiçbir şey değişmez.
+    env.sql(&format!("SET ROLE {q1}; GRANT SELECT ON {qs}.t TO {q2}; RESET ROLE")).await;
+    let revoke = f.privileges(t, |d| set_grant(d, Some(&r1), vec![]), false).await;
+    let PlanRequest::Privileges { old: before, .. } = &revoke else { unreachable!() };
+    assert!(before.foreign.iter().any(|g| g.grantor == r1), "{before:?}");
+    assert_eq!(f.preview(&revoke).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&revoke).await), "confirmation_required");
+    let (sqlstate, hint) = acl_hint_of(f.apply_with(&revoke, |o| o.confirmed = true).await);
+    assert_eq!((sqlstate.as_str(), hint.as_deref()), ("2BP01", Some(ACL_DEPENDENTS_HINT)));
+    assert_eq!(&f.load_acl_of(t).await, before, "başarısız REVOKE hiçbir şeyi değiştirmemeli");
+
+    // CASCADE üretimde: veri kaybı → genel onay, sonra ad yazma onayı; sonra bağımlı yetki de gider.
+    let prod = fx(&env, &ts, false, Some("Üretim"));
+    let cascade = prod.privileges(t, |d| set_grant(d, Some(&r1), vec![]), true).await;
+    assert_eq!(prod.preview(&cascade).await.risk, Risk::DataLoss);
+    assert_eq!(code(&prod.apply(&cascade).await), "confirmation_required");
+    assert_eq!(code(&prod.apply_with(&cascade, |o| o.confirmed = true).await), "production_confirmation_required");
+    assert_eq!(warnings_of(prod.apply_with(&cascade, |o| (o.confirmed, o.confirmed_production) = (true, true)).await), None);
+    let after = f.load_acl_of(t).await;
+    assert!(row_of(&after, Some(&r1)).is_none() && after.foreign.is_empty(), "{after:?}");
+
+    // Database ACL bakım bağlantısında (`database_oid` yok): PUBLIC'ten TEMPORARY kaldırılır.
+    let dbo = ObjectRef { kind: ObjectKind::Database, oid: env.db_oid };
+    let req = f.privileges(dbo, |d| set_grant(d, None, vec![pgr(Privilege::Connect, false)]), false).await;
+    let PlanRequest::Privileges { old, .. } = &req else { unreachable!() };
+    assert!(!old.explicit && row_of(old, None).is_some_and(|g| g.privileges.len() == 2), "{old:?}");
+    let view = f.dm.preview(f.server, None, &req).await.unwrap();
+    let mut o = opts(&view.hash);
+    o.confirmed = true;
+    assert_eq!(warnings_of(f.dm.apply(f.server, None, &req, o).await), None);
+    let reloaded = f.load_acl_of(dbo).await;
+    assert_eq!(row_of(&reloaded, None).map(|g| g.privileges.clone()), Some(vec![pgr(Privilege::Connect, false)]));
+
+    // Başka role ait nesne: süper kullanıcının GRANT/REVOKE'u sahip adına kaydedilir → ACL_WARNING yok, `foreign` boş.
+    env.sql(&format!("CREATE TABLE {qs}.o (id int); ALTER TABLE {qs}.o OWNER TO {q2}")).await;
+    let to = ObjectRef { kind: ObjectKind::Table, oid: env.class_oid(&s, "o").await };
+    let req = f.privileges(to, |d| set_grant(d, Some(&r1), vec![pgr(Privilege::Select, true)]), false).await;
+    assert_eq!(warnings_of(f.apply(&req).await), None);
+    let l = f.load_acl_of(to).await;
+    assert_eq!((l.owner.as_str(), l.viewer.as_str()), (r2.as_str(), env.me.as_str()));
+    assert!(l.foreign.is_empty(), "{l:?}");
+    assert_eq!(row_of(&l, Some(&r1)).map(|g| g.privileges.clone()), Some(vec![pgr(Privilege::Select, true)]));
+    let req = f.privileges(to, |d| set_grant(d, Some(&r1), vec![]), false).await;
+    assert_eq!(warnings_of(f.apply_with(&req, |o| o.confirmed = true).await), None);
+    let l = f.load_acl_of(to).await;
+    assert!(l.foreign.is_empty() && row_of(&l, Some(&r1)).is_none(), "{l:?}");
+
+    // Varsayılan yetkiler: kapsam rolü `old.role` ile uyuşmazsa `invalid_def` (bağlantı yok).
+    let PlanRequest::DefaultPrivileges { scope, old, new } = &def_req else { unreachable!() };
+    let bad = PlanRequest::DefaultPrivileges { scope: DefaultAclScope { role: Some(r1.clone()), schema_oid: None }, old: old.clone(), new: new.clone() };
+    assert_eq!(code(&f.apply(&bad).await), "invalid_def");
+    // Tam akış; gerçekten yeni tabloya uygulanır.
+    assert_eq!(f.preview(&def_req).await.risk, Risk::Safe);
+    assert_eq!(warnings_of(f.apply(&def_req).await), None);
+    let reloaded = f.dm.load_default_acl(f.server, f.db, scope.clone()).await.unwrap();
+    let mut want = new.clone();
+    sort_grants(&mut tables_mut(&mut want).grants, privileges_for(ObjectKind::Table, 170000));
+    assert_eq!(reloaded, want);
+    env.sql(&format!("CREATE TABLE {qs}.u (id int)")).await;
+    let can: bool = env
+        .admin
+        .query_one("SELECT has_table_privilege($1::text, $2::text, 'SELECT')", &[&r1, &format!("{qs}.u")])
+        .await
+        .unwrap()
+        .get(0);
+    assert!(can, "varsayılan yetki yeni tabloya uygulanmalı");
+    // Bayat varsayılan yetki isteği: `plan_changed`.
+    assert_eq!(code(&f.apply(&def_req).await), "plan_changed");
+}
+
+#[tokio::test]
+async fn non_owner_privileges_warn_and_hint() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(acl_non_owner_body(ts.clone()), cleanup_acl(&ts, RT_PREFIX, "maclno")).await;
+    }
+}
+
+async fn acl_non_owner_body(ts: TestServer) {
+    const TAG: &str = "maclno";
+    cleanup_acl(&ts, RT_PREFIX, TAG).await;
+    let env = setup_in(&ts, RT_PREFIX, TAG).await;
+    let (c, r) = (acl_role(TAG, "c"), acl_role(TAG, "r"));
+    let s = format!("{RT_PREFIX}_{TAG}");
+    let pw = random_password();
+    env.admin
+        .batch_execute(&format!(
+            "CREATE ROLE {c} LOGIN PASSWORD {}; CREATE ROLE {r}; CREATE SCHEMA {s}; CREATE TABLE {s}.t (id int); \
+             CREATE TABLE {s}.u (id int); GRANT USAGE ON SCHEMA {s} TO {c}; GRANT SELECT ON {s}.t TO {c} WITH GRANT OPTION",
+            quote_literal(&pw)
+        ))
+        .await
+        .unwrap();
+    let mut config = ts.config.clone();
+    config.id = Uuid::new_v4();
+    config.username = c.clone();
+    let mgr = Arc::new(ConnectionManager::new());
+    if mgr.connect(config.clone(), Some(pw)).await.is_err() {
+        panic!("test rolüyle bağlanılamadı");
+    }
+    let (dm, dir) = manager(mgr.clone(), &config, false, None);
+    let u = Fx { dm, server: config.id, db: env.db_oid, _dir: dir };
+
+    // GRANT OPTION'lı sahip olmayan rolün GRANT'ı başarılı ama `foreign`'a (veren = bağlı rol) düşer → ACL_WARNING.
+    let t = ObjectRef { kind: ObjectKind::Table, oid: env.class_oid(&s, "t").await };
+    let req = u.privileges(t, |d| set_grant(d, Some(&r), vec![pgr(Privilege::Select, false)]), false).await;
+    let PlanRequest::Privileges { old, .. } = &req else { unreachable!() };
+    assert_eq!((old.viewer.as_str(), old.owner.as_str()), (c.as_str(), env.me.as_str()));
+    assert_eq!(warnings_of(u.apply(&req).await), Some(vec![ACL_WARNING.to_string()]));
+    let reloaded = u.load_acl_of(t).await;
+    assert!(
+        reloaded.foreign.iter().any(|g| g.grantor == c && g.grantee.as_deref() == Some(r.as_str()) && g.privilege == Privilege::Select),
+        "{reloaded:?}"
+    );
+    assert!(row_of(&reloaded, Some(&r)).is_none(), "{reloaded:?}");
+
+    // Hiç yetkisi olmayan nesnede GRANT: 42501 + yetki ipucu (genel ipucu değil).
+    let tu = ObjectRef { kind: ObjectKind::Table, oid: env.class_oid(&s, "u").await };
+    let req = u.privileges(tu, |d| set_grant(d, Some(&r), vec![pgr(Privilege::Select, false)]), false).await;
+    let (sqlstate, hint) = acl_hint_of(u.apply(&req).await);
+    assert_eq!((sqlstate.as_str(), hint.as_deref()), ("42501", Some(ACL_PRIVILEGE_HINT)));
+
+    // `FOR ROLE <başka rol>` üyeliksiz: 42501 + varsayılan yetki ipucu.
+    let req = u
+        .default_privileges(DefaultAclScope { role: Some(env.me.clone()), schema_oid: None }, |d| {
+            tables_mut(d).grants.push(AclGrant { grantee: Some(r.clone()), privileges: vec![pgr(Privilege::Select, false)] })
+        })
+        .await;
+    let (sqlstate, hint) = acl_hint_of(u.apply(&req).await);
+    assert_eq!((sqlstate.as_str(), hint.as_deref()), ("42501", Some(DEFAULT_ACL_PRIVILEGE_HINT)));
+    mgr.disconnect(config.id);
+}

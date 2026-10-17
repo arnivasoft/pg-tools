@@ -1,8 +1,10 @@
 // Nesne diyaloglarının saf modeli: hata eşleme, uygulama kapısı (güvenlik), betik aralıkları, indeks kolon işlemleri.
 // İstemci SQL üretmez; yalnızca arka ucun döndürdüğü PlanView'i yorumlar.
+import type { AclDef } from "../../ipc/bindings/AclDef";
 import type { ApplyOptions } from "../../ipc/bindings/ApplyOptions";
 import type { DdlCreate } from "../../ipc/bindings/DdlCreate";
 import type { DdlFocus } from "../../ipc/bindings/DdlFocus";
+import type { DefaultAclDef } from "../../ipc/bindings/DefaultAclDef";
 import type { FieldError } from "../../ipc/bindings/FieldError";
 import type { IndexColumn } from "../../ipc/bindings/IndexColumn";
 import type { IndexDef } from "../../ipc/bindings/IndexDef";
@@ -13,6 +15,33 @@ import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Statement } from "../../ipc/bindings/Statement";
 
 export type DesignerKind = ObjectKind;
+
+/**
+ * Plan 22: designer sekmesinin türü. `object`: nesne diyaloğu (`ObjectDef`); `acl`: nesne yetkileri (`AclDef`);
+ * `default_acl`: varsayılan yetkiler (`DefaultAclDef`).
+ */
+export type DesignerVariant = "object" | "acl" | "default_acl";
+/** Designer'ın düzenlediği tanım (varyanta göre). */
+export type DesignerDef = ObjectDef | AclDef | DefaultAclDef;
+
+/**
+ * Nesne tanımı mı (yetki tanımı değil). `viewer` yalnız yetki tanımlarında bulunur (`AclDef.kind` nesne türünü
+ * taşıdığından `kind` ayırt etmez). Sekme modeli elindeyken önce `variant` denetlenmeli; bu koruma tip daraltması ve
+ * savunmadır. Hiçbir `ObjectDef` varyantının `viewer` taşımadığı `designer-model.test.ts`'te tür düzeyinde sınanır.
+ */
+export function isObjectDef(d: DesignerDef): d is ObjectDef {
+  return !("viewer" in d);
+}
+/** Nesne tanımı ise kendisi, aksi halde (yetki tanımı ya da null) null. */
+export function objectDefOf(d: DesignerDef | null): ObjectDef | null {
+  return d && isObjectDef(d) ? d : null;
+}
+export function isAclDef(d: DesignerDef): d is AclDef {
+  return "viewer" in d && "grants" in d;
+}
+export function isDefaultAclDef(d: DesignerDef): d is DefaultAclDef {
+  return "viewer" in d && "sections" in d;
+}
 
 const KIND_LABELS: Record<ObjectKind, string> = {
   schema: "Schema",
@@ -55,9 +84,15 @@ export function scriptActionsEnabled(view: PlanView | null): { copy: boolean; op
 
 /**
  * Başlıkta/mesajlarda görünen ad; şema altındaki türler (sequence, indeks, tablo, view, MV, function, procedure, type,
- * domain) şema nitelikli, trigger tablosuyla (`şema.tablo.ad`), ad boşsa boş.
+ * domain) şema nitelikli, trigger tablosuyla (`şema.tablo.ad`), ad boşsa boş. Yetki tanımları: acl → nesne adı
+ * (`şema.ad`, imza varsa `ad(imza)`); default_acl → rol (şema kapsamında ` / şema`).
  */
-export function defName(def: ObjectDef): string {
+export function defName(def: DesignerDef): string {
+  if (!isObjectDef(def)) {
+    if (!isAclDef(def)) return def.schema === null ? def.role : `${def.role} / ${def.schema}`;
+    const base = def.schema === null ? def.name : `${def.schema}.${def.name}`;
+    return def.signature === null ? base : `${base}(${def.signature})`;
+  }
   if (!def.name) return "";
   switch (def.kind) {
     case "sequence":
@@ -77,7 +112,7 @@ export function defName(def: ObjectDef): string {
   }
 }
 
-export function cloneDef<T extends ObjectDef>(def: T): T {
+export function cloneDef<T extends DesignerDef>(def: T): T {
   return structuredClone(def);
 }
 
@@ -91,7 +126,7 @@ function canonical(v: unknown): string {
   return JSON.stringify(v) ?? "null";
 }
 /** Taslak == yüklenen mi (kirli bayrağı). */
-export function defsEqual(a: ObjectDef, b: ObjectDef): boolean {
+export function defsEqual(a: DesignerDef, b: DesignerDef): boolean {
   return canonical(a) === canonical(b);
 }
 
@@ -245,8 +280,8 @@ export function isSafeIntegerString(s: string): boolean {
  * olmalıdır (boş dizge de biçimsiz; boş sınır formda `null`'dır). Diğer türler için engel yok.
  */
 export type LocalBlock = "sequenceNumbers";
-export function localBlock(def: ObjectDef | null): LocalBlock | null {
-  if (!def || def.kind !== "sequence") return null;
+export function localBlock(def: DesignerDef | null): LocalBlock | null {
+  if (!def || !isObjectDef(def) || def.kind !== "sequence") return null;
   const ok = [def.increment, def.start, def.cache].every(isSafeIntegerString)
     && [def.minValue, def.maxValue].every((v) => v === null || isSafeIntegerString(v));
   return ok ? null : "sequenceNumbers";
@@ -364,6 +399,15 @@ export function designerTabKey(open: ReadonlyArray<{ key: string }>, t: Designer
     if (Number.isInteger(k) && k >= n) n = k + 1;
   }
   return `${prefix}${n}`;
+}
+
+/** Plan 22: nesne yetkileri sekmesi anahtarı `acl:<kind>:<sunucu>:<db>:<oid>` (aynı nesne tek sekme). */
+export function aclTabKey(kind: ObjectKind, serverId: string, databaseOid: number | null, oid: number): string {
+  return `acl:${kind}:${serverId}:${databaseOid}:${oid}`;
+}
+/** Plan 22: varsayılan yetkiler sekmesi anahtarı `defacl:<sunucu>:<db>:<şemaOid|0>` (veritabanı geneli = 0). */
+export function defaultAclTabKey(serverId: string, databaseOid: number, schemaOid: number | null): string {
+  return `defacl:${serverId}:${databaseOid}:${schemaOid ?? 0}`;
 }
 
 /** Tablo diyaloğu odak alanı: `column:<attnum>` / `constraint:<oid>` (`requestFocus` alanı; `name` gibi düz alanlarla çakışmaz). */

@@ -380,3 +380,41 @@ Arka uç `crates/pgt-ddl` altındadır; saf testler (insta anlık görüntüleri
 | `crates/pgt-ddl/tests/manager.rs` | Yönetici entegrasyonu: `find_created`, `defaults(…, preset)`, salt okunur kapısı, ipuçları (2BP01/42P13/42809/0A000/42501), sahte `editable` -> `plan_changed` |
 | `crates/pgt-ddl/src/lookup.rs` (birim + DB) | `languages` ve `triggerFunctions` açılır listeleri |
 | `crates/pgt-ddl/tests/logging.rs` | Gövde/ad/değerlerin günlüğe düşmediği (yakalama testi) |
+
+## Ana paket bütçesi (Plan 21)
+
+`bun run bundle:check` geçici dizine kaynak haritalı bir `vite build` yapar (`dist/` değişmez), `index.html`'in giriş parçasını bulur ve `scripts/bundle-budget.json` ile karşılaştırır: ana paket baytı (`//# sourceMappingURL` yorumu düşülür; `bun run build` çıktısıyla aynıdır), `__vite__mapDeps` girdi sayısı, `modulepreload` adları (`index.html` preload'ları tam olarak `bundle-budget.json` içindeki `htmlPreloads` ile eşit olmalı, şu an `["solid","web"]`; `htmlPreloads`: Plan 21 sonunda yalnız solid/web — lucide `Icon` artık ana pakette), kaynak haritasından VLQ çözülerek kaynak ve paket başına bayt tablosu (ilk 25) ve ana pakete sızan yasak paketler (Kobalte, floating-ui, corvu, …). **Açılış kümesi:** gerçek açılış maliyeti yalnız giriş parçası değil, girişin statik `import` kapanışıdır (`index.html` önyüklemesi); denetim derlenmiş parçalardaki statik `import … from "./x.js"` / `import "./x.js"` / `export * from "./x.js"` ifadelerini (yorum önekliler dahil; `./`, `../` ve `/assets/` belirteçleri çıktı köküne göre çözülür) geçişli izler (dinamik `import()` ve `__vite__mapDeps` hariç); çözülemeyen belirteç, eksik parça dosyası ya da haritasız açılış parçası açık hatayla düşer, toplam baytı ve parça listesini "Açılış kümesi" olarak basar, `startupMaxBytes` tavanını uygular ve yasak paket atfını bu kümedeki her parçanın kaynak haritasında yapar. Çıkış kodu 1: ana paket ya da açılış kümesi tavan aşımı, `enforceForbidden` açıkken (Plan 21 Task 5'ten beri açık) açılış kümesinde yasak paket, preload ihlali, harita yok ya da eşlenen toplam ana baytın %90'ından az. Saf işlevler `scripts/bundle-check-lib.mjs`'tedir ve `scripts/bundle-check-lib.test.mjs` ile `bun run test`'te koşar (vitest `include`'u `scripts/**/*.test.mjs`'i kapsar).
+
+**Sonraki planlar için kural (Plan 21):** ana paket ≤ `mainMaxBytes` ve açılış kümesi ≤ `startupMaxBytes` (`scripts/bundle-budget.json`); tavanlar plan sonunda ölçülen değere çekilir ve sıfır pay bırakır: eklenen her bayt geri ödenmeli ya da tavan o planda gerekçesiyle açıkça yükseltilmelidir; `index.html` preload ⊆ solid/web/Icon (Plan 21 sonunda yalnız solid/web); ana pakette/açılış kümesinde yasak paket (Kobalte, floating-ui, corvu, …) yok. Yeni tembel parça eklenirse boşta ısıtma listesine (`src/app/prefetch.ts`'e `App.tsx` verir) ve elle kontrol listesine eklenir; `prefetch.ts` tembel modülleri içe aktarmaz.
+
+## Yetkiler testleri (Plan 20)
+
+Arka uç `crates/pgt-ddl` altındadır; saf testler (insta: `src/build/snapshots`) sunucusuzdur, Docker testleri `PGT_TEST_URLS` ister ve `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf` ile PG 10–18'de koşar (sürüme bağlı adımlar atlanır: `MAINTAIN` PG 17+, Procedure PG 11+).
+
+| Dosya | Kapsam |
+|---|---|
+| `crates/pgt-ddl/src/acl.rs` (birim) | Yetki kataloğu: `privileges_for`/`default_privileges_for`, `acl_supported`, ACL harf eşlemesi, kanonik sıralama |
+| `crates/pgt-ddl/src/build/{acl,default_acl}.rs` (birim) | Saf üreticiler: GRANT/REVOKE/`REVOKE GRANT OPTION FOR` farkı ve sırası, CASCADE riski, sahip/PUBLIC kuralları, kendini kilitleme uyarıları, sürüm kapıları, hostile adlar |
+| `crates/pgt-ddl/tests/acl_roundtrip.rs` | Nesne ve varsayılan yetki yükleyicileri: `apply → load → beklenen`, sabit nokta, NULL ACL, yabancı veren, kolon ACL'leri, aggregate/salt okunur yüklemeler, `FOR ROLE` 42501, PG 18 LARGE OBJECTS |
+| `crates/pgt-ddl/tests/manager.rs` (ACL bölümü) | Yönetici kapıları, 2BP01/42501/42704 ipuçları, uygulama sonrası `ACL_WARNING`, sahte `editable` -> `plan_changed` |
+| `crates/pgt-ddl/tests/logging.rs` | Rol adı/yetki/SQL'in günlüğe düşmediği (yakalama testi) |
+
+**Test rolleri:** roller küme geneldir; test rolleri `pgt_acl_rt_<etiket>_<n>` adını taşır ve nesneler benzersiz önekli şemada (`pgt_ddl_rt_<etiket>`) kurulur. Temizlik (`common::cleanup_acl`) başarısız doğrulamadan sonra bile çalışır: önce veritabanı/şema silinir, sonra her veritabanında `DROP OWNED BY` + `DROP ROLE IF EXISTS` ile roller temizlenir.
+
+## Yetkiler ön yüzü testleri (Plan 22)
+
+Tümü `bun run test` (vitest) altında koşar; Docker gerekmez. Arka uç `available` alanı `crates/pgt-ddl/src/acl.rs` birim testlerindedir; `role_not_found` kodu (`NotFound(ROLE_SUBJECT)`, ileti adsız) `crates/pgt-ddl/src/error_codes.rs` birim testindedir.
+
+| Dosya | Kapsam |
+|---|---|
+| `src/features/designer/acl-grid-model.test.ts` | Izgara modeli: hücre döngüsü (yok → var → devredilebilir), PUBLIC/sahip satırında GRANT OPTION atlama, salt okunur ızgarada döngünün etkisizliği (`cycleCell`), alıcı ekle/kaldır ve yinelenen/boş giriş, PUBLIC sözde satır adı (`granteeLabel`) ve PUBLIC adlı gerçek rol ayrımı |
+| `src/app/strings-privileges.test.ts` | Erişilebilir ad metinleri: hücre adı (`grid.cell`: "<alıcı> — <yetki>: <durum>"), bölüm ızgarası adı (`gridName`), PUBLIC sözde adının "PUBLIC" rolünden ayrı olması. Adlar `AclGrid.tsx`'te bu işlevlerle kurulur; bileşenin kendisi (DOM) birim testli değildir (elle kontrol) |
+| `src/features/designer/privileges-paths.test.ts` | `aclGridPaths` / `defaultAclGridPaths`: `grants[i]…` ve `sections[i].grants…` hata yollarının hücre/satıra (bölüme), kalanların (`sections[i].baseline` dahil) genel şeride eşlenmesi; aynı hücrede ilk hata kazanır |
+| `src/features/designer/default-acl-model.test.ts` | Varsayılan yetkiler: bölüm görünümleri (taban yolu, sahip, salt okunurluk, baseline), düzenleme sonrası her indeksin aynı bölümü taşıması (`<Index>` kararlılığı), rol değişiminde kirli/meşgul taslak kararı |
+| `src/features/designer/designer-controller.test.ts` | Variant'lı denetleyici: CASCADE sıfırlama/yeniden önizleme, başarısız rol değişiminde önceki kapsamın geri yüklenmesi (`role_not_found` satır içi hata), rol değişiminde şema/veritabanı yokluğu (`not_found`) → gone, yeniden yüklemede kaybolan rolde bağlı role düşme ve bilgi notu (`aclRoleGone`) |
+| `src/features/designer/errors.test.ts` | `role_not_found` → gone sınıfı (nesne/rol sekmeleri); kapı kodu değil |
+| `src/features/designer/designer-model.test.ts` | `isObjectDef` koruması: hiçbir `ObjectDef` varyantı `viewer` taşımaz (tür düzeyi; varyant kazanırsa typecheck kırılır) |
+| `src/features/designer/designer-open.test.ts` | `aclTabKey` / `defaultAclTabKey` ve `privileges` / `defaultPrivileges` açma kipleri |
+| `src/features/explorer/actions.test.ts` | Menü kuralları: `privilegesObject` / `defaultPrivilegesObject` görünürlüğü (ACL türleri, `db`/`sch`), odak hedefleri ve ACL dışı türlerde gizli, kilitte devre dışı |
+
+Elle kontrol: `docs/smoke-test.md` "Yetkiler arayüzü (Plan 22)".

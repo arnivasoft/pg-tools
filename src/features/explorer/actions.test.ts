@@ -79,14 +79,15 @@ describe("qualifiedParts / actionsFor", () => {
     expect(actionsFor(s, node(s, "srv-down"))).toEqual(["openQueryTool", "connect", "editServer", "deleteServer", "copyName"]);
     expect(actionsFor(s, node(s, "srv-up"))).toEqual(["openQueryTool", "openDashboard", "refresh", "disconnect", "editServer", "deleteServer", "copyName"]);
     expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["createObject", "refresh", "copyName"]);
-    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "openData", "editObject", "renameObject", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "openData", "editObject", "renameObject", "privilegesObject", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "col-id"))).toEqual(["editObject", "copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "con-1"))).toEqual(["editObject", "copyName", "copyDdl"]);
   });
   it("Dashboard: bağlı sunucuda ve veritabanında var, bağlı olmayan sunucuda ve diğer düğümlerde yok", () => {
     expect(actionsFor(s, node(s, "srv-up"))).toContain("openDashboard");
     expect(actionsFor(s, node(s, "db-app"))).toEqual([
-      "openQueryTool", "openDashboard", "editObject", "renameObject", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl",
+      "openQueryTool", "openDashboard", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject",
+      "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
     expect(actionsFor(s, node(s, "srv-down"))).not.toContain("openDashboard");
     for (const id of ["sch-app", "tbl-orders", "coll-tables", "col-id"]) expect(actionsFor(s, node(s, id))).not.toContain("openDashboard");
@@ -250,7 +251,8 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
   });
   it("nesnelerde editObject/renameObject/dropObject, Query Tool eylemlerinden sonra", () => {
     expect(actionsFor(s, node(s, "sch-app"))).toEqual([
-      "openQueryTool", "editObject", "renameObject", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl",
+      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject",
+      "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
     expect(actionsFor(s, node(s, "idx-1"))).toEqual(["editObject", "renameObject", "dropObject", "copyName", "copyQualifiedName", "copyDdl"]);
     for (const id of ["seq-1", "ext-1"]) {
@@ -394,5 +396,98 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
     const d = { ...deps(s), openDesigner: vi.fn(), serverLocked: vi.fn(() => true) };
     for (const a of DES) await executeAction(d as unknown as ActionDeps, a, a === "createObject" ? "coll-seq" : "seq-1");
     expect(d.openDesigner).not.toHaveBeenCalled();
+  });
+});
+
+describe("yetki eylemleri (Yetkiler… / Varsayılan yetkiler…)", () => {
+  function aclTree(): TreeState {
+    const s = sampleTree();
+    const add = (id: string, parent: string, kind: NodeKind, label: string, extra: Partial<TreeNode> = {}) => {
+      s.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, color: null, tag: null, ...extra });
+      s.parent.set(id, parent);
+      s.children.set(parent, [...(s.children.get(parent) ?? []), id]);
+    };
+    add("coll-seq", "sch-app", "sequenceCollection", "Sequences", { hasChildren: true });
+    add("seq-1", "coll-seq", "sequence", "s");
+    add("coll-views", "sch-app", "viewCollection", "Views", { hasChildren: true });
+    add("view-1", "coll-views", "view", "v");
+    add("coll-vcols", "view-1", "columnCollection", "Columns", { hasChildren: true });
+    add("vcol-1", "coll-vcols", "column", "id");
+    add("coll-mvs", "sch-app", "materializedViewCollection", "MVs", { hasChildren: true });
+    add("mv-1", "coll-mvs", "materializedView", "m");
+    add("coll-proc", "sch-app", "procedureCollection", "Procedures", { hasChildren: true });
+    add("proc-1", "coll-proc", "procedure", "p(integer)");
+    add("coll-tfn", "sch-app", "triggerFunctionCollection", "TFs", { hasChildren: true });
+    add("tfn-1", "coll-tfn", "triggerFunction", "audit()");
+    add("coll-type", "sch-app", "typeCollection", "Types", { hasChildren: true });
+    add("type-1", "coll-type", "type", "mood");
+    add("coll-dom", "sch-app", "domainCollection", "Domains", { hasChildren: true });
+    add("dom-1", "coll-dom", "domain", "email");
+    add("coll-ext", "db-app", "extensionCollection", "Extensions", { hasChildren: true });
+    add("ext-1", "coll-ext", "extension", "pgcrypto");
+    add("coll-roles", "srv-up", "roleCollection", "Roles", { hasChildren: true });
+    add("role-1", "coll-roles", "role", "app_user");
+    add("coll-ts", "srv-up", "tablespaceCollection", "Tablespaces", { hasChildren: true });
+    add("ts-1", "coll-ts", "tablespace", "pg_default");
+    add("coll-pol", "tbl-orders", "policyCollection", "Policies", { hasChildren: true });
+    add("pol-1", "coll-pol", "policy", "p1");
+    add("sch-sys", "db-app", "schema", "pg_catalog", { flags: { ...flags, system: true } });
+    return s;
+  }
+  const s = aclTree();
+  const ACL: ActionId[] = ["privilegesObject", "defaultPrivilegesObject"];
+  const DES: ActionId[] = ["editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject"];
+  const des = (id: string) => actionsFor(s, node(s, id)).filter((x) => DES.includes(x));
+
+  it("ACL düğümlerinde Yetkiler…, sıra edit/rename/privileges/drop", () => {
+    for (const id of ["tbl-orders", "tbl-partition", "view-1", "mv-1", "seq-1", "fn-fmt-int", "proc-1", "tfn-1", "type-1", "dom-1"]) {
+      expect(des(id)).toEqual(["editObject", "renameObject", "privilegesObject", "dropObject"]);
+    }
+  });
+  it("veritabanı ve şemada (sistem şeması dahil) ek olarak Varsayılan yetkiler…", () => {
+    for (const id of ["db-app", "sch-app", "sch-sys"]) {
+      expect(des(id)).toEqual(["editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject"]);
+    }
+    expect(actionsFor(s, node(s, "sch-app"))).toEqual([
+      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject",
+      "refresh", "copyName", "copyQualifiedName", "copyDdl",
+    ]);
+  });
+  it("indeks, trigger, eklenti, rol, kısıt, kolon (odak hedefleri), politika, tablespace ve koleksiyonlarda yok", () => {
+    for (const id of [
+      "idx-1", "trg-1", "ext-1", "role-1", "con-1", "col-id", "col-part", "vcol-1", "pol-1", "ts-1", "srv-up", "srv-down",
+      "coll-tables", "coll-cols", "coll-con", "coll-part", "coll-fn", "coll-seq", "coll-roles", "coll-type",
+    ]) {
+      const a = actionsFor(s, node(s, id));
+      for (const x of ACL) expect(a, `${id}: ${x}`).not.toContain(x);
+    }
+  });
+  it("grup 3 (designer grubu)", () => {
+    for (const a of ACL) expect(groupOf(a)).toBe(groupOf("editObject"));
+  });
+  it("disabledReason: kilitli sunucuda gerekçe dolu, kilitsizde boş", () => {
+    const lockedTree = aclTree();
+    const srv = lockedTree.nodes.get("srv-up")!;
+    lockedTree.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
+    const viaTree = { state: () => lockedTree } as unknown as ActionDeps;
+    for (const a of ACL) {
+      expect(disabledReason(a, viaTree, "db-app")).toBe(t.query.hint.locked);
+      expect(disabledReason(a, { serverLocked: () => true } as unknown as ActionDeps, "sch-app")).toBe(t.query.hint.locked);
+      expect(disabledReason(a, { state: () => s } as unknown as ActionDeps, "sch-app")).toBeNull();
+    }
+    expect(disabledReason("privilegesObject", viaTree, "tbl-orders")).toBe(t.query.hint.locked);
+  });
+  it("executeAction kipleri privileges / defaultPrivileges; kilitliyse çağırmaz", async () => {
+    const d = { ...deps(s), openDesigner: vi.fn(), serverLocked: vi.fn(() => false) };
+    await executeAction(d as unknown as ActionDeps, "privilegesObject", "tbl-orders");
+    await executeAction(d as unknown as ActionDeps, "defaultPrivilegesObject", "sch-app");
+    expect(d.openDesigner.mock.calls).toEqual([["tbl-orders", "privileges"], ["sch-app", "defaultPrivileges"]]);
+    const l = { ...deps(s), openDesigner: vi.fn(), serverLocked: vi.fn(() => true) };
+    for (const a of ACL) await executeAction(l as unknown as ActionDeps, a, "db-app");
+    expect(l.openDesigner).not.toHaveBeenCalled();
+  });
+  it("menü metinleri ana t.menu'de", () => {
+    expect(t.menu.privilegesObject).toBe("Yetkiler…");
+    expect(t.menu.defaultPrivilegesObject).toBe("Varsayılan yetkiler…");
   });
 });

@@ -1,17 +1,18 @@
 // Designer sekmesinin gövdesi (tembel parça): üst çubuk (tür rozeti, sunucu/veritabanı, durum, Yeniden yükle), durum
 // şeritleri, türe göre form yuvası ve sağda SQL önizleme + uygulama çubuğu. Formlar türe göre ayrı tembel parçalardır.
 import { RefreshCw } from "lucide-solid";
-import { For, Show, Suspense, createMemo, createSignal, lazy } from "solid-js";
+import { For, Show, Suspense, createMemo, createSignal, lazy, type Component } from "solid-js";
 import { Dynamic } from "solid-js/web";
 import { tdes } from "../../app/strings-designer";
 import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
 import { Button } from "../../ui/Button";
-import { ConfirmDialog } from "../../ui/ConfirmDialog";
+import { ConfirmDialog } from "../../ui/ConfirmDialogView";
 import ApplyBar from "./ApplyBar";
-import type { DesignerController, DesignerModel } from "./designer-controller";
-import { groupIssues, kindLabel } from "./designer-model";
-import type { FormEntry } from "./FormParts";
+import type { DesignerController, DesignerModel, ObjectDesignerModel } from "./designer-controller";
+import { groupIssues, isAclDef, isDefaultAclDef, kindLabel, type DesignerVariant } from "./designer-model";
+import type { AclFormProps, FormEntry } from "./FormParts";
 import { FORM_PATHS } from "./forms-model";
+import { aclGridPaths, defaultAclGridPaths } from "./privileges-paths";
 import SqlPreview from "./SqlPreview";
 
 // Tür → form (tembel bileşen + bilinen alan yolları; kök yol alt yolları da kapsar: `columns` ⊃ `columns[1].key`).
@@ -36,6 +37,20 @@ const FORMS: Record<ObjectKind, FormEntry> = {
   type: { view: lazy(() => import("./TypeForm")), paths: FORM_PATHS.type },
   domain: { view: lazy(() => import("./DomainForm")), paths: FORM_PATHS.domain },
 };
+
+// Plan 22: yetki sekmelerinin formları (`variant !== "object"`; ayrı tembel parçalar, kendi prop tipleriyle). Hata yolları
+// taslaktan hesaplanır (`aclIssuePaths`).
+const NO_PATHS: ReadonlySet<string> = new Set();
+const ACL_FORMS: Record<Exclude<DesignerVariant, "object">, Component<AclFormProps>> = {
+  acl: lazy(() => import("./PrivilegesForm")),
+  default_acl: lazy(() => import("./DefaultPrivilegesForm")),
+};
+/** Yetki sekmesinde ızgaranın sahiplendiği yollar; geri kalan her hata üst şeride (catch-all). */
+function aclIssuePaths(m: DesignerModel): ReadonlySet<string> {
+  const d = m.draft;
+  if (d && isAclDef(d)) return aclGridPaths("grants", d.grants, d.available);
+  return d && isDefaultAclDef(d) ? defaultAclGridPaths(d.sections) : NO_PATHS;
+}
 
 type StatusKey = keyof typeof tdes.view.status;
 
@@ -76,9 +91,18 @@ export default function DesignerView(props: {
       {(m) => {
         const v = tdes.view;
         const [askReload, setAskReload] = createSignal(false);
-        const entry = () => FORMS[m().kind];
+        const variant = () => m().variant;
+        const objectForm = (): FormEntry | null => (variant() === "object" ? FORMS[m().kind] : null);
+        const paths = () => objectForm()?.paths ?? aclIssuePaths(m());
+        // Başlık rozeti: nesne sekmesinde tür, yetki sekmelerinde "Yetkiler" / "Varsayılan yetkiler".
+        const badge = () => {
+          const x = variant();
+          return x === "object" ? kindLabel(m().kind) : v.variant[x];
+        };
         // Genel hatalar: `old.`, üst-düzey `columns` ve formun bilmediği yollar.
-        const issues = createMemo(() => groupIssues(m().view?.errors ?? [], entry().paths));
+        const issues = createMemo(() => groupIssues(m().view?.errors ?? [], paths()));
+        // Tablo formu geniş (önizleme dar); yetki sekmeleri tablo türünde de normal genişlikte.
+        const wideForm = () => variant() === "object" && m().kind === "table";
         const done = () => m().mode === "create" && m().outcome?.outcome === "applied";
         const readOnly = () => m().locked || m().status !== "ready" || m().applying || done();
         const canReload = () => !m().applying && m().status !== "gone" && m().status !== "loading";
@@ -91,7 +115,7 @@ export default function DesignerView(props: {
           <div class="flex h-full min-h-0 flex-col">
             <div class="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-panel px-2">
               <span class="inline-flex h-5 shrink-0 items-center rounded border border-border px-1.5 text-[11px] font-medium">
-                {kindLabel(m().kind)}
+                {badge()}
               </span>
               <span class="shrink-0 text-[12px] text-muted">{v.mode[m().mode]}</span>
               <span class="min-w-0 truncate text-[13px]" title={props.where ?? m().serverName}>
@@ -142,17 +166,34 @@ export default function DesignerView(props: {
               </div>
             </Show>
             <div class="flex min-h-0 flex-1">
-              <section aria-label={kindLabel(m().kind)} class="min-w-0 flex-1 overflow-auto p-3">
+              <section aria-label={badge()} class="min-w-0 flex-1 overflow-auto p-3">
                 <Show when={m().draft !== null}>
                   <Suspense fallback={<p class="text-muted">{tdes.loading}</p>}>
-                    <Dynamic
-                      component={entry().view}
-                      designer={props.designer}
-                      tabId={props.tabId}
-                      model={m()}
-                      issues={issues()}
-                      readOnly={readOnly()}
-                    />
+                    <Show
+                      when={objectForm()}
+                      fallback={
+                        <Dynamic
+                          component={ACL_FORMS[variant() as Exclude<DesignerVariant, "object">]}
+                          designer={props.designer}
+                          tabId={props.tabId}
+                          model={m()}
+                          issues={issues()}
+                          readOnly={readOnly()}
+                        />
+                      }
+                    >
+                      {(f) => (
+                        <Dynamic
+                          component={f().view}
+                          designer={props.designer}
+                          tabId={props.tabId}
+                          // Nesne formu yalnız nesne sekmesinde seçilir (`objectForm`).
+                          model={m() as ObjectDesignerModel}
+                          issues={issues()}
+                          readOnly={readOnly()}
+                        />
+                      )}
+                    </Show>
                   </Suspense>
                 </Show>
                 <Show when={m().draft === null && m().status === "loading"}>
@@ -161,7 +202,7 @@ export default function DesignerView(props: {
               </section>
               <div
                 class="flex min-w-80 shrink-0 flex-col border-l border-border"
-                classList={{ "w-[46%]": m().kind !== "table", "w-[38%]": m().kind === "table" }}
+                classList={{ "w-[46%]": !wideForm(), "w-[38%]": wideForm() }}
               >
                 <SqlPreview model={m()} general={issues().general} />
                 <ApplyBar

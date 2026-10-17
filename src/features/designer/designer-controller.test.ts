@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tdes } from "../../app/strings-designer";
+import type { AclDef } from "../../ipc/bindings/AclDef";
+import type { DefaultAclDef } from "../../ipc/bindings/DefaultAclDef";
+import type { DefaultAclScope } from "../../ipc/bindings/DefaultAclScope";
 import type { ApplyOptions } from "../../ipc/bindings/ApplyOptions";
 import type { ApplyOutcome } from "../../ipc/bindings/ApplyOutcome";
 import type { LookupItem } from "../../ipc/bindings/LookupItem";
@@ -27,6 +30,15 @@ const risky = (risk: Risk, hash = "hr") => view({ risk, hash });
 const applied = (created: ObjectRef | null = null, statements = 1): ApplyOutcome => ({ outcome: "applied", statements, elapsedMs: 3, created });
 const err = (code: string, message = `m:${code}`, detail: string | null = null) => ({ code, message, detail, hint: null });
 const OBJ: ObjectRef = { kind: "schema", oid: 100 };
+const aclDef = (p: Partial<AclDef> = {}): AclDef => ({
+  kind: "table", schema: "public", name: "orders", signature: null, owner: "alice", viewer: "alice", explicit: true,
+  grants: [{ grantee: null, privileges: [{ privilege: "select", grantOption: false }] }], foreign: [], columns: [],
+  editable: true, unsupported: [], available: ["select", "insert"], ...p,
+});
+const defAclDef = (p: Partial<DefaultAclDef> = {}): DefaultAclDef => ({
+  role: "alice", schema: null, viewer: "alice",
+  sections: [{ objectType: "tables", grants: [], baseline: [], available: ["select"] }], editable: true, unsupported: [], ...p,
+});
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -49,6 +61,8 @@ function setup(extra: Partial<DesignerControllerDeps> = {}) {
     ddlPreview: vi.fn(async (_s: string, _db: number | null, _r: PlanRequest): Promise<PlanView> => view()),
     ddlApply: vi.fn(async (_s: string, _db: number | null, _r: PlanRequest, _o: ApplyOptions): Promise<ApplyOutcome> => applied()),
     ddlCancel: vi.fn(async (_id: string) => null),
+    ddlLoadAcl: vi.fn(async (_s: string, _db: number | null, _o: ObjectRef): Promise<AclDef> => aclDef()),
+    ddlLoadDefaultAcl: vi.fn(async (_s: string, _db: number, sc: DefaultAclScope): Promise<DefaultAclDef> => defAclDef({ role: sc.role ?? "alice" })),
   };
   const notify = vi.fn();
   const refreshNode = vi.fn();
@@ -1661,5 +1675,219 @@ describe("designer-controller Plan 19: preset ve editable/unsupported", () => {
     const req = s.api.ddlPreview.mock.calls.at(-1)![2] as Extract<PlanRequest, { op: "alter" }>;
     expect(req.old).toMatchObject({ editable: false, unsupported: ["C dili"] });
     expect(req.new).toMatchObject({ editable: false, unsupported: ["C dili"], comment: "x" });
+  });
+});
+
+describe("Plan 22: yetki varyantları (acl / default_acl)", () => {
+  const TBL: ObjectRef = { kind: "table", oid: 42 };
+  const CTX = { serverId: "S1", databaseOid: 5, refreshNodeId: "N-tbl" };
+  const grantInsert = (d: AclDef) => {
+    d.grants[0]!.privileges.push({ privilege: "insert", grantOption: false });
+  };
+
+  it("openAcl: ddlLoadAcl çağrılır; variant=acl, mode=alter, kind nesne türü; dirty=false", async () => {
+    const s = setup();
+    await s.ctl.openAcl("P1", CTX, TBL);
+    expect(s.api.ddlLoadAcl).toHaveBeenCalledExactlyOnceWith("S1", 5, TBL);
+    expect(s.api.ddlLoad).not.toHaveBeenCalled();
+    const m = s.ctl.model("P1")!;
+    expect(m).toMatchObject({ variant: "acl", mode: "alter", kind: "table", object: TBL, status: "ready", dirty: false, aclScope: null });
+    expect(m.original).toEqual(aclDef());
+    expect(m.draft).toEqual(aclDef());
+    expect(m.draft).not.toBe(m.original);
+  });
+
+  it("acl: düzenleme → privileges isteği (cascade dahil); geri alınan düzenleme dirty=false", async () => {
+    const s = setup();
+    await s.ctl.openAcl("P1", CTX, TBL);
+    s.ctl.setCascade("P1", true);
+    s.ctl.editAcl("P1", grantInsert);
+    expect(s.ctl.isDirty("P1")).toBe(true);
+    await settle();
+    const want = aclDef();
+    want.grants[0]!.privileges.push({ privilege: "insert", grantOption: false });
+    expect(s.api.ddlPreview).toHaveBeenLastCalledWith("S1", 5, { op: "privileges", object: TBL, old: aclDef(), new: want, cascade: true });
+    expect(planRequest(s.ctl.model("P1")!)).toEqual({ op: "privileges", object: TBL, old: aclDef(), new: want, cascade: true });
+    s.ctl.editAcl("P1", (d) => { d.grants[0]!.privileges.pop(); });
+    expect(s.ctl.isDirty("P1")).toBe(false);
+    // Nesne düzenlemesi yetki sekmesinde etkisizdir.
+    s.ctl.edit("P1", (d) => ({ ...d, name: "x" }));
+    expect(s.ctl.model("P1")!.draft).toEqual(aclDef());
+  });
+
+  it("acl: uygulama sonrası ddlLoadAcl ile yeniden yüklenir; onApplied/ağaç yenilemesi yok; uyarılar kalır", async () => {
+    const onApplied = vi.fn();
+    const s = setup({ onApplied });
+    await s.ctl.openAcl("P1", CTX, TBL);
+    s.ctl.editAcl("P1", grantInsert);
+    await settle();
+    s.api.ddlApply.mockResolvedValueOnce({ outcome: "applied", statements: 1, elapsedMs: 1, created: null, warnings: ["ACL uyarısı"] });
+    await s.ctl.apply("P1");
+    await flush();
+    expect(s.api.ddlLoadAcl).toHaveBeenCalledTimes(2);
+    expect(s.api.ddlLoad).not.toHaveBeenCalled();
+    expect(onApplied).not.toHaveBeenCalled();
+    expect(s.refreshNode).not.toHaveBeenCalled();
+    expect(s.ctl.model("P1")).toMatchObject({ dirty: false, needsReload: false, postApplyWarnings: ["ACL uyarısı"] });
+  });
+
+  it("acl: reload ddlLoadAcl kullanır", async () => {
+    const s = setup();
+    await s.ctl.openAcl("P1", CTX, TBL);
+    await s.ctl.reload("P1");
+    expect(s.api.ddlLoadAcl).toHaveBeenCalledTimes(2);
+  });
+
+  it("acl sekmesi findAlter ile nesne sekmesi sayılmaz; nesne silinince gone olur", async () => {
+    const s = setup();
+    await s.ctl.openAcl("P1", CTX, TBL);
+    expect(s.ctl.findAlter("S1", 5, TBL)).toBeNull();
+    s.ctl.objectDropped("S1", 5, TBL);
+    expect(s.ctl.model("P1")!.status).toBe("gone");
+  });
+
+  it("openDefaultAcl: ddlLoadDefaultAcl (databaseOid zorunlu); default_privileges isteği", async () => {
+    const s = setup();
+    const scope: DefaultAclScope = { role: null, schemaOid: 2200 };
+    await s.ctl.openDefaultAcl("D1", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, scope);
+    expect(s.api.ddlLoadDefaultAcl).toHaveBeenCalledExactlyOnceWith("S1", 5, scope);
+    const m = s.ctl.model("D1")!;
+    expect(m).toMatchObject({ variant: "default_acl", mode: "alter", kind: "schema", aclScope: scope, databaseOid: 5, dirty: false });
+    s.ctl.editDefaultAcl("D1", (d) => { d.sections[0]!.grants.push({ grantee: "bob", privileges: [{ privilege: "select", grantOption: false }] }); });
+    expect(s.ctl.isDirty("D1")).toBe(true);
+    await settle();
+    const req = s.api.ddlPreview.mock.calls.at(-1)![2];
+    expect(req).toMatchObject({ op: "default_privileges", scope, old: defAclDef() });
+    expect(req.op === "default_privileges" && req.new.sections[0]!.grants).toHaveLength(1);
+    // Veritabanı kapsamı: kind database
+    await s.ctl.openDefaultAcl("D2", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: null, schemaOid: null });
+    expect(s.ctl.model("D2")!.kind).toBe("database");
+  });
+
+  it("setAclRole: kapsamın rolü değişir ve yeniden yüklenir (kirli taslak atılır)", async () => {
+    const s = setup();
+    await s.ctl.openDefaultAcl("D1", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: null, schemaOid: null });
+    s.ctl.editDefaultAcl("D1", (d) => { d.sections[0]!.grants.push({ grantee: "bob", privileges: [] }); });
+    s.ctl.setAclRole("D1", "bob");
+    await flush();
+    expect(s.api.ddlLoadDefaultAcl).toHaveBeenLastCalledWith("S1", 5, { role: "bob", schemaOid: null });
+    const m = s.ctl.model("D1")!;
+    expect(m.aclScope).toEqual({ role: "bob", schemaOid: null });
+    expect(m.draft).toEqual(defAclDef({ role: "bob" }));
+    expect(m.dirty).toBe(false);
+    // Nesne/acl sekmesinde etkisiz.
+    await s.ctl.openAcl("P1", CTX, TBL);
+    s.ctl.setAclRole("P1", "bob");
+    await flush();
+    expect(s.ctl.model("P1")!.aclScope).toBeNull();
+  });
+
+  it("acl: CASCADE değişimi sürümü ilerletir ve yeniden önizler; kapı yeni görünüme göre (üretim adı)", async () => {
+    const s = setup();
+    s.servers.S1!.production = true;
+    await s.ctl.openAcl("P1", CTX, TBL);
+    s.api.ddlPreview.mockResolvedValue(view({ risk: "destructive", hash: "h-rev" }));
+    s.ctl.editAcl("P1", (d) => { d.grants = []; });
+    await settle();
+    expect(s.ctl.peekApplyGate("P1")).toEqual({ kind: "needsConfirm" });
+    const v0 = s.ctl.model("P1")!.version;
+    s.api.ddlPreview.mockResolvedValue(view({ risk: "data_loss", hash: "h-cascade" }));
+    s.ctl.setCascade("P1", true);
+    expect(s.ctl.model("P1")!.version).toBe(v0 + 1);
+    expect(s.ctl.peekApplyGate("P1").kind).toBe("blocked");
+    await settle();
+    expect(s.api.ddlPreview).toHaveBeenLastCalledWith("S1", 5, expect.objectContaining({ op: "privileges", cascade: true }));
+    expect(s.ctl.peekApplyGate("P1")).toEqual({ kind: "needsProductionName", expected: "prod-1" });
+    // Aynı değer: yeni önizleme yok.
+    const calls = s.api.ddlPreview.mock.calls.length;
+    s.ctl.setCascade("P1", true);
+    await settle();
+    expect(s.api.ddlPreview).toHaveBeenCalledTimes(calls);
+  });
+
+  it("acl: yeni temelde (yeniden yükleme / uygulama sonrası) CASCADE false olur", async () => {
+    const s = setup();
+    await s.ctl.openAcl("P1", CTX, TBL);
+    s.ctl.setCascade("P1", true);
+    await s.ctl.reload("P1");
+    expect(s.ctl.model("P1")!.cascade).toBe(false);
+    s.ctl.editAcl("P1", grantInsert);
+    s.ctl.setCascade("P1", true);
+    await settle();
+    await s.ctl.apply("P1");
+    await flush();
+    expect(s.api.ddlApply).toHaveBeenCalledWith("S1", 5, expect.objectContaining({ cascade: true }), expect.anything());
+    expect(s.ctl.model("P1")).toMatchObject({ cascade: false, dirty: false });
+  });
+
+  it("setAclRole: yükleme başarısızsa kapsam eski role döner, eski tanım korunur, hata görünür", async () => {
+    const s = setup();
+    await s.ctl.openDefaultAcl("D1", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: null, schemaOid: null });
+    const before = s.ctl.model("D1")!;
+    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("role_not_found", "rol yok"));
+    s.ctl.setAclRole("D1", "yok");
+    await flush();
+    const m = s.ctl.model("D1")!;
+    expect(m.aclScope).toEqual({ role: null, schemaOid: null });
+    expect(m.status).toBe("ready");
+    expect(m.error).toBeTruthy();
+    expect(m.original).toEqual(before.original);
+    expect(m.draft).toEqual(before.draft);
+    // Sonraki istek eski kapsamla gider.
+    s.ctl.editDefaultAcl("D1", (d) => { d.sections[0]!.grants.push({ grantee: "bob", privileges: [{ privilege: "select", grantOption: false }] }); });
+    await settle();
+    expect(s.api.ddlPreview).toHaveBeenLastCalledWith("S1", 5, expect.objectContaining({ op: "default_privileges", scope: { role: null, schemaOid: null } }));
+  });
+
+  it("setAclRole: şema/veritabanı yok (`not_found`) → sekme gone (rol hatası değil)", async () => {
+    const s = setup();
+    await s.ctl.openDefaultAcl("D1", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: null, schemaOid: 7 });
+    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("not_found", "şema yok"));
+    s.ctl.setAclRole("D1", "bob");
+    await flush();
+    const m = s.ctl.model("D1")!;
+    expect(m.status).toBe("gone");
+    expect(m.aclRoleGone).toBeNull();
+  });
+
+  it("yeniden yükleme: seçili rol artık yok (`role_not_found`) → bağlı role (role: null) düşer, bilgi notu; sekme düşmez", async () => {
+    const s = setup();
+    await s.ctl.openDefaultAcl("D1", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: null, schemaOid: null });
+    s.ctl.setAclRole("D1", "bob");
+    await flush();
+    expect(s.ctl.model("D1")!.aclScope).toEqual({ role: "bob", schemaOid: null });
+    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("role_not_found", "rol yok"));
+    await s.ctl.reload("D1");
+    await flush();
+    expect(s.api.ddlLoadDefaultAcl).toHaveBeenLastCalledWith("S1", 5, { role: null, schemaOid: null });
+    const m = s.ctl.model("D1")!;
+    expect(m).toMatchObject({ status: "ready", error: null, aclScope: { role: null, schemaOid: null }, aclRoleGone: "bob" });
+    expect(m.draft).toEqual(defAclDef());
+    // Sonraki rol değişimi notu temizler.
+    s.ctl.setAclRole("D1", "carol");
+    await flush();
+    expect(s.ctl.model("D1")!.aclRoleGone).toBeNull();
+  });
+
+  it("yeniden yükleme: bağlı rol kapsamında (role: null) `role_not_found` ya da şema `not_found` → gone", async () => {
+    const s = setup();
+    await s.ctl.openDefaultAcl("D1", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: null, schemaOid: null });
+    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("role_not_found"));
+    await s.ctl.reload("D1");
+    expect(s.ctl.model("D1")!.status).toBe("gone");
+    await s.ctl.openDefaultAcl("D2", { serverId: "S1", databaseOid: 5, refreshNodeId: null }, { role: "bob", schemaOid: 7 });
+    s.api.ddlLoadDefaultAcl.mockRejectedValueOnce(err("not_found"));
+    await s.ctl.reload("D2");
+    expect(s.ctl.model("D2")!).toMatchObject({ status: "gone", aclScope: { role: "bob", schemaOid: 7 } });
+  });
+
+  it("planRequest: varyant yoksa nesne isteği (geriye uyumlu); default_acl kapsamsız → null", () => {
+    expect(planRequest({
+      variant: "default_acl", aclScope: null, mode: "alter", kind: "database", object: null, original: defAclDef(), draft: defAclDef(),
+      concurrently: false, cascade: false,
+    })).toBeNull();
+    expect(planRequest({
+      variant: "acl", aclScope: null, mode: "alter", kind: "table", object: TBL, original: aclDef(), draft: aclDef(), concurrently: false, cascade: false,
+    }, "drop")).toBeNull();
   });
 });

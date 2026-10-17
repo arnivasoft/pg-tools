@@ -8,6 +8,9 @@
 //   EŞZAMANLI çağrılır (sekme çizilmeden denetleyici girdisi hazır olsun).
 // - Sunucu kapsamlı türler (Database/Role; Plan 14): `databaseOid` her zaman `null` gönderilir (hedef zaten null
 //   döner; savunma), sekme başlığında/`where`'de veritabanı adı yoktur. Veritabanı kapsamlı türde `null` → açılmaz.
+// - Yetkiler (Plan 22): `privileges` nesnenin ACL sekmesini (`openAcl`, anahtar `acl:…`), `defaultPrivileges` yalnız
+//   `db`/`sch` düğümünde varsayılan yetkiler sekmesini (`openDefaultAcl`, anahtar `defacl:…`) açar. Varsayılan
+//   yetkiler her zaman veritabanı kapsamlıdır (`db` düğümünde `object.oid`). Kilit/bağlantı akışı aynıdır.
 import { createRoot, createEffect, on } from "solid-js";
 import { t } from "../../app/strings";
 import { tdes } from "../../app/strings-designer";
@@ -22,14 +25,14 @@ import type { QueryController } from "../query/query-controller";
 import type { TabsStore } from "../query/tabs-store";
 import { isProductionLabel } from "../servers/server-form";
 import { createDesignerController, type DesignerController, type DesignerControllerDeps } from "./designer-controller";
-import { designerTabKey, focusFieldOf, isServerScoped, kindLabel } from "./designer-model";
+import { aclTabKey, defaultAclTabKey, designerTabKey, focusFieldOf, isServerScoped, kindLabel } from "./designer-model";
 import type { DropInput } from "./drop-controller";
 import { extraRefreshIds, titleAfterApply, type OpenContext } from "./refresh-model";
 
 export type { DropInput };
 
 export interface DesignerOpenDeps {
-  designer: Pick<DesignerController, "openCreate" | "openAlter" | "requestFocus" | "findAlter" | "ids">;
+  designer: Pick<DesignerController, "openCreate" | "openAlter" | "openAcl" | "openDefaultAcl" | "requestFocus" | "findAlter" | "ids">;
   tabs: Pick<TabsStore, "state" | "openDesigner" | "activate" | "rename">;
   api: Pick<Api, "ddlTargetOf">;
   tree: () => TreeState;
@@ -71,7 +74,13 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
         notify(tdes.open.rowInTable, "info");
         return;
       }
-      if (kind === undefined || (target.databaseOid === null && !isServerScoped(kind))) {
+      // Plan 22: varsayılan yetkiler yalnız veritabanı ve şema düğümünde; kolon/kısıt odak hedefi (tabloya çözülür)
+      // yetki sekmesi açmaz (menü göstermez; savunma).
+      const defAcl = mode === "defaultPrivileges";
+      if (
+        kind === undefined || (target.databaseOid === null && !isServerScoped(kind))
+        || (defAcl && kind !== "database" && kind !== "schema") || ((defAcl || mode === "privileges") && target.focus)
+      ) {
         notify(tdes.open.none, "info");
         return;
       }
@@ -106,6 +115,36 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
         return;
       }
       if (!object) return;
+      if (mode === "privileges" || defAcl) {
+        const ctx: OpenContext = { databaseNodeId: ancestorOfKind(deps.tree(), nodeId, ["database"])?.id ?? null, tableNodeId: null };
+        let key: string;
+        let title: string;
+        let tabDb: number | null = databaseOid;
+        let tabWhere = where;
+        if (defAcl) {
+          // Varsayılan yetkiler veritabanı kapsamlıdır: `db` düğümünde veritabanı nesnenin kendisi, `sch`'de hedefin veritabanı.
+          tabDb = object.kind === "database" ? object.oid : target.databaseOid;
+          if (tabDb === null) return;
+          const dbLabel = ancestorOfKind(deps.tree(), nodeId, ["database"])?.label ?? null;
+          if (dbLabel !== null) {
+            dbNames.set(`${serverId}|${tabDb}`, dbLabel);
+            tabWhere = `${config.name}/${dbLabel}`;
+          }
+          key = defaultAclTabKey(serverId, tabDb, object.kind === "schema" ? object.oid : null);
+          title = tdes.tab.defaultPrivileges(node.label);
+        } else {
+          key = aclTabKey(object.kind, serverId, databaseOid, object.oid);
+          title = tdes.tab.privileges(node.label);
+        }
+        const r = tabs.openDesigner({ serverId, databaseOid: tabDb, title, key, where: tabWhere });
+        const actx = { serverId, databaseOid: tabDb, refreshNodeId };
+        if (r.created) {
+          if (defAcl) void designer.openDefaultAcl(r.id, actx, { role: null, schemaOid: object.kind === "schema" ? object.oid : null });
+          else void designer.openAcl(r.id, actx, object);
+        }
+        remember(r.id, ctx);
+        return;
+      }
       const focus = (id: string) => {
         if (mode === "rename") designer.requestFocus(id, "name");
         else if (target.focus) designer.requestFocus(id, focusFieldOf(target.focus));

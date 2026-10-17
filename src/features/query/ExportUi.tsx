@@ -1,6 +1,7 @@
 import { save } from "@tauri-apps/plugin-dialog";
 import { For, createSignal } from "solid-js";
 import { t } from "../../app/strings";
+import { tstrip } from "./strings-strip";
 import { texp } from "./strings-export";
 import { toast } from "../../app/toast";
 import type { CsvDelimiter } from "../../ipc/bindings/CsvDelimiter";
@@ -56,7 +57,7 @@ export function createExportUi() {
     session = null;
     if (outcome.kind === "done") {
       const s = outcome.summary;
-      toast.show(e.done(s.rows, (s.bytes / 1024).toLocaleString("tr-TR", { maximumFractionDigits: 1 }), t.query.strip.ms(s.elapsedMs)), "success");
+      toast.show(e.done(s.rows, (s.bytes / 1024).toLocaleString("tr-TR", { maximumFractionDigits: 1 }), tstrip.ms(s.elapsedMs)), "success");
     } else if (outcome.kind === "cancelled") {
       toast.show(e.cancelled, "info");
     } else if (outcome.kind === "error") {

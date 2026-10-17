@@ -15,6 +15,10 @@
 // - Tepkisellik: `model(tabId)` yalnızca `openCreate`/`openAlter` girdiyi kaydettikten sonra tepkiseldir. Girdi bu
 //   çağrıların içinde EŞZAMANLI kurulur (`makeEntry` eşzamanlıdır, ilk `await`'ten önce); arayüz (Task 3) sekmeyi
 //   çizmeden önce bu çağrıları eşzamanlı başlatmalıdır (sözü beklemek gerekmez).
+// - Varyant (Plan 22): `object` nesne diyaloğu; `acl` (`openAcl`) ve `default_acl` (`openDefaultAcl`) yetki sekmeleridir.
+//   Yetki sekmeleri her zaman `alter` kipindedir; yükleme/yeniden yükleme varyanta göre `ddl_load_acl` /
+//   `ddl_load_default_acl` ile yapılır. İstekler `privileges` / `default_privileges`; uygulama sonrası yalnız yeniden
+//   yüklenir (başlık değişimi, `onApplied`, ağaç yenilemesi yok).
 // - Parola (Plan 15): değer yalnızca tepkisiz `secrets` haritasında (sekme başına) ve tek `ddl_apply` çağrısının
 //   `options.password` alanında bulunur; modele, `PlanRequest`'e, kirli karşılaştırmasına, bildirime, günlüğe girmez.
 //   Başarılı uygulamada, yeniden yüklemede, kapanışta, sekme düşünce (bağlantı kaybı/oturumlar kapandı/nesne yok) ve
@@ -22,8 +26,11 @@
 import { createSignal, type Accessor, type Setter } from "solid-js";
 import { tdes } from "../../app/strings-designer";
 import type { ToastKind } from "../../app/toast-model";
+import type { AclDef } from "../../ipc/bindings/AclDef";
 import type { ApplyOutcome } from "../../ipc/bindings/ApplyOutcome";
 import type { DdlCreate } from "../../ipc/bindings/DdlCreate";
+import type { DefaultAclDef } from "../../ipc/bindings/DefaultAclDef";
+import type { DefaultAclScope } from "../../ipc/bindings/DefaultAclScope";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { LookupItem } from "../../ipc/bindings/LookupItem";
 import type { LookupRequest } from "../../ipc/bindings/LookupRequest";
@@ -35,12 +42,15 @@ import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Api } from "../../ipc/commands";
 import { errorText, toPayload } from "../../ipc/errors";
 import {
-  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, isServerScoped, localBlock, planHasRedacted, type ApplyGate, type ConfirmState,
+  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, isAclDef, isDefaultAclDef, isObjectDef, isServerScoped, localBlock, planHasRedacted,
+  type ApplyGate, type ConfirmState, type DesignerDef, type DesignerVariant,
 } from "./designer-model";
 import { createDropController } from "./drop-controller";
 import { dropRequest, matchesObject } from "./drop-model";
 import { classifyError, designerErrorText, failedText } from "./errors";
 import { PREVIEW_DELAY_MS, createPreviewer, type PreviewDeps, type Previewer } from "./preview";
+
+export { aclTabKey, defaultAclTabKey } from "./designer-model";
 
 export type DesignerMode = "create" | "alter";
 /**
@@ -57,13 +67,29 @@ export interface DesignerModel {
   /** Sunucu kapsamlı türlerde (Database/Role) `null` (bakım veritabanı). */
   databaseOid: number | null;
   mode: DesignerMode;
+  /** Plan 22: sekme türü (nesne / nesne yetkileri / varsayılan yetkiler). */
+  variant: DesignerVariant;
+  /** object/acl: nesne türü. default_acl: kapsamın türü (`schema` ya da veritabanı geneli için `database`). */
   kind: ObjectKind;
-  /** alter: yüklenen nesne; create: başarıdan sonra `created` ile dolar. */
+  /**
+   * alter: yüklenen nesne; create: başarıdan sonra `created` ile dolar. acl: yetkisi düzenlenen nesne. default_acl:
+   * kapsam nesnesi (şema ya da veritabanı; silinince sekme `gone` olsun diye).
+   */
   object: ObjectRef | null;
-  /** alter: `ddl_load` çıktısı (DEĞİŞTİRİLMEZ, `old` olarak gider); create: null. */
-  original: ObjectDef | null;
-  /** Formun düzenlediği tanım (her düzenlemede yeni nesne). */
-  draft: ObjectDef | null;
+  /** Yalnız default_acl: yükleme/istek kapsamı (`role = null` → bağlı rol); diğerlerinde null. */
+  aclScope: DefaultAclScope | null;
+  /**
+   * Yalnız default_acl: yeniden yüklemede artık var olmayan (`role_not_found`) seçili rol; kapsam bağlı role
+   * (`role = null`) düşürüldü (form bilgi notu gösterir). Sonraki rol değişiminde temizlenir.
+   */
+  aclRoleGone: string | null;
+  /**
+   * alter: `ddl_load` (acl: `ddl_load_acl`, default_acl: `ddl_load_default_acl`) çıktısı (DEĞİŞTİRİLMEZ, `old` olarak
+   * gider); create: null.
+   */
+  original: DesignerDef | null;
+  /** Formun düzenlediği tanım (her düzenlemede yeni nesne; türü `variant`'a göredir). */
+  draft: DesignerDef | null;
   status: DesignerStatus;
   /** Yükleme/bağlantı hatası metni. */
   error: string | null;
@@ -93,7 +119,7 @@ export interface DesignerModel {
   production: boolean;
   /** Yalnız index create. */
   concurrently: boolean;
-  /** Silme isteği için (`planRequest(m, "drop")`). */
+  /** Silme isteği için (`planRequest(m, "drop")`); acl: REVOKE ... CASCADE (`privileges` isteği). */
   cascade: boolean;
   /**
    * Son başarılı uygulamanın `applied.warnings` iletileri (arka uç metni; SQL/değer/parola içermez). Yeniden yüklemede
@@ -106,6 +132,12 @@ export interface DesignerModel {
    */
   partialCreated: ObjectRef | null;
 }
+
+/**
+ * Nesne formlarının gördüğü model (`variant = "object"`): tanımlar `ObjectDef`. DesignerView formu varyanta göre seçer;
+ * nesne formuna yalnız nesne sekmesinin modeli verilir.
+ */
+export type ObjectDesignerModel = Omit<DesignerModel, "original" | "draft"> & { original: ObjectDef | null; draft: ObjectDef | null };
 
 /** `username`: sunucu kaydındaki bağlantı kullanıcısı (Role formunun kendini kilitleme uyarıları; isteğe bağlı). */
 export interface ServerInfo { name: string; locked: boolean; production: boolean; username?: string }
@@ -126,20 +158,35 @@ const emptyConfirm = (): ConfirmState => ({ checked: false, typedName: "" });
 /**
  * Taslaktan istek: create → `{create, def, concurrently}`; alter → `{alter, object, old: original, new: draft}`;
  * `"drop"` → `{drop, object, def: original, cascade}` (`dropRequest`; silme diyaloğuyla tek tanım). Tanımlar derin
- * kopyalanır (istek nesnesi modelle paylaşılmaz).
+ * kopyalanır (istek nesnesi modelle paylaşılmaz). Plan 22: acl → `{privileges, object, old, new, cascade}`;
+ * default_acl → `{default_privileges, scope, old, new}` (ikisinde de silme yok). `variant` verilmezse `object`; tanım
+ * türü varyantla uyuşmazsa null.
  */
 export function planRequest(
-  m: Pick<DesignerModel, "mode" | "kind" | "object" | "original" | "draft" | "concurrently" | "cascade">,
+  m: Pick<DesignerModel, "mode" | "kind" | "object" | "original" | "draft" | "concurrently" | "cascade">
+    & Partial<Pick<DesignerModel, "variant" | "aclScope">>,
   op: "save" | "drop" = "save",
 ): PlanRequest | null {
-  if (op === "drop") {
-    return m.mode === "alter" && m.object && m.original
-      ? dropRequest(m.object, m.original, m.cascade)
+  const { original: o, draft: d } = m;
+  const variant = m.variant ?? "object";
+  if (variant === "acl") {
+    return op === "save" && m.object && o && d && isAclDef(o) && isAclDef(d)
+      ? { op: "privileges", object: { ...m.object }, old: cloneDef(o), new: cloneDef(d), cascade: m.cascade }
       : null;
   }
-  if (!m.draft) return null;
-  if (m.mode === "create") return { op: "create", def: cloneDef(m.draft), concurrently: m.kind === "index" && m.concurrently };
-  return m.object && m.original ? { op: "alter", object: { ...m.object }, old: cloneDef(m.original), new: cloneDef(m.draft) } : null;
+  if (variant === "default_acl") {
+    return op === "save" && m.aclScope && o && d && isDefaultAclDef(o) && isDefaultAclDef(d)
+      ? { op: "default_privileges", scope: { ...m.aclScope }, old: cloneDef(o), new: cloneDef(d) }
+      : null;
+  }
+  if (op === "drop") {
+    return m.mode === "alter" && m.object && o && isObjectDef(o)
+      ? dropRequest(m.object, o, m.cascade)
+      : null;
+  }
+  if (!d || !isObjectDef(d)) return null;
+  if (m.mode === "create") return { op: "create", def: cloneDef(d), concurrently: m.kind === "index" && m.concurrently };
+  return m.object && o && isObjectDef(o) ? { op: "alter", object: { ...m.object }, old: cloneDef(o), new: cloneDef(d) } : null;
 }
 
 /** Düz `LookupRequest` için anahtar sırasından bağımsız JSON. */
@@ -160,7 +207,7 @@ interface Entry {
   refreshNodeId: string | null;
   create: DdlCreate | null;
   /** create: varsayılan tanım (kirli karşılaştırması). */
-  base: ObjectDef | null;
+  base: DesignerDef | null;
   focus: Accessor<FocusRequest | null>;
   setFocus: Setter<FocusRequest | null>;
 }
@@ -182,7 +229,7 @@ export interface AppliedInfo {
 }
 
 export interface DesignerControllerDeps {
-  api: Pick<Api, "ddlDefaults" | "ddlLoad" | "ddlLookup" | "ddlPreview" | "ddlApply" | "ddlCancel">;
+  api: Pick<Api, "ddlDefaults" | "ddlLoad" | "ddlLoadAcl" | "ddlLoadDefaultAcl" | "ddlLookup" | "ddlPreview" | "ddlApply" | "ddlCancel">;
   notify(text: string, kind: ToastKind): void;
   serverInfo(serverId: string): ServerInfo | null;
   /** Explorer düğüm yenilemesi (hatası yutulur). */
@@ -198,6 +245,8 @@ export interface DesignerControllerDeps {
 
 export interface OpenCreateInput { tabId: string; serverId: string; databaseOid: number | null; create: DdlCreate; refreshNodeId: string | null }
 export interface OpenAlterInput { tabId: string; serverId: string; databaseOid: number | null; object: ObjectRef; refreshNodeId: string | null }
+/** Plan 22: yetki sekmesi açılış bağlamı (`openAcl` / `openDefaultAcl`). */
+export interface AclOpenContext { serverId: string; databaseOid: number | null; refreshNodeId: string | null }
 
 export function createDesignerController(deps: DesignerControllerDeps) {
   const { api, notify } = deps;
@@ -267,7 +316,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   /** Düzenleme/önizleme yapılabilir mi: `ready`, uygulama dışında ve "tamam" değil. */
   const editable = (m: DesignerModel) => m.status === "ready" && !m.applying && !finished(m);
   /** Kirli: taslak temelden (alter: original; create: varsayılan) farklı ya da create'te CONCURRENTLY seçili. */
-  const dirtyOf = (e: Entry, draft: ObjectDef, m: Pick<DesignerModel, "original" | "mode" | "concurrently">) => {
+  const dirtyOf = (e: Entry, draft: DesignerDef, m: Pick<DesignerModel, "original" | "mode" | "concurrently">) => {
     const ref = m.original ?? e.base;
     if (!ref) return true;
     return !defsEqual(draft, ref) || (m.mode === "create" && m.concurrently);
@@ -359,11 +408,11 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   // ---- açma / yükleme
   const makeEntry = (
     tabId: string, serverId: string, databaseOid: number | null, mode: DesignerMode, kind: ObjectKind, object: ObjectRef | null,
-    refreshNodeId: string | null, create: DdlCreate | null,
+    refreshNodeId: string | null, create: DdlCreate | null, variant: DesignerVariant = "object", aclScope: DefaultAclScope | null = null,
   ): Entry => {
     const info = deps.serverInfo(serverId);
     const [m, set] = createSignal<DesignerModel>({
-      id: tabId, serverId, serverName: info?.name ?? "", databaseOid, mode, kind, object,
+      id: tabId, serverId, serverName: info?.name ?? "", databaseOid, mode, variant, kind, object, aclScope, aclRoleGone: null,
       original: null, draft: null, status: "loading", error: null, dirty: false,
       view: null, viewFor: -1, version: 0, pending: false, previewError: null,
       applying: false, applyId: null, outcome: null, applyError: null, gateError: null, needsReload: false,
@@ -380,16 +429,34 @@ export function createDesignerController(deps: DesignerControllerDeps) {
   };
 
   /** Yükleme hatası: gone/disconnected ya da genel hata (önceki taslak varsa `ready` korunur). */
-  const loadFailed = (e: Entry, err: unknown, prev: DesignerStatus) => {
+  const loadFailed = (e: Entry, err: unknown, prev: DesignerStatus, prevScope?: DefaultAclScope) => {
+    // Rol değişimi (default_acl) başarısız: kapsam eski role döner; tanım/taslak/görünüm o role aittir, tutarlı kalır.
+    if (prevScope) patch(e, { aclScope: prevScope });
     const p = toPayload(err);
+    // default_acl: `role_not_found` kapsamın rolünün yokluğudur (şema/veritabanı yokluğu düz `not_found` → gone).
+    const roleMissing = e.model().variant === "default_acl" && p.code === "role_not_found";
+    // Rol değişiminde seçilen rol yok: sekme düşmez, hata gösterilir (önceki rolün tanımı kalır).
+    if (roleMissing && prevScope) {
+      patch(e, { status: prev === "ready" ? "ready" : "error", error: errorText(p) });
+      return;
+    }
+    // Yeniden yüklemede (açılış/yenileme/uygulama sonrası) seçili rol kaybolmuş: bağlı role düşülür, bilgi notu.
+    const scope = e.model().aclScope;
+    if (roleMissing && scope && scope.role !== null) {
+      patch(e, { aclScope: { ...scope, role: null }, aclRoleGone: scope.role });
+      void loadObject(e.model().id, e);
+      return;
+    }
     if (markIfDown(e, p)) return;
     patch(e, { status: prev === "ready" ? "ready" : "error", error: errorText(p) });
   };
 
   /** Yeni temel tanımı kurar: taslak = kopya, sürüm ilerler, eski önizleme/onay/hatalar düşer. */
-  const setBase = (e: Entry, original: ObjectDef | null, draft: ObjectDef) =>
+  const setBase = (e: Entry, original: DesignerDef | null, draft: DesignerDef) =>
     update(e, (m) => ({
       ...m, status: "ready", error: null, original, draft, dirty: false, version: m.version + 1,
+      // acl: CASCADE her yeni temelde (yeniden yükleme/uygulama sonrası) güvenli varsayılana döner.
+      cascade: m.variant === "acl" ? false : m.cascade,
       view: null, viewFor: -1, pending: false, previewError: null, gateError: null, applyError: null, needsReload: false,
       confirm: emptyConfirm(),
     }));
@@ -411,19 +478,26 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     }
   };
 
-  const loadObject = async (tabId: string, e: Entry) => {
+  /** Varyanta göre yükleme komutu: object → `ddl_load`, acl → `ddl_load_acl`, default_acl → `ddl_load_default_acl`. */
+  const loadDef = (m: DesignerModel): Promise<DesignerDef> => {
+    if (m.variant === "default_acl") return api.ddlLoadDefaultAcl(m.serverId, m.databaseOid!, { ...m.aclScope! });
+    if (m.variant === "acl") return api.ddlLoadAcl(m.serverId, m.databaseOid, m.object!);
+    return api.ddlLoad(m.serverId, m.databaseOid, m.object!);
+  };
+
+  /** `prevScope`: rol değişimi yüklemesi; başarısızlıkta kapsam buna geri döner. */
+  const loadObject = async (tabId: string, e: Entry, prevScope?: DefaultAclScope) => {
     const gen = ++e.gen;
     e.previewer.cancel();
     const m = e.model();
-    const object = m.object!;
     const prev = m.draft ? "ready" : m.status;
     patch(e, { status: "loading", error: null, pending: false });
     try {
-      const def = await api.ddlLoad(m.serverId, m.databaseOid, object);
+      const def = await loadDef(m);
       if (!alive(tabId, e, gen)) return;
       setBase(e, cloneDef(def), cloneDef(def));
     } catch (err) {
-      if (alive(tabId, e, gen)) loadFailed(e, err, prev);
+      if (alive(tabId, e, gen)) loadFailed(e, err, prev, prevScope);
     }
   };
 
@@ -438,6 +512,43 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     if (entries.has(input.tabId)) return;
     const e = makeEntry(input.tabId, input.serverId, input.databaseOid, "alter", input.object.kind, { ...input.object }, input.refreshNodeId, null);
     await loadObject(input.tabId, e);
+  };
+
+  /**
+   * Plan 22: nesne yetkileri sekmesi (`acl`; kip `alter`). Sunucu kapsamlı nesnede (Database) `databaseOid` null'dır.
+   * Girdi EŞZAMANLI kurulur (`openAlter` gibi).
+   */
+  const openAcl = async (tabId: string, ctx: AclOpenContext, object: ObjectRef): Promise<void> => {
+    if (entries.has(tabId)) return;
+    const e = makeEntry(tabId, ctx.serverId, ctx.databaseOid, "alter", object.kind, { ...object }, ctx.refreshNodeId, null, "acl");
+    await loadObject(tabId, e);
+  };
+
+  /**
+   * Plan 22: varsayılan yetkiler sekmesi (`default_acl`; kip `alter`). `databaseOid` zorunludur (null → açılmaz).
+   * Kapsam nesnesi şema (`schemaOid`) ya da veritabanıdır; silinince sekme `gone` olur.
+   */
+  const openDefaultAcl = async (tabId: string, ctx: AclOpenContext, scope: DefaultAclScope): Promise<void> => {
+    if (entries.has(tabId) || ctx.databaseOid === null) return;
+    const object: ObjectRef = scope.schemaOid === null
+      ? { kind: "database", oid: ctx.databaseOid }
+      : { kind: "schema", oid: scope.schemaOid };
+    const e = makeEntry(tabId, ctx.serverId, ctx.databaseOid, "alter", object.kind, object, ctx.refreshNodeId, null, "default_acl", { ...scope });
+    await loadObject(tabId, e);
+  };
+
+  /**
+   * Plan 22 (default_acl): kapsamın rolünü değiştirir ve tanımı yeniden yükler. Kirli taslak atılır: çağıran
+   * kullanıcıdan onay almış olmalıdır. Başka varyantta, uygulama sırasında ya da `gone` sekmede etkisizdir.
+   */
+  const setAclRole = (tabId: string, role: string): void => {
+    const e = entries.get(tabId);
+    const m = e?.model();
+    if (!e || !m || m.variant !== "default_acl" || !m.aclScope || m.applying || m.status === "gone") return;
+    forgetSecret(tabId);
+    const prevScope = { ...m.aclScope };
+    patch(e, { aclScope: { ...m.aclScope, role }, aclRoleGone: null, postApplyWarnings: [] });
+    void loadObject(tabId, e, prevScope);
   };
 
   /**
@@ -459,19 +570,26 @@ export function createDesignerController(deps: DesignerControllerDeps) {
    * `f` taslağın kopyasını alır (yerinde değiştirebilir ya da yeni tanım döndürebilir). Yalnızca `ready` ve uygulama
    * dışında; uygulama sırasındaki düzenlemeler bilinçli olarak yok sayılır (gönderilen taslak değişmez).
    */
-  const edit = (tabId: string, f: (draft: ObjectDef) => ObjectDef | void) => {
+  const editDef = <D extends DesignerDef>(tabId: string, variant: DesignerVariant, f: (draft: D) => D | void) => {
     const e = entries.get(tabId);
     const m = e?.model();
-    if (!e || !m || !editable(m) || !m.draft) return;
-    const copy = cloneDef(m.draft);
+    // Yalnız varyantı eşleşen sekme (ör. nesne düzenleyicisi yetki sekmesinde etkisiz).
+    if (!e || !m || m.variant !== variant || !editable(m) || !m.draft) return;
+    const copy = cloneDef(m.draft as D);
     const next = cloneDef(f(copy) ?? copy);
     update(e, (cur) => ({
       ...cur, draft: next, version: cur.version + 1, dirty: dirtyOf(e, next, cur), outcome: null, applyError: null,
     }));
     // Parola niyeti `set` değilse (keep/clear ya da rol dışı) girilmiş parola tutulmaz.
-    if (!(next.kind === "role" && next.password === "set")) forgetSecret(tabId);
+    if (!(variant === "object" && isObjectDef(next) && next.kind === "role" && next.password === "set")) forgetSecret(tabId);
     startPreview(e, false);
   };
+  const edit = (tabId: string, f: (draft: ObjectDef) => ObjectDef | void) => editDef<ObjectDef>(tabId, "object", f);
+  /** Plan 22: nesne yetkileri taslağı (yalnız `acl` sekmesinde). */
+  const editAcl = (tabId: string, f: (draft: AclDef) => AclDef | void) => editDef<AclDef>(tabId, "acl", f);
+  /** Plan 22: varsayılan yetkiler taslağı (yalnız `default_acl` sekmesinde). */
+  const editDefaultAcl = (tabId: string, f: (draft: DefaultAclDef) => DefaultAclDef | void) =>
+    editDef<DefaultAclDef>(tabId, "default_acl", f);
 
   const previewNow = (tabId: string) => {
     const e = entries.get(tabId);
@@ -496,9 +614,21 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     patch(e, { concurrently: v, version: m.version + 1, dirty: m.draft ? dirtyOf(e, m.draft, { ...m, concurrently: v }) : m.dirty });
     startPreview(e, false);
   };
+  /**
+   * Nesne sekmesi: yalnız silme isteği seçeneği. acl: `privileges` isteğinin parçasıdır → plan değişir, sürüm ilerler ve
+   * önizleme yenilenir (risk/kapı/üretim adı onayı yeni görünüme göre; eski görünüm bayat sayılır).
+   */
   const setCascade = (tabId: string, v: boolean) => {
     const e = entries.get(tabId);
-    if (e) patch(e, { cascade: v });
+    const m = e?.model();
+    if (!e || !m) return;
+    if (m.variant !== "acl") {
+      patch(e, { cascade: v });
+      return;
+    }
+    if (!editable(m) || m.cascade === v) return;
+    patch(e, { cascade: v, version: m.version + 1 });
+    startPreview(e, false);
   };
 
   // ---- uygulama
@@ -510,14 +640,20 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     else notify(tdes.apply.applied(out.statements), "success");
     // Uyarılar sekmede kalıcı (yeniden yükleme `setBase` bunlara dokunmaz).
     patch(e, { postApplyWarnings: [...warnings] });
+    if (m.variant !== "object") {
+      // Yetki sekmeleri: ad/ağaç değişmez; yalnız yeniden yüklenir (yükleme başarısızsa `needsReload` kalır).
+      patch(e, { dirty: false, needsReload: true });
+      await loadObject(tabId, e);
+      return;
+    }
     // Sunucu kapsamlı nesne (rol/veritabanı) her veritabanının lookup'larını (ör. `roles`) etkiler.
     dropLookups(m.serverId, isServerScoped(m.kind) ? undefined : m.databaseOid);
     refresh(e.refreshNodeId);
-    if ((mode === "alter" || out.created) && m.draft) {
+    // Buraya yalnız `variant = "object"` ulaşır (yetki sekmeleri yukarıda döner); `isObjectDef` tip daraltmasıdır.
+    if ((mode === "alter" || out.created) && m.draft && isObjectDef(m.draft)) {
+      const before = m.original && isObjectDef(m.original) ? cloneDef(m.original) : null;
       try {
-        deps.onApplied?.({
-          tabId, kind: m.kind, mode, before: m.original ? cloneDef(m.original) : null, after: cloneDef(m.draft), object: out.created ?? m.object,
-        });
+        deps.onApplied?.({ tabId, kind: m.kind, mode, before, after: cloneDef(m.draft), object: out.created ?? m.object });
       } catch {
         /* başlık/ek yenileme hatası uygulama sonucunu etkilemez */
       }
@@ -634,7 +770,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     e.previewer.dispose();
     await openAlter({ tabId, serverId: m.serverId, databaseOid: m.databaseOid, object, refreshNodeId: e.refreshNodeId });
     const n = entries.get(tabId)?.model();
-    if (!n || n.status !== "ready" || !n.original) return;
+    if (!n || n.status !== "ready" || !n.original || !isObjectDef(n.original)) return;
     try {
       deps.onApplied?.({ tabId, kind: n.kind, mode: "create", before: null, after: cloneDef(n.original), object: { ...object } });
     } catch {
@@ -757,7 +893,9 @@ export function createDesignerController(deps: DesignerControllerDeps) {
    */
   const setSecret = (tabId: string, value: string | null): void => {
     const m = entries.get(tabId)?.model();
-    const accept = !!value && !!m && m.status === "ready" && m.draft?.kind === "role" && m.draft.password === "set";
+    const d = m?.draft;
+    const accept = !!value && !!m && m.status === "ready" && m.variant === "object" && !!d && isObjectDef(d) && d.kind === "role"
+      && d.password === "set";
     if (accept) {
       if (secrets.get(tabId) === value) return;
       secrets.set(tabId, value!);
@@ -778,11 +916,14 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     entries.get(tabId)?.setFocus({ field, seq: ++focusSeq });
   };
 
-  /** Aynı nesnenin (`gone` olmayan) alter sekmesi — create'ten dönüşen ya da kimliği `created` ile güncellenen dahil. Tepkisel değil. */
+  /**
+   * Aynı nesnenin (`gone` olmayan) alter sekmesi — create'ten dönüşen ya da kimliği `created` ile güncellenen dahil.
+   * Yalnız nesne sekmeleri (yetki sekmeleri kendi anahtarlarıyla tekilleşir). Tepkisel değil.
+   */
   const findAlter = (serverId: string, databaseOid: number | null, object: ObjectRef): string | null => {
     for (const [id, e] of entries) {
       const m = e.model();
-      if (m.status !== "gone" && matchesObject(m, { serverId, databaseOid, object })) return id;
+      if (m.variant === "object" && m.status !== "gone" && matchesObject(m, { serverId, databaseOid, object })) return id;
     }
     return null;
   };
@@ -793,7 +934,12 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     ids: () => (registry(), [...entries.keys()]),
     openCreate,
     openAlter,
+    openAcl,
+    openDefaultAcl,
+    setAclRole,
     edit,
+    editAcl,
+    editDefaultAcl,
     setLockTimeout,
     setConfirm,
     setConcurrently,

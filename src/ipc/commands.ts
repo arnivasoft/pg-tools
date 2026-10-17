@@ -33,11 +33,14 @@ import type { SignalKind } from "./bindings/SignalKind";
 import type { SignalOutcome } from "./bindings/SignalOutcome";
 import type { Statements } from "./bindings/Statements";
 import type { StatementsOrder } from "./bindings/StatementsOrder";
+import type { AclDef } from "./bindings/AclDef";
 import type { ApplyOptions } from "./bindings/ApplyOptions";
 import type { ApplyOutcome } from "./bindings/ApplyOutcome";
 import type { CreateContext } from "./bindings/CreateContext";
 import type { CreatePreset } from "./bindings/CreatePreset";
 import type { DdlTarget } from "./bindings/DdlTarget";
+import type { DefaultAclDef } from "./bindings/DefaultAclDef";
+import type { DefaultAclScope } from "./bindings/DefaultAclScope";
 import type { LookupItem } from "./bindings/LookupItem";
 import type { LookupRequest } from "./bindings/LookupRequest";
 import type { ObjectDef } from "./bindings/ObjectDef";
@@ -133,6 +136,9 @@ export const commands = {
   ddlDefaults: (serverId: string, databaseOid: number | null, kind: ObjectKind, ctx: CreateContext, preset: CreatePreset | null = null) =>
     call<ObjectDef>("ddl_defaults", { serverId, databaseOid, kind, ctx, preset }),
   ddlLoad: (serverId: string, databaseOid: number | null, object: ObjectRef) => call<ObjectDef>("ddl_load", { serverId, databaseOid, object }),
+  ddlLoadAcl: (serverId: string, databaseOid: number | null, object: ObjectRef) => call<AclDef>("ddl_load_acl", { serverId, databaseOid, object }),
+  ddlLoadDefaultAcl: (serverId: string, databaseOid: number, scope: DefaultAclScope) =>
+    call<DefaultAclDef>("ddl_load_default_acl", { serverId, databaseOid, scope }),
   ddlLookup: (serverId: string, databaseOid: number | null, request: LookupRequest) =>
     call<LookupItem[]>("ddl_lookup", { serverId, databaseOid, request }),
   ddlPreview: (serverId: string, databaseOid: number | null, request: PlanRequest) =>

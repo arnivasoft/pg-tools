@@ -4,7 +4,7 @@
 import { PencilRuler } from "lucide-solid";
 import { For, Show, Suspense, createEffect, createSignal, lazy, type Component, type JSX } from "solid-js";
 import { tdes } from "../../app/strings-designer";
-import { ConfirmDialog } from "../../ui/ConfirmDialog";
+import { ConfirmDialog } from "../../ui/ConfirmDialogView";
 import type { DesignerTab } from "../query/tabs-store";
 import type { DesignerController } from "./designer-controller";
 

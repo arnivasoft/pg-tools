@@ -482,3 +482,80 @@ async fn data_logging_body(ts: TestServer) {
     let stale = DataChangeSet { fingerprint: "0000000000000000".into(), ..bad };
     assert!(dm.apply(server, db, &stale, &o).await.is_err());
 }
+
+// ================================================================================================================
+// Plan 20: yetkiler — günlükte rol adı, şema/tablo adı, yetki listesi ve SQL yok (yalnız op/tür/sonuç kodu)
+// ================================================================================================================
+
+/// Ayırt edici izleyici dizgeler: alıcı rol adları, şema ve tablo adı.
+const ACL_TAG: &str = "macllog";
+const ACL_SCHEMA: &str = "zacl_gizli_sema";
+const ACL_TABLE: &str = "zacl_gizli_tablo";
+
+#[tokio::test]
+async fn privilege_logging_is_name_and_privilege_free() {
+    let buf = capture();
+    for ts in servers() {
+        guarded(acl_logging_body(ts.clone()), common::cleanup_acl(&ts, common::RT_PREFIX, ACL_TAG)).await;
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        for marker in ["privileges", "default_privileges", "42704", "DDL uygulandı", "DDL uygulanamadı"] {
+            assert!(out.contains(marker), "günlükte {marker:?} yok: {out}");
+        }
+        let (granted, missing) = (common::acl_role(ACL_TAG, "zgizli"), common::acl_role(ACL_TAG, "zyok"));
+        for secret in [
+            granted.as_str(),
+            missing.as_str(),
+            "pgt_acl_rt_macllog",
+            ACL_SCHEMA,
+            ACL_TABLE,
+            "zacl_gizli",
+            "GRANT",
+            "REVOKE",
+            "DEFAULT PRIVILEGES",
+            "ON TABLES",
+            "WITH GRANT OPTION",
+            "does not exist",
+        ] {
+            assert!(!out.contains(secret), "günlükte {secret:?} var: {out}");
+        }
+        if let Some(p) = ts.password.as_deref().filter(|p| !p.is_empty()) {
+            assert!(!out.contains(p), "günlükte parola var");
+        }
+    }
+}
+
+async fn acl_logging_body(ts: TestServer) {
+    common::cleanup_acl(&ts, common::RT_PREFIX, ACL_TAG).await;
+    let env = setup_in(&ts, common::RT_PREFIX, ACL_TAG).await;
+    let (dm, _dir) = manager(&ts.config, env.mgr.clone());
+    let (server, db) = (env.server, env.db_oid);
+    let granted = common::acl_role(ACL_TAG, "zgizli");
+    env.sql(&format!("CREATE ROLE {granted}; CREATE SCHEMA {ACL_SCHEMA}; CREATE TABLE {ACL_SCHEMA}.{ACL_TABLE} (id int)")).await;
+    let oid = env.class_oid(ACL_SCHEMA, ACL_TABLE).await;
+    let object = ObjectRef { kind: ObjectKind::Table, oid };
+    let grant = |who: &str| AclGrant {
+        grantee: Some(who.to_string()),
+        privileges: vec![PrivilegeGrant { privilege: Privilege::Select, grant_option: true }],
+    };
+    // GRANT … WITH GRANT OPTION uygulanır.
+    let old = dm.load_acl(server, db, object).await.unwrap();
+    let mut new = old.clone();
+    new.grants.push(grant(&granted));
+    let req = PlanRequest::Privileges { object, old, new, cascade: false };
+    assert!(matches!(apply(&dm, server, db, &req).await, Ok(ApplyOutcome::Applied { .. })));
+    // Olmayan alıcı: 42704 (PG iletisi adı içerir; günlüğe yalnız kod).
+    let old = dm.load_acl(server, db, object).await.unwrap();
+    let mut new = old.clone();
+    new.grants.push(grant(&common::acl_role(ACL_TAG, "zyok")));
+    let req = PlanRequest::Privileges { object, old, new, cascade: false };
+    let r = apply(&dm, server, db, &req).await;
+    let Ok(ApplyOutcome::Failed { sqlstate, .. }) = r else { panic!("{r:?}") };
+    assert_eq!(sqlstate.as_deref(), Some("42704"));
+    // Varsayılan yetkiler.
+    let scope = DefaultAclScope { role: None, schema_oid: None };
+    let old = dm.load_default_acl(server, db, scope.clone()).await.unwrap();
+    let mut new = old.clone();
+    new.sections.iter_mut().find(|s| s.object_type == DefaultAclObjectType::Tables).unwrap().grants.push(grant(&granted));
+    let req = PlanRequest::DefaultPrivileges { scope, old, new };
+    assert!(matches!(apply(&dm, server, db, &req).await, Ok(ApplyOutcome::Applied { .. })));
+}

@@ -1,0 +1,34 @@
+// Hata rozetinin saf mantığı (ana paket): tam bileşen (tembel) ile fallback aynı etiketi/başlığı kullanır.
+import { t } from "../../app/strings";
+import { createLoader } from "../../ui/lazy-load";
+import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
+
+/** Rozetin `aria-label`ı (tek kaynak: fallback ve HoverCard'lı tetikleyici aynı değeri üretir). */
+export const badgeLabel = (): string => t.error.badge;
+
+/** Kaybolmuş nesne: yeniden denemek yerine üst düğüm yenilenir. */
+export const isGone = (err: ErrorPayload): boolean => err.code === "not_found";
+
+/** Kartın başlık satırı. */
+export const cardTitle = (err: ErrorPayload): string => (isGone(err) ? t.error.gone : err.message);
+
+/** Kartın eylem düğmesi etiketi. */
+export const cardActionLabel = (err: ErrorPayload): string => (isGone(err) ? t.error.refreshParent : t.error.retry);
+
+/** Rozet ortak sınıfları (fallback ile tam tetikleyici birebir aynı görünür). */
+export const BADGE_CLASS = "ml-auto shrink-0 rounded text-danger outline-none focus-visible:ring-1 focus-visible:ring-accent";
+
+
+/**
+ * Hata kartı yükleyicisi: başarısızlık sessizdir (bildirim yok; kart süs olduğundan fallback rozet yeterli).
+ * `start` (rozet oluşunca) başarısızlıktan sonra yeniden denemez; yalnız yeni kullanıcı etkileşimi (`retry`: rozet
+ * üzerine gelme/odak) yeniden dener. Başarıda başarısızlık işareti temizlenir.
+ */
+export function createBadgeCardLoader(load: () => Promise<unknown>): { start: () => void; retry: () => void } {
+  let failed = false;
+  const ensure = createLoader(
+    () => load().then(() => void (failed = false)),
+    () => void (failed = true),
+  );
+  return { start: () => void (failed || ensure()), retry: () => void ensure() };
+}

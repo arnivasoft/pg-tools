@@ -1,0 +1,7 @@
+---
+source: crates/pgt-ddl/src/build/acl.rs
+expression: render(&p)
+---
+[Destructive] REVOKE SELECT, INSERT ON TABLE s.t FROM x
+[Destructive] REVOKE SELECT ON TABLE s.t FROM y
+[Safe] GRANT SELECT ON TABLE s.t TO w

@@ -1,0 +1,7 @@
+---
+source: crates/pgt-ddl/src/build/default_acl.rs
+expression: render(&p)
+---
+[Safe] ALTER DEFAULT PRIVILEGES FOR ROLE own IN SCHEMA "Şema ""x""" GRANT SELECT ON TABLES TO PUBLIC
+[Safe] ALTER DEFAULT PRIVILEGES FOR ROLE own IN SCHEMA "Şema ""x""" REVOKE SELECT ON SEQUENCES FROM old_r
+WARN: Yalnızca bundan sonra oluşturulan nesneleri etkiler; mevcut nesnelerin yetkileri değişmez.

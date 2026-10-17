@@ -1,28 +1,9 @@
 export const t = {
+  app: { chunkLoadFailed: "Pencere yüklenemedi." },
+  /** Sunucu içe aktarma: ana paketteki giriş (Toolbar düğmesi, diyalog başlığı); diyalog metinleri `strings-import.ts`. */
   import: {
     button: "İçe aktar",
     title: "pgAdmin sunucularını içe aktar",
-    choose: "Dosya seç…",
-    reading: "Okunuyor…",
-    selectRecommended: "Önerilenleri seç",
-    ungrouped: "(grupsuz)",
-    selectNone: "Hiçbirini seçme",
-    duplicate: "zaten var",
-    cancel: "Vazgeç",
-    doImport: (n: number) => `İçe aktar (${n})`,
-    done: (n: number) => `${n} sunucu içe aktarıldı. Parolalar ilk bağlantıda sorulacak.`,
-    summary: (s: { total: number; importable: number; duplicates: number; errors: number }) =>
-      `${s.total} kayıt · ${s.importable} aktarılabilir · ${s.duplicates} zaten var · ${s.errors} hatalı`,
-    warnings: "Uyarılar",
-    warnBadge: (n: number) => `⚠ ${n}`,
-    showWarnings: (n: number) => `${n} uyarıyı göster`,
-    hideWarnings: (n: number) => `${n} uyarıyı gizle`,
-    fileFilter: "pgAdmin servers.json",
-    colName: "Ad",
-    colGroup: "Grup",
-    colHost: "Host:Port",
-    colUser: "Kullanıcı",
-    colStatus: "Durum",
   },
   toolbar: {
     addServer: "Sunucu ekle",
@@ -82,7 +63,6 @@ export const t = {
     testOk: (version: string) => `Bağlantı başarılı (PostgreSQL ${version})`,
     save: "Kaydet",
     cancel: "Vazgeç",
-    close: "Kapat",
   },
   password: {
     title: (server: string) => `${server} için parola`,
@@ -111,6 +91,8 @@ export const t = {
     createObject: "Oluştur…",
     editObject: "Düzenle…",
     renameObject: "Yeniden adlandır…",
+    privilegesObject: "Yetkiler…",
+    defaultPrivilegesObject: "Varsayılan yetkiler…",
     dropObject: "Sil…",
     gone: "Bu öğe artık yok.",
     disconnected: "Bağlantı kesildi.",
@@ -206,27 +188,12 @@ export const t = {
       tx: { inTransaction: "açık", failed: "hatalı", idle: "" },
       busy: "çalışıyor",
     },
-    env: {
-      title: "Bu sunucunun ortamı?",
-      message: (name: string) => `‘${name}’ için bir ortam etiketi seçin. Üretim sunucusunda yazma ifadeleri onay ister ve sekmeler Manuel modda açılır.`,
-      skip: "Atla",
-      save: "Kaydet",
-      lock: "Salt okunur kilidi aç (önerilir)",
-    },
     hint: {
       autocommit: "Bu ifade transaction bloğunda çalışamaz; sekmeyi autocommit kipine alın.",
       rollback: "Transaction hata durumunda; yalnızca ROLLBACK yapılabilir.",
       sessionReset:
         "Bağlantı yeniden kuruldu; oturum durumu (SET, geçici tablolar, advisory kilitler) kaybolmuş olabilir. Sorguyu tekrar çalıştırın.",
       locked: "Bu sunucu salt okunur kilitli.",
-    },
-    strip: {
-      ariaLabel: "İfade sonuçları",
-      status: { running: "Çalışıyor", ok: "Başarılı", failed: "Hata", cancelled: "İptal edildi" },
-      kind: { select: "SELECT", write: "Yazma", ddl: "DDL", tx: "Transaction", other: "Diğer" },
-      rows: (n: number) => `${n.toLocaleString("tr-TR")} satır`,
-      affected: (n: number) => `${n.toLocaleString("tr-TR")} etkilendi`,
-      ms: (n: number) => (n < 1000 ? `${n} ms` : `${(n / 1000).toFixed(2)} sn`),
     },
   },
 } as const;

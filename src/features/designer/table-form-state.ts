@@ -5,7 +5,8 @@
 import { batch, createEffect, createSignal, type Accessor } from "solid-js";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import type { TableDef } from "../../ipc/bindings/TableDef";
-import type { DesignerController, DesignerModel } from "./designer-controller";
+import type { DesignerController, ObjectDesignerModel } from "./designer-controller";
+import { objectDefOf } from "./designer-model";
 import type { FormProps } from "./FormParts";
 import { NO_PK_FORCED, createSnapTracker, reconcilePrimaryKeyNotNull, type PkForced, type SelfSnap, type WithSnap } from "./table-constraints";
 import { asTable, columnRefs, removeColumnRestoringName, renameTableColumn, rowOfFocus, type ColumnRef, type TableDraft, type TableSection } from "./table-model";
@@ -55,7 +56,7 @@ export interface TableFormState {
 type StateProps = {
   designer: Pick<DesignerController, "focusRequest" | "consumeFocus" | "edit" | "model">;
   tabId: string;
-  model: Pick<DesignerModel, "status" | "draft">;
+  model: Pick<ObjectDesignerModel, "status" | "draft">;
 };
 
 export function createTableFormState(props: StateProps): TableFormState {
@@ -63,7 +64,7 @@ export function createTableFormState(props: StateProps): TableFormState {
   const [highlight, setHighlight] = createSignal<TableHighlight | null>(null);
 
   // Denetleyicinin güncel taslağı (memo zinciri değil: düzenlemeden hemen sonra okunur).
-  const current = () => asTable(props.designer.model(props.tabId)?.draft ?? null);
+  const current = () => asTable(objectDefOf(props.designer.model(props.tabId)?.draft ?? null));
   const tracker = createSnapTracker(current);
   let epochCount = 0;
   let epochSeen: TableDef | null | undefined;

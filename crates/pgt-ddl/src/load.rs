@@ -131,7 +131,7 @@ async fn fetch(mgr: &ConnectionManager, server: Uuid, db: u32, sql: &'static Ver
 
 /// Satır kümelerinden birinde geçersiz UTF-8 metin varsa `INVALID_UTF8_REASON` (bir kez). Bu gerekçeyi taşıyan
 /// yükleyiciler adı/tip metnini taşıyabilen alanları kayıplı okur (`lossy*`; yalnızca gösterim).
-fn note_invalid_utf8(sets: &[&[Row]], unsupported: &mut Vec<String>) {
+pub(crate) fn note_invalid_utf8(sets: &[&[Row]], unsupported: &mut Vec<String>) {
     if sets.iter().any(|rows| !rows.iter().all(is_utf8)) && !unsupported.iter().any(|u| u == INVALID_UTF8_REASON) {
         unsupported.push(INVALID_UTF8_REASON.to_string());
     }
@@ -850,7 +850,7 @@ async fn load_role(mgr: &ConnectionManager, server: Uuid, target: Target, oid: u
             Ok((head, members, settings))
         })
         .await?;
-    let h = head.first().ok_or_else(|| not_found("rol"))?;
+    let h = head.first().ok_or_else(|| not_found(crate::error_codes::ROLE_SUBJECT))?;
     if h.get::<_, bool>("is_system") {
         return Err(Error::Invalid("sistem rolü düzenlenemez".to_string()));
     }
