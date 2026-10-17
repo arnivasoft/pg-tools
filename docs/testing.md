@@ -403,14 +403,17 @@ Arka uç `crates/pgt-ddl` altındadır; saf testler (insta: `src/build/snapshots
 
 ## Yetkiler ön yüzü testleri (Plan 22)
 
-Tümü `bun run test` (vitest) altında koşar; Docker gerekmez. Arka uç `available` alanı `crates/pgt-ddl/src/acl.rs` birim testlerindedir.
+Tümü `bun run test` (vitest) altında koşar; Docker gerekmez. Arka uç `available` alanı `crates/pgt-ddl/src/acl.rs` birim testlerindedir; `role_not_found` kodu (`NotFound(ROLE_SUBJECT)`, ileti adsız) `crates/pgt-ddl/src/error_codes.rs` birim testindedir.
 
 | Dosya | Kapsam |
 |---|---|
-| `src/features/designer/acl-grid-model.test.ts` | Izgara modeli: hücre döngüsü (yok → var → devredilebilir), PUBLIC/sahip satırında GRANT OPTION atlama, alıcı ekle/kaldır ve yinelenen/boş giriş, erişilebilir ad, PUBLIC adlı gerçek rol ayrımı |
-| `src/features/designer/privileges-paths.test.ts` | `aclGridPaths`: `grants[i]…` hata yollarının hücre/satıra, kalanların genel şeride eşlenmesi; aynı hücrede ilk hata kazanır |
-| `src/features/designer/default-acl-model.test.ts` | Varsayılan yetkiler: kapsam satırı, bölüm ızgaraları, `sections[i]…` yolları, rol değişiminde kirli taslak kararı |
-| `src/features/designer/designer-controller.test.ts` | Variant'lı denetleyici: CASCADE sıfırlama/yeniden önizleme, başarısız rol değişiminde önceki kapsamın geri yüklenmesi, `not_found` satır içi hatası |
+| `src/features/designer/acl-grid-model.test.ts` | Izgara modeli: hücre döngüsü (yok → var → devredilebilir), PUBLIC/sahip satırında GRANT OPTION atlama, salt okunur ızgarada döngünün etkisizliği (`cycleCell`), alıcı ekle/kaldır ve yinelenen/boş giriş, PUBLIC sözde satır adı (`granteeLabel`) ve PUBLIC adlı gerçek rol ayrımı |
+| `src/app/strings-privileges.test.ts` | Erişilebilir ad metinleri: hücre adı (`grid.cell`: "<alıcı> — <yetki>: <durum>"), bölüm ızgarası adı (`gridName`), PUBLIC sözde adının "PUBLIC" rolünden ayrı olması. Adlar `AclGrid.tsx`'te bu işlevlerle kurulur; bileşenin kendisi (DOM) birim testli değildir (elle kontrol) |
+| `src/features/designer/privileges-paths.test.ts` | `aclGridPaths` / `defaultAclGridPaths`: `grants[i]…` ve `sections[i].grants…` hata yollarının hücre/satıra (bölüme), kalanların (`sections[i].baseline` dahil) genel şeride eşlenmesi; aynı hücrede ilk hata kazanır |
+| `src/features/designer/default-acl-model.test.ts` | Varsayılan yetkiler: bölüm görünümleri (taban yolu, sahip, salt okunurluk, baseline), düzenleme sonrası her indeksin aynı bölümü taşıması (`<Index>` kararlılığı), rol değişiminde kirli/meşgul taslak kararı |
+| `src/features/designer/designer-controller.test.ts` | Variant'lı denetleyici: CASCADE sıfırlama/yeniden önizleme, başarısız rol değişiminde önceki kapsamın geri yüklenmesi (`role_not_found` satır içi hata), rol değişiminde şema/veritabanı yokluğu (`not_found`) → gone, yeniden yüklemede kaybolan rolde bağlı role düşme ve bilgi notu (`aclRoleGone`) |
+| `src/features/designer/errors.test.ts` | `role_not_found` → gone sınıfı (nesne/rol sekmeleri); kapı kodu değil |
+| `src/features/designer/designer-model.test.ts` | `isObjectDef` koruması: hiçbir `ObjectDef` varyantı `viewer` taşımaz (tür düzeyi; varyant kazanırsa typecheck kırılır) |
 | `src/features/designer/designer-open.test.ts` | `aclTabKey` / `defaultAclTabKey` ve `privileges` / `defaultPrivileges` açma kipleri |
 | `src/features/explorer/actions.test.ts` | Menü kuralları: `privilegesObject` / `defaultPrivilegesObject` görünürlüğü (ACL türleri, `db`/`sch`), odak hedefleri ve ACL dışı türlerde gizli, kilitte devre dışı |
 

@@ -130,7 +130,7 @@ Tam Docker matrisi `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf` fd5163e 
 | CASCADE | "Bağımlı yetkilerle birlikte geri al (CASCADE)" onay kutusu: yalnız plan REVOKE içerdiğinde etkindir; risk/onay mevcut akıştandır. |
 | Varsayılan yetkiler | Üstte kapsam satırı bulunur: rol seçici (varsayılan `viewer`) ve "Veritabanı geneli" ya da "Şema: <ad>". Rol değişince tanım yeniden yüklenir; taslak kirliyse önce onay istenir. Nesne türü başına bir ızgara gösterilir (Tablolar, Diziler, Fonksiyonlar, Tipler[, Şemalar]). Şema kapsamında her türün altında "Genel varsayılan (salt okunur)" ızgarası yer alır. |
 | Hata yolları | `grants[i].grantee`, `grants[i].privileges[j](.privilege\|.grantOption)` → ilgili satır/hücre. `sections[i]…` → ilgili tür ızgarası. `object`, `schema`, `name`, `signature`, `foreign`, `columns`, `sections`, `sections[i].baseline`, `old.*` → üst hata şeridi. |
-| Uygulama sonrası | Tanım yeniden yüklenir. `ACL_WARNING` mevcut "uygulama sonrası uyarılar" şeridinde gösterilir. Inspector DDL'i yenilenir (seçili düğüm aynıysa). |
+| Uygulama sonrası | Tanım yeniden yüklenir. `ACL_WARNING` mevcut "uygulama sonrası uyarılar" şeridinde gösterilir. Inspector DDL yenilemesi takip işidir (Plan 22'de uygulanmadı; bkz. §8.1). |
 | Paket | Ana pakete yalnız menü kancası (eylem kuralları, `ddl-kinds` ACL kümeleri, iki menü metni) ve iki `commands.ts` sarıcısı girer. Kalan her şey tembel designer parçalarına ve `strings-privileges.ts`'e gider. `bundle:check` tavanı ya aynı planda geri ödenir ya da gerekçesiyle en çok ölçülen artış kadar yükseltilir. |
 
 ### 8.1 Uygulama notları (Plan 22)
