@@ -1,6 +1,5 @@
 //! Nesne yetkileri farkı (Plan 20 Karar 2, 5–10): yüklenen `AclDef` ile düzenlenmiş kopyası arasındaki fark →
 //! `REVOKE [GRANT OPTION FOR] … [CASCADE]` ve `GRANT … [WITH GRANT OPTION]` ifadeleri.
-
 //!
 //! Eski taraf yüklü tanımdır (yönetici yeniden yükleme eşitliğiyle doğrular): kimlik alanları yalnızca gevşek
 //! doğrulanır ve eskiyle yeni birebir eşit olmalıdır; yeni alıcılar katı (`check_ident`), eskiden gelenler gevşek.
@@ -36,6 +35,7 @@ const DUP_GRANTEE_MSG: &str = "Bu alıcı zaten listede.";
 const DUP_PRIVILEGE_MSG: &str = "Bu yetki bu alıcı için zaten listede.";
 const PUBLIC_MSG: &str = "PUBLIC için alıcıyı boş bırakın.";
 const OWNER_GRANT_OPTION_MSG: &str = "Sahip, yetkileri zaten devredebilir; GRANT OPTION ayarlanamaz.";
+const PUBLIC_GRANT_OPTION_MSG: &str = "PUBLIC'e GRANT OPTION verilemez.";
 const SIGNATURE_MSG: &str = "İmza metni güvenli biçimde yazılamıyor.";
 const SIGNATURE_MISSING_MSG: &str = "Fonksiyon/procedure için imza gerekli.";
 const SIGNATURE_EXTRA_MSG: &str = "Bu nesne türünde imza olmaz.";
@@ -166,6 +166,10 @@ fn validate_grants(ctx: &BuildCtx, old: &AclDef, new: &AclDef, e: &mut Vec<Field
             if is_owner && grant_option(old_row, p.privilege).unwrap_or(false) != p.grant_option {
                 e.push(err(&format!("{pp}.grantOption"), OWNER_GRANT_OPTION_MSG));
             }
+            // PUBLIC'e GRANT OPTION verilemez (PG 0LP01).
+            if g.grantee.is_none() && p.grant_option {
+                e.push(err(&format!("{pp}.grantOption"), PUBLIC_GRANT_OPTION_MSG));
+            }
         }
     }
 }
@@ -226,6 +230,7 @@ pub fn privileges(ctx: &BuildCtx, old: &AclDef, new: &AclDef, cascade: bool) -> 
         .any(|(_, d)| !(d.revoke.is_empty() && d.revoke_option.is_empty() && d.grant.is_empty() && d.grant_option.is_empty()));
     if !old.editable {
         // Salt okunur: değişiklik yoksa boş plan (yüklü tanımın kendisiyle karşılaştırılması).
+        // `new.editable`/`new.unsupported` karşılaştırılmaz: kapı yalnızca yüklenen (`old`) tanıma bakar.
         return if grants_changed || old.foreign != new.foreign || old.columns != new.columns {
             Err(vec![err("object", READ_ONLY_MSG)])
         } else {
@@ -597,6 +602,13 @@ mod tests {
                 ctx(),
                 vec!["grants[1].privileges[1]"],
             ),
+            (
+                "PUBLIC grantOption",
+                base.clone(),
+                edit(&|n| n.grants.push(row(None, &[(Select, false), (Insert, true)]))),
+                ctx(),
+                vec!["grants[2].privileges[1].grantOption"],
+            ),
             ("Some(PUBLIC)", base.clone(), edit(&|n| n.grants.push(row(Some("PUBLIC"), &plain(&[Select])))), ctx(), vec!["grants[2].grantee"]),
             ("Some(public)", base.clone(), edit(&|n| n.grants.push(row(Some("public"), &plain(&[Select])))), ctx(), vec!["grants[2].grantee"]),
             ("boş alıcı", base.clone(), edit(&|n| n.grants.push(row(Some(""), &plain(&[Select])))), ctx(), vec!["grants[2].grantee"]),
@@ -671,6 +683,8 @@ mod tests {
         assert_eq!(msg(&base, &dup, &ctx()), "Bu alıcı zaten listede.");
         let public = edit(&|n| n.grants.push(row(Some("Public"), &plain(&[Select]))));
         assert_eq!(msg(&base, &public, &ctx()), "PUBLIC için alıcıyı boş bırakın.");
+        let public_go = edit(&|n| n.grants.push(row(None, &[(Select, true)])));
+        assert_eq!(msg(&base, &public_go, &ctx()), "PUBLIC'e GRANT OPTION verilemez.");
         let owner_go = edit(&|n| n.grants[0].privileges[0].grant_option = true);
         assert_eq!(msg(&base, &owner_go, &ctx()), "Sahip, yetkileri zaten devredebilir; GRANT OPTION ayarlanamaz.");
         let mut ix = base.clone();

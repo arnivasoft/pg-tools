@@ -343,6 +343,10 @@ fn routine_identity_changed(kind: ObjectKind, a: &FunctionDef, b: &FunctionDef) 
     (&a.schema, &a.name) != (&b.schema, &b.name) || (b.recreate && !build::routine::needs_recreate(kind, a, b).is_empty())
 }
 
+/// Geçici (Plan 20 R2a): nesne denetimi, salt okunur kapısı ve uygulama sonrası ACL denetimi gelene dek (Task 6)
+/// yetki istekleri uygulanmaz; önizleme serbesttir.
+pub(crate) const PRIVILEGES_NOT_APPLICABLE: &str = "Yetki istekleri henüz uygulanamaz.";
+
 /// Salt okunur kapısı (Plan 18 Karar 4): `editable = false` nesnede alter/drop, bağlantı açılmadan kodsuz `invalid`.
 /// Gerekçe istemcinin gönderdiği (yüklenmiş) tanımın ilk `unsupported` girdisinden genel metindir; ad/değer içermez.
 /// İstemci `editable`'ı değiştirse bile nesne denetimi (4) yüklenen tanımla eşitliği ister, üretici de reddeder.
@@ -706,6 +710,10 @@ impl DdlManager {
         let guard = self.guard(server)?;
         if guard.locked {
             return Err(Error::Invalid(LOCKED_MESSAGE.into()));
+        }
+        // Geçici (R2a, Task 6 kaldırır): yetki istekleri bağlantı ve plan üretiminden önce kodsuz `invalid`.
+        if matches!(req, PlanRequest::Privileges { .. } | PlanRequest::DefaultPrivileges { .. }) {
+            return Err(Error::Invalid(PRIVILEGES_NOT_APPLICABLE.into()));
         }
         // (2b) salt okunur nesne (Plan 18 Karar 4): alter/drop, bağlantı ve plan üretiminden önce kodsuz `invalid`.
         if let Some(m) = read_only_refusal(req) {
@@ -1413,6 +1421,59 @@ mod tests {
         // Geçici: varsayılan yetki üreticisi bağlanana dek hata görünümü, ifade yok.
         let v = plan_view(&d, 170000);
         assert!(v.statements.is_empty() && v.errors.len() == 1);
+    }
+
+    /// Geçici apply kapısı (R2a): yetki istekleri kilit kapısından hemen sonra, bağlantı/plan üretiminden önce
+    /// kodsuz `Invalid` ile reddedilir (bağlantısız yönetici: kapı olmasa bağlantı hatası dönerdi).
+    #[tokio::test]
+    async fn apply_refuses_privilege_requests_before_connecting() {
+        use crate::error_codes::ddl_payload;
+        use pgt_core::config::ServerConfig;
+        use pgt_core::registry::Registry;
+        let acl = AclDef {
+            kind: ObjectKind::Schema,
+            schema: None,
+            name: "s".into(),
+            signature: None,
+            owner: "o".into(),
+            viewer: "o".into(),
+            explicit: false,
+            grants: vec![],
+            foreign: vec![],
+            columns: vec![],
+            editable: true,
+            unsupported: vec![],
+        };
+        let dacl = DefaultAclDef { role: "r".into(), schema: None, viewer: "r".into(), sections: vec![], editable: true, unsupported: vec![] };
+        let reqs = [
+            PlanRequest::Privileges { object: ObjectRef { kind: ObjectKind::Schema, oid: 1 }, old: acl.clone(), new: acl, cascade: false },
+            PlanRequest::DefaultPrivileges { scope: DefaultAclScope { role: None, schema_oid: None }, old: dacl.clone(), new: dacl },
+        ];
+        for locked in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut registry = Registry::load(dir.path().join("servers.json")).unwrap().registry;
+            let mut config = ServerConfig::new("x", "127.0.0.1", 1, "u");
+            config.read_only_lock = locked;
+            let server = config.id;
+            registry.upsert(config).unwrap();
+            let dm = DdlManager::new(Arc::new(ConnectionManager::new()), Arc::new(RwLock::new(registry)));
+            for r in &reqs {
+                let o = ApplyOptions {
+                    apply_id: Uuid::new_v4(),
+                    lock_timeout_ms: 5000,
+                    expected_hash: String::new(),
+                    confirmed: true,
+                    confirmed_production: true,
+                    password: None,
+                };
+                let want = if locked { LOCKED_MESSAGE } else { PRIVILEGES_NOT_APPLICABLE };
+                match dm.apply(server, 1, r, o).await {
+                    Err(Error::Invalid(m)) => assert_eq!(m, want, "{}", r.op()),
+                    other => panic!("{}: {other:?}", r.op()),
+                }
+            }
+        }
+        assert_eq!(ddl_payload(&Error::Invalid(PRIVILEGES_NOT_APPLICABLE.into())).code, "invalid");
     }
 
     #[test]
