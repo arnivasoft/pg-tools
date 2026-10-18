@@ -11,6 +11,7 @@
 //! - `--long <n>`: `n` adet `ğ` içeren tek satır yazar.
 //! - `--crlf <metin>`: satırı `\r\n` ile bitirir.
 //! - `--sleep-ms <n>`: bekler.
+//! - `--mkdir <yol>`: içinde bir dosya olan klasör oluşturur (hedefe taşımayı bozmak için).
 //! - `--exit <kod>`: o kodla çıkar (varsayılan 0).
 
 use std::io::Write;
@@ -64,6 +65,11 @@ fn main() {
                 err.flush().unwrap();
                 let ms: u64 = next(&mut i).parse().unwrap();
                 std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+            "--mkdir" => {
+                let p = next(&mut i);
+                std::fs::create_dir_all(&p).unwrap();
+                std::fs::write(std::path::Path::new(&p).join("x"), b"x").unwrap();
             }
             "--exit" => code = next(&mut i).parse().unwrap(),
             other => panic!("bilinmeyen argüman: {other}"),

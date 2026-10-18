@@ -400,6 +400,14 @@ impl ConnectionManager {
         Some(s.config.maintenance_db.clone())
     }
 
+    /// Bağlı oturum parolayla mı açıldı (parolanın kendisi verilmez; yedekleme aracının `password_required`
+    /// kararı için). Bağlı değilse `None`.
+    pub async fn session_has_password(&self, server: Uuid) -> Option<bool> {
+        let session = self.session(server).ok()?;
+        let s = session.state.lock().await;
+        Some(s.password.is_some())
+    }
+
     /// Havuzdaki `Target::Database(oid)` bağlantısını kapatır ve ad önbelleğinden siler (oturum bağlı kalır).
     /// Veritabanı yeniden adlandırma/silme/taşıma öncesi ve sonrası çağrılır (kendi bağlantımız 55006'ya yol
     /// açmasın; sonra eski ad önbellekte kalmasın); bağlı değilse sessizce döner. O an `run` içinde kullanılan

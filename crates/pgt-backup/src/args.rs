@@ -128,6 +128,45 @@ pub struct Conn {
     pub client_key: Option<String>,
 }
 
+impl Conn {
+    /// Sunucu kaydından bağlantı bilgisi. SSL eşlemesi uygulamanın kendi doğrulama anlamını izler
+    /// (`pgt_core::tls`):
+    /// - `disable`/`prefer`/`require`: sunucu sertifikası doğrulanmaz. libpq'da `require` ile `PGSSLROOTCERT`
+    ///   verilirse `verify-ca` gibi davranır; bu yüzden kök sertifika yalnız `verify-*` modlarında geçirilir.
+    /// - `verify-ca`/`verify-full`: kayıttaki kök sertifika `PGSSLROOTCERT` olur. Kök sertifika yoksa uygulama
+    ///   sistem deposunu kullanır; libpq 16+ bunu `PGSSLROOTCERT=system` ile yapar ama yalnız `verify-full`
+    ///   ile. `verify-ca` + kök sertifikasız kayıtta libpq varsayılan dosyasına (`%APPDATA%/postgresql/root.crt`)
+    ///   bakar; yoksa araç bunu kendi hatasıyla bildirir. 16'dan eski araçta `system` geçirilmez.
+    /// - İstemci sertifikası/anahtarı `disable` dışında geçirilir (uygulama da her TLS modunda gönderir).
+    pub fn from_server(config: &pgt_core::config::ServerConfig, database: &str, tool_version_num: u32) -> Conn {
+        use pgt_core::config::SslMode;
+        let ssl = &config.ssl;
+        let (sslmode, root_cert) = match ssl.mode {
+            SslMode::Disable => ("disable", None),
+            SslMode::Prefer => ("prefer", None),
+            SslMode::Require => ("require", None),
+            SslMode::VerifyCa => ("verify-ca", ssl.root_cert.clone()),
+            SslMode::VerifyFull => (
+                "verify-full",
+                ssl.root_cert
+                    .clone()
+                    .or_else(|| (tool_version_num >= 160_000).then(|| "system".to_string())),
+            ),
+        };
+        let tls = ssl.mode != SslMode::Disable;
+        Conn {
+            host: config.host.clone(),
+            port: config.port,
+            user: config.username.clone(),
+            database: database.to_string(),
+            sslmode,
+            root_cert,
+            client_cert: ssl.client_cert.clone().filter(|_| tls),
+            client_key: ssl.client_key.clone().filter(|_| tls),
+        }
+    }
+}
+
 /// Atomik çıktı planı: araç `partial_path`'e yazar, başarıda `final_path`'e taşınır.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputPlan {
@@ -158,8 +197,73 @@ const CONNECT_TIMEOUT: &str = "15";
 /// `pg_dump -n/-t` desen kaçışı: ad çift tırnak içine alınır, içteki `"` iki kez yazılır. pg_dump/psql desen
 /// sözdiziminde (`processSQLNamePattern`) tırnak içindeki her karakter düzdür: `*`, `?`, `.` ve düzenli ifade
 /// karakterleri joker sayılmaz, büyük/küçük harf korunur. Şema+tablo için `"şema"."ad"` biçiminde birleştirilir.
+///
+/// **ASCII dışı karakterler** tırnak dışında `?` (tek karakter joker) olur: `"B"?"y"?"k Ad"`. Ölçüldü: Windows'ta
+/// araçlar argv'yi ANSI kod sayfasında (ör. 1254) alır ve baytları olduğu gibi UTF-8 bağlantıya yollar; `ü` içeren
+/// desen sunucuda "invalid byte sequence for encoding UTF8" ile düşer. Joker yalnız o karaktere denk gelir; aynı
+/// desene başka nesne de uyuyorsa çağıran ([`pattern_regex`] ile) bunu reddetmelidir.
 pub fn dump_pattern(ident: &str) -> String {
-    format!("\"{}\"", ident.replace('"', "\"\""))
+    let mut out = String::with_capacity(ident.len() + 2);
+    let mut open = false;
+    for c in ident.chars() {
+        if c.is_ascii() {
+            if !open {
+                out.push('"');
+                open = true;
+            }
+            if c == '"' {
+                out.push('"');
+            }
+            out.push(c);
+        } else {
+            if open {
+                out.push('"');
+                open = false;
+            }
+            out.push('?');
+        }
+    }
+    if open || ident.is_empty() {
+        out.push('"');
+        if ident.is_empty() {
+            out.push('"');
+        }
+    }
+    out
+}
+
+/// [`dump_pattern`] deseninden pg_dump'ın sunucuda kullandığı tam eşleşme düzenli ifadesi (`^(…)$`): ASCII dışı
+/// karakter `.`, düzenli ifade özel karakterleri kaçışlı. Joker deseninin kaç nesneye uyduğunu saymak içindir.
+pub fn pattern_regex(ident: &str) -> String {
+    let mut out = String::from("^(");
+    for c in ident.chars() {
+        if !c.is_ascii() {
+            out.push('.');
+        } else {
+            if "|*+?()[]{}.^$\\".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+    }
+    out.push_str(")$");
+    out
+}
+
+/// Windows'ta istemci araçları ortam ve argv değerlerini ANSI kod sayfasına çevirir: ASCII dışı veritabanı ya da
+/// kullanıcı adı sunucuya bozuk bayt olarak gider ve bağlantı kurulamaz (ölçüldü). Bunlar plan hatasıdır.
+pub fn windows_name_problems(conn: &Conn) -> Vec<FieldError> {
+    let mut errors = Vec::new();
+    if !conn.database.is_ascii() {
+        errors.push(field(
+            "database",
+            "Windows'ta PostgreSQL araçları ASCII dışı karakter içeren veritabanı adına bağlanamaz.",
+        ));
+    }
+    if !conn.user.is_ascii() {
+        errors.push(field("user", "Windows'ta PostgreSQL araçları ASCII dışı karakter içeren kullanıcı adıyla bağlanamaz."));
+    }
+    errors
 }
 
 fn field(path: &str, message: impl Into<String>) -> FieldError {
@@ -1648,7 +1752,19 @@ mod tests {
         assert_eq!(dump_pattern("a\"b"), "\"a\"\"b\"");
         assert_eq!(dump_pattern("a.b*?"), "\"a.b*?\"");
         assert_eq!(dump_pattern("$x|(y)[z]^"), "\"$x|(y)[z]^\"");
-        assert_eq!(dump_pattern("Müşteri Tablosu"), "\"Müşteri Tablosu\"");
+        assert_eq!(dump_pattern("Müşteri Tablosu"), "\"M\"??\"teri Tablosu\"");
+        assert_eq!(dump_pattern("Büyük Ad"), "\"B\"?\"y\"?\"k Ad\"");
+        assert_eq!(dump_pattern("şş"), "??");
+        assert_eq!(dump_pattern("ş\"x"), "?\"\"\"x\"");
+        assert_eq!(dump_pattern(""), "\"\"");
+        assert_eq!(pattern_regex("Büyük Ad"), "^(B.y.k Ad)$");
+        assert_eq!(pattern_regex("a.b*?$"), r"^(a\.b\*\?\$)$");
+        let mut c = conn();
+        assert_eq!(windows_name_problems(&c).len(), 1);
+        c.database = "app".into();
+        assert!(windows_name_problems(&c).is_empty());
+        c.user = "kullanıcı".into();
+        assert_eq!(windows_name_problems(&c)[0].path, "user");
         assert_eq!(dump_pattern("\"\""), "\"\"\"\"\"\"");
         assert_eq!(dump_pattern(" "), "\" \"");
     }
@@ -1713,4 +1829,43 @@ mod tests {
             (RestoreTarget::CreateFromArchive, true)
         );
     }
+    #[test]
+    fn conn_from_server_maps_ssl_like_the_app() {
+        use pgt_core::config::{ServerConfig, SslMode};
+        let mut c = ServerConfig::new("s", "db.local", 5433, "u");
+        c.ssl.root_cert = Some("root.crt".into());
+        c.ssl.client_cert = Some("c.crt".into());
+        c.ssl.client_key = Some("c.key".into());
+        let map = |c: &ServerConfig, v: u32| {
+            let k = Conn::from_server(c, "d", v);
+            (k.sslmode, k.root_cert, k.client_cert.is_some() && k.client_key.is_some())
+        };
+        let cases = [
+            (SslMode::Disable, "disable", None, false),
+            (SslMode::Prefer, "prefer", None, true),
+            // require + kök sertifika libpq'da verify-ca olurdu: kök sertifika geçirilmez.
+            (SslMode::Require, "require", None, true),
+            (SslMode::VerifyCa, "verify-ca", Some("root.crt"), true),
+            (SslMode::VerifyFull, "verify-full", Some("root.crt"), true),
+        ];
+        for (mode, want, root, client) in cases {
+            c.ssl.mode = mode;
+            assert_eq!(map(&c, 180000), (want, root.map(str::to_string), client), "{mode:?}");
+        }
+        // Kök sertifikasız verify-full: libpq 16+ sistem deposu; eski araçta geçirilmez.
+        c.ssl.root_cert = None;
+        assert_eq!(map(&c, 160000).1.as_deref(), Some("system"));
+        assert_eq!(map(&c, 150008).1, None);
+        c.ssl.mode = SslMode::VerifyCa;
+        assert_eq!(map(&c, 180000).1, None);
+        let k = Conn::from_server(&c, "satış", 180000);
+        assert_eq!((k.host.as_str(), k.port, k.user.as_str(), k.database.as_str()), ("db.local", 5433, "u", "satış"));
+        // Ortamda kök sertifika yalnız verify-* ile görünür.
+        c.ssl.mode = SslMode::Require;
+        c.ssl.root_cert = Some("root.crt".into());
+        let env = base_env(&Conn::from_server(&c, "d", 180000), "d", "x");
+        assert!(env.iter().all(|(k, _)| k != "PGSSLROOTCERT"), "{env:?}");
+        assert!(env.contains(&("PGSSLMODE".into(), "require".into())));
+    }
+
 }

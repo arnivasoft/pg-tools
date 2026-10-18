@@ -23,6 +23,11 @@ const PASSWORD_HINT: &str =
 const DUMP_VERSION_HINT: &str = "Sunucu bu pg_dump'tan yeni: daha yeni bir pg_dump gerekir; Ayarlardan PostgreSQL bin klasörü seçin.";
 const RESTORE_VERSION_HINT: &str = "Arşiv bu pg_restore'dan yeni bir pg_dump ile alınmış: daha yeni bir pg_restore \
      gerekir; Ayarlardan PostgreSQL bin klasörü seçin.";
+/// 17+ araçlar (pg_dump arşivi ve pg_restore/psql) `SET transaction_timeout` yazar; 17'den eski sunucu bunu tanımaz
+/// (ölçüldü: araç 18, sunucu 10–16).
+const OLD_SERVER_HINT: &str = "Araç bu sunucudan yeni ve sunucunun tanımadığı bir ayar (transaction_timeout) gönderdi: \
+     sunucuyla aynı ana sürümden pg_dump/pg_restore/psql kurup Ayarlardan bin klasörü olarak seçin; \
+     \"hatada dur\" kapalıyken pg_restore bu satırı atlayıp devam eder.";
 
 /// Sunucu iletisi önem sözcükleri (psql'in yazdığı `ERROR:  …`). Türkçe `lc_messages` karşılıkları sunucunun tr
 /// çevirisinden: ERROR → `HATA:`, FATAL → `ÖLÜMCÜL (FATAL):`, PANIC → `KRİTİK:`, WARNING → `UYARI:`.
@@ -143,6 +148,8 @@ pub fn failure_hint(lines: &[String]) -> Option<&'static str> {
         Some(DUMP_VERSION_HINT)
     } else if any(&["unsupported version"]) {
         Some(RESTORE_VERSION_HINT)
+    } else if any(&["unrecognized configuration parameter \"transaction_timeout\""]) {
+        Some(OLD_SERVER_HINT)
     } else {
         None
     }
@@ -290,6 +297,11 @@ mod tests {
 
     #[test]
     fn hints_for_known_failures() {
+        let tt = failure_hint(&l(&[
+            "pg_restore: error: could not execute query: ERROR:  unrecognized configuration parameter \"transaction_timeout\"",
+        ]))
+        .unwrap();
+        assert!(tt.contains("aynı ana sürüm") && tt.contains("bin klasörü"), "{tt}");
         let pw = failure_hint(&l(&[
             "pg_dump: error: connection to server at \"h\", port 5432 failed: FATAL:  password authentication failed for user \"u\"",
         ]))

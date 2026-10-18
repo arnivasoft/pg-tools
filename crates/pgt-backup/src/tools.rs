@@ -214,7 +214,7 @@ pub async fn detect(setting: Option<&str>) -> ToolDetection {
         None
     };
     tracing::debug!(sets = sets.len(), problem = problem.is_some(), "araç bulma tamamlandı");
-    ToolDetection { sets, problem }
+    ToolDetection { sets, problem, chosen_dump: None, chosen_restore: None, chosen_psql: None }
 }
 
 /// Ana sürüm karşılaştırma anahtarı: 10+ için `major*100`, 9.x için `9*100+minor` ("9.6" ayrı ana sürümdür).

@@ -93,7 +93,7 @@ async fn success_moves_partial_file_to_target() {
     let partial = p.partial_path.clone();
     let mut sink = VecSink::default();
     let s = run(
-        inv(&["--file", &partial, "--sleep-ms", "1300"], Some(p)),
+        inv(&["--file", &partial, "--sleep-ms", "2500"], Some(p)),
         None,
         JobKind::Backup,
         None,
@@ -119,7 +119,7 @@ async fn directory_format_atomic_output() {
     let partial = p.partial_path.clone();
     let mut sink = VecSink::default();
     let s = run(
-        inv(&["--format=directory", "--file", &partial, "--sleep-ms", "1300"], Some(p)),
+        inv(&["--format=directory", "--file", &partial, "--sleep-ms", "2500"], Some(p)),
         None,
         JobKind::Backup,
         None,
@@ -288,4 +288,43 @@ async fn pre_cancelled_token_does_not_spawn() {
     let s = run(inv(&["--file", &partial], Some(p)), None, JobKind::Backup, None, &mut sink, token).await;
     assert_eq!(s.outcome, JobOutcome::Cancelled);
     assert!(!Path::new(&partial).exists());
+}
+
+#[tokio::test]
+async fn failed_move_keeps_partial_and_says_next_backup_overwrites() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("a.dump");
+    let p = plan(&target, false);
+    let partial = p.partial_path.clone();
+    let target_s = target.to_string_lossy().into_owned();
+    let mut sink = VecSink::default();
+    // Araç bitmeden hedef, içi dolu bir klasör olur: taşıma başarısız olur.
+    let s = run(inv(&["--file", &partial, "--mkdir", &target_s], Some(p)), None, JobKind::Backup, None, &mut sink, CancelToken::new())
+        .await;
+    assert_eq!(s.outcome, JobOutcome::Failed);
+    assert!(Path::new(&partial).is_file(), "geçici çıktı korunmalı");
+    let msg = sink.lines().into_iter().map(|(_, t)| t).find(|t| t.contains("geçici konumda")).expect("ileti");
+    assert!(msg.contains("bir sonraki") && msg.contains("üzerine yaz"), "{msg}");
+    finished_matches(&sink, &s);
+}
+
+/// Araç sessizken (satır yok, bayt değişmiyor) her 1 sn'de bir `Progress` gider: alıcının gittiği böyle anlaşılır.
+#[tokio::test]
+async fn heartbeat_detects_gone_sink_while_tool_is_silent() {
+    struct GoneOnProgress(u32);
+    impl pgt_backup::EventSink for GoneOnProgress {
+        fn send(&mut self, e: pgt_backup::BackupEvent) -> bool {
+            if matches!(e, pgt_backup::BackupEvent::Progress { .. }) {
+                self.0 += 1;
+                return false;
+            }
+            true
+        }
+    }
+    let started = Instant::now();
+    let mut sink = GoneOnProgress(0);
+    let s = run(inv(&["--sleep-ms", "30000"], None), None, JobKind::Restore, None, &mut sink, CancelToken::new()).await;
+    assert_eq!(s.outcome, JobOutcome::Cancelled);
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    assert_eq!(sink.0, 1);
 }

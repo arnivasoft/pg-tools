@@ -27,3 +27,6 @@ tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 insta.workspace = true
 serde_json.workspace = true
+# Docker'lı gidiş-dönüş testleri (`tests/roundtrip.rs`): `PGT_TEST_URLS` ve yönetici bağlantısı.
+pgt-core = { workspace = true, features = ["testing"] }
+tokio-postgres.workspace = true

@@ -81,14 +81,11 @@ fn is_pg_key(key: &OsStr) -> bool {
     key.to_string_lossy().get(..2).is_some_and(|p| p.eq_ignore_ascii_case("PG"))
 }
 
-fn command(inv: &Invocation, password: Option<&Secret>) -> Command {
-    let mut cmd = Command::new(&inv.exe);
-    cmd.args(&inv.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        // Yürütücü geleceği düşerse (uygulama kapanışı) çocuk süreç kalmaz.
-        .kill_on_drop(true);
+/// Kabuksuz komut: miras `PG*` ve `env_remove` anahtarları kaldırılır, stdin `null`, stderr boru; Windows'ta konsol
+/// penceresi açılmaz. Yürütücü geleceği düşerse (uygulama kapanışı) çocuk süreç kalmaz.
+fn base_command(exe: &str, args: &[String], env_remove: &[String]) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
     for (key, _) in std::env::vars_os() {
         if is_pg_key(&key) {
             // Windows'ta silme harf duyarsızdır. Aynı anahtar sonra eklenirse (`PGHOST`) komut ortamı mirastaki
@@ -96,16 +93,72 @@ fn command(inv: &Invocation, password: Option<&Secret>) -> Command {
             cmd.env_remove(&key);
         }
     }
-    for key in &inv.env_remove {
+    for key in env_remove {
         cmd.env_remove(key);
-    }
-    cmd.envs(inv.env.iter().map(|(k, v)| (k, v)));
-    if let Some(p) = password {
-        cmd.env("PGPASSWORD", p.expose());
     }
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
     cmd
+}
+
+fn command(inv: &Invocation, password: Option<&Secret>) -> Command {
+    let mut cmd = base_command(&inv.exe, &inv.args, &inv.env_remove);
+    cmd.envs(inv.env.iter().map(|(k, v)| (k, v)));
+    if let Some(p) = password {
+        cmd.env("PGPASSWORD", p.expose());
+    }
+    cmd
+}
+
+/// `pg_restore --list` zaman aşımı.
+const LIST_TIMEOUT: Duration = Duration::from_secs(60);
+/// `pg_restore --list` çıktısının üst sınırı.
+const LIST_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `pg_restore --list` ile arşivin içindekiler listesini okur (sunucuya bağlanmaz). Hata iletisi aracın ilk hata
+/// satırını ve bilinen bir ipucunu içerir; günlüğe yazılmaz.
+pub(crate) async fn list_archive(exe: &str, format: &str, path: &str) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    let args = vec!["--list".to_string(), format!("--format={format}"), path.to_string()];
+    let remove: Vec<String> = crate::args::LOCALE_OVERRIDES.iter().map(|k| k.to_string()).collect();
+    let mut cmd = base_command(exe, &args, &remove);
+    cmd.stdout(Stdio::piped()).env("LC_MESSAGES", "C");
+    let mut child = cmd.spawn().map_err(|e| format!("pg_restore başlatılamadı: {e}"))?;
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err("pg_restore çıktısı okunamadı.".into());
+    };
+    let work = async {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut limited = stdout.take(LIST_MAX_BYTES + 1);
+        let mut err_limited = stderr.take(64 * 1024);
+        let (a, b) = tokio::join!(limited.read_to_end(&mut out), err_limited.read_to_end(&mut err));
+        a.and(b).map_err(|e| format!("pg_restore çıktısı okunamadı: {e}"))?;
+        if out.len() as u64 > LIST_MAX_BYTES {
+            return Err("Arşiv içindekiler listesi çok büyük.".to_string());
+        }
+        let status = child.wait().await.map_err(|e| format!("pg_restore beklenemedi: {e}"))?;
+        Ok::<_, String>((status, out, err))
+    };
+    let (status, out, err) = match tokio::time::timeout(LIST_TIMEOUT, work).await {
+        Ok(r) => r?,
+        Err(_) => return Err(format!("pg_restore {} sn içinde yanıt vermedi.", LIST_TIMEOUT.as_secs())),
+    };
+    if status.success() {
+        return Ok(String::from_utf8_lossy(&out).into_owned());
+    }
+    let err = String::from_utf8_lossy(&err);
+    let lines: Vec<String> = err.lines().map(str::to_string).collect();
+    let first = lines.iter().find(|l| classify(l) == LineSeverity::Error).or(lines.first());
+    let mut msg = match first {
+        Some(l) => format!("Arşiv okunamadı: {}", l.trim()),
+        None => "Arşiv okunamadı.".to_string(),
+    };
+    if let Some(h) = failure_hint(&lines) {
+        msg.push(' ');
+        msg.push_str(h);
+    }
+    Err(msg)
 }
 
 /// Hedef denetimi (başlamadan önce; dosya sistemine yazmaz). Klasör formatında hedef yok ya da boş bir klasör
@@ -173,7 +226,12 @@ fn finalize(plan: &OutputPlan) -> Result<(), String> {
     if std::fs::symlink_metadata(partial).is_err() {
         return Err("Araç başarıyla bitti ama çıktı oluşmadı.".into());
     }
-    let kept = |why: String| format!("{why}; çıktı geçici konumda bırakıldı: {}", plan.partial_path);
+    let kept = |why: String| {
+        format!(
+            "{why}; çıktı geçici konumda bırakıldı: {} (aynı hedefe bir sonraki yedekleme bunu siler ve üzerine yazar)",
+            plan.partial_path
+        )
+    };
     if plan.is_dir {
         match std::fs::metadata(target) {
             Ok(m) if m.is_dir() => {
@@ -256,7 +314,7 @@ struct State {
     /// İpucu için: gösterilen satırlar ve sınırdan sonraki son satırlar.
     kept: Vec<String>,
     tail: VecDeque<String>,
-    /// Son gönderilen `(done, bytes)`; yalnız değişince yeni `Progress` gönderilir.
+    /// Son gönderilen `(done, bytes)`; satır kaynaklı `Progress` yalnız değişince gider (tık her zaman gönderir).
     last_progress: (u32, Option<u64>),
 }
 
@@ -306,11 +364,16 @@ impl State {
 
     /// `done` ya da `bytes` değiştiyse `Progress` gönderir; alıcı gittiyse `false`.
     fn progress(&mut self, sink: &mut dyn EventSink, bytes: Option<u64>) -> bool {
-        let current = (self.done, bytes);
-        if current == self.last_progress {
+        if (self.done, bytes) == self.last_progress {
             return true;
         }
-        self.last_progress = current;
+        self.heartbeat(sink, bytes)
+    }
+
+    /// Değişmemiş olsa da `Progress` gönderir (1 sn tıkı): araç sessizken de alıcının gittiği anlaşılır ve iş
+    /// iptal edilir. Alıcı gittiyse `false`.
+    fn heartbeat(&mut self, sink: &mut dyn EventSink, bytes: Option<u64>) -> bool {
+        self.last_progress = (self.done, bytes);
         sink.send(BackupEvent::Progress { done: self.done, total: self.total, bytes })
     }
 
@@ -401,7 +464,7 @@ async fn execute(
                     let (path, is_dir) = (plan.partial_path.clone(), plan.is_dir);
                     bytes = blocking(move || output_size(Path::new(&path), is_dir)).await.flatten();
                 }
-                if !st.progress(sink, bytes) {
+                if !st.heartbeat(sink, bytes) {
                     break Step::Cancel;
                 }
             }

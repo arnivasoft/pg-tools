@@ -18,7 +18,7 @@ args:
   --encoding
   UTF8
   --schema
-  "Satış ""Şema"""
+  "Sat"??" """?"ema"""
 env:
   PGHOST=db.local
   PGPORT=5432
@@ -28,7 +28,7 @@ env:
   PGAPPNAME=pg-tools backup
   PGCONNECT_TIMEOUT=15
   LC_MESSAGES=C
-preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE="satış" PGSSLMODE=prefer PGAPPNAME="pg-tools backup" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_dump" --verbose --format=plain --file "<DIR>/a.sql.gz.pgt-partial" --clean --if-exists --create --column-inserts --no-owner --no-privileges --compress=6 --encoding UTF8 --schema "\"Satış \"\"Şema\"\"\""
+preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE="satış" PGSSLMODE=prefer PGAPPNAME="pg-tools backup" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_dump" --verbose --format=plain --file "<DIR>/a.sql.gz.pgt-partial" --clean --if-exists --create --column-inserts --no-owner --no-privileges --compress=6 --encoding UTF8 --schema "\"Sat\"??\" \"\"\"?\"ema\"\"\""
 risk: Safe
 notes:
   - Çıktı gzip ile sıkıştırılır (.sql.gz); psql ile yüklemeden önce açılmalıdır.

@@ -4,4 +4,16 @@ import type { ToolSet } from "./ToolSet";
 /**
  * Araç bulma sonucu: bulunan kümeler (aday sırasıyla) ve kullanıcıya gösterilecek sorun (varsa).
  */
-export type ToolDetection = { sets: Array<ToolSet>, problem: string | null, };
+export type ToolDetection = { sets: Array<ToolSet>, problem: string | null, 
+/**
+ * Bağlı sunucunun sürümüne göre seçilen `pg_dump` klasörü (bağlı değilse ya da uygun yoksa `None`).
+ */
+chosenDump: string | null, 
+/**
+ * Seçilen `pg_restore` klasörü (en yeni).
+ */
+chosenRestore: string | null, 
+/**
+ * Seçilen `psql` klasörü (en yeni).
+ */
+chosenPsql: string | null, };

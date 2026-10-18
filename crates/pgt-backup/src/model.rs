@@ -35,6 +35,46 @@ pub struct ToolSet {
 pub struct ToolDetection {
     pub sets: Vec<ToolSet>,
     pub problem: Option<String>,
+    /// Bağlı sunucunun sürümüne göre seçilen `pg_dump` klasörü (bağlı değilse ya da uygun yoksa `None`).
+    pub chosen_dump: Option<String>,
+    /// Seçilen `pg_restore` klasörü (en yeni).
+    pub chosen_restore: Option<String>,
+    /// Seçilen `psql` klasörü (en yeni).
+    pub chosen_psql: Option<String>,
+}
+
+impl ToolDetection {
+    /// Seçimleri işaretler: `pg_dump` yalnız sunucu sürümü biliniyorsa (`server_version_num` > 0), uygun araç
+    /// yoksa `problem` seçim iletisiyle doldurulur (önceki sorun yoksa).
+    pub fn with_choices(mut self, server_version_num: Option<u32>) -> Self {
+        let dir = |kind, v| crate::tools::choose(&self.sets, kind, v).map(|s| s.dir.clone());
+        self.chosen_restore = dir(ToolKind::PgRestore, 0).ok();
+        self.chosen_psql = dir(ToolKind::Psql, 0).ok();
+        if let Some(v) = server_version_num.filter(|v| *v > 0) {
+            match dir(ToolKind::PgDump, v) {
+                Ok(d) => self.chosen_dump = Some(d),
+                Err(m) => {
+                    if self.problem.is_none() {
+                        self.problem = Some(m);
+                    }
+                }
+            }
+        }
+        self
+    }
+}
+
+/// Komut önizlemesi ve doğrulama sonucu (`backup_plan`/`restore_plan`; çalıştırmaz). `errors` boş değilse
+/// `preview` boştur ve iş başlatılamaz.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct JobPlan {
+    /// Parolasız tek satır (`PGPASSWORD=***`).
+    pub preview: String,
+    pub risk: pgt_ddl::Risk,
+    pub notes: Vec<String>,
+    pub errors: Vec<pgt_ddl::FieldError>,
 }
 
 /// Seçilecek araç türü.
@@ -69,4 +109,33 @@ impl ToolKind {
 pub enum JobKind {
     Backup,
     Restore,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set(dir: &str, num: u32) -> ToolSet {
+        ToolSet {
+            dir: dir.into(),
+            version: ToolVersion { major: num / 10_000, version_num: num, text: dir.into() },
+            pg_dump: true,
+            pg_restore: true,
+            psql: true,
+        }
+    }
+
+    #[test]
+    fn choices_follow_server_version() {
+        let d = ToolDetection { sets: vec![set("16", 160004), set("18", 180001)], problem: None, chosen_dump: None, chosen_restore: None, chosen_psql: None };
+        let c = d.clone().with_choices(Some(160002));
+        assert_eq!((c.chosen_dump.as_deref(), c.chosen_restore.as_deref(), c.chosen_psql.as_deref()), (Some("16"), Some("18"), Some("18")));
+        assert!(c.problem.is_none());
+        // Bağlı değil: pg_dump seçilmez, sorun yazılmaz.
+        let c = d.clone().with_choices(None);
+        assert_eq!((c.chosen_dump, c.problem), (None, None));
+        // Sunucu araçlardan yeni: sorun iletisi.
+        let c = d.with_choices(Some(190000));
+        assert!(c.chosen_dump.is_none() && c.problem.as_deref().is_some_and(|p| p.contains("19")));
+    }
 }

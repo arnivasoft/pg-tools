@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 
+use pgt_backup::{JobRegistry, ToolDetection};
 use pgt_catalog::Catalog;
 use pgt_core::connection::ConnectionManager;
 use pgt_core::credentials::{Credentials, MemorySecretStore, SecretStore};
@@ -29,6 +30,10 @@ pub struct AppState {
     pub dash: Arc<DashManager>,
     pub ddl: Arc<DdlManager>,
     pub data: Arc<DataManager>,
+    /// Çalışan yedekleme/geri yükleme işleri (iptal ve aynı hedef reddi).
+    pub backup: JobRegistry,
+    /// Son araç taraması (`pgBinDir` ayarıyla birlikte); ayar değişince yeniden taranır.
+    pub backup_tools: tokio::sync::Mutex<Option<(Option<String>, ToolDetection)>>,
     pub startup_notice: Option<String>,
 }
 
@@ -93,6 +98,8 @@ impl AppState {
             dash: Arc::new(DashManager::new(manager.clone())),
             ddl: Arc::new(DdlManager::new(manager.clone(), registry.clone())),
             data: Arc::new(DataManager::new(manager.clone(), registry.clone())),
+            backup: JobRegistry::new(),
+            backup_tools: tokio::sync::Mutex::new(None),
             credentials: Credentials::new(store),
             registry,
             manager,
@@ -151,6 +158,7 @@ mod tests {
         let state = AppState::with_store(dir.path(), Arc::new(MemorySecretStore::default()));
         state.ddl.cancel_all(); // uçuşta uygulama yokken panik etmez
         state.data.cancel_all();
+        assert_eq!(state.backup.cancel_all(), 0);
     }
 
     #[test]
