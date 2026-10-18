@@ -250,6 +250,17 @@ export interface OpenAlterInput { tabId: string; serverId: string; databaseOid: 
 /** Plan 22: yetki sekmesi açılış bağlamı (`openAcl` / `openDefaultAcl`). */
 export interface AclOpenContext { serverId: string; databaseOid: number | null; refreshNodeId: string | null }
 
+/**
+ * Başarılı uygulama sonrası Inspector yenilensin mi: yetki sekmeleri ve oid'i koruyan alter evet; create (yeni nesne
+ * seçili değil) ve oid'i değiştiren alter (ör. indeks yeniden kurma; eski düğüm kimliği artık yok → `not_found`) hayır —
+ * ağaç yenilemesi seçimi zaten değiştirir.
+ */
+export function inspectorShouldRefresh(m: Pick<DesignerModel, "variant" | "object">, mode: DesignerMode, created: ObjectRef | null): boolean {
+  if (m.variant !== "object") return true;
+  if (mode !== "alter") return false;
+  return created === null || (m.object !== null && created.kind === m.object.kind && created.oid === m.object.oid);
+}
+
 export function createDesignerController(deps: DesignerControllerDeps) {
   const { api, notify } = deps;
   const newId = deps.newId ?? (() => crypto.randomUUID());
@@ -642,10 +653,12 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     else notify(tdes.apply.applied(out.statements), "success");
     // Uyarılar sekmede kalıcı (yeniden yükleme `setBase` bunlara dokunmaz).
     patch(e, { postApplyWarnings: [...warnings] });
-    try {
-      deps.refreshInspector?.();
-    } catch {
-      /* Inspector yenilemesi uygulama sonucunu etkilemez */
+    if (inspectorShouldRefresh(m, mode, out.created)) {
+      try {
+        deps.refreshInspector?.();
+      } catch {
+        /* Inspector yenilemesi uygulama sonucunu etkilemez */
+      }
     }
     if (m.variant !== "object") {
       // Yetki sekmeleri: ad/ağaç değişmez; yalnız yeniden yüklenir (yükleme başarısızsa `needsReload` kalır).

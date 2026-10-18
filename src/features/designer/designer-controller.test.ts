@@ -17,7 +17,7 @@ import type { CreatePreset } from "../../ipc/bindings/CreatePreset";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import type { RoleDef } from "../../ipc/bindings/RoleDef";
 import type { Risk } from "../../ipc/bindings/Risk";
-import { createDesignerController, planRequest, type AppliedInfo, type DesignerControllerDeps } from "./designer-controller";
+import { createDesignerController, inspectorShouldRefresh, planRequest, type AppliedInfo, type DesignerControllerDeps } from "./designer-controller";
 import { failedText } from "./errors";
 
 const schema = (p: Partial<{ name: string; owner: string | null; comment: string | null }> = {}): ObjectDef =>
@@ -1917,5 +1917,17 @@ describe("Plan 22: yetki varyantları (acl / default_acl)", () => {
     expect(planRequest({
       variant: "acl", aclScope: null, mode: "alter", kind: "table", object: TBL, original: aclDef(), draft: aclDef(), concurrently: false, cascade: false,
     }, "drop")).toBeNull();
+  });
+});
+
+describe("inspectorShouldRefresh", () => {
+  const OBJ = { kind: "index" as const, oid: 10 };
+  it("yetki sekmeleri her zaman, oid'i koruyan alter evet; create ve oid'i değişen alter hayır", () => {
+    expect(inspectorShouldRefresh({ variant: "acl", object: OBJ }, "alter", null)).toBe(true);
+    expect(inspectorShouldRefresh({ variant: "default_acl", object: OBJ }, "alter", null)).toBe(true);
+    expect(inspectorShouldRefresh({ variant: "object", object: OBJ }, "alter", null)).toBe(true);
+    expect(inspectorShouldRefresh({ variant: "object", object: OBJ }, "alter", { kind: "index", oid: 10 })).toBe(true);
+    expect(inspectorShouldRefresh({ variant: "object", object: OBJ }, "alter", { kind: "index", oid: 11 })).toBe(false);
+    expect(inspectorShouldRefresh({ variant: "object", object: null }, "create", { kind: "schema", oid: 9 })).toBe(false);
   });
 });

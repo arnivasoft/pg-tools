@@ -1,5 +1,5 @@
 import { Copy } from "lucide-solid";
-import { Match, Show, Suspense, Switch, createResource, createSignal, lazy, onCleanup } from "solid-js";
+import { Match, Show, Suspense, Switch, createMemo, createResource, createSignal, lazy, onCleanup } from "solid-js";
 import { copyText } from "../../app/clipboard";
 import { createDebounced } from "../../app/debounce";
 import { t } from "../../app/strings";
@@ -48,19 +48,18 @@ export function Inspector(props: { explorer: Explorer }) {
     }
   };
 
-  // Kaynak `[id, sayaç]`: uygulama sonrası `refreshInspector` aynı düğümü de yeniden okutur.
+  // Kaynak `[id, sayaç]`: uygulama sonrası `refreshInspector` aynı düğümü de yeniden okutur. Kimlik önce memo ile
+  // tekilleştirilir: ağaç yenilemesi düğüm nesnesini (aynı kimlikle) değiştirdiğinde yeni demet, dolayısıyla gereksiz
+  // istek oluşmaz (`createResource` kaynağı kimlik eşitliğiyle karşılaştırır).
+  const selectedId = createMemo(() => selected()?.id);
+  const ddlId = createMemo(() => (tab() === "ddl" ? selectedId() : undefined));
+  const keyed = (id: string | undefined) => (id === undefined ? undefined : ([id, inspectorRevision()] as const));
   const [properties] = createResource(
-    () => {
-      const id = selected()?.id;
-      return id === undefined ? undefined : ([id, inspectorRevision()] as const);
-    },
+    () => keyed(selectedId()),
     async ([id]) => ({ id, value: await guarded(id, () => commands.getProperties(id)) }),
   );
   const [ddl] = createResource(
-    () => {
-      const id = tab() === "ddl" ? selected()?.id : undefined;
-      return id === undefined ? undefined : ([id, inspectorRevision()] as const);
-    },
+    () => keyed(ddlId()),
     async ([id]) => ({ id, value: await guarded(id, () => commands.getDdl(id)) }),
   );
 
