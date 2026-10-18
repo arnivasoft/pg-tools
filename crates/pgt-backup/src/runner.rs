@@ -110,6 +110,22 @@ fn command(inv: &Invocation, password: Option<&Secret>) -> Command {
     cmd
 }
 
+/// Yürütücünün ANSI denetimi iletisi (değer yazılmaz: parola olabilir).
+pub(crate) const ANSI_RUN_MESSAGE: &str = "Araç çağrısındaki bir değer (yol, ad ya da parola) Windows kod sayfasında güvenle \n     temsil edilemiyor; araç başlatılmadı.";
+
+/// Son savunma hattı (bkz. [`crate::ansi`]): çocuğa giden her değer (çalıştırılabilir yol, argümanlar, eklenen ortam
+/// ve parola) sistem ANSI kod sayfasında birebir gidiş-dönüş yapmalı. Plan denetimi alan hatası olarak aynısını
+/// yapar; bu denetim planı atlayan ya da yeni değer ekleyen bir çağıranı da kapalı tutar.
+fn ansi_safe<'a>(exe: &str, args: &[String], env: impl IntoIterator<Item = &'a str>) -> bool {
+    use crate::ansi::ensure_ansi_roundtrip as ok;
+    ok(exe) && args.iter().all(|a| ok(a)) && env.into_iter().all(ok)
+}
+
+fn invocation_ansi_safe(inv: &Invocation, password: Option<&Secret>) -> bool {
+    let env = inv.env.iter().flat_map(|(k, v)| [k.as_str(), v.as_str()]).chain(password.map(Secret::expose));
+    ansi_safe(&inv.exe, &inv.args, env)
+}
+
 /// `pg_restore --list` zaman aşımı.
 const LIST_TIMEOUT: Duration = Duration::from_secs(60);
 /// `pg_restore --list` çıktısının üst sınırı.
@@ -120,6 +136,9 @@ const LIST_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) async fn list_archive(exe: &str, format: &str, path: &str) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
     let args = vec!["--list".to_string(), format!("--format={format}"), path.to_string()];
+    if !ansi_safe(exe, &args, []) {
+        return Err(ANSI_RUN_MESSAGE.into());
+    }
     let remove: Vec<String> = crate::args::LOCALE_OVERRIDES.iter().map(|k| k.to_string()).collect();
     let mut cmd = base_command(exe, &args, &remove);
     cmd.stdout(Stdio::piped()).env("LC_MESSAGES", "C");
@@ -435,6 +454,10 @@ async fn execute(
             }
         }
     }
+    if !invocation_ansi_safe(inv, password.as_ref()) {
+        st.own_error(sink, ANSI_RUN_MESSAGE.into());
+        return (JobOutcome::Failed, None);
+    }
     let mut cmd = command(inv, password.as_ref());
     drop(password);
     let spawned = cmd.spawn();
@@ -616,6 +639,18 @@ mod tests {
         assert_eq!(format!("{s:?}"), "Secret(***)");
         assert_eq!(serde_json::to_string(&s).unwrap(), "\"***\"");
         assert_eq!(s.expose(), "gizli");
+    }
+
+    #[test]
+    fn runner_refuses_values_that_do_not_round_trip() {
+        let args = vec!["--file".to_string(), "C:/y/a.dump".to_string()];
+        assert!(ansi_safe("C:/bin/pg_dump.exe", &args, ["PGHOST", "db.local"]));
+        // Best-fit ile değişen değer (sistem ACP'si UTF-8 değilse; Windows dışında her değer geçer).
+        let bad = !crate::ansi::ensure_ansi_roundtrip("＂");
+        assert_eq!(cfg!(windows) && bad, !ansi_safe("C:/bin/pg_dump.exe", &args, ["PGPASSWORD", "a＂b"]));
+        assert_eq!(cfg!(windows) && bad, !ansi_safe("C:/bin＂/pg_dump.exe", &args, []));
+        let args = vec!["C:/y/x＂ -h evil ＂.dump".to_string()];
+        assert_eq!(cfg!(windows) && bad, !ansi_safe("C:/bin/pg_dump.exe", &args, []));
     }
 
     #[test]

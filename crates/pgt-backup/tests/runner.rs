@@ -370,3 +370,31 @@ async fn heartbeat_detects_gone_sink_while_tool_is_silent() {
     assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
     assert_eq!(sink.0, 1);
 }
+
+/// Yürütücü son savunma hattıdır: kod sayfasında birebir temsil edilemeyen argüman ya da parola (Windows, ACP
+/// UTF-8 değilse) aracı hiç başlatmaz. Diğer sistemlerde ve UTF-8 ACP'de araç çalışır.
+#[tokio::test]
+async fn runner_refuses_best_fit_values_before_spawning() {
+    let refuses = cfg!(windows) && !pgt_backup::ensure_ansi_roundtrip("\u{ff02}");
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("a.dump");
+    let p = plan(&out, false);
+    let partial = p.partial_path.clone();
+    let cases = [
+        (inv(&["--file", &partial, "--line", "x\u{ff02} -h evil \u{ff02}"], Some(p.clone())), None),
+        (inv(&["--file", &partial], Some(p)), Some(pgt_backup::Secret::new("a\u{ff02}b".into()))),
+    ];
+    for (i, password) in cases {
+        let mut sink = VecSink::default();
+        let s = run(i, password, JobKind::Backup, None, &mut sink, CancelToken::new()).await;
+        if refuses {
+            assert_eq!((s.outcome, s.exit_code), (JobOutcome::Failed, None));
+            assert!(sink.lines().iter().any(|(_, t)| t.contains("kod sayfasında")), "{:?}", sink.lines());
+            assert!(!sink.lines().iter().any(|(_, t)| t.contains("a\u{ff02}b")));
+            assert!(!Path::new(&partial).exists() && !out.exists(), "araç çalışmamalıydı");
+        } else {
+            assert_eq!(s.outcome, JobOutcome::Success, "{:?}", sink.lines());
+            std::fs::remove_file(&out).unwrap();
+        }
+    }
+}

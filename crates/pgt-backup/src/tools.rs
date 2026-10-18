@@ -164,7 +164,9 @@ async fn run_version(exe: &Path) -> Option<ToolVersion> {
 async fn probe_dir(dir: &str) -> Option<ToolSet> {
     let probe = |kind: ToolKind| {
         let exe = exe_path(dir, kind);
-        async move { if exe.is_file() { run_version(&exe).await } else { None } }
+        // Kod sayfasında birebir temsil edilemeyen yol (best-fit argv enjeksiyonu, bkz. `crate::ansi`) çalıştırılmaz.
+        let safe = crate::ansi::ensure_ansi_roundtrip(&exe.to_string_lossy());
+        async move { if safe && exe.is_file() { run_version(&exe).await } else { None } }
     };
     let (dump, restore, psql) = tokio::join!(probe(ToolKind::PgDump), probe(ToolKind::PgRestore), probe(ToolKind::Psql));
     let (pg_dump, pg_restore, has_psql) = (dump.is_some(), restore.is_some(), psql.is_some());

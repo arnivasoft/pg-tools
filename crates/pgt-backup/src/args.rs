@@ -276,11 +276,14 @@ pub const ANSI_PATH_MESSAGE: &str = "Bu yol Windows kod sayfasında güvenle tem
      alır. Yalnız sistem kod sayfasındaki karakterleri içeren bir yol seçin.";
 const ANSI_VALUE_MESSAGE: &str = "Bu değer Windows kod sayfasında güvenle temsil edilemiyor; araç onu farklı karakterlerle alır.";
 
-/// Ortam anahtarının plan alan yolu (ANSI denetimi). `PGDATABASE`/`PGUSER` burada denetlenmez: Windows'ta ASCII
-/// dışı ad zaten plan hatasıdır ([`windows_name_problems`], daha katı); sabit ASCII değerler atlanır.
+/// Ortam anahtarının plan alan yolu (ANSI denetimi); sabit ASCII değerler atlanır. `PGDATABASE`/`PGUSER` da
+/// denetlenir: çağıran [`windows_name_problems`]'i (daha katı) çağırmasa bile kitaplık kendi başına kapalı kalır.
+/// `--dbname` bağlantı dizesi argümanı `PGDATABASE` ile aynı adı ve yalnız ASCII tırnak/kaçış ekler.
 fn env_field(key: &str) -> Option<&'static str> {
     match key {
         "PGHOST" => Some("host"),
+        "PGDATABASE" => Some("database"),
+        "PGUSER" => Some("user"),
         "PGSSLROOTCERT" => Some("ssl.rootCert"),
         "PGSSLCERT" => Some("ssl.clientCert"),
         "PGSSLKEY" => Some("ssl.clientKey"),
@@ -290,9 +293,8 @@ fn env_field(key: &str) -> Option<&'static str> {
 
 /// Kurulan çağrının ANSI gidiş-dönüş denetimi (Windows'ta best-fit argv enjeksiyonuna karşı; diğer sistemlerde
 /// etkisiz). Yol alanları çağıranca ayrıca (alan yoluyla) denetlenir; bu süpürme çalıştırılabilir yolu, ortam
-/// değerlerini ve geri kalan her argümanı kapsar. `skip_arg`: `windows_name_problems` ile denetlenen bağlantı
-/// dizesi argümanı (veritabanı adı içerir).
-fn ansi_sweep(exe: &str, args: &[String], env: &[(String, String)], skip_arg: Option<usize>, errors: &mut Vec<FieldError>) {
+/// değerlerini ve geri kalan her argümanı kapsar. Yürütücü başlatmadan önce aynı denetimi yineler (son savunma).
+fn ansi_sweep(exe: &str, args: &[String], env: &[(String, String)], errors: &mut Vec<FieldError>) {
     use crate::ansi::ensure_ansi_roundtrip as ok;
     if !ok(exe) {
         errors.push(field("tool", ANSI_PATH_MESSAGE));
@@ -301,13 +303,13 @@ fn ansi_sweep(exe: &str, args: &[String], env: &[(String, String)], skip_arg: Op
         if let Some(path) = env_field(key)
             && !ok(value)
         {
-            let msg = if key == "PGHOST" { ANSI_VALUE_MESSAGE } else { ANSI_PATH_MESSAGE };
+            let msg = if key.starts_with("PGSSL") { ANSI_PATH_MESSAGE } else { ANSI_VALUE_MESSAGE };
             errors.push(field(path, msg));
         }
     }
     // Yol alanı hatası zaten yazıldıysa aynı argüman için ikinci, genel hata eklenmez.
     if errors.is_empty()
-        && args.iter().enumerate().any(|(i, a)| Some(i) != skip_arg && !ok(a))
+        && args.iter().any(|a| !ok(a))
     {
         errors.push(field("request", ANSI_VALUE_MESSAGE));
     }
@@ -644,7 +646,7 @@ pub fn backup_invocation(
 
     let exe = exe(tool, ToolKind::PgDump);
     let env = base_env(conn, &conn.database, "pg-tools backup");
-    ansi_sweep(&exe, &args, &env, None, &mut errors);
+    ansi_sweep(&exe, &args, &env, &mut errors);
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -730,7 +732,7 @@ pub fn restore_invocation(
         }
         let exe = exe(psql_tool, ToolKind::Psql);
         let env = base_env(conn, &conn.database, "pg-tools restore");
-        ansi_sweep(&exe, &args, &env, None, &mut errors);
+        ansi_sweep(&exe, &args, &env, &mut errors);
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -872,8 +874,7 @@ pub fn restore_invocation(
     }
     let exe = exe(restore_tool, ToolKind::PgRestore);
     let env = base_env(conn, database, "pg-tools restore");
-    // `--dbname` değeri (indeks 3) veritabanı adını taşır; `windows_name_problems` ile denetlenir.
-    ansi_sweep(&exe, &args, &env, Some(3), &mut errors);
+    ansi_sweep(&exe, &args, &env, &mut errors);
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -2003,6 +2004,15 @@ mod tests {
         let req = breq(BackupScope::Database, DumpFormat::Custom, BackupOptions::default(), "a.backup");
         let got = paths(backup_invocation(&tools(), &k, &req));
         assert_eq!(got, if bad { vec!["host".to_string(), "ssl.clientCert".to_string()] } else { vec![] });
+        // Ad alanları da (çağıran `windows_name_problems`'i çağırmasa bile): `--dbname` bağlantı dizesi dahil.
+        let n = Conn { database: "d＂b".into(), user: "u＂".into(), ..conn() };
+        let want_names = if bad { vec!["user".to_string(), "database".to_string()] } else { vec![] };
+        assert_eq!(paths(backup_invocation(&tools(), &n, &req)), want_names);
+        let rr = RestoreRequest { path: out("kaynak"), target: RestoreTarget::Existing, options: RestoreOptions::default() };
+        assert_eq!(paths(restore_invocation((&tools(), &tools()), &n, "postgres", &rr, SourceFormat::Custom)), want_names);
+        let rc = RestoreRequest { target: RestoreTarget::CreateFromArchive, ..rr };
+        let want_db = if bad { vec!["database".to_string()] } else { vec![] };
+        assert_eq!(paths(restore_invocation((&tools(), &tools()), &conn(), "bakim＂", &rc, SourceFormat::Custom)), want_db);
         let t = ToolSet { dir: format!("{}{SEP}bin＂ -h x", out_dir()), ..tools() };
         assert_eq!(paths(backup_invocation(&t, &conn(), &req)), if bad { vec!["tool".to_string()] } else { vec![] });
     }
