@@ -2,18 +2,18 @@
 source: crates/pgt-ddl/src/build/maintenance.rs
 expression: out
 ---
-Index: [Destructive non-tx] REINDEX INDEX s.i  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+Index: [Destructive non-tx] REINDEX INDEX s.i  -- Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler.
 Index: [Safe non-tx] REINDEX (VERBOSE) INDEX CONCURRENTLY s.i
 Index: [Safe non-tx] REINDEX INDEX CONCURRENTLY s.i
-Table: [Destructive non-tx] REINDEX TABLE s.t  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+Table: [Destructive non-tx] REINDEX TABLE s.t  -- Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler.
 Table: [Safe non-tx] REINDEX (VERBOSE) TABLE CONCURRENTLY s.t
 Table: [Safe non-tx] REINDEX TABLE CONCURRENTLY s.t
-MaterializedView: [Destructive non-tx] REINDEX TABLE s.t  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+MaterializedView: [Destructive non-tx] REINDEX TABLE s.t  -- Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler.
 MaterializedView: [Safe non-tx] REINDEX (VERBOSE) TABLE CONCURRENTLY s.t
 MaterializedView: [Safe non-tx] REINDEX TABLE CONCURRENTLY s.t
-Schema: [Destructive non-tx] REINDEX SCHEMA s  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+Schema: [Destructive non-tx] REINDEX SCHEMA s  -- Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler. Tablolar sırayla kilitlenir.
 Schema: [Safe non-tx] REINDEX (VERBOSE) SCHEMA CONCURRENTLY s
 Schema: [Safe non-tx] REINDEX SCHEMA CONCURRENTLY s
-Database: [Destructive non-tx] REINDEX DATABASE d  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+Database: [Destructive non-tx] REINDEX DATABASE d  -- Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler. Tablolar sırayla kilitlenir.
 Database: [Safe non-tx] REINDEX (VERBOSE) DATABASE CONCURRENTLY d
 Database: [Safe non-tx] REINDEX DATABASE CONCURRENTLY d

@@ -105,8 +105,12 @@ pub fn ops_for(kind: MaintenanceTargetKind, partitioned: bool, version_num: u32)
     use MaintenanceTargetKind::*;
     match kind {
         Table if !partitioned || version_num >= 150000 => &["vacuum", "analyze", "reindex", "cluster"],
-        Table => &["vacuum", "analyze", "reindex"],
+        // Bölümlenmiş tabloda REINDEX PG 14+ (PG 11–13 uyarıyla atlar); CLUSTER PG 15+.
+        Table if version_num >= 140000 => &["vacuum", "analyze", "reindex"],
+        Table => &["vacuum", "analyze"],
         MaterializedView => &["vacuum", "analyze", "reindex"],
+        // Bölümlenmiş indekste REINDEX PG 14+.
+        Index if partitioned && version_num < 140000 => &[],
         Index | Schema => &["reindex"],
         Database => &["vacuum", "analyze", "reindex"],
     }

@@ -10,10 +10,14 @@ use crate::plan::{Plan, Risk};
 use crate::quote::{qualified, quote_ident};
 
 const LOCK_NOTE: &str = "Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.";
+const REINDEX_NOTE: &str = "Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler.";
+const REINDEX_MANY_NOTE: &str = " Tablolar sırayla kilitlenir.";
 const COMPOSED_BROKEN: &str = "Üretilen ifade güvenli biçimde kurulamadı (ad tırnak/yorum sınırını bozuyor).";
 
 /// Üretici girişi: doğrular, tek ifade üretir.
 pub fn maintenance(ctx: &BuildCtx, target: &MaintenanceTarget, op: &MaintenanceOp) -> Result<Plan, Vec<FieldError>> {
+    // Not: `ctx.concurrently`, `target.table` ve `target.unsupported` burada kullanılmaz (REINDEX CONCURRENTLY
+    // `ReindexOptions`'tan gelir; indeks ifadesi şema+adla yazılır; `unsupported` yükleyici/arayüz içindir).
     let v = ctx.version_num;
     let mut errs = Vec::new();
 
@@ -43,8 +47,12 @@ pub fn maintenance(ctx: &BuildCtx, target: &MaintenanceTarget, op: &MaintenanceO
         MaintenanceOp::Cluster(_) => "cluster",
     };
     if !ops_for(target.kind, target.partitioned, v).contains(&op_name) {
-        let msg = if op_name == "cluster" && target.kind == MaintenanceTargetKind::Table && target.partitioned {
+        let part = target.partitioned
+            && matches!(target.kind, MaintenanceTargetKind::Table | MaintenanceTargetKind::Index);
+        let msg = if op_name == "cluster" && part {
             "Bölümlenmiş tabloda CLUSTER PostgreSQL 15 ve üzerini gerektirir."
+        } else if op_name == "reindex" && part {
+            "Bölümlenmiş tabloda/indekste REINDEX PostgreSQL 14 ve üzerini gerektirir."
         } else {
             "Bu hedef için bu işlem desteklenmiyor."
         };
@@ -69,8 +77,15 @@ pub fn maintenance(ctx: &BuildCtx, target: &MaintenanceTarget, op: &MaintenanceO
     if !composed_is_clean(&sql) {
         return Err(vec![err("object", COMPOSED_BROKEN)]);
     }
-    let note = (risk == Risk::Destructive).then_some(LOCK_NOTE);
-    Ok(Plan { statements: vec![stmt_nt(sql, risk, note)], warnings: vec![] })
+    let note = if risk != Risk::Destructive {
+        None
+    } else if let MaintenanceOp::Reindex(_) = op {
+        let many = matches!(target.kind, MaintenanceTargetKind::Schema | MaintenanceTargetKind::Database);
+        Some(if many { format!("{REINDEX_NOTE}{REINDEX_MANY_NOTE}") } else { REINDEX_NOTE.to_string() })
+    } else {
+        Some(LOCK_NOTE.to_string())
+    };
+    Ok(Plan { statements: vec![stmt_nt(sql, risk, note.as_deref())], warnings: vec![] })
 }
 
 fn gate(errs: &mut Vec<FieldError>, v: u32, min: u32, path: &str, what: &str, major: u32) {
@@ -113,6 +128,9 @@ fn vacuum(
         opts.push("VERBOSE".into());
     }
     if o.disable_page_skipping {
+        if o.full {
+            errs.push(err("options.disablePageSkipping", "DISABLE_PAGE_SKIPPING, FULL ile birlikte kullanılamaz."));
+        }
         opts.push("DISABLE_PAGE_SKIPPING".into());
     }
     if o.skip_locked {
@@ -160,6 +178,18 @@ fn analyze(
     if o.skip_locked {
         gate(errs, v, 120000, "options.skipLocked", "SKIP_LOCKED", 12);
         opts.push("SKIP_LOCKED".into());
+    }
+    if v < 110000 {
+        // PG 10: parantezli seçenek listesi yok; yalnız `ANALYZE VERBOSE [hedef]`.
+        let mut s = String::from("ANALYZE");
+        if o.verbose {
+            s.push_str(" VERBOSE");
+        }
+        if t.kind != MaintenanceTargetKind::Database {
+            s.push(' ');
+            s.push_str(&rel());
+        }
+        return s;
     }
     with_opts("ANALYZE", &opts, t, rel)
 }
@@ -412,17 +442,27 @@ mod tests {
         assert_eq!(risk(&tgt(Table), MaintenanceOp::Analyze(ana())).0, Risk::Safe);
         for k in [Index, Table, Schema, Database] {
             let r = risk(&tgt(k), MaintenanceOp::Reindex(rei()));
-            assert_eq!((r.0, r.1), (Risk::Destructive, Some(lock.into())), "{k:?}");
+            assert_eq!(r.0, Risk::Destructive, "{k:?}");
             let r = risk(&tgt(k), MaintenanceOp::Reindex(ReindexOptions { concurrently: true, verbose: false }));
             assert_eq!((r.0, r.1), (Risk::Safe, None), "{k:?}");
         }
         assert_eq!(risk(&ct, MaintenanceOp::Cluster(clu())), (Risk::Destructive, Some(lock.into()), 0));
+        let rn = "Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler.";
+        let r = risk(&tgt(Table), MaintenanceOp::Reindex(rei()));
+        assert_eq!(r.1.as_deref(), Some(rn));
+        for k in [Schema, Database] {
+            let r = risk(&tgt(k), MaintenanceOp::Reindex(rei()));
+            assert_eq!(r.1, Some(format!("{rn} Tablolar sırayla kilitlenir.")));
+        }
     }
 
     #[test]
     fn ops_for_table() {
         assert_eq!(ops_for(Table, false, 100000), ["vacuum", "analyze", "reindex", "cluster"]);
         assert_eq!(ops_for(Table, true, 140000), ["vacuum", "analyze", "reindex"]);
+        assert_eq!(ops_for(Table, true, 130000), ["vacuum", "analyze"]);
+        assert!(ops_for(Index, true, 130000).is_empty());
+        assert_eq!(ops_for(Index, true, 140000), ["reindex"]);
         assert_eq!(ops_for(Table, true, 150000), ["vacuum", "analyze", "reindex", "cluster"]);
         assert_eq!(ops_for(MaterializedView, false, 170000), ["vacuum", "analyze", "reindex"]);
         assert_eq!(ops_for(Index, false, 170000), ["reindex"]);
@@ -506,6 +546,38 @@ mod tests {
         p.cluster_index = Some("i1".into());
         assert_eq!(paths(&errs(140000, &p, MaintenanceOp::Cluster(clu()))), ["op"]);
         assert!(maintenance(&ctx(150000), &p, &MaintenanceOp::Cluster(clu())).is_ok());
+    }
+
+    #[test]
+    fn analyze_pg10_has_no_parens() {
+        let v = AnalyzeOptions { verbose: true, skip_locked: false };
+        assert_eq!(sql(100000, &tgt(Table), MaintenanceOp::Analyze(v.clone())), "ANALYZE VERBOSE s.t");
+        assert_eq!(sql(100000, &tgt(Database), MaintenanceOp::Analyze(v)), "ANALYZE VERBOSE");
+        assert_eq!(sql(100000, &tgt(Table), MaintenanceOp::Analyze(ana())), "ANALYZE s.t");
+        assert_eq!(
+            sql(110000, &tgt(Table), MaintenanceOp::Analyze(AnalyzeOptions { verbose: true, skip_locked: false })),
+            "ANALYZE (VERBOSE) s.t"
+        );
+    }
+
+    #[test]
+    fn reindex_partitioned_needs_pg14() {
+        let mut t = tgt(Table);
+        t.partitioned = true;
+        assert_eq!(paths(&errs(130000, &t, MaintenanceOp::Reindex(rei()))), ["op"]);
+        assert!(maintenance(&ctx(140000), &t, &MaintenanceOp::Reindex(rei())).is_ok());
+        let mut i = tgt(Index);
+        i.partitioned = true;
+        let e = errs(130000, &i, MaintenanceOp::Reindex(rei()));
+        assert_eq!(paths(&e), ["op"]);
+        assert!(e[0].message.contains("PostgreSQL 14 ve üzerini gerektirir"));
+        assert!(maintenance(&ctx(140000), &i, &MaintenanceOp::Reindex(rei())).is_ok());
+    }
+
+    #[test]
+    fn disable_page_skipping_with_full_errors() {
+        let o = VacuumOptions { full: true, disable_page_skipping: true, ..vac() };
+        assert_eq!(paths(&errs(170000, &tgt(Table), MaintenanceOp::Vacuum(o))), ["options.disablePageSkipping"]);
     }
 
     #[test]
