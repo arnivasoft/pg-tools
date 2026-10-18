@@ -1,0 +1,19 @@
+---
+source: crates/pgt-ddl/src/build/maintenance.rs
+expression: out
+---
+Index: [Destructive non-tx] REINDEX INDEX s.i  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+Index: [Safe non-tx] REINDEX (VERBOSE) INDEX CONCURRENTLY s.i
+Index: [Safe non-tx] REINDEX INDEX CONCURRENTLY s.i
+Table: [Destructive non-tx] REINDEX TABLE s.t  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+Table: [Safe non-tx] REINDEX (VERBOSE) TABLE CONCURRENTLY s.t
+Table: [Safe non-tx] REINDEX TABLE CONCURRENTLY s.t
+MaterializedView: [Destructive non-tx] REINDEX TABLE s.t  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+MaterializedView: [Safe non-tx] REINDEX (VERBOSE) TABLE CONCURRENTLY s.t
+MaterializedView: [Safe non-tx] REINDEX TABLE CONCURRENTLY s.t
+Schema: [Destructive non-tx] REINDEX SCHEMA s  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+Schema: [Safe non-tx] REINDEX (VERBOSE) SCHEMA CONCURRENTLY s
+Schema: [Safe non-tx] REINDEX SCHEMA CONCURRENTLY s
+Database: [Destructive non-tx] REINDEX DATABASE d  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+Database: [Safe non-tx] REINDEX (VERBOSE) DATABASE CONCURRENTLY d
+Database: [Safe non-tx] REINDEX DATABASE CONCURRENTLY d

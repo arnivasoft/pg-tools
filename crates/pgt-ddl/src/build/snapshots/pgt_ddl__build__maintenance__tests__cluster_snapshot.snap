@@ -1,0 +1,9 @@
+---
+source: crates/pgt-ddl/src/build/maintenance.rs
+expression: out
+---
+[Destructive non-tx] CLUSTER s.t  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+[Destructive non-tx] CLUSTER VERBOSE s.t  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+[Destructive non-tx] CLUSTER s.t USING i1  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+[Destructive non-tx] CLUSTER VERBOSE s.t USING i1  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.
+[Destructive non-tx] CLUSTER s.t USING i1  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.

@@ -14,6 +14,7 @@ pub mod domain;
 pub mod extension;
 pub mod freesql;
 pub mod index;
+pub mod maintenance;
 pub mod matview;
 pub mod pgtype;
 pub mod role;

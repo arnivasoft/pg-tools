@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/build/maintenance.rs
+expression: out
+---
+Table: [Safe non-tx] ANALYZE s.t
+Table: [Safe non-tx] ANALYZE (VERBOSE, SKIP_LOCKED) s.t
+MaterializedView: [Safe non-tx] ANALYZE s.t
+MaterializedView: [Safe non-tx] ANALYZE (VERBOSE, SKIP_LOCKED) s.t
+Database: [Safe non-tx] ANALYZE
+Database: [Safe non-tx] ANALYZE (VERBOSE, SKIP_LOCKED)
