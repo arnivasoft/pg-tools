@@ -438,8 +438,8 @@ Elle kontrol: `docs/smoke-test.md` "Fonksiyon gövdesi düzenleyicisi (Plan 23)"
 - **Saf üretici** (`crates/pgt-ddl/src/build/maintenance.rs`, insta): her işlem × hedef × seçenek × sürüm; sürüm kapıları (kapının bir altında hata, kapıda serbest), risk/not, tek ifade ve `transactional = false`, düşmanca adlar. `cargo test -p pgt-ddl` (Docker gerekmez).
 - **Birim** (Docker'sız): ileti kesme/sınır yardımcıları (`apply.rs`: `clip_field`, `MessageBuf`), `hint_for` bakım ipuçları, `progress_sql`/`progress_counts`, `plan_view`/`read_only_refusal`.
 - **Docker** (`PGT_TEST_URLS` ya da `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`):
-  - `crates/pgt-ddl/tests/maintenance_roundtrip.rs`: yükleyici alanları ve her işlemin gerçek etkisi.
-  - `crates/pgt-ddl/tests/manager.rs`: kapılar (kilitli, bayat hedef, onay), `lock_timeout` 55P03, iptal 57014, ilerleme, `messages`.
+  - `crates/pgt-ddl/tests/maintenance_roundtrip.rs`: yükleyici alanları (geçersiz kümeleme indeksi dahil), her işlemin gerçek etkisi (bölümlenmiş tabloda VACUUM/ANALYZE, PG 14+ REINDEX, PG 15+ CLUSTER USING), `PlanRequest::Maintenance` kapıları (kilitli, bayat hedef, onay), `lock_timeout` 55P03, iptal 57014 ve ilerleme (sınırlı yoklama).
+  - `crates/pgt-ddl/src/manager.rs` (`tests::docker`): `messages` toplama/sınırları, arka uç pid'i (yalnız `op = "maintenance"`), iptalde iletiler ve pid temizliği, ilerleme sorgularının aşamaya göre sayaç seçimi (`VALUES` satırlarıyla).
   - `crates/pgt-ddl/tests/logging.rs`: SQL, nesne adı ve ileti metni günlükte yok.
 - **Kapanış taramaları:** `rg "tracing::" crates/pgt-ddl/src/build/maintenance.rs crates/pgt-ddl/src/load_maintenance.rs` boş olmalı; `manager.rs` günlük çağrılarında ileti metni geçmemeli.
 - Sürüm kapılı atlamalar matris çıktısında sürümle birlikte görünür (ör. PG 10–11'de cluster/create_index ilerlemesi sorgulanmaz, PARALLEL/INDEX_CLEANUP kapı testleri hata bekler).
