@@ -160,13 +160,31 @@ async fn plain_single_transaction_rolls_back_on_error() {
     }
 }
 
-async fn backup_sessions(env: &Env) -> i64 {
+/// Bu testin pg_dump oturumları: `datname` ile sınırlıdır. Aynı ikilideki diğer testler aynı sunucuda eşzamanlı
+/// yedek alır (`application_name` aynı); yalnız uygulama adına göre sayım onların oturumlarını da sayar (ölçüldü).
+async fn backup_pids(env: &Env, db: &str, lock_wait_only: bool) -> Vec<i32> {
     env.admin()
         .await
-        .query_one("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'pg-tools backup'", &[])
+        .query(
+            "SELECT pid FROM pg_stat_activity WHERE application_name = 'pg-tools backup' AND datname = $1              AND (NOT $2 OR wait_event_type = 'Lock') ORDER BY pid",
+            &[&db, &lock_wait_only],
+        )
         .await
         .unwrap()
-        .get(0)
+        .iter()
+        .map(|r| r.get(0))
+        .collect()
+}
+
+async fn alive(env: &Env, pids: &[i32]) -> Vec<i32> {
+    env.admin()
+        .await
+        .query("SELECT pid FROM pg_stat_activity WHERE pid = ANY($1) ORDER BY pid", &[&pids])
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect()
 }
 
 #[tokio::test]
@@ -193,33 +211,42 @@ async fn cancel_removes_partial_output_and_ends_the_tool() {
             let token = CancelToken::new();
             let t = token.clone();
             let p = partial.clone();
-            let canceller = tokio::spawn(async move {
-                // Geçici çıktı oluşana dek bekle (custom/directory'de pg_dump onu bağlanmadan önce açar), sonra iptal et.
+            let canceller = async {
+                // Geçici çıktı oluşsun (custom/directory'de pg_dump onu bağlanmadan önce açar) ve pg_dump'ın sunucu
+                // oturumu kilitte beklesin; sonra iptal et. Zamanlamadan bağımsızdır: iptal anında oturum kesin kilitte.
                 let started = Instant::now();
-                while !Path::new(&p).exists() && started.elapsed() < Duration::from_secs(20) {
+                let mut pids = Vec::new();
+                while started.elapsed() < Duration::from_secs(20) {
+                    if Path::new(&p).exists() {
+                        pids = backup_pids(&env, src, true).await;
+                        if !pids.is_empty() {
+                            break;
+                        }
+                    }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 let seen = Path::new(&p).exists();
-                tokio::time::sleep(Duration::from_millis(500)).await;
                 t.cancel();
-                seen
-            });
+                (seen, pids)
+            };
             let mut sink = VecSink::default();
             let started = Instant::now();
-            let s = run(inv, env.secret(), JobKind::Backup, None, &mut sink, token).await;
-            assert!(canceller.await.unwrap(), "geçici çıktı hiç oluşmadı: {:?}", sink.lines());
+            let (s, (seen, pids)) = tokio::join!(run(inv, env.secret(), JobKind::Backup, None, &mut sink, token), canceller);
+            assert!(seen, "geçici çıktı hiç oluşmadı: {:?}", sink.lines());
+            assert!(!pids.is_empty(), "{format:?}: pg_dump oturumu kilitte beklemedi: {:?}", sink.lines());
             assert_eq!(s.outcome, JobOutcome::Cancelled, "{:?}", sink.lines());
             assert!(started.elapsed() < Duration::from_secs(30));
             assert!(!Path::new(&partial).exists() && !out.exists(), "{format:?}: geçici çıktı kaldı");
             assert!(matches!(sink.events.last(), Some(BackupEvent::Finished { .. })));
-            // Kilitte bekleyen sunucu oturumu istemcinin gittiğini ancak kilit bırakılınca fark eder (ölçüldü). Kilit
-            // bırakılınca oturum kapanmalı ve çıktı oluşmamalı: pg_dump süreci gerçekten sonlandı.
+            // Kilitte bekleyen sunucu oturumu istemcinin gittiğini ancak kilit bırakılınca fark eder (ölçüldü: iptalden
+            // sonra hâlâ kilitte, bırakılınca ilk yoklamada yok, 10–18). Kilit bırakılınca tam bu oturumlar kapanmalı ve
+            // çıktı oluşmamalı: pg_dump süreci gerçekten sonlandı. 10 sn yalnız yavaş CI için paydır.
             holder.batch_execute("ROLLBACK").await.unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
-            while backup_sessions(&env).await > 0 && Instant::now() < deadline {
+            while !alive(&env, &pids).await.is_empty() && Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            assert_eq!(backup_sessions(&env).await, 0, "{format:?}: pg_dump oturumu kaldı");
+            assert_eq!(alive(&env, &pids).await, Vec::<i32>::new(), "{format:?}: pg_dump oturumu kaldı");
             assert!(!Path::new(&partial).exists() && !out.exists(), "{format:?}: iptalden sonra çıktı oluştu");
         }
         drop((db, holder));
