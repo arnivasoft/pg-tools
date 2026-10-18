@@ -1,6 +1,7 @@
 // Bakım diyaloğunun saf modeli (Plan 25). Ana paket modülü içe aktarmaz; yalnız tür ve tembel metin modülü kullanır.
 // Kaynak: crates/pgt-ddl/src/maintenance.rs (`ops_for`) ve crates/pgt-ddl/src/build/maintenance.rs (kapılar, dışlamalar).
 import { tm } from "../../app/strings-maintenance";
+import type { FieldError } from "../../ipc/bindings/FieldError";
 import type { MaintenanceOp } from "../../ipc/bindings/MaintenanceOp";
 import type { MaintenanceProgress } from "../../ipc/bindings/MaintenanceProgress";
 import type { MaintenanceTarget } from "../../ipc/bindings/MaintenanceTarget";
@@ -245,4 +246,28 @@ export function createProgressPoller(deps: {
       cancel = null;
     },
   };
+}
+
+/**
+ * Sunucu düğümünün `detail` metninden (`ServerInfo.version`, ör. "16.4", "17beta1") `server_version_num`. PG 10+:
+ * major*10000 + minor; PG < 10: major*10000 + minor*100 + patch. Çözülemezse null (istemci kapısı yok; arka uç doğrular).
+ */
+export function parseVersionNum(version: string | null): number | null {
+  const m = /^(\d+)(?:\.(\d+))?(?:\.(\d+))?/.exec(version ?? "");
+  if (!m) return null;
+  const major = Number(m[1]);
+  const minor = Number(m[2] ?? 0);
+  return major >= 10 ? major * 10000 + minor : major * 10000 + minor * 100 + Number(m[3] ?? 0);
+}
+
+/** Önizleme alan hataları: `options.<alan>` seçeneğin altına, diğerleri (`object`, `op`, eşlenmeyen) üst şeride. */
+export function splitFieldErrors(errors: FieldError[]): { byOption: Record<string, string[]>; top: string[] } {
+  const byOption: Record<string, string[]> = {};
+  const top: string[] = [];
+  for (const e of errors) {
+    const key = e.path.startsWith("options.") ? e.path.slice(8) : "";
+    if (key) (byOption[key] ??= []).push(e.message);
+    else top.push(e.message);
+  }
+  return { byOption, top };
 }

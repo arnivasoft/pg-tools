@@ -16,6 +16,8 @@ import {
   optionStates,
   opsFor,
   progressView,
+  parseVersionNum,
+  splitFieldErrors,
 } from "./maintenance-model";
 
 const target = (over: Partial<MaintenanceTarget> = {}): MaintenanceTarget => ({
@@ -429,5 +431,36 @@ describe("normalize ek kurallar", () => {
     }
     expect(stopped).toBe(0);
     expect(timers.length).toBeGreaterThan(0);
+  });
+});
+
+describe("parseVersionNum (sunucu düğümü `detail` = ServerInfo.version)", () => {
+  it("PG 10+: major*10000 + minor", () => {
+    expect(parseVersionNum("16.4")).toBe(160004);
+    expect(parseVersionNum("10.23")).toBe(100023);
+    expect(parseVersionNum("17beta1")).toBe(170000);
+    expect(parseVersionNum("18devel")).toBe(180000);
+  });
+  it("PG < 10: major.minor.patch", () => {
+    expect(parseVersionNum("9.6.24")).toBe(90624);
+  });
+  it("bilinmeyen/boş → null (sürüm kapısı yok; arka uç doğrular)", () => {
+    expect(parseVersionNum(null)).toBeNull();
+    expect(parseVersionNum("")).toBeNull();
+    expect(parseVersionNum("abc")).toBeNull();
+  });
+});
+
+describe("splitFieldErrors", () => {
+  it("options.<alan> seçeneğe, diğerleri üst şeride", () => {
+    const r = splitFieldErrors([
+      { path: "options.parallel", message: "p" },
+      { path: "options.skipLocked", message: "s" },
+      { path: "object", message: "o" },
+      { path: "op", message: "x" },
+      { path: "weird", message: "w" },
+    ]);
+    expect(r.byOption).toEqual({ parallel: ["p"], skipLocked: ["s"] });
+    expect(r.top).toEqual(["o", "x", "w"]);
   });
 });

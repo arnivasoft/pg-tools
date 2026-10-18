@@ -679,3 +679,21 @@ Plan 24 yalnızca arka uçtur; GUI maddeleri Plan 25'te ("Bakım…" diyaloğu) 
 - Kapılar: kilitli sunucu, bayat hedef (`PLAN_CHANGED`), Destructive onayı, sistem şemasında CLUSTER/CONCURRENTLY reddi, günlükte SQL/ad/ileti metni yok.
 - Sürüm kapılı atlamalar: SKIP_LOCKED/INDEX_CLEANUP/CONCURRENTLY/cluster ve create_index ilerlemesi PG 12+; PARALLEL ve analyze ilerlemesi PG 13+; INDEX_CLEANUP AUTO PG 14+; bölümlenmiş REINDEX PG 14+, bölümlenmiş CLUSTER PG 15+; ANALYZE PG 10'da parantezsiz.
 - Bilinen sınırlar: bölümlenmiş indeks ve geçici şema hedefleri salt okunur; çoklu tablo/kolon listesi, `REINDEX SYSTEM`, `TABLESPACE` kapsam dışı.
+
+## Bakım işlemleri arayüzü (Plan 25)
+
+Ön koşul: Docker PG 10 ve PG 17 sunucuları; bir şemada büyükçe bir tablo (ör. 5 milyon satır), indeksli tablo, maddeleştirilmiş görünüm, bölümlenmiş tablo; başka bir rolün sahibi olduğu bir tablo. Diyalog tembel parçadadır (`MaintenanceDialog-*.js`); ilk açılışta kısa yükleme normaldir. Sürüm kaynağı: sunucu düğümünün sürüm metni (`ServerInfo.version`); bağlı değilse kapılar gösterilmez ve hatalar sunucudan seçenek altına gelir.
+
+- [ ] Hedef türleri ve işlemler: tablo (VACUUM/ANALYZE/REINDEX/CLUSTER), MV (VACUUM/ANALYZE/REINDEX), indeks ve şema (REINDEX), veritabanı (VACUUM/ANALYZE/REINDEX) düğümlerinde "Bakım…" açılır; her işlem önizlenip uygulanır ve "Tamamlandı (mm:ss)" görünür. Koleksiyon, kolon ve kısıt satırlarında menü görünmez. **[—]**
+- [ ] Sürüm kapıları: PG 10 sunucusunda SKIP_LOCKED, INDEX_CLEANUP, PARALLEL, CONCURRENTLY devre dışı ve "PostgreSQL N ve üzerini gerektirir" gerekçeli (gizlenmez); INDEX_CLEANUP AUTO yalnız PG 14+; PG 17'de hepsi etkin; bölümlenmiş tabloda CLUSTER PG 15+ sunulur. **[—]**
+- [ ] Karşılıklı dışlama: FULL işaretlenince PARALLEL ve DISABLE_PAGE_SKIPPING devre dışı ("FULL ile birlikte kullanılamaz"); sistem nesnesinde CONCURRENTLY ve CLUSTER devre dışı. **[—]**
+- [ ] VACUUM FULL onayı: risk "Yıkıcı", kilit ve disk notu görünür; "Etkisini anladım" işaretlenmeden Uygula kapalı (başlık gerekçeyi söyler); seçenek değişince onay sıfırlanır. **[—]**
+- [ ] CLUSTER `USING`: varsayılan kümeleme indeksi (yoksa ilk indeks) seçili; indeksi olmayan tabloda CLUSTER devre dışı ve gerekçeli. Bir indeksle uygula, ardından aynı diyalogda "Yeniden çalıştır" → `plan_changed` vermez (hedef yeniden yüklendi). **[—]**
+- [ ] REINDEX CONCURRENTLY (PG 12+): önizlemede `*_ccnew` notu; uzun bir REINDEX CONCURRENTLY sırasında İptal → "İptal edildi" ve `*_ccnew` temizleme uyarısı (DROP INDEX CONCURRENTLY önerisi). **[—]**
+- [ ] VERBOSE iletileri: VACUUM VERBOSE sonrası "Sunucu iletileri (N)" listesi; veritabanı genelinde VACUUM'da sahibi olunmayan tablo WARNING'i belirgin (⚠, renkli) ve özette "N uyarı"; 500 iletiyi aşan çıktıda son satır "… ileti daha gösterilmedi". **[—]**
+- [ ] Lock timeout: başka oturumda `BEGIN; LOCK TABLE t;` tutulurken VACUUM FULL (lock_timeout 1 sn) → başarısız, PG iletisi + "İpucu: Nesne başka bir oturumca kilitli…". Hedef yeniden yüklenmez; seçenekler korunur. **[—]**
+- [ ] İlerleme: büyük tabloda VACUUM sırasında ilerleme çubuğu yüzde ve aşama adı (Türkçe; bilinmeyen İngilizce) gösterir; CLUSTER `writing new heap` aşamasında belirsiz çubuk + satır sayısı; geçen süre her saniye artar; Uygula ve seçenekler kilitli. **[—]**
+- [ ] Çalışırken kapatma: Esc ya da × → "İşlem sürüyor; iptal edilsin mi?"; Hayır → açık kalır, işlem sürer; Evet → iptal istenir, işlem bitince diyalog kapanır. Boştayken Esc hemen kapatır. **[—]**
+- [ ] Hatalar: hedef yüklenemezse (ör. nesne silindi) ileti ve "Yeniden dene"; başka oturumda nesneyi değiştirip uygula → `plan_changed` bilgisi ve hedef yeniden yüklenir. **[—]**
+- [ ] Klavye ve ekran okuyucu: odak diyalogda kalır; seçenekler etiketli, devre dışı gerekçesi okunur (`aria-describedby`); Enter (onay tamamsa) uygular, IME bileşiminde uygulamaz; ilerleme `progressbar` olarak okunur (yüzde ya da aşama metni); sonuç `status`, hata `alert` olarak duyurulur. **[—]**
+- [ ] Kilitli sunucu: menü devre dışı ve gerekçeli; diyalog açıkken sunucu kilitlenirse Uygula kapalı ve "salt okunur kilitli" şeridi. **[—]**

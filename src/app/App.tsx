@@ -284,7 +284,7 @@ export default function App() {
       <Toaster />
       <Show when={maintenanceEverOpened()}>
         <Suspense>
-          <MaintenanceDialog open={maintenanceId() !== null} onClose={() => setMaintenanceId(null)} />
+          <MaintenanceDialog nodeId={maintenanceId()} deps={lazyDeps()} onClose={() => setMaintenanceId(null)} />
         </Suspense>
       </Show>
       <Show when={importEverOpened()}>
