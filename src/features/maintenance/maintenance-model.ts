@@ -260,13 +260,33 @@ export function parseVersionNum(version: string | null): number | null {
   return major >= 10 ? major * 10000 + minor : major * 10000 + minor * 100 + Number(m[3] ?? 0);
 }
 
-/** Önizleme alan hataları: `options.<alan>` seçeneğin altına, diğerleri (`object`, `op`, eşlenmeyen) üst şeride. */
-export function splitFieldErrors(errors: FieldError[]): { byOption: Record<string, string[]>; top: string[] } {
+/** Diyalogun işlem için çizdiği seçenek alanları (sıra = çizim sırası; `usingIndex`/`indexCleanup`/`parallel` dahil). */
+export function renderedOptions(op: OpName): string[] {
+  switch (op) {
+    case "vacuum":
+      return ["full", "freeze", "analyze", "verbose", "disablePageSkipping", "skipLocked", "indexCleanup", "parallel"];
+    case "analyze":
+      return ["verbose", "skipLocked"];
+    case "reindex":
+      return ["concurrently", "verbose"];
+    case "cluster":
+      return ["usingIndex", "verbose"];
+  }
+}
+
+/**
+ * Önizleme alan hataları: çizilen bir seçeneğe ait `options.<alan>` seçeneğin altına; diğerleri (`object`, `op`,
+ * çizilmeyen seçenek, eşlenmeyen yol) üst şeride.
+ */
+export function splitFieldErrors(
+  errors: FieldError[],
+  rendered: readonly string[],
+): { byOption: Record<string, string[]>; top: string[] } {
   const byOption: Record<string, string[]> = {};
   const top: string[] = [];
   for (const e of errors) {
     const key = e.path.startsWith("options.") ? e.path.slice(8) : "";
-    if (key) (byOption[key] ??= []).push(e.message);
+    if (key && rendered.includes(key)) (byOption[key] ??= []).push(e.message);
     else top.push(e.message);
   }
   return { byOption, top };

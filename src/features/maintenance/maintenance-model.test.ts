@@ -18,6 +18,7 @@ import {
   progressView,
   parseVersionNum,
   splitFieldErrors,
+  renderedOptions,
 } from "./maintenance-model";
 
 const target = (over: Partial<MaintenanceTarget> = {}): MaintenanceTarget => ({
@@ -459,8 +460,21 @@ describe("splitFieldErrors", () => {
       { path: "object", message: "o" },
       { path: "op", message: "x" },
       { path: "weird", message: "w" },
-    ]);
+    ], renderedOptions("vacuum"));
     expect(r.byOption).toEqual({ parallel: ["p"], skipLocked: ["s"] });
     expect(r.top).toEqual(["o", "x", "w"]);
+  });
+  it("işlemin çizmediği seçeneğin hatası üst şeride düşer", () => {
+    const r = splitFieldErrors([
+      { path: "options.usingIndex", message: "u" },
+      { path: "options.parallel", message: "p" },
+      { path: "options.concurrently", message: "c" },
+    ], renderedOptions("cluster"));
+    expect(r.byOption).toEqual({ usingIndex: ["u"] });
+    expect(r.top).toEqual(["p", "c"]);
+  });
+  it("renderedOptions işlemlere göre", () => {
+    expect(renderedOptions("analyze")).toEqual(["verbose", "skipLocked"]);
+    expect(renderedOptions("reindex")).toEqual(["concurrently", "verbose"]);
   });
 });

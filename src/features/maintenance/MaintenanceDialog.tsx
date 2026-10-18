@@ -17,7 +17,14 @@ import {
   type MaintenanceControllerDeps,
   type MaintenanceResult,
 } from "./maintenance-controller";
-import { elapsedLabel, parseVersionNum, progressView, splitFieldErrors, type OptionState } from "./maintenance-model";
+import {
+  elapsedLabel,
+  parseVersionNum,
+  progressView,
+  renderedOptions,
+  splitFieldErrors,
+  type OptionState,
+} from "./maintenance-model";
 
 export interface MaintenanceDialogDeps {
   api: MaintenanceControllerDeps["api"];
@@ -81,7 +88,39 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
     const t = s()?.target;
     return t ? tm.titleFor(t.schema ? `${t.schema}.${t.name}` : t.name) : tm.title;
   };
-  const fieldErrors = () => splitFieldErrors(s()?.view?.errors ?? []);
+  const fieldErrors = () => {
+    const op = s()?.operation;
+    return splitFieldErrors(s()?.view?.errors ?? [], op ? renderedOptions(op.op) : []);
+  };
+  const reasonId = createUniqueId();
+  /** Kalıcı canlı bölgeler (her zaman bağlı; yalnız metin değişir): durum ve uyarı duyuruları. */
+  const statusText = () => {
+    const cur = s();
+    if (!cur) return "";
+    const r = cur.result;
+    return [
+      cur.phase === "loading" ? tm.loading : "",
+      cur.closing ? tm.closeWaiting : "",
+      cur.notice ?? "",
+      r && r.kind !== "failed" ? [resultHead(r), r.ccnew ? tm.ccnew : ""].join(" ") : "",
+    ].filter(Boolean).join(" ");
+  };
+  const alertText = () => {
+    const cur = s();
+    if (!cur) return "";
+    const t = cur.target;
+    const r = cur.result;
+    return [
+      ctl.locked() ? tm.locked : "",
+      cur.phase === "loadError" ? `${tm.loadFailed} ${cur.loadError ?? ""}` : "",
+      cur.closeAsk ? tm.closeAsk : "",
+      t && !t.editable ? `${tm.unsupported} ${t.unsupported.join(", ")}` : "",
+      t?.editable && ctl.ops().length === 0 ? tm.noOps : "",
+      r?.kind === "failed"
+        ? [resultHead(r), r.error, r.hint ? `${tm.hint}: ${r.hint}` : "", r.ccnew ? tm.ccnew : ""].filter(Boolean).join(" ")
+        : "",
+    ].filter(Boolean).join(" ");
+  };
   const gateReason = () => {
     const g = ctl.gate();
     if (!g.ok) return tm.blocked[g.reason];
@@ -95,27 +134,43 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
     if (ctl.canApply()) void ctl.apply();
   };
   let noEl: HTMLButtonElement | undefined;
+  let cancelEl: HTMLButtonElement | undefined;
+  /** Kapatma sorusundan önce odaklı öğe: "Hayır"dan sonra odak oraya (yoksa İptal düğmesine) döner. */
+  let beforeAsk: HTMLElement | null = null;
   createEffect(() => {
     if (s()?.closeAsk) queueMicrotask(() => noEl?.focus());
   });
+  const askClose = () => {
+    if (s()?.phase === "applying" && !s()?.closeAsk) beforeAsk = document.activeElement as HTMLElement | null;
+    ctl.requestClose();
+  };
+  const answerNo = () => {
+    ctl.answerClose(false);
+    const el = beforeAsk;
+    beforeAsk = null;
+    queueMicrotask(() => (el?.isConnected ? el : cancelEl)?.focus());
+  };
 
   return (
     <Dialog
       open={props.nodeId !== null && s() !== null}
       onOpenChange={(o) => {
         if (o) return;
-        if (s()?.closeAsk) ctl.answerClose(false);
-        else ctl.requestClose();
+        if (s()?.closeAsk) answerNo();
+        else askClose();
       }}
       title={title()}
       width="640px"
       footer={
         <>
+          <span id={reasonId} class="mr-auto self-center text-[12px] text-muted">
+            {gateReason() ?? ""}
+          </span>
           <Show
             when={applying()}
-            fallback={<Button onClick={() => ctl.requestClose()}>{tm.close}</Button>}
+            fallback={<Button onClick={askClose}>{tm.close}</Button>}
           >
-            <Button disabled={s()?.cancelRequested} onClick={() => ctl.cancelApply()}>
+            <Button ref={cancelEl} disabled={s()?.cancelRequested} onClick={() => ctl.cancelApply()}>
               {s()?.cancelRequested ? tm.cancelling : tm.cancel}
             </Button>
           </Show>
@@ -123,6 +178,7 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
             variant="primary"
             disabled={!ctl.canApply()}
             title={gateReason()}
+            aria-describedby={gateReason() ? reasonId : undefined}
             onClick={() => ctl.canApply() && void ctl.apply()}
           >
             {s()?.result ? tm.rerun : tm.apply}
@@ -130,17 +186,19 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
         </>
       }
     >
+      <div role="status" class="sr-only">{statusText()}</div>
+      <div role="alert" class="sr-only">{alertText()}</div>
       <Show when={s()}>
         {(cur) => (
           <div class="flex flex-col gap-3 text-[13px]" onKeyDown={onKeyDown}>
-            <Show when={cur().locked}>
-              <p role="alert" class="text-danger">{tm.locked}</p>
+            <Show when={ctl.locked()}>
+              <p class="text-danger">{tm.locked}</p>
             </Show>
             <Show when={cur().phase === "loading"}>
-              <p role="status" class="text-muted">{tm.loading}</p>
+              <p class="text-muted">{tm.loading}</p>
             </Show>
             <Show when={cur().phase === "loadError"}>
-              <div role="alert" class="flex flex-col gap-2 rounded border border-danger px-3 py-2">
+              <div class="flex flex-col gap-2 rounded border border-danger px-3 py-2">
                 <p class="font-medium text-danger">{tm.loadFailed}</p>
                 <p class="text-muted">{cur().loadError}</p>
                 <Show when={cur().loadError !== tm.noTarget}>
@@ -151,23 +209,23 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
               </div>
             </Show>
             <Show when={cur().notice}>
-              <p role="status" class="rounded border border-border px-3 py-2 text-warn-text">{cur().notice}</p>
+              <p class="rounded border border-border px-3 py-2 text-warn-text">{cur().notice}</p>
             </Show>
             <Show when={cur().closeAsk}>
-              <div role="alert" class="flex items-center gap-2 rounded border border-danger px-3 py-2">
+              <div class="flex items-center gap-2 rounded border border-danger px-3 py-2">
                 <p class="flex-1 font-medium">{tm.closeAsk}</p>
-                <Button ref={noEl} onClick={() => ctl.answerClose(false)}>{tm.closeNo}</Button>
+                <Button ref={noEl} onClick={answerNo}>{tm.closeNo}</Button>
                 <Button class="!bg-danger !text-danger-fg" onClick={() => ctl.answerClose(true)}>{tm.closeYes}</Button>
               </div>
             </Show>
             <Show when={cur().closing}>
-              <p role="status" class="text-muted">{tm.closeWaiting}</p>
+              <p class="text-muted">{tm.closeWaiting}</p>
             </Show>
             <Show when={cur().target}>
               {(target) => (
                 <>
                   <Show when={!target().editable}>
-                    <div role="alert" class="rounded border border-danger px-3 py-2">
+                    <div class="rounded border border-danger px-3 py-2">
                       <p class="font-medium">{tm.unsupported}</p>
                       <ul class="list-disc pl-5">
                         <For each={target().unsupported}>{(u) => <li>{u}</li>}</For>
@@ -175,7 +233,7 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
                     </div>
                   </Show>
                   <Show when={target().editable && ctl.ops().length === 0}>
-                    <p role="alert" class="text-danger">{tm.noOps}</p>
+                    <p class="text-danger">{tm.noOps}</p>
                   </Show>
                   <Show when={cur().versionNum === null && target().editable}>
                     <p class="text-[12px] text-muted">{tm.versionUnknown}</p>
@@ -431,7 +489,7 @@ function ApplyControls(props: { ctl: MaintenanceController }) {
       >
         <For each={LOCK_TIMEOUTS}>{(ms) => <option value={String(ms)}>{`${tm.lockTimeout}: ${tm.lockChoice(ms)}`}</option>}</For>
       </select>
-      <Show when={needsConfirm() && !s().locked}>
+      <Show when={needsConfirm() && !props.ctl.locked()}>
         <label class="flex items-center gap-2">
           <input
             type="checkbox"
@@ -455,8 +513,8 @@ function Running(props: { ctl: MaintenanceController; now: number }) {
       <div
         role="progressbar"
         aria-label={tm.progress}
-        aria-valuemin={0}
-        aria-valuemax={100}
+        aria-valuemin={pv().percent === null ? undefined : 0}
+        aria-valuemax={pv().percent === null ? undefined : 100}
         aria-valuenow={pv().percent ?? undefined}
         aria-valuetext={pv().text}
         class="h-2 w-full overflow-hidden rounded bg-panel"
@@ -482,8 +540,9 @@ function Result(props: { r: MaintenanceResult }) {
   const r = () => props.r;
   const head = () =>
     r().kind === "applied" ? tm.doneIn(elapsedLabel(r().elapsedMs)) : `${tm.status[r().kind]} (${elapsedLabel(r().elapsedMs)})`;
-  const body = (
-    <>
+  // Duyuru kalıcı canlı bölgelerdedir (MaintenanceDialog); burası yalnız görseldir.
+  return (
+    <div class="flex flex-col gap-2 rounded border border-border px-3 py-2">
       <p class="font-medium" classList={{ "text-danger": r().kind === "failed" }}>
         {head()}
         <Show when={r().warnings > 0}>
@@ -498,13 +557,6 @@ function Result(props: { r: MaintenanceResult }) {
       </Show>
       <Show when={r().ccnew}>
         <p class="text-warn-text">{tm.ccnew}</p>
-      </Show>
-    </>
-  );
-  return (
-    <div class="flex flex-col gap-2 rounded border border-border px-3 py-2">
-      <Show when={r().kind === "failed"} fallback={<div role="status">{body}</div>}>
-        <div role="alert">{body}</div>
       </Show>
       <Show when={r().messages.length > 0}>
         <details open={r().warnings > 0}>
@@ -531,4 +583,10 @@ function Result(props: { r: MaintenanceResult }) {
       </Show>
     </div>
   );
+}
+
+/** Sonuç başlığı + uyarı sayısı (canlı bölge duyurusu). */
+function resultHead(r: MaintenanceResult): string {
+  const head = r.kind === "applied" ? tm.doneIn(elapsedLabel(r.elapsedMs)) : `${tm.status[r.kind]} (${elapsedLabel(r.elapsedMs)})`;
+  return r.warnings > 0 ? `${head} — ${tm.warnCount(r.warnings)}` : head;
 }

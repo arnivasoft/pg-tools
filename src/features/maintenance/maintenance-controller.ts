@@ -67,7 +67,6 @@ export interface MaintenanceState {
   /** Yükleyici çıktısı (DEĞİŞTİRİLMEZ; isteğe olduğu gibi gider). */
   target: MaintenanceTarget | null;
   versionNum: number | null;
-  locked: boolean;
   operation: MaintenanceOp | null;
   version: number;
   view: PlanView | null;
@@ -98,7 +97,7 @@ export interface MaintenanceControllerDeps {
     Api,
     "ddlTargetOf" | "ddlLoadMaintenanceTarget" | "ddlPreview" | "ddlApply" | "ddlCancel" | "ddlMaintenanceProgress"
   >;
-  /** Sunucu sürümü (bilinmiyorsa null → istemci kapısı yok) ve salt okunur kilit. */
+  /** Sunucu sürümü (bilinmiyorsa null → istemci kapısı yok) ve salt okunur kilit (canlı; tek kaynak). */
   serverInfo(serverId: string): { versionNum: number | null; locked: boolean } | null;
   notify(text: string, kind: ToastKind): void;
   /** Denetleyici kendi kapandığında (kapatma onayı/boşta kapatma) App'in düğüm kimliğini temizlemesi için. */
@@ -242,7 +241,7 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
         if (!cur) return cur;
         const base: MaintenanceState = {
           ...cur, serverId, databaseOid, object, target, phase: "ready", loadError: null,
-          versionNum: info?.versionNum ?? null, locked: cur.locked || (info?.locked ?? false),
+          versionNum: info?.versionNum ?? null,
         };
         const ops = target.editable ? opsFor(target.kind, target.partitioned, base.versionNum) : [];
         const kept = keep && cur.operation && ops.includes(cur.operation.op) && opBlocked(cur.operation.op, target) === null;
@@ -259,11 +258,16 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
     }
   };
 
+  /**
+   * Diyaloğu açar. Uygulama sürerken yok sayılır: uçuştaki işlem sessizce iptal edilmez (diyalog kipli olduğundan
+   * normalde ulaşılamaz; savunma).
+   */
   const open = (nodeId: string) => {
+    if (state()?.phase === "applying") return;
     close();
     setState({
       nodeId, serverId: null, databaseOid: null, object: null, phase: "loading", loadError: null, target: null,
-      versionNum: null, locked: false, operation: null, version: 0, view: null, viewFor: -1, pending: false,
+      versionNum: null, operation: null, version: 0, view: null, viewFor: -1, pending: false,
       previewError: null, lockTimeoutMs: DEFAULT_LOCK_TIMEOUT_MS, confirmed: false, applyId: null, startedAt: null,
       progress: null, progressStopped: false, cancelRequested: false, closeAsk: false, closing: false, result: null,
       notice: null,
@@ -281,10 +285,16 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
     setState(null);
   }
 
+  /** Canlı kilit (sunucu düğümü `flags.locked`); kilit açılınca kendiliğinden kalkar. */
+  const locked = (): boolean => {
+    const id = state()?.serverId;
+    return id ? (deps.serverInfo(id)?.locked ?? false) : false;
+  };
+
   const gate = (): Gate => {
     const s = state();
     if (!s) return { ok: false, reason: "loading" };
-    if (s.locked || (s.serverId !== null && (deps.serverInfo(s.serverId)?.locked ?? false))) return { ok: false, reason: "locked" };
+    if (locked()) return { ok: false, reason: "locked" };
     if (s.phase === "loading" || s.phase === "loadError") return { ok: false, reason: "loading" };
     if (s.phase === "applying") return { ok: false, reason: "busy" };
     if (!s.target || !s.operation || opBlocked(s.operation.op, s.target) !== null) return { ok: false, reason: "unavailable" };
@@ -348,8 +358,10 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
         void loadTarget(true);
         return;
       }
+      // Kilit reddi: kilit şeridi ve kapı canlı sunucu düğümünden okunur (ayrı bildirim yok).
       if (p.code === "locked") {
-        patch({ ...base, locked: true, notice: tm.locked });
+        patch(base);
+        schedulePreview(0);
         return;
       }
       const elapsed = deps.now() - startedAt;
@@ -445,6 +457,7 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
     answerClose,
     gate,
     canApply,
+    locked,
     /** Sunulan işlemler ve kullanılamayanların gerekçesi. */
     ops: (): { name: OpName; reason: string | null }[] => {
       const s = state();

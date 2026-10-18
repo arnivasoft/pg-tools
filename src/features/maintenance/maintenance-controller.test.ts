@@ -64,7 +64,7 @@ function setup(info: { versionNum: number | null; locked: boolean } | null = { v
     clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
   };
   const ctl = createMaintenanceController(deps);
-  return { ctl, api, notify, onClosed };
+  return { ctl, api, notify, onClosed, setInfo: (i: typeof info) => { info = i; } };
 }
 type S = ReturnType<typeof setup>;
 
@@ -158,11 +158,33 @@ describe("maintenance-controller önizleme ve kapı", () => {
     expect(s.api.ddlApply.mock.calls[0]![3]).toMatchObject({ confirmed: true, confirmedProduction: false, password: null, lockTimeoutMs: 5000 });
   });
 
-  it("kilitli sunucuda uygulama kapalı", async () => {
+  it("kilit canlıdır: kilitlenince kapı kapanır, açılınca kendiliğinden kalkar", async () => {
     const s = setup({ versionNum: 170000, locked: true });
     await ready(s);
+    expect(s.ctl.locked()).toBe(true);
     expect(s.ctl.canApply()).toBe(false);
     expect(s.ctl.gate()).toEqual({ ok: false, reason: "locked" });
+    s.setInfo({ versionNum: 170000, locked: false });
+    expect(s.ctl.locked()).toBe(false);
+    expect(s.ctl.canApply()).toBe(true);
+    s.setInfo({ versionNum: 170000, locked: true });
+    expect(s.ctl.canApply()).toBe(false);
+  });
+
+  it("locked reddi: ayrı bildirim yok, kilit canlı değerden; önizleme yenilenir", async () => {
+    const s = setup();
+    await ready(s);
+    s.api.ddlApply.mockRejectedValueOnce({ code: "locked", message: "x", detail: null, hint: null });
+    s.setInfo({ versionNum: 170000, locked: true });
+    await s.ctl.apply();
+    await settle();
+    const st = s.ctl.state()!;
+    expect(st.phase).toBe("ready");
+    expect(st.notice).toBeNull();
+    expect(st.result).toBeNull();
+    expect(s.ctl.locked()).toBe(true);
+    s.setInfo({ versionNum: 170000, locked: false });
+    expect(s.ctl.canApply()).toBe(true);
   });
 
   it("işlem değişimi varsayılan seçenekleri kurar ve önizler", async () => {
@@ -280,6 +302,22 @@ describe("maintenance-controller uygulama", () => {
 });
 
 describe("maintenance-controller kapatma", () => {
+  it("uygulama sürerken open() yok sayılır (uçuştaki işlem iptal edilmez)", async () => {
+    const s = setup();
+    await ready(s);
+    const d = deferred<ApplyOutcome>();
+    s.api.ddlApply.mockReturnValueOnce(d.promise);
+    void s.ctl.apply();
+    await flush();
+    s.ctl.open("N2");
+    expect(s.api.ddlCancel).not.toHaveBeenCalled();
+    expect(s.ctl.state()!.nodeId).toBe("N1");
+    expect(s.ctl.state()!.phase).toBe("applying");
+    d.resolve(applied());
+    await flush();
+    expect(s.ctl.state()!.result?.kind).toBe("applied");
+  });
+
   it("çalışırken kapatma onay ister; Hayır açık bırakır, Evet iptal edip sonucu bekler", async () => {
     const s = setup();
     await ready(s);
