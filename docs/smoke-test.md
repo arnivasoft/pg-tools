@@ -699,3 +699,21 @@ Plan 24 yalnızca arka uçtur; GUI maddeleri "Bakım işlemleri arayüzü (Plan 
 - [ ] Klavye ve ekran okuyucu: odak diyalogda kalır; seçenekler etiketli, devre dışı gerekçesi okunur (`aria-describedby`); Enter (onay tamamsa) uygular, IME bileşiminde uygulamaz; ilerleme `progressbar` olarak okunur (yüzde ya da aşama metni); sonuç `status`, hata `alert` olarak duyurulur. **[—]**
 - [ ] Kilitli sunucu: menü devre dışı ve gerekçeli; diyalog açıkken sunucu kilitlenirse Uygula kapalı ve "salt okunur kilitli" şeridi. **[—]**
 - [ ] Query Tool iletileri: `SET lc_messages = 'tr_TR…'` olan bir oturumda `DO $$ BEGIN RAISE WARNING 'x'; RAISE NOTICE 'y'; END $$` → ileti önemi İngilizce (WARNING/NOTICE) görünür (Plan 25 `pgt-core` değişikliği). **[—]**
+
+## Yedekleme arka ucu (Plan 26)
+
+Plan 26 yalnızca arka uçtur; GUI maddeleri Plan 27'de eklenecektir. Arka uç elle sınanmaz; birim testleri, sahte araç ikilisi ve Docker testleriyle (`crates/pgt-backup/tests/*`, `PGT_TEST_PGBIN` ile gerçek araçlar, PG 10–18) doğrulanır. Sözleşme: `docs/superpowers/specs/2026-10-18-backup-restore-design.md` §5.
+
+- Araç bulma: `pgBinDir` ayarı, `PATH`, `Program Files\PostgreSQL\*\bin` ve pgAdmin `runtime` sırasıyla taranır; `pg_dump` sunucu sürümüne eşit ya da büyük seçilir. Geçersiz bin klasörü `settings_set_pg_bin_dir` ile reddedilir.
+- Yedekleme: her format (custom/plain/directory/tar) ve kapsam (veritabanı/şema/tablo) yeni bir veritabanına geri yüklenir; tablo ve satır sayıları eşittir. Çıktı `.pgt-partial` olarak yazılır, başarıda taşınır; hata ve iptalde silinir.
+- İptal: büyük tabloda iptal sonrası süreç sonlanır ve geçici dosya kalmaz; `--clean` geri yükleme, düz SQL + `psql -1` hatada geri alma, yanlış parola ipucu doğrulanır.
+- Kapılar: kilitli sunucu, onay (`confirmation_required`), üretimde ek onay, `password_required`, `not_connected`, plan alan hataları (`invalid_request` + alan yolu), aynı hedefe ikinci yedek (`busy`).
+- Günlükte parola, yol ve nesne adı yoktur.
+- Bilinen sınırlar (Plan 27 arayüzü bunları göstermeli):
+  - PG 17'den eski sunucuda 17+ araçlarla geri yükleme: `SET transaction_timeout` yüzünden `pg_restore` veriyi yükler ama başarısız (çıkış kodu sıfırdan farklı) bildirir, düz `psql` ilk satırda durur. Sunucuyla aynı ana sürümden araç önerilir.
+  - Windows ANSI kod sayfası: ASCII dışı şema/tablo adı `?` joker desenle aktarılır (belirsizse plan hatası); ASCII dışı veritabanı ya da kullanıcı adı plan hatasıdır.
+  - `password_required` yalnız oturum parolayla açıldıysa döner.
+  - İlerleme toplamı yalnız `relkind = 'r'` tabloları sayar (bölümlenmiş üst tablo ve MV hariç); yalnız şema yedeğinde toplam yoktur.
+  - Kilit beklerken iptal edilen `pg_dump` sunucu oturumu kilit bırakılana dek kalır (takip: `pg_cancel_backend`).
+  - Geri yüklemeler birbirini engellemez; yalnız aynı hedef yola yazan yedeklemeler engellenir.
+  - Son taşıma başarısızsa çıktı `.pgt-partial` olarak korunur ve iletide yeri yazar.

@@ -456,3 +456,16 @@ Elle kontrol: `docs/smoke-test.md` "Bakım işlemleri arka ucu (Plan 24)".
 - Paket: `bun run bundle:check` tavanları ölçülen değerdedir (ana 129,476 B / açılış 157,149 B).
 
 Elle kontrol: `docs/smoke-test.md` "Bakım işlemleri arayüzü (Plan 25)".
+
+## Yedekleme arka ucu testleri (Plan 26)
+
+- **Birim** (Docker'sız, `cargo test -p pgt-backup`): sürüm ayrıştırma ve araç seçimi, argüman/ortam üretimi (insta anlık görüntüleri; her format ve seçenek, dışlamalar, düşmanca adlar), format algılama ve `pg_restore -l` ayrıştırma, satır sınıflandırma, ilerleme sayımı, ipuçları, iş kaydı. `src-tauri/src/backup.rs` testleri: kapı sırası, parola kararı, parametreli sayım sorguları, alan yolu eşlemesi (`cargo test -p pg-tools` ya da `cargo test --workspace`).
+- **Sahte araç ikilisi** (`crates/pgt-backup/tests/support/fake_tool.rs`, `CARGO_BIN_EXE_pgt-fake-tool`): yürütücü testleri (`tests/runner.rs`, `tests/runner_env.rs`) gerçek PostgreSQL araçları olmadan akış/sınıflandırma, satır sınırları, atomik çıktı, iptal, alıcı gitmesi, ortam temizliği (`PG*`, `LC_ALL`, `LANGUAGE`, `PGPASSWORD`) ve taşıma hatasında korunan geçici çıktıyı sınar.
+- **Araç gerekliliği:** gerçek `pg_dump`/`pg_restore`/`psql` gerekir. `PGT_TEST_PGBIN` en yeni istemci araçlarının `bin` klasörünü verir (örn. `C:\Program Files\PostgreSQL\18\bin`); tanımsızsa Windows'ta varsayılan PostgreSQL 18 yolu denenir, araç yoksa ilgili testler atlanır (çıktıda "atlandı"). Araç bulma testi (`tools.rs`) aynı değişkeni kullanır.
+- **Docker** (`PGT_TEST_URLS` + `PGT_TEST_PGBIN` ya da `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`; her ikisi yoksa atlanır):
+  - `tests/roundtrip.rs`: her formatta yedekle → yeni veritabanına yükle (tablo/satır eşitliği), şema ve tablo kapsamı, `--clean`, `psql -1` hatada geri alma, iptalde geçici dosyanın ve sunucu oturumunun temizliği, yanlış parola ipucu, ASCII dışı veritabanı adı (Windows'ta plan hatası).
+  - `tests/roundtrip_log.rs`: günlükte parola, yol ve ad yok.
+  - Bilinen: 18 araçları PG < 17 sunucuda `transaction_timeout` nedeniyle geri yüklemeyi başarısız bildirir; bu senaryolar sürüme göre beklenen sonucu doğrular (bkz. spec §5 "Bilinen sınırlar").
+- **Kapanış taramaları:** `rg "PGPASSWORD" crates src-tauri` yalnız yürütücüde, argüman üreticide ve testlerde çıkmalı; `rg "tracing::" crates/pgt-backup` alanlarında yol, ad ya da metin içermemeli.
+
+Elle kontrol: `docs/smoke-test.md` "Yedekleme arka ucu (Plan 26)".
