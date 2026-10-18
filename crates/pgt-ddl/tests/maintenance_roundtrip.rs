@@ -1,6 +1,6 @@
-//! Bakım işlemleri (Plan 24) Docker testleri: hedef yükleyicisi (`load_maintenance_target`) ve üreticinin
-//! (`build::maintenance`) ürettiği ifadenin sunucuda düz çalıştırılması (`PlanRequest::Maintenance` Task 4'te).
-//! `PGT_TEST_URLS` yoksa atlanır.
+//! Bakım işlemleri (Plan 24) Docker testleri: hedef yükleyicisi (`load_maintenance_target`), üreticinin
+//! (`build::maintenance`) ürettiği ifadenin sunucuda düz çalıştırılması ve `PlanRequest::Maintenance`'ın
+//! `DdlManager` kapılarından uygulanması (iletiler, lock_timeout, iptal, ilerleme). `PGT_TEST_URLS` yoksa atlanır.
 //!
 //! Her test kendi geçici veritabanını (`pgt_ddl_rt_<ana sürüm>_<etiket>`) ve `pgt_ddl_rt_<etiket>` şemasını kurar;
 //! başarısız doğrulamadan sonra bile veritabanı silinir (`guarded` + `cleanup`). Sürüme bağlı kısımlar (bölümlenmiş
@@ -8,11 +8,13 @@
 
 mod common;
 
-use std::time::Duration;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use common::{Env, cleanup, db_name, guarded, servers, setup};
 use pgt_core::Error;
 use pgt_core::connection::{SessionProfile, Target};
+use pgt_core::registry::Registry;
 use pgt_core::testing::{TestServer, admin_client};
 use pgt_ddl::build::maintenance::maintenance;
 use pgt_ddl::load_maintenance::{NO_MAINTENANCE_MSG, PARTITIONED_INDEX_REASON, TEMP_SCHEMA_REASON, WRONG_DATABASE_MSG};
@@ -405,4 +407,280 @@ async fn full_dps_body(ts: TestServer, tag: &'static str) {
     let t = ld(&env, ObjectKind::Table, env.class_oid(S, "t").await).await;
     let o = VacuumOptions { full: true, disable_page_skipping: true, ..vac() };
     assert!(maintenance(&ctx, &t, &MaintenanceOp::Vacuum(o)).is_err());
+}
+
+// ================================================================================================================
+// uygulama: `PlanRequest::Maintenance` → `DdlManager` kapıları
+// ================================================================================================================
+
+/// Kayıtlı (kilitli ya da değil) sunucuyla yönetici.
+fn manager(env: &Env, ts: &TestServer, locked: bool) -> (Arc<DdlManager>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut registry = Registry::load(dir.path().join("servers.json")).unwrap().registry;
+    let mut config = ts.config.clone();
+    config.read_only_lock = locked;
+    registry.upsert(config).unwrap();
+    (Arc::new(DdlManager::new(env.mgr.clone(), Arc::new(RwLock::new(registry)))), dir)
+}
+
+fn opts(hash: &str, confirmed: bool) -> ApplyOptions {
+    ApplyOptions { apply_id: uuid::Uuid::new_v4(), lock_timeout_ms: 5000, expected_hash: hash.into(), confirmed, confirmed_production: false, password: None }
+}
+
+/// Hedefi yöneticiden yükler (arayüzün `ddl_load_maintenance_target` → istek akışı).
+async fn request(dm: &DdlManager, env: &Env, kind: ObjectKind, oid: u32, op: MaintenanceOp) -> PlanRequest {
+    let object = ObjectRef { kind, oid };
+    let target = dm.load_maintenance_target(env.server, env.db_oid, object).await.unwrap_or_else(|e| panic!("{kind:?}: {e:?}"));
+    PlanRequest::Maintenance { object, target, op }
+}
+
+/// Önizleme hash'iyle, onaylı uygular.
+async fn apply_req(dm: &DdlManager, env: &Env, req: &PlanRequest, edit: impl FnOnce(&mut ApplyOptions)) -> pgt_core::Result<ApplyOutcome> {
+    let view = dm.preview(env.server, env.db_oid, req).await.unwrap();
+    assert!(view.errors.is_empty(), "{:?}", view.errors);
+    let mut o = opts(&view.hash, true);
+    edit(&mut o);
+    dm.apply(env.server, env.db_oid, req, o).await
+}
+
+async fn applied(dm: &DdlManager, env: &Env, req: &PlanRequest) -> Vec<ServerMessage> {
+    match apply_req(dm, env, req, |_| {}).await {
+        Ok(ApplyOutcome::Applied { statements: 1, created: None, warnings: None, messages, .. }) => messages,
+        other => panic!("uygulanmalıydı: {other:?}"),
+    }
+}
+
+fn code(r: &pgt_core::Result<ApplyOutcome>) -> String {
+    match r {
+        Err(e) => ddl_payload(e).code,
+        Ok(o) => panic!("kapı reddi bekleniyordu: {o:?}"),
+    }
+}
+
+async fn filenode(env: &Env, rel: &str) -> u32 {
+    env.admin.query_one(&format!("SELECT pg_relation_filenode('{rel}'::regclass)::oid"), &[]).await.unwrap().get(0)
+}
+
+fn reindex(concurrently: bool, verbose: bool) -> MaintenanceOp {
+    MaintenanceOp::Reindex(ReindexOptions { concurrently, verbose })
+}
+
+docker_test!(maintenance_applies_through_the_manager, apply_body, "mtapply");
+async fn apply_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag).await;
+    fixture(&env).await;
+    env.sql(&format!("INSERT INTO {S}.t SELECT g, g, g FROM generate_series(1, 2000) g")).await;
+    let (dm, _dir) = manager(&env, &ts, false);
+    let t = env.class_oid(S, "t").await;
+    let rel = format!("{S}.t");
+
+    // VACUUM (Safe) ve ANALYZE: istatistik sütunları dolar.
+    let vacuum = request(&dm, &env, ObjectKind::Table, t, MaintenanceOp::Vacuum(vac())).await;
+    assert_eq!(dm.preview(env.server, env.db_oid, &vacuum).await.unwrap().risk, Risk::Safe);
+    applied(&dm, &env, &vacuum).await;
+    assert!(stat_set(&env, &rel, "last_vacuum").await, "last_vacuum dolmalı");
+    let analyze = request(&dm, &env, ObjectKind::Table, t, MaintenanceOp::Analyze(AnalyzeOptions { verbose: false, skip_locked: false })).await;
+    applied(&dm, &env, &analyze).await;
+    assert!(stat_set(&env, &rel, "last_analyze").await, "last_analyze dolmalı");
+
+    // VERBOSE: sunucu INFO iletileri sonuca düşer.
+    let verbose = request(&dm, &env, ObjectKind::Table, t, MaintenanceOp::Vacuum(VacuumOptions { verbose: true, ..vac() })).await;
+    let m = applied(&dm, &env, &verbose).await;
+    assert!(!m.is_empty() && m.iter().any(|m| m.severity == "INFO"), "{m:?}");
+
+    // REINDEX TABLE / INDEX / SCHEMA / DATABASE: indeks dosyası yenilenir (Destructive, onaylı).
+    let idx = format!("{S}.t_b");
+    let i = env.class_oid(S, "t_b").await;
+    let s = env.schema_oid(S).await;
+    for (kind, oid) in [(ObjectKind::Table, t), (ObjectKind::Index, i), (ObjectKind::Schema, s), (ObjectKind::Database, env.db_oid)] {
+        let before = filenode(&env, &idx).await;
+        let req = request(&dm, &env, kind, oid, reindex(false, kind == ObjectKind::Index)).await;
+        assert_eq!(dm.preview(env.server, env.db_oid, &req).await.unwrap().risk, Risk::Destructive);
+        let m = applied(&dm, &env, &req).await;
+        assert_ne!(filenode(&env, &idx).await, before, "{kind:?}: indeks yeniden kurulmalı");
+        if kind == ObjectKind::Index {
+            assert!(!m.is_empty(), "REINDEX (VERBOSE) iletisi bekleniyordu");
+        }
+    }
+    // REINDEX CONCURRENTLY (PG 12+; Safe).
+    if env.version >= 120000 {
+        let before = filenode(&env, &idx).await;
+        let req = request(&dm, &env, ObjectKind::Index, i, reindex(true, false)).await;
+        assert_eq!(dm.preview(env.server, env.db_oid, &req).await.unwrap().risk, Risk::Safe);
+        applied(&dm, &env, &req).await;
+        assert_ne!(filenode(&env, &idx).await, before);
+        let req = request(&dm, &env, ObjectKind::Table, t, reindex(true, false)).await;
+        applied(&dm, &env, &req).await;
+    } else {
+        eprintln!("PG {}: REINDEX CONCURRENTLY yok (PG 12+), atlandı", env.version);
+    }
+
+    // CLUSTER USING: kümeleme indeksi değişir; USING'siz CLUSTER kayıtlı kümeleme indeksini kullanır.
+    let clustered = |name: &'static str| {
+        let sql = format!("SELECT indisclustered FROM pg_index WHERE indexrelid = '{S}.{name}'::regclass");
+        let admin = &env.admin;
+        async move { admin.query_one(&sql, &[]).await.unwrap().get::<_, bool>(0) }
+    };
+    let using = MaintenanceOp::Cluster(ClusterOptions { verbose: true, using_index: Some("t_pkey".into()) });
+    let using = request(&dm, &env, ObjectKind::Table, t, using).await;
+    let m = applied(&dm, &env, &using).await;
+    assert!(clustered("t_pkey").await && !clustered("t_b").await);
+    assert!(!m.is_empty(), "CLUSTER VERBOSE iletisi bekleniyordu");
+    let plain = request(&dm, &env, ObjectKind::Table, t, MaintenanceOp::Cluster(ClusterOptions { verbose: false, using_index: None })).await;
+    applied(&dm, &env, &plain).await;
+    assert!(clustered("t_pkey").await);
+
+    // MV ve veritabanı hedefi (bağlı veritabanı; bakım veritabanı değil).
+    let mv_op = MaintenanceOp::Vacuum(VacuumOptions { analyze: true, ..vac() });
+    let mv = request(&dm, &env, ObjectKind::MaterializedView, env.class_oid(S, "mv").await, mv_op).await;
+    applied(&dm, &env, &mv).await;
+    let db_op = MaintenanceOp::Analyze(AnalyzeOptions { verbose: false, skip_locked: false });
+    let db = request(&dm, &env, ObjectKind::Database, env.db_oid, db_op).await;
+    applied(&dm, &env, &db).await;
+}
+
+docker_test!(maintenance_gates_hold, gates_body, "mtgates");
+async fn gates_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag).await;
+    fixture(&env).await;
+    let (dm, _dir) = manager(&env, &ts, false);
+    let t = env.class_oid(S, "t").await;
+    let full = request(&dm, &env, ObjectKind::Table, t, MaintenanceOp::Vacuum(VacuumOptions { full: true, ..vac() })).await;
+    let hash = dm.preview(env.server, env.db_oid, &full).await.unwrap().hash;
+
+    // Kilitli sunucu: önizleme serbest, uygulama `locked`.
+    let (locked, _d) = manager(&env, &ts, true);
+    assert_eq!(code(&locked.apply(env.server, env.db_oid, &full, opts(&hash, true)).await), "locked");
+    assert_eq!(locked.preview(env.server, env.db_oid, &full).await.unwrap().statements.len(), 1);
+    // Destructive (VACUUM FULL) onaysız → `confirmation_required`.
+    assert_eq!(code(&dm.apply(env.server, env.db_oid, &full, opts(&hash, false)).await), "confirmation_required");
+    // Veritabanı gerekir (Database türünde de).
+    let dbreq = request(&dm, &env, ObjectKind::Database, env.db_oid, MaintenanceOp::Vacuum(vac())).await;
+    let dbhash = dm.preview(env.server, env.db_oid, &dbreq).await.unwrap().hash;
+    match dm.apply(env.server, None, &dbreq, opts(&dbhash, true)).await {
+        Err(Error::Invalid(m)) => assert_eq!(m, pgt_ddl::error_codes::NEEDS_DATABASE),
+        other => panic!("{other:?}"),
+    }
+    // Sahte hedef (başka ad/şema): yeniden yükleme eşitliği yakalar.
+    let PlanRequest::Maintenance { object, target, op } = full.clone() else { unreachable!() };
+    for spoof in [MaintenanceTarget { name: "mv".into(), ..target.clone() }, MaintenanceTarget { schema: Some("public".into()), ..target.clone() }] {
+        let req = PlanRequest::Maintenance { object, target: spoof, op: op.clone() };
+        let h = dm.preview(env.server, env.db_oid, &req).await.unwrap().hash;
+        assert_eq!(code(&dm.apply(env.server, env.db_oid, &req, opts(&h, true)).await), "plan_changed");
+    }
+    // Bayat hash.
+    let other = request(&dm, &env, ObjectKind::Table, t, MaintenanceOp::Vacuum(vac())).await;
+    assert_eq!(code(&dm.apply(env.server, env.db_oid, &other, opts(&hash, true)).await), "plan_changed");
+    // Bayat hedef: yükleme sonrası yeniden adlandırma → `plan_changed`; silme → `not_found`.
+    env.sql(&format!("ALTER TABLE {S}.t RENAME TO t2")).await;
+    assert_eq!(code(&dm.apply(env.server, env.db_oid, &full, opts(&hash, true)).await), "plan_changed");
+    env.sql(&format!("DROP TABLE {S}.t2 CASCADE")).await;
+    assert_eq!(code(&dm.apply(env.server, env.db_oid, &full, opts(&hash, true)).await), "not_found");
+    // Nesne türü ↔ hedef türü uyuşmazlığı ve salt okunur hedef bağlantıdan önce reddedilir.
+    let mismatched = PlanRequest::Maintenance { object: ObjectRef { kind: ObjectKind::Index, oid: object.oid }, target: target.clone(), op: op.clone() };
+    assert_eq!(code(&dm.apply(env.server, env.db_oid, &mismatched, opts(&hash, true)).await), "invalid_def");
+    let ro = PlanRequest::Maintenance { object, target: MaintenanceTarget { editable: false, ..target }, op };
+    assert!(matches!(dm.apply(env.server, env.db_oid, &ro, opts(&hash, true)).await, Err(Error::Invalid(_))));
+}
+
+/// Uygulama oturumlarından kaçı kilit bekliyor.
+async fn ddl_waiting(admin: &tokio_postgres::Client) -> i64 {
+    let sql = "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'pg-tools ddl' AND wait_event_type = 'Lock' \
+               AND datname = current_database()";
+    admin.query_one(sql, &[]).await.unwrap().get(0)
+}
+
+/// Tabloyu ACCESS EXCLUSIVE kilitleyen ayrı oturum (transaction açık kalır).
+async fn lock_table(ts: &TestServer, tag: &str, rel: &str) -> tokio_postgres::Client {
+    let locker = admin_client(ts, &db_name(ts, tag).await).await;
+    locker.batch_execute(&format!("BEGIN; LOCK TABLE {rel} IN ACCESS EXCLUSIVE MODE")).await.unwrap();
+    locker
+}
+
+docker_test!(maintenance_lock_timeout_and_cancel, lock_body, "mtlock");
+async fn lock_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag).await;
+    fixture(&env).await;
+    let (dm, _dir) = manager(&env, &ts, false);
+    let t = env.class_oid(S, "t").await;
+    let full_op = MaintenanceOp::Vacuum(VacuumOptions { full: true, verbose: true, ..vac() });
+    let full = request(&dm, &env, ObjectKind::Table, t, full_op).await;
+    let locker = lock_table(&ts, tag, &format!("{S}.t")).await;
+
+    // lock_timeout aşımı: 55P03 + bakım kilit ipucu.
+    let started = Instant::now();
+    let r = apply_req(&dm, &env, &full, |o| o.lock_timeout_ms = 300).await;
+    let Ok(ApplyOutcome::Failed { failed_index: 0, committed: 0, sqlstate, error, .. }) = r else { panic!("{r:?}") };
+    assert_eq!(sqlstate.as_deref(), Some("55P03"));
+    assert_eq!(error.hint.as_deref(), Some(pgt_ddl::manager::MAINTENANCE_LOCK_HINT));
+    assert!(started.elapsed() < Duration::from_secs(5));
+
+    // İptal: kilit beklerken `cancel(apply_id)` → 57014, ipucusuz; ilerleme sorgusu bekleme sırasında hatasız.
+    let hash = dm.preview(env.server, env.db_oid, &full).await.unwrap().hash;
+    let o = ApplyOptions { lock_timeout_ms: 0, ..opts(&hash, true) };
+    let id = o.apply_id;
+    let (dm2, server, db, req) = (dm.clone(), env.server, env.db_oid, full.clone());
+    let task = tokio::spawn(async move { dm2.apply(server, db, &req, o).await });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while ddl_waiting(&env.admin).await != 1 {
+        assert!(Instant::now() < deadline, "bekleyen bakım oturumu görülmedi");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Kilit beklerken ilerleme satırı olmayabilir (VACUUM FULL kilidi aldıktan sonra raporlar); sorgu hatasız döner.
+    let p = dm.maintenance_progress(env.server, env.db_oid, id).await.unwrap();
+    eprintln!("PG {}: kilit beklerken ilerleme = {p:?}", env.version);
+    dm.cancel(id).await.unwrap();
+    let r = tokio::time::timeout(Duration::from_secs(15), task).await.expect("iptal 15 sn içinde sonuçlanmalı").unwrap();
+    let Ok(ApplyOutcome::Failed { sqlstate, error, .. }) = r else { panic!("{r:?}") };
+    assert_eq!(sqlstate.as_deref(), Some("57014"));
+    assert_eq!(error.hint, None, "{error:?}");
+    // Bitmiş kimlik: ilerleme `None`, iptal Ok.
+    assert_eq!(dm.maintenance_progress(env.server, env.db_oid, id).await.unwrap(), None);
+    dm.cancel(id).await.unwrap();
+    locker.batch_execute("COMMIT").await.unwrap();
+    assert_eq!(ddl_waiting(&env.admin).await, 0);
+}
+
+// İlerleme (en iyi çaba): büyük tabloda VACUUM ve VACUUM FULL sürerken yoklanır. Satır gelirse alanlar tutarlı
+// olmalı; gelmezse (kısa sürdü) `None` kabul. Her sürümde sorgu hatasızdır (PG 10–11'de yalnız vacuum görünümü).
+docker_test!(maintenance_progress_is_read_while_running, progress_body, "mtprog");
+async fn progress_body(ts: TestServer, tag: &'static str) {
+    let env = setup(&ts, tag).await;
+    env.sql(&format!(
+        "CREATE SCHEMA {S};
+         CREATE TABLE {S}.big (id int, pad text);
+         INSERT INTO {S}.big SELECT g, repeat('x', 100) FROM generate_series(1, 200000) g;
+         DELETE FROM {S}.big WHERE id % 2 = 0;"
+    ))
+    .await;
+    let (dm, _dir) = manager(&env, &ts, false);
+    let big = env.class_oid(S, "big").await;
+    for op in [MaintenanceOp::Vacuum(vac()), MaintenanceOp::Vacuum(VacuumOptions { full: true, ..vac() })] {
+        let req = request(&dm, &env, ObjectKind::Table, big, op.clone()).await;
+        let hash = dm.preview(env.server, env.db_oid, &req).await.unwrap().hash;
+        let o = opts(&hash, true);
+        let id = o.apply_id;
+        let (dm2, server, db) = (dm.clone(), env.server, env.db_oid);
+        let task = tokio::spawn(async move { dm2.apply(server, db, &req, o).await });
+        let mut seen = vec![];
+        while !task.is_finished() {
+            let p = dm.maintenance_progress(env.server, env.db_oid, id).await.expect("ilerleme sorgusu hatasız olmalı");
+            seen.extend(p);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let r = task.await.unwrap();
+        assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
+        eprintln!("PG {}: {op:?} ilerleme satırları = {}, örnek = {:?}", env.version, seen.len(), seen.first());
+        for p in &seen {
+            assert!(!p.phase.is_empty(), "{p:?}");
+            if let (Some(d), Some(t)) = (p.done, p.total) {
+                assert!(d <= t, "{p:?}");
+            }
+            if p.total.is_some() {
+                assert!(p.done.is_some() && p.unit.is_some(), "{p:?}");
+            }
+            assert!(p.unit.as_deref().is_none_or(|u| ["blocks", "tuples", "indexes"].contains(&u)), "{p:?}");
+        }
+        assert_eq!(dm.maintenance_progress(env.server, env.db_oid, id).await.unwrap(), None);
+    }
 }

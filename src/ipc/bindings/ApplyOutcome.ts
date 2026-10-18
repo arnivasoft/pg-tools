@@ -3,6 +3,9 @@ import type { ErrorPayload } from "./ErrorPayload";
 import type { ObjectRef } from "./ObjectRef";
 import type { ServerMessage } from "./ServerMessage";
 
+/**
+ * Uygulama sonucu. Günlüğe yazmayın (`Debug` dahil): sunucu ileti metni (`messages`, `error`) içerir.
+ */
 export type ApplyOutcome = { "outcome": "applied", statements: number, elapsedMs: number, 
 /**
  * Create (ve kimliği değişen alter/yeniden kurma) sonrası yeni nesne; en iyi çaba, bulunamazsa `None`.

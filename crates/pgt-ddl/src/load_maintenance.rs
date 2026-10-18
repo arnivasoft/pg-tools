@@ -38,7 +38,7 @@ pub const PARTITIONED_INDEX_REASON: &str = "bölümlenmiş indeks";
 pub const TEMP_SCHEMA_REASON: &str = "geçici şema (başka oturumun nesneleri)";
 
 /// `ObjectKind` → bakım hedefi türü; bakımı olmayan tür `None`.
-fn target_kind(kind: ObjectKind) -> Option<MaintenanceTargetKind> {
+pub(crate) fn target_kind(kind: ObjectKind) -> Option<MaintenanceTargetKind> {
     match kind {
         ObjectKind::Table => Some(MaintenanceTargetKind::Table),
         ObjectKind::MaterializedView => Some(MaintenanceTargetKind::MaterializedView),

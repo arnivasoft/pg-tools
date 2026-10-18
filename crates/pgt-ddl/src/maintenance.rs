@@ -115,3 +115,19 @@ pub fn ops_for(kind: MaintenanceTargetKind, partitioned: bool, version_num: u32)
         Database => &["vacuum", "analyze", "reindex"],
     }
 }
+
+/// Süren bakım işleminin ilerlemesi (`pg_stat_progress_*`, uygulama bağlantısının pid'i için; Plan 24).
+/// `phase` PG'nin İngilizce aşama metnidir (ön yüz çevirir ya da olduğu gibi gösterir). `done`/`total` bilinmiyorsa
+/// `None` (belirsiz ilerleme); `total` olmadan `done` sayaçtır (ör. yazılan satır).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct MaintenanceProgress {
+    pub phase: String,
+    #[ts(type = "number | null")]
+    pub done: Option<u64>,
+    #[ts(type = "number | null")]
+    pub total: Option<u64>,
+    #[ts(type = "\"blocks\" | \"tuples\" | \"indexes\" | null")]
+    pub unit: Option<String>,
+}

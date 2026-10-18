@@ -2,10 +2,12 @@
 import type { AclDef } from "./AclDef";
 import type { DefaultAclDef } from "./DefaultAclDef";
 import type { DefaultAclScope } from "./DefaultAclScope";
+import type { MaintenanceOp } from "./MaintenanceOp";
+import type { MaintenanceTarget } from "./MaintenanceTarget";
 import type { ObjectDef } from "./ObjectDef";
 import type { ObjectRef } from "./ObjectRef";
 
 /**
  * Arayüzün istediği değişiklik; plan arka uçta bu istekten üretilir.
  */
-export type PlanRequest = { "op": "create", def: ObjectDef, concurrently: boolean, } | { "op": "alter", object: ObjectRef, old: ObjectDef, new: ObjectDef, } | { "op": "drop", object: ObjectRef, def: ObjectDef, cascade: boolean, force: boolean, } | { "op": "privileges", object: ObjectRef, old: AclDef, new: AclDef, cascade: boolean, } | { "op": "default_privileges", scope: DefaultAclScope, old: DefaultAclDef, new: DefaultAclDef, };
+export type PlanRequest = { "op": "create", def: ObjectDef, concurrently: boolean, } | { "op": "alter", object: ObjectRef, old: ObjectDef, new: ObjectDef, } | { "op": "drop", object: ObjectRef, def: ObjectDef, cascade: boolean, force: boolean, } | { "op": "privileges", object: ObjectRef, old: AclDef, new: AclDef, cascade: boolean, } | { "op": "default_privileges", scope: DefaultAclScope, old: DefaultAclDef, new: DefaultAclDef, } | { "op": "maintenance", object: ObjectRef, target: MaintenanceTarget, operation: MaintenanceOp, };

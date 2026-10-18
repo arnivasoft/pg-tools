@@ -289,8 +289,7 @@ impl CancelMap {
     }
 
     /// Süren uygulamanın arka uç pid'i; bilinmeyen/bitmiş kimlik ya da pid henüz okunmadıysa `None`.
-    // İlerleme sorgusu (Plan 24 Görev 4) kullanır.
-    #[allow(dead_code)]
+    // İlerleme sorgusu (`DdlManager::maintenance_progress`) kullanır.
     pub(crate) fn backend_pid(&self, id: Uuid) -> Option<i32> {
         self.lock().slots.get(&id).and_then(|s| s.backend_pid)
     }

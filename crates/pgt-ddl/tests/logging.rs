@@ -559,3 +559,71 @@ async fn acl_logging_body(ts: TestServer) {
     let req = PlanRequest::DefaultPrivileges { scope, old, new };
     assert!(matches!(apply(&dm, server, db, &req).await, Ok(ApplyOutcome::Applied { .. })));
 }
+
+// ---- bakım işlemleri (Plan 24) ----
+
+/// Ayırt edici izleyici dizgeler: şema ve tablo adı (VERBOSE iletileri ve hata iletileri bunları içerir).
+const MT_SCHEMA: &str = "zmt_gizli_sema";
+const MT_TABLE: &str = "zmt_gizli_tablo";
+
+#[tokio::test]
+async fn maintenance_logging_is_sql_name_and_message_free() {
+    let buf = capture();
+    for ts in servers() {
+        guarded(maintenance_logging_body(ts.clone()), cleanup(&ts, "m_mtlog")).await;
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        for marker in ["maintenance", "55P03", "DDL uygulandı", "DDL uygulanamadı", "maintenance_progress", "load_maintenance_target"] {
+            assert!(out.contains(marker), "günlükte {marker:?} yok: {out}");
+        }
+        for secret in [MT_SCHEMA, MT_TABLE, "zmt_gizli", "VACUUM", "vacuuming", "pages", "removable", "lock timeout"] {
+            assert!(!out.contains(secret), "günlükte {secret:?} var: {out}");
+        }
+        if let Some(p) = ts.password.as_deref().filter(|p| !p.is_empty()) {
+            assert!(!out.contains(p), "günlükte parola var");
+        }
+    }
+}
+
+async fn maintenance_logging_body(ts: TestServer) {
+    let env = setup(&ts, "m_mtlog").await;
+    let (dm, _dir) = manager(&ts.config, env.mgr.clone());
+    let (server, db) = (env.server, env.db_oid);
+    env.sql(&format!("CREATE SCHEMA {MT_SCHEMA}; CREATE TABLE {MT_SCHEMA}.{MT_TABLE} (id int); INSERT INTO {MT_SCHEMA}.{MT_TABLE} VALUES (1)")).await;
+    let object = ObjectRef { kind: ObjectKind::Table, oid: env.class_oid(MT_SCHEMA, MT_TABLE).await };
+    let target = dm.load_maintenance_target(server, db, object).await.unwrap();
+    let vacuum = |full: bool| VacuumOptions {
+        full,
+        freeze: false,
+        analyze: false,
+        verbose: true,
+        disable_page_skipping: false,
+        skip_locked: false,
+        index_cleanup: None,
+        parallel: None,
+    };
+    // VERBOSE: iletiler sonuçta (ad içerir), günlükte yok.
+    let req = PlanRequest::Maintenance { object, target: target.clone(), op: MaintenanceOp::Vacuum(vacuum(false)) };
+    let r = apply(&dm, server, db, &req).await;
+    let Ok(ApplyOutcome::Applied { messages, .. }) = r else { panic!("{r:?}") };
+    assert!(messages.iter().any(|m| m.message.contains(MT_TABLE)), "{messages:?}");
+    // Kilit zaman aşımı (başka oturum ACCESS EXCLUSIVE tutarken): günlüğe yalnız kod.
+    let name: String = env.admin.query_one("SELECT current_database()::text", &[]).await.unwrap().get(0);
+    let locker = pgt_core::testing::admin_client(&ts, &name).await;
+    locker.batch_execute(&format!("BEGIN; LOCK TABLE {MT_SCHEMA}.{MT_TABLE} IN ACCESS EXCLUSIVE MODE")).await.unwrap();
+    let full = PlanRequest::Maintenance { object, target, op: MaintenanceOp::Vacuum(vacuum(true)) };
+    let hash = dm.preview(server, db, &full).await.unwrap().hash;
+    let o = ApplyOptions { lock_timeout_ms: 1500, confirmed: true, ..opts(&hash) };
+    let id = o.apply_id;
+    let dm = Arc::new(dm);
+    let dm2 = dm.clone();
+    let task = tokio::spawn(async move { dm2.apply(server, db, &full, o).await });
+    // Kilit beklerken ilerleme sorgusu (kayıtlı kimlik: katalog sorgusu çalışır, günlükte yalnız işlem adı).
+    while !task.is_finished() {
+        dm.maintenance_progress(server, db, id).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let r = task.await.unwrap();
+    let Ok(ApplyOutcome::Failed { sqlstate, .. }) = r else { panic!("{r:?}") };
+    assert_eq!(sqlstate.as_deref(), Some("55P03"));
+    locker.batch_execute("COMMIT").await.unwrap();
+}

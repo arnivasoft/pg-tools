@@ -102,6 +102,8 @@ fn main() {
             ddl::ddl_load,
             ddl::ddl_load_acl,
             ddl::ddl_load_default_acl,
+            ddl::ddl_load_maintenance_target,
+            ddl::ddl_maintenance_progress,
             ddl::ddl_lookup,
             ddl::ddl_preview,
             ddl::ddl_apply,
