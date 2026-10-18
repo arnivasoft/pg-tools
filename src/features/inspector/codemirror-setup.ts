@@ -1,7 +1,8 @@
+import { defaultKeymap, history, historyKeymap, indentWithTab, temporarilySetTabFocusMode } from "@codemirror/commands";
 import { PostgreSQL, sql } from "@codemirror/lang-sql";
-import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { EditorState, type Extension } from "@codemirror/state";
-import { EditorView, lineNumbers } from "@codemirror/view";
+import { HighlightStyle, bracketMatching, indentService, indentUnit, syntaxHighlighting } from "@codemirror/language";
+import { EditorState, countColumn, type Extension } from "@codemirror/state";
+import { EditorView, drawSelection, keymap, lineNumbers } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 
 export const sharedHighlight = HighlightStyle.define([
@@ -49,3 +50,82 @@ export function replaceDoc(view: EditorView, doc: string): void {
     effects: EditorView.scrollIntoView(0, { y: "start" }),
   });
 }
+
+/**
+ * Düzenlenebilir gövde editörünün (designer `SqlBodyEditor`, Plan 23) temel uzantıları: satır numarası, geri alma
+ * geçmişi, girinti (`indent` birimi; Tab/Shift+Tab), parantez eşleme; `closeBrackets` yok.
+ *
+ * Otomatik girinti: SQL dilbilgisi PL/pgSQL bloklarını (BEGIN/IF/LOOP … END) modellemediğinden dilin girintisi yerine
+ * `indentService` girinti kopyalar: Enter bulunduğu satırın kendi girintisini, satır boşsa en yakın boş olmayan önceki
+ * satırınkini (`bodyIndentColumn`); girintileme komutları önceki dolu satırınkini (`copyIndentColumn`). `indentOnInput` yok (bu servisle anlamsız; dilin yeniden girintileme deseni de yok).
+ *
+ * Neden burada (paket): `@codemirror/commands` Sorgu Aracı ile ikinci bir tembel tüketiciden (RoutineForm) içe
+ * aktarılınca Rolldown onu ayrı bir paylaşılan parçaya böler ve ana paketin `__vite__mapDeps` listesi bir girdi büyür
+ * (ana +29 B, bütçe aşılır). Bu ortak modülden içe aktarıldığında commands bu parçayla aynı giriş kümesine düşer ve
+ * mevcut CodeMirror parçasına katılır (yeni parça yok). Bu modül ana paket modüllerini içe aktarmamalıdır.
+ *
+ * Tuzaktan çıkış: Esc → 2 sn tab-odak kipi (`temporarilySetTabFocusMode`); bağ `false` döner ki `defaultKeymap`'teki
+ * `simplifySelection` da çalışsın (seçim varken o Esc'i tüketir ve yerleşik Esc işleyicisine sıra gelmez — kip yine de
+ * burada açılmış olur). Salt okunurda `indentMore` `false` döner → Tab tarayıcıya kalır, odak doğrudan çıkar.
+ */
+export function bodyEditingExtensions(indent: string): Extension[] {
+  return [
+    lineNumbers(),
+    history(),
+    drawSelection(),
+    bracketMatching(),
+    indentUnit.of(indent),
+    copyIndent,
+    keymap.of([
+      {
+        key: "Escape",
+        run: (v) => {
+          temporarilySetTabFocusMode(v);
+          return false;
+        },
+      },
+      ...defaultKeymap,
+      ...historyKeymap,
+      indentWithTab,
+    ]),
+  ];
+}
+
+/**
+ * Önceki satırlardan (en yakın önce) ilk boş olmayanın girinti sütunu (`tabSize` ile sekme genişliği); yoksa 0.
+ * Saf: `indentService` ve testler kullanır.
+ */
+export function copyIndentColumn(prevLines: Iterable<string>, tabSize: number): number {
+  for (const text of prevLines) {
+    if (text.trim() === "") continue;
+    const ws = /^[ \t]*/.exec(text)![0];
+    return countColumn(ws, tabSize);
+  }
+  return 0;
+}
+
+/**
+ * Enter'da yeni satırın girinti sütunu: bulunduğu satır boş değilse (yalnız boşluk dahil) **kendi** baştaki boşluğu —
+ * imlecin önündeki boşluk ve arkasındaki metin bu girintiyle yeni satıra taşınır, var olan metnin girintisi değişmez;
+ * satır tamamen boşsa (`""`) en yakın boş olmayan önceki satırınki (`copyIndentColumn`). Saf.
+ */
+export function bodyIndentColumn(lineText: string, prevLines: Iterable<string>, tabSize: number): number {
+  if (lineText !== "") return countColumn(/^[ \t]*/.exec(lineText)![0], tabSize);
+  return copyIndentColumn(prevLines, tabSize);
+}
+
+/**
+ * Enter (`insertNewlineAndIndent`) servisi imleç konumuyla ve benzetilmiş satır kırılmasıyla çağırır; girintileme
+ * komutları (`indentSelection`) ise satır başıyla ve kırılmasız. Kırılma `ctx.lineAt(pos, -1)`'den anlaşılır: imleç satır
+ * başında değilse ya da kırılmadan önceki parça satırın tamamı değilse Enter'dır (satır başında + boş satırda iki yol
+ * aynı sonucu verir). Enter → `bodyIndentColumn`; girintileme → önceki dolu satır.
+ */
+const copyIndent = indentService.of((ctx, pos) => {
+  const doc = ctx.state.doc;
+  const line = doc.lineAt(pos);
+  const enter = pos !== line.from || ctx.lineAt(pos, -1).text !== line.text;
+  function* prev(): Generator<string> {
+    for (let k = line.number - 1; k >= 1; k--) yield doc.line(k).text;
+  }
+  return enter ? bodyIndentColumn(line.text, prev(), ctx.state.tabSize) : copyIndentColumn(prev(), ctx.state.tabSize);
+});

@@ -418,3 +418,17 @@ Tümü `bun run test` (vitest) altında koşar; Docker gerekmez. Arka uç `avail
 | `src/features/explorer/actions.test.ts` | Menü kuralları: `privilegesObject` / `defaultPrivilegesObject` görünürlüğü (ACL türleri, `db`/`sch`), odak hedefleri ve ACL dışı türlerde gizli, kilitte devre dışı |
 
 Elle kontrol: `docs/smoke-test.md` "Yetkiler arayüzü (Plan 22)".
+
+## Fonksiyon gövdesi düzenleyicisi testleri (Plan 23)
+
+Tümü `bun run test` (vitest, `environment: node`) altında koşar; DOM gerekmez. CodeMirror bileşeni (`SqlBodyEditor.tsx`: görünüm, klavye, odak, IME ertelemesi) birim testli değildir — elle kontrol.
+
+| Dosya | Kapsam |
+|---|---|
+| `src/features/designer/sql-body-model.test.ts` | `separatorOf`, `displayText`, `applyDisplayEdit` (CRLF/LF/karışık satır sonu korunumu), `bodyLanguageMode` (`sql`/`plpgsql` büyük-küçük harf duyarsız → vurgu, diğerleri düz), `displayDiff` (dış değer → belge değişikliği), CodeMirror belge akışı (CRLF gövdede satır ekleme/silme/birleştirme, çok satırlı girinti, aynı metin → aynı ham) |
+| `src/features/designer/sql-body-sync.test.ts` | `resyncState` (görünümsüz `EditorState` + `history()`): aynı metinde `null`, dış değer sonrası geri alma geçmişinin sıfırlanması (`undoDepth` 0, `undo` etkisiz), seçimin değişiklikle eşlenmesi; `syncDecision` (yankıda — bileşim sürse de — `noop`, gerçek dış değişiklikte bileşimde `defer`, değilse `apply`) |
+| `src/features/inspector/codemirror-setup.test.ts` | Gövde girintisi: `copyIndentColumn` (en yakın boş olmayan önceki satır, sekme genişliği), `bodyIndentColumn` (satırın kendi girintisi; boşsa önceki dolu satır) ve `bodyEditingExtensions` ile görünümsüz Enter (`insertNewlineAndIndent`), düz ve SQL kipinde: ifadenin önünde, ilk satırda baştaki boşlukta, yalnız boşluk satırında, satır başında ve boş satırda |
+
+Paket: `bun run bundle:check` değişmeden geçmelidir (ana paket / açılış kümesi / `__vite__mapDeps` aynı). `@codemirror/commands`'ı `codemirror-setup.ts` dışından ikinci bir tembel tüketiciden içe aktarmak QueryTab ile paylaşılan yeni bir parça böler ve ana paketi büyütür (Plan 23 Task 1'de ölçüldü: +29 B, mapDeps 34 → 35) — düzenleme uzantıları `bodyEditingExtensions()` üzerinden alınır.
+
+Elle kontrol: `docs/smoke-test.md` "Fonksiyon gövdesi düzenleyicisi (Plan 23)".

@@ -428,6 +428,7 @@ export default function RoutineForm(props: FormProps) {
                     label={trout.body.label}
                     value={d().body}
                     onChange={(body) => patch({ body })}
+                    language={d().language}
                     readOnly={locked()}
                     invalid={f.invalid}
                     describedBy={[f.describedBy, bodyNoteId, dollarId].filter(Boolean).join(" ")}
