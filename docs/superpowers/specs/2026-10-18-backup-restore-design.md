@@ -24,8 +24,8 @@
 - Her adayda `pg_dump.exe`, `pg_restore.exe` ve `psql.exe` için `--version` çalıştırılır (zaman aşımı 5 sn) ve çıktıdan sürüm okunur. Sonuç bir `ToolSet { dir, version_num, has: {pg_dump, pg_restore, psql} }` listesidir.
 - **Seçim:**
   - `pg_dump` sürümü sunucunun ana sürümüne **eşit ya da büyük** olmalıdır; aksi hâlde araç kullanılmaz. Uygun olanlardan sunucuyla aynı ana sürüm tercih edilir, yoksa en küçük büyük sürüm.
-  - `pg_restore` arşivi okuyabilmelidir: arşivi üretenle aynı ya da daha yeni sürüm gerekir. Sürüm bilinmiyorsa en yeni araç seçilir; uyumsuzluğu PG kendi hatasıyla bildirir.
-  - `psql` için sürüm şartı yoktur, en yeni seçilir.
+  - `pg_restore` arşivi okuyabilmelidir: arşivi üretenle aynı ya da daha yeni sürüm gerekir. Arşiv sürümü `pg_restore -l` özetinden okunur. Sıra: sunucuyla aynı ana sürüm (arşivi okuyabiliyorsa); yoksa arşivi okuyabilen en küçük ana sürüm; yoksa en yeni (uyumsuzluğu PG kendi hatasıyla bildirir). Eşitlikte aday sırası (ayardaki klasör önce). Arşiv sürümü bilinmiyorsa sunucuyla aynı ana sürüm, yoksa en yeni.
+  - `psql` için sürüm şartı yoktur, en yeni seçilir (düz SQL'in uyumu dosyayı üreten `pg_dump`'a bağlıdır).
   - Uygun araç yoksa iletide sunucu sürümü ve bulunan en yeni araç sürümü belirtilir, "Ayarlardan bin klasörü seçin" önerisi verilir.
 - **Ayar:** `AppSettings.pgBinDir: Option<String>`. Kaydedilmeden önce doğrulanır: klasör var mı, içinde en az `pg_dump.exe` var mı.
 
@@ -63,7 +63,7 @@
   - `-j` ile `-1` birlikte kullanılamaz.
   - `-C` ile hedef bakım veritabanıdır.
   - `--verbose` her zaman açıktır.
-- **Düz SQL (`psql`):** `psql -X -v ON_ERROR_STOP=1 -f <dosya>`, isteğe bağlı `-1` (tek transaction). Yalnız "mevcut veritabanına" yüklenir; temizle ve oluştur seçenekleri yoktur (SQL içeriğine bağlıdır). İçerik taranmaz.
+- **Düz SQL (`psql`):** `psql -X -v ON_ERROR_STOP=1 -f <dosya>`, isteğe bağlı `-1` (tek transaction). Yalnız "mevcut veritabanına" yüklenir; temizle ve oluştur seçenekleri yoktur (SQL içeriğine bağlıdır). İçerik taranmaz. Düz SQL dosyası psql meta komutları (`\!`, `\connect`, `\copy … program`) çalıştırabilir; plan notu yalnız güvenilen dosyaların yüklenmesini söyler.
 - **Risk:**
   - Geri yükleme veritabanını değiştirir.
   - Kilitli sunucuda reddedilir.
@@ -88,13 +88,13 @@
   - `Line { severity: info|warning|error, text }`: stderr satırları. En çok 2000 satır tutulur; satır başına 4 KiB, sınırda kesilir.
   - `Progress { done, total: Option, bytes }`:
     - Yedeklemede `done`, "dumping contents of table" satırlarının sayısıdır. `total`, işten önce katalogdan sayılan tablo sayısıdır (kapsama göre). `bytes`, hedef/geçici dosyanın boyutudur ve 1 sn'de bir okunur.
-    - Geri yüklemede `done`, "processing item"/"creating"/"restoring data" satırlarının sayısıdır. `total`, arşiv özetindeki öğe sayısıdır. Plain'de `total` yoktur.
-  - `Finished { outcome: success|failed|cancelled, exit_code, elapsed_ms, warnings, errors, output_path? }`.
+    - Geri yüklemede `done` öğe başına bir satırdır: `creating …`, `processing data for table …` (eski araçlarda `restoring data …`), `executing …`, `processing BLOBS`. `processing item`/`launching item`/`finished item` sayılmaz (paralel kipte aynı öğe için ek satırlardır). `total`, arşiv özetindeki öğe sayısıdır; yalnız şema, yalnız veri ya da oluştur (`--create`) seçiliyse `done` toplama ulaşmayacağından `total` yoktur (belirsiz ilerleme). Plain'de `total` yoktur. Ön yüz `done`'u `total` ile sınırlar.
+  - `Finished { outcome: success|completed_with_errors|failed|cancelled, exit_code, elapsed_ms, warnings, errors, output_path? }`.
 - **Hata eşleme:** çıkış kodu sıfır değilse sonuç failed olur. Son `error:` satırları özetlenir.
   - "password authentication failed" ve "no password supplied" için ipucu: parolayı kaydedin ya da yeniden bağlanın.
   - "server version mismatch" / "aborting because of server version mismatch" için ipucu: daha yeni pg_dump gerekir, bin klasörü seçin.
   - `pg_restore` "unsupported version" için ipucu: daha yeni pg_restore gerekir.
-  - Uyarılı ama sıfır çıkış kodlu geri yüklemede (`-e` olmadan hatalar atlanır; pg_restore hata sayısını bildirir) sonuç "tamamlandı, N hata" olur ve vurgulanır.
+  - `pg_restore` `-e` olmadan hataları atlar, sonunda `errors ignored on restore: N` yazar ve **1** ile çıkar. Bu durumda (geri yükleme, `pg_restore`, "hatada dur" kapalı, çıkış kodu 1 ve sayı satırı görüldü) sonuç `completed_with_errors` olur: "tamamlandı, N hata" olarak vurgulanır, veri yüklenmiş olabilir. Sayı satırı yoksa (bağlantı ya da arşiv okuma hatası gibi erken çıkış) sonuç `failed`'dır.
 - **İptal:**
   - `backup_cancel(job_id)` çocuk süreci sonlandırır (Windows'ta `TerminateProcess`; `-j` iş parçacıklı olduğu için tek süreç yeter). Geçici çıktı silinir.
   - Uygulama kapanırken ya da sayfa yenilenirken tüm işler sonlandırılır (`cancel_all`, mevcut `on_page_load` ve `RunEvent::Exit` kancaları).
@@ -180,10 +180,10 @@ Sıra: `started` → `line`/`progress`* → `finished` (daima son). Etiket alan�
 - `{ event: "started", preview }` (parolasız tek satır; `PGPASSWORD=***`).
 - `{ event: "line", severity: "info"|"warning"|"error", text }`.
 - `{ event: "progress", done, total: number|null, bytes: number|null }`. `bytes` yalnız yedeklemede ve ~1 sn aralıkla (klasörde dosya toplamı); geri yüklemede `null`.
-- `{ event: "finished", outcome: "success"|"failed"|"cancelled", exitCode: number|null, elapsedMs, warnings, errors, outputPath: string|null, hint: string|null, truncatedLines }`.
+- `{ event: "finished", outcome: "success"|"completed_with_errors"|"failed"|"cancelled", exitCode: number|null, elapsedMs, warnings, errors, outputPath: string|null, hint: string|null, truncatedLines }`.
 - `JobSummary` aynı alanlardır (`start` komutlarının dönüş değeri `finished` ile eştir). `outputPath` yalnız başarıda dolu. `warnings`/`errors` gösterilmeyen satırları da sayar.
 - Sınırlar: en çok **2000** satır (`MAX_LOG_LINES`), fazlası `truncatedLines`'a sayılır ve sona "… N satır daha gösterilmedi" satırı eklenir; satır başına **4096 bayt** (`MAX_LINE_BYTES`, UTF-8 sınırında kesilir, sonuna `…`); ilerleme aralığı 1 sn. Pencere kapanır/olay gönderilemezse iş iptal edilir.
-- Sıfır çıkış kodlu ama hata satırlı geri yükleme (`pg_restore` hataları atlar) `success` döner; `errors > 0` ile "tamamlandı, N hata" gösterilmelidir.
+- `completed_with_errors`: `pg_restore` "hatada dur" kapalıyken hataları atlayıp sonuna dek çalıştı ve `errors ignored on restore: N` yazıp 1 ile çıktı (`exitCode: 1`; `errors` hata satırı sayısıdır). Ön yüz "tamamlandı, N hata" gösterir; veri yüklenmiş olabilir. `hint` bu sonuçta da dolabilir (ör. ipucu 4). `success` her zaman sıfır çıkış kodudur.
 
 ### Ön koşullar, kapılar ve hata kodları
 
@@ -210,9 +210,10 @@ Hatalar `ErrorPayload { code, message, detail?, hint? }` olarak gelir.
 
 Yedekleme:
 
-- `tool`: "Seçilen araç klasöründe pg_dump yok." ya da seçim iletisi ("Sunucu sürümü 16 için uygun pg_dump yok (bulunan en yeni pg_dump: 15.4). Ayarlardan PostgreSQL bin klasörü seçin.").
+- `tool`: "Seçilen araç klasöründe pg_dump yok." ya da seçim iletisi ("Sunucu sürümü 16 için uygun pg_dump yok (bulunan en yeni pg_dump: 15.4). Ayarlardan PostgreSQL bin klasörü seçin."); Windows'ta araç yolu kod sayfasında birebir temsil edilemiyorsa ANSI iletisi (aşağıda).
+- **ANSI (yalnız Windows; bkz. bilinen sınırlar (b)):** `outputPath`/`path`/`tool`/`ssl.rootCert`/`ssl.clientCert`/`ssl.clientKey`: "Bu yol Windows kod sayfasında güvenle temsil edilemiyor; araç onu farklı karakterlerle alır. Yalnız sistem kod sayfasındaki karakterleri içeren bir yol seçin."; `host` ve (savunma süpürmesi) `request`: "Bu değer Windows kod sayfasında güvenle temsil edilemiyor; araç onu farklı karakterlerle alır."
 - `database` / `user` (yalnız Windows): "Windows'ta PostgreSQL araçları ASCII dışı karakter içeren veritabanı adına / kullanıcı adıyla bağlanamaz."
-- `scope.name`, `scope.schema`: "Ad boş olamaz." / "Ad geçersiz karakter içeriyor."; `scope.name` ayrıca ASCII dışı ad belirsiz joker desene uyuyorsa: "Ad ASCII dışı karakter içeriyor: araç adı joker desenle aktarır ve desen başka nesnelere de uyuyor. Veritabanının tamamını yedekleyin ya da nesneyi yeniden adlandırın."
+- `scope.name`, `scope.schema`: "Ad boş olamaz." / "Ad geçersiz karakter içeriyor."; `scope.name` ayrıca ASCII dışı ad belirsiz joker desene uyuyorsa: "Ad ASCII dışı karakter içeriyor: araç adı joker desenle aktarır ve desen başka nesnelere de uyuyor. Veritabanının tamamını yedekleyin ya da nesneyi yeniden adlandırın."; desen sayım sorgusu hata verirse kapalı kalınır: "Ad ASCII dışı karakter içeriyor ve joker desenin başka nesnelere uyup uymadığı denetlenemedi. Veritabanının tamamını yedekleyin ya da yeniden deneyin." Denetim plan ve başlatma anında yapılır; arada ya da iş sürerken desene uyan yeni nesne oluşturulursa (TOCTOU) o da yedeğe girebilir.
 - `outputPath`: "Yol boş olamaz." / "Yol geçersiz karakter içeriyor." / "Dosya yolu klasör ayracıyla bitemez." / "Tam (mutlak) yol gerekir." / hedef denetimi: "Hedef klasör boş değil; boş bir klasör ya da yeni bir ad seçin." / "Hedef bir dosya; klasör formatı için boş bir klasör ya da yeni bir ad seçin." / "Hedef bir klasör; bir dosya adı seçin." / "Hedef denetlenemedi: …".
 - `options.dataOnly`: "Yalnız şema ile yalnız veri birlikte seçilemez."
 - `options.clean`: "Yalnız düz SQL (plain) formatında kullanılabilir." ya da "Temizle (--clean) yalnız veri ile birlikte kullanılamaz."
@@ -224,7 +225,7 @@ Yedekleme:
 
 Geri yükleme:
 
-- `path`: kaynak algılama iletileri ("Kaynak yolu geçersiz.", "Kaynak için tam (mutlak) yol gerekir.", "Kaynak bulunamadı.", "Klasörde toc.dat yok; directory formatında alınmış bir pg_dump yedeği seçin.", "Dosya gzip ile sıkıştırılmış (.sql.gz); psql bunu doğrudan okuyamaz. Önce açın (ör. 7-Zip) ve .sql dosyasını seçin.") ve yol iletileri (yedeklemedekiyle aynı).
+- `path`: ANSI iletisi (arşivde `pg_restore -l` bile çalıştırılmadan önce), arşiv okunamadı iletisi ("Arşiv okunamadı: …"), kaynak algılama iletileri ("Kaynak yolu geçersiz.", "Kaynak için tam (mutlak) yol gerekir.", "Kaynak bulunamadı.", "Klasörde toc.dat yok; directory formatında alınmış bir pg_dump yedeği seçin.", "Dosya gzip ile sıkıştırılmış (.sql.gz); psql bunu doğrudan okuyamaz. Önce açın (ör. 7-Zip) ve .sql dosyasını seçin.") ve yol iletileri (yedeklemedekiyle aynı).
 - `target`: "Hedef veritabanı seçilmedi." (`existing`, `databaseOid` null) / "Düz SQL yalnız mevcut bir veritabanına yüklenir." / "Bakım veritabanı bilinmiyor."
 - `tool`, `database`, `user`: yedeklemedekiyle aynı (`tool` için `pg_restore`/`psql`).
 - Düz SQL'de `options.clean|ifExists|create|jobs|schemaOnly|dataOnly|noOwner|noPrivileges`: "Düz SQL geri yüklemede kullanılamaz (SQL içeriğine bağlıdır)."
@@ -233,21 +234,23 @@ Geri yükleme:
 - `options.singleTransaction`: "Oluştur (--create) ile tek transaction birlikte kullanılamaz."
 - `options.jobs`: "Paralel iş sayısı 1–16 olmalı." / "Paralel iş ile tek transaction birlikte kullanılamaz." / "Tar arşivinde paralel geri yükleme yapılamaz."
 
-Plan notları (`JobPlan.notes`, ön yüz olduğu gibi gösterebilir): directory için "Hedef klasör boş olmalı ya da hiç olmamalı."; plain + `compress>0` için gzip (.sql.gz) notu; `create` + plain dışı için arşive yazılma notu; geri yüklemede bakım veritabanı, "Arşivdeki nesneler hedefte varsa önce silinir.", "İş yarıda kalırsa veritabanı yarım kalabilir (tek transaction kapalı).", "Hatalar atlanır ve sonunda sayıları bildirilir; …" ve düz SQL için "Düz SQL psql ile çalıştırılır; içerik taranmaz ve ilk hatada durulur." (psql `ON_ERROR_STOP=1`, `--no-psqlrc`).
+Plan notları (`JobPlan.notes`, ön yüz olduğu gibi gösterebilir): directory için "Hedef klasör boş olmalı ya da hiç olmamalı."; plain + `compress>0` için gzip (.sql.gz) notu; `create` + plain dışı için arşive yazılma notu; geri yüklemede bakım veritabanı, "Arşivdeki nesneler hedefte varsa önce silinir.", "İş yarıda kalırsa veritabanı yarım kalabilir (tek transaction kapalı).", "Hatalar atlanır ve sonunda sayıları bildirilir; …" ve düz SQL için "Düz SQL psql ile çalıştırılır; içerik taranmaz ve ilk hatada durulur." (psql `ON_ERROR_STOP=1`, `--no-psqlrc`) ile "Düz SQL dosyası psql meta komutları (\!, \connect, \copy … program) çalıştırabilir; yalnız güvendiğiniz dosyaları yükleyin." Plain yedekte araç ≥ 17 ve sunucu < 17 ise: "Bu yedek `SET transaction_timeout` içerir; PostgreSQL < 17 sunucuya düz SQL olarak geri yüklenemez. Aynı ana sürüm pg_dump kullanın ya da custom formatı seçin." (`PGREQUIREAUTH` kullanılmaz: trust/sertifika kimlik doğrulamasını bozabilir.)
 
 ### Araç seçimi
 
-- `pg_dump`: sunucu ana sürümüne eşit ya da büyük; aynı ana sürüm tercih edilir, yoksa en küçük büyük. `pg_restore`/`psql`: en yeni (kaynak sürümü bilinmez; uyumsuzluğu PG bildirir).
+- `pg_dump`: sunucu ana sürümüne eşit ya da büyük; aynı ana sürüm tercih edilir, yoksa en küçük büyük.
+- `pg_restore` (`tools::choose_restore(sets, serverVersionNum, archiveDumpVersion)`): sunucuyla aynı ana sürüm (arşivi okuyabiliyorsa, yani ≥ arşivi üreten pg_dump ana sürümü); yoksa arşivi okuyabilen en küçük ana sürüm; yoksa en yeni. Eşitlikte aday sırası. `restore_plan`/`restore_start` arşiv özetini bir kez okur (en yeni `pg_restore -l`) ve hem seçimde hem toplamda kullanır. `ToolDetection.chosenRestore` arşiv bilinmeden seçilir (sunucuyla aynı ana sürüm, yoksa en yeni).
+- `psql`: en yeni (sürüm önemsiz).
 - `ToolDetection.problem` metinleri: "PostgreSQL istemci araçları (pg_dump, pg_restore, psql) bulunamadı. Ayarlardan PostgreSQL bin klasörü seçin." | "Ayarlardaki bin klasöründe çalışan PostgreSQL aracı bulunamadı; diğer bulunan araçlar kullanılacak." | seçim iletisi (yukarıdaki `tool` örneği; sunucu bağlıyken `chosenDump` yoksa).
-- `settings_set_pg_bin_dir` hataları: "Seçilen bin klasörü bulunamadı." / "Seçilen klasörde pg_dump.exe yok."
+- `settings_set_pg_bin_dir` hataları: "Bin klasörü için tam (mutlak) yol gerekir." / "Seçilen bin klasörü bulunamadı." / "Seçilen klasörde pg_dump.exe yok."
 - Her `backup_tools` çağrısı yeniden tarar; diğer komutlar önbelleği kullanır (ayar değişince geçersiz olur).
 
-### İpuçları (`JobSummary.hint`; yalnız başarısız işte)
+### İpuçları (`JobSummary.hint`; yalnız `failed` ve `completed_with_errors` işte)
 
 1. Parola (`password authentication failed`, `no password supplied`, Türkçe `şifre doğrulaması başarısız`): "Parola reddedildi ya da verilmedi: parolayı kaydedin veya sunucuya yeniden bağlanın."
 2. `server version mismatch`: "Sunucu bu pg_dump'tan yeni: daha yeni bir pg_dump gerekir; Ayarlardan PostgreSQL bin klasörü seçin."
 3. `unsupported version`: "Arşiv bu pg_restore'dan yeni bir pg_dump ile alınmış: daha yeni bir pg_restore gerekir; Ayarlardan PostgreSQL bin klasörü seçin."
-4. `unrecognized configuration parameter "transaction_timeout"`: araç sunucudan yeni; sunucuyla aynı ana sürümden araç kurun ("hatada dur" kapalıyken `pg_restore` satırı atlar).
+4. `unrecognized configuration parameter "transaction_timeout"`: `pg_restore` işinde araç sunucudan yeni; sunucuyla aynı ana sürümden araç kurun ("hatada dur" kapalıyken `pg_restore` satırı atlar). `psql` (düz SQL) işinde satır dosyanın kendisindedir: "Düz SQL yedeği bu sunucudan yeni bir pg_dump ile alınmış ve sunucunun tanımadığı bir ayar (transaction_timeout) içeriyor: yedeği sunucuyla aynı ana sürümden pg_dump ile yeniden alın ya da custom formatı kullanın."
 
 Öncelik yukarıdaki sıradadır; satır sınırı aşıldığında son 100 satır taranır.
 
@@ -269,10 +272,10 @@ Plan notları (`JobPlan.notes`, ön yüz olduğu gibi gösterebilir): directory 
 
 ### Bilinen sınırlar
 
-- **(a) v18 araçları PG < 17 sunucuda:** araç `SET transaction_timeout` gönderir. `pg_restore` veriyi yükler ama hatayı bildirip çıkış kodu sıfırdan farklı döner ("failed", veri yüklenmiş olabilir); düz `psql` geri yüklemesi ilk satırda durur (`ON_ERROR_STOP`). Plan 27 diyalogta **sunucuyla aynı ana sürümden araç kullanmayı önermeli ve araç ≥ 17, sunucu < 17 ise uyarmalıdır**; ipucu 4 sonuçta da gösterilir. `pg_dump` bu uyumsuzluktan etkilenmez (yedek alınır).
-- **(b) Windows ANSI kod sayfası:** araçlar argv/ortamı ANSI kod sayfasında alır. ASCII dışı şema/tablo adı `?` joker deseniyle aktarılır; desen birden fazla nesneye uyarsa plan hatası (`scope.name`), tek nesneye uyarsa çalışır. ASCII dışı veritabanı ya da kullanıcı adı Windows'ta plan hatasıdır (`database`/`user`).
+- **(a) 17+ araçlar PG < 17 sunucuda:** `pg_dump` bu uyumsuzluktan etkilenmez (yedek alınır), ama 17+ `pg_dump`'ın **düz SQL** çıktısı `SET transaction_timeout = 0;` satırını içerir (hedef sunucu yedek alınırken bilinmez): böyle bir dosyanın 17'den eski sunucuya `psql` ile geri yüklenmesi ilk satırda durur (`ON_ERROR_STOP`) — psql sürümü önemsizdir, çözüm yedeği aynı ana sürüm `pg_dump` ile almak ya da custom format kullanmaktır (plan notu, ipucu 4'ün psql metni). Arşiv geri yüklemede 17+ `pg_restore` 17'den eski sunucuya `SET transaction_timeout` gönderir: "hatada dur" kapalıyken satırı atlar, veriyi yükler ve 1 ile çıkar (`completed_with_errors`); açıkken `failed`. `choose_restore` sunucuyla aynı ana sürümden `pg_restore` varsa onu seçerek bunu önler. Plan 27 diyalogta **sunucuyla aynı ana sürümden araç kurmayı önermeli ve araç ≥ 17, sunucu < 17 ise uyarmalıdır**; ipucu 4 sonuçta da gösterilir.
+- **(b) Windows ANSI kod sayfası:** araçlar argv/ortamı ANSI kod sayfasında alır. ASCII dışı şema/tablo adı `?` joker deseniyle aktarılır; desen birden fazla nesneye uyarsa plan hatası (`scope.name`), tek nesneye uyarsa çalışır. ASCII dışı veritabanı ya da kullanıcı adı Windows'ta plan hatasıdır (`database`/`user`). **Best-fit eşlemesi:** araçlar ANSI `main` kullanır; CRT argv'yi `GetCommandLineA` ile en yakın eşlemeyle (ör. U+FF02 `＂` → `"`, U+FF0D `－` → `-`) yeniden kurar. Böyle karakterli bir yol tek argüman olarak verilse de araçta tırnağı kapatıp argüman ekleyebilir (`-h kötü.örnek` ile `PGPASSWORD` başka sunucuya gider; `--clean` ile kapı atlanır). Bu yüzden Windows'ta sabit ASCII olmayan her argv öğesi (yollar; desenler zaten ASCII'dir) ile `PGHOST` ve sertifika yolu ortam değerleri `CP_ACP`'de birebir gidiş-dönüş yapmalıdır (`WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS)` varsayılan karakter kullanmamalı ve geri çözüm aynı olmalı; `pgt_backup::ansi`). Aksi plan hatasıdır (ANSI iletisi); arşivde `pg_restore -l` bile çalıştırılmaz. Kod sayfasında olmayan karakterli yol (ör. 1254'te Japonca) da reddedilir; Türkçe yol 1254'te çalışır. Sistem kod sayfası UTF-8 (65001) ise her yol geçer.
 - **(c) `password_required` yalnız oturum parola kullandıysa** döner; parolasız (trust) oturumda araç da parolasız çalışır.
-- **(d) İlerleme toplamı yalnız `relkind = 'r'`:** bölümlenmiş üst tablo ve MV sayılmaz; yalnız şema yedeğinde `total` yoktur (`null`). Sayı 0 ya da sorgu hatalıysa `total = null` (belirsiz ilerleme). Geri yüklemede toplam arşiv özetindeki öğe sayısıdır (düz SQL'de yok).
+- **(d) İlerleme toplamı yalnız `relkind = 'r'`:** bölümlenmiş üst tablo, MV ve yapılandırma tablosu olmayan uzantı üyesi tablolar (`pg_depend.deptype = 'e'`, `pg_extension.extconfig` dışı) sayılmaz; yalnız şema yedeğinde `total` yoktur (`null`). Sayı 0 ya da sorgu hatalıysa `total = null` (belirsiz ilerleme). Şema/tablo kapsamında uzantı dökülmezse yapılandırma tablosu sayılıp dökülmeyebilir (toplam biraz fazla; ön yüz `done`'u sınırlar). Geri yüklemede toplam arşiv özetindeki öğe sayısıdır; yalnız şema/veri ya da oluştur seçiliyse ve düz SQL'de yoktur.
 - **(e) Kilitte bekleyen `pg_dump` iptali:** süreç sonlandırılır ama sunucu oturumu kilit bırakılana dek kalır (takip işi: `pg_cancel_backend` ile `PGAPPNAME` eşlemesi).
 - **(f) Geri yüklemeler birbirini engellemez;** yalnız aynı hedef yola yazan yedeklemeler (`busy`) engellenir. Aynı veritabanına eşzamanlı iki geri yükleme ön yüzce engellenmelidir.
-- Ek: `restore_start` ilerleme toplamını arşiv özetinden yeniden okur (`pg_restore -l` ikinci kez çalışır); 60 sn / 64 MiB sınırını aşan arşivde `total = null`.
+- Ek: `restore_start` arşiv özetini plan hazırlığında bir kez okur (`pg_restore -l`, 60 sn / 64 MiB sınırı) ve araç seçimi ile ilerleme toplamında yeniden kullanır; özet okunamazsa plan hatasıdır (`path`).

@@ -710,10 +710,12 @@ Plan 26 yalnızca arka uçtur; GUI maddeleri Plan 27'de eklenecektir. Arka uç e
 - Kapılar: kilitli sunucu, onay (`confirmation_required`), üretimde ek onay, `password_required`, `not_connected`, plan alan hataları (`invalid_request` + alan yolu), aynı hedefe ikinci yedek (`busy`).
 - Günlükte parola, yol ve nesne adı yoktur.
 - Bilinen sınırlar (Plan 27 arayüzü bunları göstermeli):
-  - PG 17'den eski sunucuda 17+ araçlarla geri yükleme: `SET transaction_timeout` yüzünden `pg_restore` veriyi yükler ama başarısız (çıkış kodu sıfırdan farklı) bildirir, düz `psql` ilk satırda durur. Sunucuyla aynı ana sürümden araç önerilir.
-  - Windows ANSI kod sayfası: ASCII dışı şema/tablo adı `?` joker desenle aktarılır (belirsizse plan hatası); ASCII dışı veritabanı ya da kullanıcı adı plan hatasıdır.
+  - PG 17'den eski sunucuda 17+ araçlarla geri yükleme: `pg_restore` (hatada dur kapalı) `SET transaction_timeout` satırını atlar, veriyi yükler ve `completed_with_errors` döner ("tamamlandı, N hata"); sunucuyla aynı ana sürümden `pg_restore` kuruluysa o seçilir. 17+ `pg_dump` ile alınmış düz SQL yedek 17'den eski sunucuda `psql` ile ilk satırda durur (plan notu ve psql'e özgü ipucu: aynı ana sürüm pg_dump ya da custom format).
+  - Windows ANSI kod sayfası: ASCII dışı şema/tablo adı `?` joker desenle aktarılır (belirsizse ya da denetim sorgusu hata verirse plan hatası); ASCII dışı veritabanı ya da kullanıcı adı plan hatasıdır.
+  - Windows best-fit: tam genişlikte tırnak/tire (`＂`, `－`) ya da kod sayfasında olmayan karakter içeren yedek/kaynak yolu, bin klasörü ya da sertifika yolu plan hatasıdır ("Bu yol Windows kod sayfasında güvenle temsil edilemiyor; …"); `restore_inspect` bu yolda `pg_restore` çalıştırmaz. Türkçe karakterli yol (1254) çalışır. Elle: `C:\Temp\a＂ -h x ＂.dump` hedefiyle yedek planı hata vermeli.
+  - Düz SQL geri yükleme planı psql meta komutları uyarısını gösterir.
   - `password_required` yalnız oturum parolayla açıldıysa döner.
-  - İlerleme toplamı yalnız `relkind = 'r'` tabloları sayar (bölümlenmiş üst tablo ve MV hariç); yalnız şema yedeğinde toplam yoktur.
+  - İlerleme toplamı yalnız `relkind = 'r'` tabloları sayar (bölümlenmiş üst tablo, MV ve yapılandırma tablosu olmayan uzantı üyeleri hariç); yalnız şema yedeğinde toplam yoktur. Geri yüklemede yalnız şema/veri ya da oluştur seçiliyse toplam yoktur.
   - Kilit beklerken iptal edilen `pg_dump` sunucu oturumu kilit bırakılana dek kalır (takip: `pg_cancel_backend`).
   - Geri yüklemeler birbirini engellemez; yalnız aynı hedef yola yazan yedeklemeler engellenir.
   - Son taşıma başarısızsa çıktı `.pgt-partial` olarak korunur ve iletide yeri yazar.
