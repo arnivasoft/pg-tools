@@ -1,7 +1,7 @@
 // Onay diyaloğunun görünümü (Kobalte Dialog'u çeker): ana pakette statik içe aktarılmaz, `loadConfirmDialogView` ile tembel iner.
-import { t } from "../app/strings";
 import { Button } from "./Button";
 import { Dialog } from "./Dialog";
+import { dialogStrings } from "./dialog-strings";
 
 export function ConfirmDialog(props: {
   open: boolean;
@@ -27,7 +27,7 @@ export function ConfirmDialog(props: {
       footer={
         <>
           <Button ref={cancelEl} onClick={() => props.onCancel()}>
-            {t.server.cancel}
+            {dialogStrings.cancel}
           </Button>
           <Button
             variant="primary"

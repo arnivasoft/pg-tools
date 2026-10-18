@@ -1,6 +1,8 @@
 // QueryTab çalışma alanı metinleri (Mesajlar paneli). Yalnızca tembel QueryTab parçası içe aktarır: ana pakette durmasın
 // diye ayrı modüldedir (Plan 17 ana paket telafisi; eskiden ana `t` nesnesinin `query.*` blokları).
 export const tqt = {
+  editorAria: "SQL editörü",
+  resizeEditor: "Editör yüksekliği",
   messages: {
     ariaLabel: "Mesajlar",
     empty: "Mesaj yok.",

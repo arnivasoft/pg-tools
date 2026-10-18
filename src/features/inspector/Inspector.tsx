@@ -1,5 +1,5 @@
 import { Copy } from "lucide-solid";
-import { Match, Show, Suspense, Switch, createResource, createSignal, lazy, onCleanup } from "solid-js";
+import { Match, Show, Suspense, Switch, createMemo, createResource, createSignal, lazy, onCleanup } from "solid-js";
 import { copyText } from "../../app/clipboard";
 import { createDebounced } from "../../app/debounce";
 import { t } from "../../app/strings";
@@ -10,6 +10,7 @@ import { Button } from "../../ui/Button";
 import { TabStrip, TabStripPanel } from "../../ui/TabStrip";
 import type { Explorer } from "../explorer/explorer-store";
 import { forNode } from "./for-node";
+import { inspectorRevision } from "./inspector-revision";
 import { kindLabel } from "./labels";
 import { PropertiesView } from "./PropertiesView";
 
@@ -47,13 +48,19 @@ export function Inspector(props: { explorer: Explorer }) {
     }
   };
 
+  // Kaynak `[id, sayaç]`: uygulama sonrası `refreshInspector` aynı düğümü de yeniden okutur. Kimlik önce memo ile
+  // tekilleştirilir: ağaç yenilemesi düğüm nesnesini (aynı kimlikle) değiştirdiğinde yeni demet, dolayısıyla gereksiz
+  // istek oluşmaz (`createResource` kaynağı kimlik eşitliğiyle karşılaştırır).
+  const selectedId = createMemo(() => selected()?.id);
+  const ddlId = createMemo(() => (tab() === "ddl" ? selectedId() : undefined));
+  const keyed = (id: string | undefined) => (id === undefined ? undefined : ([id, inspectorRevision()] as const));
   const [properties] = createResource(
-    () => selected()?.id,
-    async (id) => ({ id, value: await guarded(id, () => commands.getProperties(id)) }),
+    () => keyed(selectedId()),
+    async ([id]) => ({ id, value: await guarded(id, () => commands.getProperties(id)) }),
   );
   const [ddl] = createResource(
-    () => (tab() === "ddl" ? selected()?.id : undefined),
-    async (id) => ({ id, value: await guarded(id, () => commands.getDdl(id)) }),
+    () => keyed(ddlId()),
+    async ([id]) => ({ id, value: await guarded(id, () => commands.getDdl(id)) }),
   );
 
   // Hatalı bir resource'un `.latest` değeri okunursa Solid hatayı fırlatır; bu yüzden önce `.error` kontrol edilir.

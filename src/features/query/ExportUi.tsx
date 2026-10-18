@@ -1,6 +1,5 @@
 import { save } from "@tauri-apps/plugin-dialog";
 import { For, createSignal } from "solid-js";
-import { t } from "../../app/strings";
 import { tstrip } from "./strings-strip";
 import { texp } from "./strings-export";
 import { toast } from "../../app/toast";
@@ -12,6 +11,7 @@ import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import { Field, inputClass } from "../../ui/Field";
 import { DEFAULT_CSV_OPTIONS, runExport, type ExportOutcome } from "./export";
+import { dialogStrings } from "../../ui/dialog-strings";
 
 const DELIMITERS: CsvDelimiter[] = ["comma", "semicolon", "tab"];
 
@@ -79,7 +79,7 @@ export function createExportUi() {
         width="360px"
         footer={
           <>
-            <Button onClick={() => finishOptions(null)}>{t.server.cancel}</Button>
+            <Button onClick={() => finishOptions(null)}>{dialogStrings.cancel}</Button>
             <Button variant="primary" onClick={() => finishOptions(opts())}>
               {e.start}
             </Button>

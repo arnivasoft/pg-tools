@@ -104,6 +104,8 @@ export interface MaintenanceControllerDeps {
   notify(text: string, kind: ToastKind): void;
   /** Denetleyici kendi kapandığında (kapatma onayı/boşta kapatma) App'in düğüm kimliğini temizlemesi için. */
   onClosed(): void;
+  /** Başarılı uygulama sonrası Inspector'ı yeniden okut (App `lazyDeps`). */
+  refreshInspector?(): void;
   newId(): string;
   now(): number;
   setTimer(fn: () => void, ms: number): unknown;
@@ -377,6 +379,14 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
       });
       schedulePreview(0);
       return;
+    }
+    // Başarılı uygulama nesnenin DDL'ini değiştirmiş olabilir (ör. CLUSTER): diyalog kapatılmış olsa da Inspector yenilenir.
+    if (out.outcome === "applied") {
+      try {
+        deps.refreshInspector?.();
+      } catch {
+        /* Inspector yenilemesi sonucu etkilemez */
+      }
     }
     if (myGen !== gen) return;
     stopPolling();

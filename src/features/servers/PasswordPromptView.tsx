@@ -1,11 +1,12 @@
 // Parola istemi görünümü (Kobalte Dialog çeker): ana pakette statik içe aktarılmaz, `loadPasswordPromptView` ile tembel iner.
 import { Show } from "solid-js";
-import { t } from "../../app/strings";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import { Field, inputClass } from "../../ui/Field";
 import type { PasswordAnswer } from "../explorer/controller";
 import type { PasswordRequest } from "./password-prompt-model";
+import { tsrv } from "../../app/strings-server";
+import { dialogStrings } from "../../ui/dialog-strings";
 
 export default function PasswordPromptView(props: {
   request: PasswordRequest | null;
@@ -20,7 +21,7 @@ export default function PasswordPromptView(props: {
     <Dialog
       open={props.request !== null}
       onOpenChange={(open) => !open && props.finish(null)}
-      title={t.password.title(props.request?.node.label ?? "")}
+      title={tsrv.prompt.title(props.request?.node.label ?? "")}
       width="360px"
       onOpenAutoFocus={(e) => {
         e.preventDefault();
@@ -28,9 +29,9 @@ export default function PasswordPromptView(props: {
       }}
       footer={
         <>
-          <Button onClick={() => props.finish(null)}>{t.server.cancel}</Button>
+          <Button onClick={() => props.finish(null)}>{dialogStrings.cancel}</Button>
           <Button variant="primary" type="submit" form="pgt-password-form">
-            {t.password.connect}
+            {tsrv.prompt.connect}
           </Button>
         </>
       }
@@ -44,12 +45,12 @@ export default function PasswordPromptView(props: {
         }}
       >
         <Show when={props.request?.retry}>
-          <p class="text-danger">{props.request?.error?.message ?? t.password.retry}</p>
+          <p class="text-danger">{props.request?.error?.message ?? tsrv.prompt.retry}</p>
           <Show when={props.request?.error?.detail}>
             {(detail) => <p class="text-muted break-words select-text">{detail()}</p>}
           </Show>
         </Show>
-        <Field label={t.server.password}>
+        <Field label={tsrv.password}>
           <input
             type="password"
             class={inputClass}
@@ -60,7 +61,7 @@ export default function PasswordPromptView(props: {
         </Field>
         <label class="flex items-center gap-2">
           <input type="checkbox" checked={props.remember} onChange={(e) => props.onRemember(e.currentTarget.checked)} />
-          {t.server.savePassword}
+          {tsrv.savePassword}
         </label>
       </form>
     </Dialog>

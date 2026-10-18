@@ -2,12 +2,12 @@
 // "Vazgeç"te başlar (Enter yıkıcı eylemi onaylamaz); onayda gerçek iş denetleyicidedir (`confirmSignal` → canlı doğrulama →
 // `dash_signal`). Onaydan sonra kapı kapanır; uçuştaki istek `model.signaling` ile düğmeleri kapalı tutar.
 import { For, Show, createEffect, on } from "solid-js";
-import { t } from "../../app/strings";
 import { td } from "../../app/strings-dashboard";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import type { DashController } from "./dash-controller";
 import { firstLines } from "./table-model";
+import { dialogStrings } from "../../ui/dialog-strings";
 
 /** Gövdede gösterilen sorgu satırı sayısı. */
 const QUERY_LINES = 3;
@@ -47,7 +47,7 @@ export default function SignalDialog(props: { dash: DashController; tabId: strin
       footer={
         <>
           <Button ref={cancelEl} onClick={() => g.answer(false)}>
-            {t.server.cancel}
+            {dialogStrings.cancel}
           </Button>
           <Button
             variant="primary"

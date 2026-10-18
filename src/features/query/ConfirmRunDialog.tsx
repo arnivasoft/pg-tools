@@ -1,9 +1,9 @@
 import { For, Show, createSignal, onCleanup } from "solid-js";
-import { t } from "../../app/strings";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import { createConfirmGate, type ConfirmItem } from "./confirm-model";
 import { tqt } from "./strings-querytab";
+import { dialogStrings } from "../../ui/dialog-strings";
 
 const MAX_CHARS = 500;
 const MAX_ITEMS = 50;
@@ -36,7 +36,7 @@ export function ConfirmRunDialog(props: {
       footer={
         <>
           <Button ref={cancelEl} onClick={() => props.onCancel()}>
-            {t.server.cancel}
+            {dialogStrings.cancel}
           </Button>
           <Button variant="primary" class="!bg-danger !text-white" onClick={() => props.onConfirm()}>
             {c.run}

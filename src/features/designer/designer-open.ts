@@ -192,6 +192,8 @@ export interface DesignerDeps extends Omit<DesignerOpenDeps, "designer" | "openD
   query: Pick<QueryController, "servers" | "openScript">;
   /** Uygulama sonrası düğüm yenilemesi (`refreshNodeId`; düğüm artık yoksa denetleyicinin hata yolu). */
   explorer: Pick<ExplorerController, "refresh">;
+  /** Başarılı uygulama sonrası Inspector yenilemesi (App `lazyDeps`). */
+  refreshInspector?: () => void;
   /** Silme diyaloğu; verilmezse denetleyicinin tek örnek diyaloğu (`ctl.drop`, DesignerPanels çizer). */
   openDrop?: DesignerOpenDeps["openDrop"];
 }
@@ -208,6 +210,7 @@ export function createDesigner(deps: DesignerDeps) {
       return c ? { name: c.name, locked: c.readOnlyLock, production: isProductionLabel(c.label), username: c.username } : null;
     },
     refreshNode: (id) => deps.explorer.refresh(id),
+    refreshInspector: deps.refreshInspector,
     onApplied: (info) => {
       const title = titleAfterApply(info);
       if (title) deps.tabs.rename(info.tabId, title);

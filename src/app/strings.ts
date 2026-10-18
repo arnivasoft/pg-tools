@@ -34,14 +34,6 @@ export const t = {
   server: {
     labelSuggestions: ["Üretim", "Test", "Geliştirme"],
     lockedTitle: "Salt okunur kilit açık",
-    password: "Parola",
-    savePassword: "Parolayı kaydet",
-    cancel: "Vazgeç",
-  },
-  password: {
-    title: (server: string) => `${server} için parola`,
-    retry: "Parola hatalı, tekrar deneyin.",
-    connect: "Bağlan",
   },
   status: {
     ready: "Hazır",
@@ -96,8 +88,6 @@ export const t = {
       txOpen: "açık transaction",
       txFailed: "hatalı transaction",
       loading: "Query Tool yükleniyor…",
-      editorAria: "SQL editörü",
-      resizeEditor: "Editör yüksekliği",
     },
     ctx: {
       mode: "Transaction modu",

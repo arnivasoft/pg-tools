@@ -31,6 +31,7 @@ export interface MaintenanceDialogDeps {
   /** Explorer ağacı: sunucu düğümünün `detail`'i (`ServerInfo.version`) sürüm, `flags.locked` kilit kaynağıdır. */
   tree: () => { nodes: Map<string, TreeNode> };
   notify: (text: string, kind: ToastKind) => void;
+  refreshInspector?: () => void;
 }
 
 type BoolKey = "full" | "freeze" | "analyze" | "verbose" | "disablePageSkipping" | "skipLocked" | "concurrently";
@@ -58,6 +59,7 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
     // Diyalogun sunucusu için hafızalı bilgi (ağaç değişince yeniden hesaplanır; her kapı çağrısında taranmaz).
     serverInfo: (id) => (id === currentServer() ? currentInfo() : serverInfoFrom(deps.tree, id)),
     notify: deps.notify,
+    refreshInspector: deps.refreshInspector,
     onClosed: () => props.onClose(),
     newId: () => crypto.randomUUID(),
     now: () => Date.now(),

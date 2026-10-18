@@ -699,3 +699,10 @@ Plan 24 yalnızca arka uçtur; GUI maddeleri "Bakım işlemleri arayüzü (Plan 
 - [ ] Klavye ve ekran okuyucu: odak diyalogda kalır; seçenekler etiketli, devre dışı gerekçesi okunur (`aria-describedby`); Enter (onay tamamsa) uygular, IME bileşiminde uygulamaz; ilerleme `progressbar` olarak okunur (yüzde ya da aşama metni); sonuç `status`, hata `alert` olarak duyurulur. **[—]**
 - [ ] Kilitli sunucu: menü devre dışı ve gerekçeli; diyalog açıkken sunucu kilitlenirse Uygula kapalı ve "salt okunur kilitli" şeridi. **[—]**
 - [ ] Query Tool iletileri: `SET lc_messages = 'tr_TR…'` olan bir oturumda `DO $$ BEGIN RAISE WARNING 'x'; RAISE NOTICE 'y'; END $$` → ileti önemi İngilizce (WARNING/NOTICE) görünür (Plan 25 `pgt-core` değişikliği). **[—]**
+
+## Inspector yenileme (uygulama sonrası)
+
+- [ ] Tabloyu seçip Inspector'da **DDL** sekmesini açın; aynı tabloda "Yetkiler…" ile bir GRANT uygulayın → DDL sekmesi düğüm yeniden seçilmeden yeni `GRANT` satırını gösterir; **Özellikler** sekmesi de yenilenir. **[—]**
+- [ ] Aynı tabloda "Bakım…" ile `CLUSTER … USING <indeks>` uygulayın (diyalog açıkken ya da çalışırken kapatıp) → DDL'deki `CLUSTER ON` bilgisi güncellenir. **[—]**
+- [ ] Bir nesne formunda (ör. tablo yorumu) değişiklik uygulayın → seçili düğümün DDL/özellikleri yenilenir; başarısız ya da iptal edilen uygulamada Inspector yeniden istek atmaz. **[—]**
+- [ ] Metin taşıma (yalnız tembel diyaloglarda kullanılan "Vazgeç", parola istemi, editör erişilebilir adları): parola istemi, sunucu diyaloğu, onay diyalogları ve Query Tool editör/yeniden boyutlandırma etiketleri eskisi gibi görünür/okunur. **[—]**

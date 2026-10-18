@@ -236,6 +236,8 @@ export interface DesignerControllerDeps {
   refreshNode(nodeId: string): Promise<void> | void;
   /** Başarılı uygulama sonrası (hatası yutulur; uygulama sonucunu etkilemez). */
   onApplied?(info: AppliedInfo): void;
+  /** Başarılı her uygulama sonrası Inspector'ı (özellikler/DDL) yeniden okut (hatası yutulur). */
+  refreshInspector?(): void;
   previewDelay?: number;
   previewDeps?: Partial<PreviewDeps>;
   newId?: () => string;
@@ -247,6 +249,17 @@ export interface OpenCreateInput { tabId: string; serverId: string; databaseOid:
 export interface OpenAlterInput { tabId: string; serverId: string; databaseOid: number | null; object: ObjectRef; refreshNodeId: string | null }
 /** Plan 22: yetki sekmesi açılış bağlamı (`openAcl` / `openDefaultAcl`). */
 export interface AclOpenContext { serverId: string; databaseOid: number | null; refreshNodeId: string | null }
+
+/**
+ * Başarılı uygulama sonrası Inspector yenilensin mi: yetki sekmeleri ve oid'i koruyan alter evet; create (yeni nesne
+ * seçili değil) ve oid'i değiştiren alter (ör. indeks yeniden kurma; eski düğüm kimliği artık yok → `not_found`) hayır —
+ * ağaç yenilemesi seçimi zaten değiştirir.
+ */
+export function inspectorShouldRefresh(m: Pick<DesignerModel, "variant" | "object">, mode: DesignerMode, created: ObjectRef | null): boolean {
+  if (m.variant !== "object") return true;
+  if (mode !== "alter") return false;
+  return created === null || (m.object !== null && created.kind === m.object.kind && created.oid === m.object.oid);
+}
 
 export function createDesignerController(deps: DesignerControllerDeps) {
   const { api, notify } = deps;
@@ -640,6 +653,13 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     else notify(tdes.apply.applied(out.statements), "success");
     // Uyarılar sekmede kalıcı (yeniden yükleme `setBase` bunlara dokunmaz).
     patch(e, { postApplyWarnings: [...warnings] });
+    if (inspectorShouldRefresh(m, mode, out.created)) {
+      try {
+        deps.refreshInspector?.();
+      } catch {
+        /* Inspector yenilemesi uygulama sonucunu etkilemez */
+      }
+    }
     if (m.variant !== "object") {
       // Yetki sekmeleri: ad/ağaç değişmez; yalnız yeniden yüklenir (yükleme başarısızsa `needsReload` kalır).
       patch(e, { dirty: false, needsReload: true });

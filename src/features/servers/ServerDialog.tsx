@@ -12,6 +12,7 @@ import { Dialog } from "../../ui/Dialog";
 import { Field, inputClass } from "../../ui/Field";
 import { TabPanel, Tabs } from "../../ui/Tabs";
 import { SERVER_COLORS, emptyForm, formFromConfig, suggestLock, toConfig, type FormTab, type ServerForm } from "./server-form";
+import { dialogStrings } from "../../ui/dialog-strings";
 
 const SSL_MODES: SslMode[] = ["disable", "prefer", "require", "verify-ca", "verify-full"];
 type Feedback = { kind: "ok"; text: string } | { kind: "error"; error: ErrorPayload } | null;
@@ -138,7 +139,7 @@ export function ServerDialog(props: {
           <Button class="mr-auto" disabled={busy()} onClick={() => void runTest()}>
             {busy() ? tsrv.testing : tsrv.test}
           </Button>
-          <Button onClick={props.onClose}>{t.server.cancel}</Button>
+          <Button onClick={props.onClose}>{dialogStrings.cancel}</Button>
           <Button variant="primary" type="submit" form="pgt-server-form" disabled={busy()}>
             {tsrv.save}
           </Button>
@@ -185,13 +186,13 @@ export function ServerDialog(props: {
               </Field>
             </div>
             <div class="col-span-2">
-              <Field label={t.server.password} hint={props.editing ? tsrv.passwordKeep : undefined}>
+              <Field label={tsrv.password} hint={props.editing ? tsrv.passwordKeep : undefined}>
                 <input type="password" class={inputClass} {...text("password")} />
               </Field>
             </div>
             <label class="col-span-2 flex items-center gap-2">
               <input type="checkbox" checked={form().savePassword} onChange={(e) => set("savePassword", e.currentTarget.checked)} />
-              {t.server.savePassword}
+              {tsrv.savePassword}
             </label>
           </TabPanel>
           <TabPanel value="ssl" class="flex flex-col gap-3 pt-3">
