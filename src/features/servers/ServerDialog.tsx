@@ -1,6 +1,7 @@
 import { open as openFile } from "@tauri-apps/plugin-dialog";
 import { For, Match, Show, Switch, createEffect, createSignal } from "solid-js";
 import { t } from "../../app/strings";
+import { tsrv } from "../../app/strings-server";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { SslMode } from "../../ipc/bindings/SslMode";
@@ -74,7 +75,7 @@ export function ServerDialog(props: {
     setFeedback(null);
     try {
       const info = await commands.testConnection(r.config, r.password);
-      if (gen === generation) setFeedback({ kind: "ok", text: t.server.testOk(info.version) });
+      if (gen === generation) setFeedback({ kind: "ok", text: tsrv.testOk(info.version) });
     } catch (e) {
       if (gen === generation) setFeedback({ kind: "error", error: toPayload(e) });
     } finally {
@@ -117,7 +118,7 @@ export function ServerDialog(props: {
     <Field label={p.label}>
       <div class="flex gap-1">
         <input class={inputClass} {...text(p.key)} />
-        <Button onClick={() => void pick(p.key)}>{t.server.browse}</Button>
+        <Button onClick={() => void pick(p.key)}>{tsrv.browse}</Button>
       </div>
     </Field>
   );
@@ -126,7 +127,7 @@ export function ServerDialog(props: {
     <Dialog
       open={props.open}
       onOpenChange={(o) => !o && props.onClose()}
-      title={props.editing ? t.server.titleEdit : t.server.titleNew}
+      title={props.editing ? tsrv.titleEdit : tsrv.titleNew}
       width="520px"
       onOpenAutoFocus={(e) => {
         e.preventDefault();
@@ -135,11 +136,11 @@ export function ServerDialog(props: {
       footer={
         <>
           <Button class="mr-auto" disabled={busy()} onClick={() => void runTest()}>
-            {busy() ? t.server.testing : t.server.test}
+            {busy() ? tsrv.testing : tsrv.test}
           </Button>
           <Button onClick={props.onClose}>{t.server.cancel}</Button>
           <Button variant="primary" type="submit" form="pgt-server-form" disabled={busy()}>
-            {t.server.save}
+            {tsrv.save}
           </Button>
         </>
       }
@@ -149,17 +150,17 @@ export function ServerDialog(props: {
           value={tab()}
           onChange={(v) => setTab(v as FormTab)}
           tabs={[
-            { value: "general", label: t.server.tabs.general },
-            { value: "connection", label: t.server.tabs.connection },
-            { value: "ssl", label: t.server.tabs.ssl },
-            { value: "security", label: t.server.tabs.security },
+            { value: "general", label: tsrv.tabs.general },
+            { value: "connection", label: tsrv.tabs.connection },
+            { value: "ssl", label: tsrv.tabs.ssl },
+            { value: "security", label: tsrv.tabs.security },
           ]}
         >
           <TabPanel value="general" class="flex flex-col gap-3 pt-3">
-            <Field label={t.server.name}>
+            <Field label={tsrv.name}>
               <input ref={nameEl} class={inputClass} {...text("name")} />
             </Field>
-            <Field label={t.server.group}>
+            <Field label={tsrv.group}>
               <input class={inputClass} list="pgt-groups" {...text("group")} />
               <datalist id="pgt-groups">
                 <For each={props.groups}>{(g) => <option value={g} />}</For>
@@ -167,24 +168,24 @@ export function ServerDialog(props: {
             </Field>
           </TabPanel>
           <TabPanel value="connection" class="grid grid-cols-[1fr_96px] gap-3 pt-3">
-            <Field label={t.server.host}>
+            <Field label={tsrv.host}>
               <input class={inputClass} {...text("host")} />
             </Field>
-            <Field label={t.server.port}>
+            <Field label={tsrv.port}>
               <input class={inputClass} inputMode="numeric" {...text("port")} />
             </Field>
             <div class="col-span-2">
-              <Field label={t.server.maintenanceDb}>
+              <Field label={tsrv.maintenanceDb}>
                 <input class={inputClass} {...text("maintenanceDb")} />
               </Field>
             </div>
             <div class="col-span-2">
-              <Field label={t.server.username}>
+              <Field label={tsrv.username}>
                 <input class={inputClass} {...text("username")} />
               </Field>
             </div>
             <div class="col-span-2">
-              <Field label={t.server.password} hint={props.editing ? t.server.passwordKeep : undefined}>
+              <Field label={t.server.password} hint={props.editing ? tsrv.passwordKeep : undefined}>
                 <input type="password" class={inputClass} {...text("password")} />
               </Field>
             </div>
@@ -194,17 +195,17 @@ export function ServerDialog(props: {
             </label>
           </TabPanel>
           <TabPanel value="ssl" class="flex flex-col gap-3 pt-3">
-            <Field label={t.server.sslMode}>
+            <Field label={tsrv.sslMode}>
               <select class={inputClass} onChange={(e) => set("sslMode", e.currentTarget.value as SslMode)}>
                 <For each={SSL_MODES}>{(m) => <option value={m} selected={form().sslMode === m}>{m}</option>}</For>
               </select>
             </Field>
-            <FileField label={t.server.rootCert} key="rootCert" />
-            <FileField label={t.server.clientCert} key="clientCert" />
-            <FileField label={t.server.clientKey} key="clientKey" />
+            <FileField label={tsrv.rootCert} key="rootCert" />
+            <FileField label={tsrv.clientCert} key="clientCert" />
+            <FileField label={tsrv.clientKey} key="clientKey" />
           </TabPanel>
           <TabPanel value="security" class="flex flex-col gap-3 pt-3">
-            <Field label={t.server.label} hint={t.server.labelHint}>
+            <Field label={tsrv.label} hint={tsrv.labelHint}>
               <input
                 class={inputClass}
                 list="pgt-labels"
@@ -220,14 +221,14 @@ export function ServerDialog(props: {
               </datalist>
             </Field>
             <div class="flex flex-col gap-1">
-              <span class="text-xs text-muted">{t.server.color}</span>
-              <div class="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t.server.color}>
+              <span class="text-xs text-muted">{tsrv.color}</span>
+              <div class="flex flex-wrap gap-1.5" role="radiogroup" aria-label={tsrv.color}>
                 <button
                   type="button"
                   role="radio"
                   aria-checked={form().color === null}
-                  title={t.server.colorNone}
-                  aria-label={t.server.colorNone}
+                  title={tsrv.colorNone}
+                  aria-label={tsrv.colorNone}
                   class="h-6 w-6 rounded-full border border-dashed border-border text-[11px] text-muted"
                   classList={{ "ring-2 ring-accent ring-offset-1 ring-offset-bg": form().color === null }}
                   onClick={() => set("color", null)}
@@ -240,8 +241,8 @@ export function ServerDialog(props: {
                       type="button"
                       role="radio"
                       aria-checked={form().color === c}
-                      title={t.server.colors[c]}
-                      aria-label={t.server.colors[c]}
+                      title={tsrv.colors[c]}
+                      aria-label={tsrv.colors[c]}
                       class="h-6 w-6 rounded-full border border-border"
                       classList={{ "ring-2 ring-accent ring-offset-1 ring-offset-bg": form().color === c }}
                       style={{ background: `var(--srv-${c})` }}
@@ -262,8 +263,8 @@ export function ServerDialog(props: {
                 }}
               />
               <span class="flex flex-col">
-                {t.server.readOnlyLock}
-                <span class="text-xs text-muted">{t.server.readOnlyLockHint}</span>
+                {tsrv.readOnlyLock}
+                <span class="text-xs text-muted">{tsrv.readOnlyLockHint}</span>
               </span>
             </label>
           </TabPanel>
