@@ -61,15 +61,15 @@ pub fn qt_drafts_clear(state: State<'_, AppState>) -> CmdResult<()> {
 
 #[tauri::command(async)]
 pub fn settings_get(state: State<'_, AppState>) -> CmdResult<AppSettings> {
-    Ok(*state.store.settings.lock().unwrap())
+    Ok(state.store.settings.lock().unwrap().clone())
 }
 
 #[tauri::command(async)]
 pub fn settings_set_history(state: State<'_, AppState>, enabled: bool) -> CmdResult<AppSettings> {
     let mut settings = state.store.settings.lock().unwrap();
-    let next = AppSettings { history_enabled: enabled, ..*settings };
+    let next = AppSettings { history_enabled: enabled, ..settings.clone() };
     next.save(&state.store.settings_path)?;
-    *settings = next;
+    *settings = next.clone();
     state.store.history.lock().unwrap().set_enabled(enabled);
     Ok(next)
 }
@@ -79,9 +79,29 @@ pub fn settings_set_history(state: State<'_, AppState>, enabled: bool) -> CmdRes
 pub fn settings_set_editor(state: State<'_, AppState>, check_enabled: bool, format: FormatOptions) -> CmdResult<AppSettings> {
     format.validate()?;
     let mut settings = state.store.settings.lock().unwrap();
-    let next = AppSettings { check_enabled, format, ..*settings };
+    let next = AppSettings { check_enabled, format, ..settings.clone() };
     next.save(&state.store.settings_path)?;
-    *settings = next;
+    *settings = next.clone();
+    Ok(next)
+}
+
+/// Doğrulanmış `pgBinDir` değeri: boş metin `None`; `Some` için klasör var ve `pg_dump` içeriyor olmalı (`invalid`).
+pub(crate) fn normalize_pg_bin_dir(dir: Option<String>) -> pgt_core::Result<Option<String>> {
+    let dir = dir.map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+    if let Some(d) = &dir {
+        pgt_backup::tools::validate_bin_dir(d)?;
+    }
+    Ok(dir)
+}
+
+/// Yedekleme araçlarının bin klasörü (`None` otomatik bulmaya döner). Yol günlüğe yazılmaz.
+#[tauri::command(async)]
+pub fn settings_set_pg_bin_dir(state: State<'_, AppState>, dir: Option<String>) -> CmdResult<AppSettings> {
+    let pg_bin_dir = normalize_pg_bin_dir(dir)?;
+    let mut settings = state.store.settings.lock().unwrap();
+    let next = AppSettings { pg_bin_dir, ..settings.clone() };
+    next.save(&state.store.settings_path)?;
+    *settings = next.clone();
     Ok(next)
 }
 
@@ -107,6 +127,18 @@ mod tests {
         let n = h.push_many(vec![e("select 1"), e("select 1; alter user bob with password 'p'"), e("select 2")], is_sensitive_sql).unwrap();
         assert_eq!(n, 2);
         assert!(h.list(None, 10).iter().all(|x| !x.sql.contains("password")));
+    }
+
+    #[test]
+    fn pg_bin_dir_is_validated() {
+        assert_eq!(normalize_pg_bin_dir(None).unwrap(), None);
+        assert_eq!(normalize_pg_bin_dir(Some("  ".into())).unwrap(), None);
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_string_lossy().into_owned();
+        let err = normalize_pg_bin_dir(Some(d.clone())).unwrap_err();
+        assert!(matches!(err, pgt_core::Error::Invalid(_)), "{err:?}");
+        std::fs::write(dir.path().join(format!("pg_dump{}", std::env::consts::EXE_SUFFIX)), b"").unwrap();
+        assert_eq!(normalize_pg_bin_dir(Some(format!(" {d} "))).unwrap(), Some(d));
     }
 
     #[test]

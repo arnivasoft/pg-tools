@@ -69,7 +69,7 @@ fn to_json<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 
 // ---------------------------------------------------------------- Ayarlar
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct AppSettings {
@@ -81,6 +81,9 @@ pub struct AppSettings {
     /// Biçimlendirici seçenekleri (tasarım §5.1); eski dosyalarda yok → varsayılanlar.
     #[serde(default)]
     pub format: FormatOptions,
+    /// Yedekleme araçları için kullanıcının seçtiği PostgreSQL bin klasörü; eski dosyalarda yok → `None`.
+    #[serde(default)]
+    pub pg_bin_dir: Option<String>,
 }
 
 fn yes() -> bool {
@@ -89,7 +92,7 @@ fn yes() -> bool {
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { history_enabled: true, check_enabled: true, format: FormatOptions::default() }
+        Self { history_enabled: true, check_enabled: true, format: FormatOptions::default(), pg_bin_dir: None }
     }
 }
 
@@ -548,6 +551,7 @@ mod tests {
         assert!(!old.history_enabled);
         assert!(old.check_enabled);
         assert_eq!(old.format, FormatOptions::default());
+        assert_eq!(old.pg_bin_dir, None);
         // Kısmi biçim nesnesi: eksik alanlar varsayılan.
         fs::write(&path, r#"{ "format": { "indent": 4 } }"#).unwrap();
         assert_eq!(AppSettings::load(&path).format, FormatOptions { indent: 4, ..FormatOptions::default() });
@@ -560,6 +564,7 @@ mod tests {
             history_enabled: true,
             check_enabled: false,
             format: FormatOptions { keyword_case: KeywordCase::Lower, indent: 4, comma: CommaStyle::Leading, max_line: 80 },
+            pg_bin_dir: Some(r"C:\Program Files\PostgreSQL\18\bin".into()),
         };
         next.save(&path).unwrap();
         assert_eq!(AppSettings::load(&path), next);
@@ -569,7 +574,8 @@ mod tests {
             serde_json::json!({
                 "historyEnabled": true,
                 "checkEnabled": false,
-                "format": { "keywordCase": "lower", "indent": 4, "comma": "leading", "maxLine": 80 }
+                "format": { "keywordCase": "lower", "indent": 4, "comma": "leading", "maxLine": 80 },
+                "pgBinDir": r"C:\Program Files\PostgreSQL\18\bin"
             })
         );
     }

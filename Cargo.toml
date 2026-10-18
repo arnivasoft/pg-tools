@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/pgt-core", "crates/pgt-catalog", "crates/pgt-query", "crates/pgt-dash", "crates/pgt-ddl", "src-tauri"]
+members = ["crates/pgt-core", "crates/pgt-catalog", "crates/pgt-query", "crates/pgt-dash", "crates/pgt-ddl", "crates/pgt-backup", "src-tauri"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,7 +13,8 @@ pgt-catalog = { path = "crates/pgt-catalog" }
 pgt-query = { path = "crates/pgt-query" }
 pgt-dash = { path = "crates/pgt-dash" }
 pgt-ddl = { path = "crates/pgt-ddl" }
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time"] }
+pgt-backup = { path = "crates/pgt-backup" }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "fs"] }
 tokio-postgres = "0.7.18"
 # İstemci tarafı parola özeti (SCRAM-SHA-256, psql \password gibi); tokio-postgres zaten çeker.
 postgres-protocol = "0.6.12"

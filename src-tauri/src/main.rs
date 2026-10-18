@@ -123,6 +123,7 @@ fn main() {
             store_cmds::settings_get,
             store_cmds::settings_set_history,
             store_cmds::settings_set_editor,
+            store_cmds::settings_set_pg_bin_dir,
         ])
         .build(tauri::generate_context!())
         .expect("pg-tools başlatılamadı")
