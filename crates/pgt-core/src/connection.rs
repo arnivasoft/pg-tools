@@ -598,6 +598,11 @@ fn timeout_ms(value: &str) -> Option<u64> {
 
 /// Katalog profilinin üç ayarı gerçekten etkin mi? (`settings_ok_for(Catalog, …)`.)
 #[cfg(test)]
+fn session_settings_ok(read_only: &str, statement_timeout: &str, search_path: &str) -> bool {
+    settings_ok_for(SessionProfile::Catalog, read_only, statement_timeout, search_path)
+}
+
+#[cfg(test)]
 mod severity_tests {
     use super::severity_name;
     use tokio_postgres::error::Severity;
@@ -608,11 +613,6 @@ mod severity_tests {
         assert_eq!(severity_name(Some(Severity::Log), "KAYIT"), "LOG");
         assert_eq!(severity_name(None, "UYARI"), "UYARI");
     }
-}
-
-#[cfg(test)]
-fn session_settings_ok(read_only: &str, statement_timeout: &str, search_path: &str) -> bool {
-    settings_ok_for(SessionProfile::Catalog, read_only, statement_timeout, search_path)
 }
 
 /// Profilin gerektirdiği oturum ayarları gerçekten etkin mi? (`options`'ı sessizce yok sayan havuzlayıcılar,
