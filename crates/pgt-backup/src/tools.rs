@@ -233,7 +233,8 @@ fn major_text(version_num: u32) -> String {
 /// Spec §1 seçim kuralı.
 /// - `pg_dump`: sürümü sunucunun ana sürümüne eşit ya da büyük olmalı; aynı ana sürüm tercih edilir, yoksa en
 ///   küçük büyük sürüm. Eşitlikte aday sırası (ayardaki klasör önce).
-/// - `pg_restore`, `psql`: en yeni araç (arşiv sürümü bilinmiyor; uyumsuzluğu PG kendi hatasıyla bildirir).
+/// - `pg_restore`, `psql`: en yeni araç. Arşiv ve sunucu sürümüne göre `pg_restore` seçimi [`choose_restore`]'dur;
+///   `psql` için sürüm önemsizdir (düz SQL'in uyumu dosyayı üreten pg_dump'a bağlıdır).
 ///   `server_version_num` yalnız hata iletisinde kullanılır.
 pub fn choose(sets: &[ToolSet], kind: ToolKind, server_version_num: u32) -> Result<&ToolSet, String> {
     let with_tool = || sets.iter().filter(move |s| kind.has(s));
@@ -265,9 +266,43 @@ pub fn choose(sets: &[ToolSet], kind: ToolKind, server_version_num: u32) -> Resu
     })
 }
 
+/// Arşiv özetindeki pg_dump sürüm metninden (`ArchiveInfo::archive_version`: "16.4", "18.1 (Debian …)",
+/// "17beta1") `version_num`. Okunamazsa `None`.
+pub fn archive_version_num(text: &str) -> Option<u32> {
+    parse_version(&format!("pg_dump (PostgreSQL) {}", text.trim())).map(|v| v.version_num)
+}
+
+/// `pg_restore` seçimi (spec §1). `archive_dump_version`: arşivi üreten pg_dump'ın `version_num`'u (bilinmiyorsa
+/// `None`). Sıra:
+/// 1. Sunucuyla aynı ana sürüm (arşivi okuyabiliyorsa: ana sürümü arşivinkine eşit ya da büyük). 17+ araç 17'den
+///    eski sunucuya `SET transaction_timeout` gönderdiğinden aynı ana sürüm bu uyumsuzluğu önler.
+/// 2. Arşiv sürümü biliniyorsa onu okuyabilen en küçük ana sürüm.
+/// 3. En yeni (uyumsuzluğu araç "unsupported version" ile bildirir; ipucu 3).
+///
+/// Eşitlikte aday sırası (ayardaki klasör önce). `server_version_num` 0 ise 1. adım atlanır.
+pub fn choose_restore(sets: &[ToolSet], server_version_num: u32, archive_dump_version: Option<u32>) -> Result<&ToolSet, String> {
+    let with_tool = || sets.iter().filter(|s| s.pg_restore);
+    let key = |s: &ToolSet| major_key(s.version.version_num);
+    let min = archive_dump_version.map(major_key).unwrap_or(0);
+    let server = major_key(server_version_num);
+    let same = (server_version_num > 0)
+        .then(|| with_tool().find(|s| key(s) == server && key(s) >= min))
+        .flatten();
+    let readable = || archive_dump_version.and_then(|_| with_tool().filter(|s| key(s) >= min).min_by_key(|s| key(s)));
+    match same.or_else(readable) {
+        Some(s) => Ok(s),
+        // En yeni; hata iletisi `choose` ile aynıdır (sürüm cümlesi yok).
+        None => choose(sets, ToolKind::PgRestore, 0),
+    }
+}
+
 /// `pgBinDir` ayarını doğrular: klasör var ve içinde `pg_dump` (Windows'ta `pg_dump.exe`) bulunur.
 pub fn validate_bin_dir(dir: &str) -> pgt_core::Result<()> {
     let p = Path::new(dir.trim());
+    // Göreli klasör CWD'ye bağlıdır (aday bulma da göreli klasörü eler).
+    if !p.is_absolute() {
+        return Err(pgt_core::Error::Invalid("Bin klasörü için tam (mutlak) yol gerekir.".into()));
+    }
     if !p.is_dir() {
         return Err(pgt_core::Error::Invalid("Seçilen bin klasörü bulunamadı.".into()));
     }
@@ -431,6 +466,59 @@ mod tests {
             !unknown.contains("Sunucu sürümü") && unknown.contains("pg_restore") && unknown.contains("Ayarlardan"),
             "{unknown}"
         );
+    }
+
+    #[test]
+    fn choose_restore_prefers_server_major_that_reads_the_archive() {
+        let s15 = set("a15", "15.8", 150008, true, true, true);
+        let s16 = set("a16", "16.4", 160004, true, true, true);
+        let s16b = set("b16", "16.9", 160009, true, true, true);
+        let s17 = set("a17", "17.2", 170002, true, true, true);
+        let s18 = set("a18", "18.1", 180001, true, true, true);
+        let no_restore = set("x16", "16.0", 160000, true, false, true);
+        let all = [s18.clone(), s15.clone(), s16.clone(), s16b.clone(), s17.clone()];
+        let pick = |sets: &[ToolSet], server, archive| choose_restore(sets, server, archive).map(|s| s.dir.clone());
+        // Sunucu 16, arşiv 16: aynı ana sürüm (eşitlikte aday sırası: a16 önce).
+        assert_eq!(pick(&all, 160002, Some(160004)).unwrap(), "a16");
+        // Sunucu 16, arşiv 15: sunucuyla aynı ana sürüm yine tercih.
+        assert_eq!(pick(&all, 160002, Some(150008)).unwrap(), "a16");
+        // Sunucu 16, arşiv 17: 16 arşivi okuyamaz; okuyabilen en küçük 17.
+        assert_eq!(pick(&all, 160002, Some(170002)).unwrap(), "a17");
+        // Sunucuyla aynı sürüm yok (sunucu 14), arşiv 15: en küçük okuyabilen 15.
+        assert_eq!(pick(&all, 140000, Some(150001)).unwrap(), "a15");
+        // Arşivi hiçbir araç okuyamıyor (19): en yeni (araç kendi hatasını verir).
+        assert_eq!(pick(&all, 160002, Some(190000)).unwrap(), "a18");
+        // Arşiv sürümü bilinmiyor: sunucuyla aynı ana sürüm, yoksa en yeni (en eski değil).
+        assert_eq!(pick(&all, 170000, None).unwrap(), "a17");
+        assert_eq!(pick(&all, 140000, None).unwrap(), "a18");
+        // Sunucu sürümü bilinmiyor (0): arşive göre.
+        assert_eq!(pick(&all, 0, Some(160000)).unwrap(), "a16");
+        assert_eq!(pick(&all, 0, None).unwrap(), "a18");
+        // pg_restore'u olmayan küme sayılmaz.
+        assert_eq!(pick(&[no_restore.clone(), s18.clone()], 160000, Some(160000)).unwrap(), "a18");
+        let err = pick(std::slice::from_ref(&no_restore), 160000, Some(160000)).unwrap_err();
+        assert!(err.contains("pg_restore") && err.contains("Ayarlardan"), "{err}");
+        // 9.6 ayrı ana sürümdür.
+        let s96 = set("a96", "9.6.24", 90624, true, true, true);
+        let s95 = set("a95", "9.5.25", 90525, true, true, true);
+        assert_eq!(pick(&[s95, s96, s18.clone()], 90620, Some(90620)).unwrap(), "a96");
+    }
+
+    #[test]
+    fn archive_version_text_is_parsed() {
+        assert_eq!(archive_version_num("16.4"), Some(160004));
+        assert_eq!(archive_version_num(" 18.1 (Debian 18.1-1.pgdg13+2)"), Some(180001));
+        assert_eq!(archive_version_num("17beta1"), Some(170000));
+        assert_eq!(archive_version_num("9.6.24"), Some(90624));
+        assert_eq!(archive_version_num(""), None);
+        assert_eq!(archive_version_num("x"), None);
+    }
+
+    #[test]
+    fn validate_bin_dir_rejects_relative_paths() {
+        let err = validate_bin_dir("bin").unwrap_err();
+        assert!(err.to_string().contains("mutlak"), "{err}");
+        assert!(validate_bin_dir(".").is_err());
     }
 
     #[test]

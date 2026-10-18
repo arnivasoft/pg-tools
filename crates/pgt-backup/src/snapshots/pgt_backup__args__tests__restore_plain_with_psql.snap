@@ -26,4 +26,5 @@ preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE="satış" PGSS
 risk: DataLoss
 notes:
   - Düz SQL psql ile çalıştırılır; içerik taranmaz ve ilk hatada durulur.
+  - Düz SQL dosyası psql meta komutları (\!, \connect, \copy … program) çalıştırabilir; yalnız güvendiğiniz dosyaları yükleyin.
 output: -

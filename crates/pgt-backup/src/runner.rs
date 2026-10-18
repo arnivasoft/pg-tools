@@ -28,8 +28,8 @@ use tokio::process::Command;
 
 use crate::args::{Invocation, OutputPlan};
 use crate::events::{BackupEvent, EventSink, JobOutcome, JobSummary};
-use crate::lines::{LineSeverity, classify, failure_hint, progress_tick};
-use crate::model::JobKind;
+use crate::lines::{LineSeverity, classify, failure_hint, failure_hint_for, ignored_errors, progress_tick};
+use crate::model::{JobKind, ToolKind};
 use crate::registry::CancelToken;
 
 /// Gösterilen en çok stderr satırı; fazlası sayılır, son satırla bildirilir.
@@ -305,6 +305,9 @@ impl<R: AsyncBufRead + Unpin> LineReader<R> {
 /// Satır sayaçları ve ilerleme durumu.
 struct State {
     kind: JobKind,
+    tool: ToolKind,
+    /// `pg_restore`'un bildirdiği atlanan hata sayısı (`errors ignored on restore: N`).
+    ignored: Option<u32>,
     total: Option<u32>,
     shown: usize,
     truncated: u32,
@@ -319,9 +322,11 @@ struct State {
 }
 
 impl State {
-    fn new(kind: JobKind, total: Option<u32>) -> Self {
+    fn new(kind: JobKind, tool: ToolKind, total: Option<u32>) -> Self {
         State {
             kind,
+            tool,
+            ignored: None,
             total,
             shown: 0,
             truncated: 0,
@@ -341,6 +346,12 @@ impl State {
             LineSeverity::Warning => self.warnings += 1,
             LineSeverity::Error => self.errors += 1,
             LineSeverity::Info => {}
+        }
+        if self.kind == JobKind::Restore
+            && self.tool == ToolKind::PgRestore
+            && let Some(n) = ignored_errors(&text)
+        {
+            self.ignored = Some(n);
         }
         let tick = progress_tick(&text, self.kind);
         if tick {
@@ -386,7 +397,7 @@ impl State {
     fn hint(&self) -> Option<String> {
         let mut lines = self.kept.clone();
         lines.extend(self.tail.iter().cloned());
-        failure_hint(&lines).map(str::to_string)
+        failure_hint_for(&lines, self.tool).map(str::to_string)
     }
 }
 
@@ -479,6 +490,17 @@ async fn execute(
             (JobOutcome::Cancelled, None)
         }
         Step::Exited(Ok(status)) if status.success() => (JobOutcome::Success, status.code()),
+        // pg_restore "hatada dur" kapalıyken atlanan hatalarla 1 döner; sayı satırı görüldüyse iş sonuna dek
+        // yürümüştür (bağlantı ya da arşiv okuma hatası gibi erken çıkışlar bu satırı yazmaz).
+        Step::Exited(Ok(status))
+            if status.code() == Some(1)
+                && inv.tolerates_ignored_errors
+                && st.kind == JobKind::Restore
+                && st.tool == ToolKind::PgRestore
+                && st.ignored.is_some_and(|n| n > 0) =>
+        {
+            (JobOutcome::CompletedWithErrors, status.code())
+        }
         Step::Exited(Ok(status)) => (JobOutcome::Failed, status.code()),
         Step::Exited(Err(e)) => {
             st.own_error(sink, format!("Aracın bitişi beklenemedi: {e}"));
@@ -505,7 +527,7 @@ pub async fn run(
     cancel: CancelToken,
 ) -> JobSummary {
     let started = Instant::now();
-    let mut st = State::new(kind, total);
+    let mut st = State::new(kind, inv.tool, total);
     let (mut outcome, exit_code) = execute(&inv, password, &mut st, sink, &cancel).await;
 
     let mut output_path = None;
@@ -548,7 +570,7 @@ pub async fn run(
         warnings: st.warnings,
         errors: st.errors,
         output_path,
-        hint: if outcome == JobOutcome::Failed { st.hint() } else { None },
+        hint: if matches!(outcome, JobOutcome::Failed | JobOutcome::CompletedWithErrors) { st.hint() } else { None },
         truncated_lines: st.truncated,
     };
     sink.send(BackupEvent::from(&summary));

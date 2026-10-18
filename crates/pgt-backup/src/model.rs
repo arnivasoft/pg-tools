@@ -37,7 +37,7 @@ pub struct ToolDetection {
     pub problem: Option<String>,
     /// Bağlı sunucunun sürümüne göre seçilen `pg_dump` klasörü (bağlı değilse ya da uygun yoksa `None`).
     pub chosen_dump: Option<String>,
-    /// Seçilen `pg_restore` klasörü (en yeni).
+    /// Seçilen `pg_restore` klasörü: sunucuyla aynı ana sürüm, yoksa en yeni (arşiv sürümü burada bilinmez).
     pub chosen_restore: Option<String>,
     /// Seçilen `psql` klasörü (en yeni).
     pub chosen_psql: Option<String>,
@@ -48,7 +48,10 @@ impl ToolDetection {
     /// yoksa `problem` seçim iletisiyle doldurulur (önceki sorun yoksa).
     pub fn with_choices(mut self, server_version_num: Option<u32>) -> Self {
         let dir = |kind, v| crate::tools::choose(&self.sets, kind, v).map(|s| s.dir.clone());
-        self.chosen_restore = dir(ToolKind::PgRestore, 0).ok();
+        // Arşiv bilinmez: sunucuyla aynı ana sürüm, yoksa en yeni (`restore_plan` arşive göre yeniden seçer).
+        self.chosen_restore = crate::tools::choose_restore(&self.sets, server_version_num.unwrap_or(0), None)
+            .map(|s| s.dir.clone())
+            .ok();
         self.chosen_psql = dir(ToolKind::Psql, 0).ok();
         if let Some(v) = server_version_num.filter(|v| *v > 0) {
             match dir(ToolKind::PgDump, v) {
@@ -129,7 +132,8 @@ mod tests {
     fn choices_follow_server_version() {
         let d = ToolDetection { sets: vec![set("16", 160004), set("18", 180001)], problem: None, chosen_dump: None, chosen_restore: None, chosen_psql: None };
         let c = d.clone().with_choices(Some(160002));
-        assert_eq!((c.chosen_dump.as_deref(), c.chosen_restore.as_deref(), c.chosen_psql.as_deref()), (Some("16"), Some("18"), Some("18")));
+        assert_eq!((c.chosen_dump.as_deref(), c.chosen_restore.as_deref(), c.chosen_psql.as_deref()), (Some("16"), Some("16"), Some("18")));
+        assert_eq!(d.clone().with_choices(Some(170000)).chosen_restore.as_deref(), Some("18"));
         assert!(c.problem.is_none());
         // Bağlı değil: pg_dump seçilmez, sorun yazılmaz.
         let c = d.clone().with_choices(None);

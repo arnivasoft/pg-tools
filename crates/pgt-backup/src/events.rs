@@ -5,12 +5,14 @@ use ts_rs::TS;
 
 use crate::lines::LineSeverity;
 
-/// İş sonucu.
+/// İş sonucu. `CompletedWithErrors`: `pg_restore` "hatada dur" kapalıyken hataları atlayıp sonuna dek çalıştı ve
+/// `errors ignored on restore: N` yazıp 1 ile çıktı (veri yüklenmiş olabilir; `errors` hata satırı sayısıdır).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
 pub enum JobOutcome {
     Success,
+    CompletedWithErrors,
     Failed,
     Cancelled,
 }
@@ -19,6 +21,7 @@ impl JobOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
             JobOutcome::Success => "success",
+            JobOutcome::CompletedWithErrors => "completed_with_errors",
             JobOutcome::Failed => "failed",
             JobOutcome::Cancelled => "cancelled",
         }
@@ -27,6 +30,7 @@ impl JobOutcome {
 
 /// İşin özeti; son `Finished` olayıyla aynı bilgidir ve komutun dönüş değeridir.
 /// `warnings`/`errors` gösterilmeyen (sınır aşan) satırları da sayar. `output_path` yalnız başarıda doludur.
+/// `hint` yalnız `failed` ve `completed_with_errors` sonuçlarında dolabilir.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -87,6 +91,12 @@ pub trait EventSink: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outcome_names_are_snake_case() {
+        assert_eq!(serde_json::to_value(JobOutcome::CompletedWithErrors).unwrap(), serde_json::json!("completed_with_errors"));
+        assert_eq!(JobOutcome::CompletedWithErrors.as_str(), "completed_with_errors");
+    }
 
     #[test]
     fn events_serialize_as_tagged_camel_case() {

@@ -226,6 +226,48 @@ async fn success_without_output_is_failure() {
     assert_eq!(s.output_path, None);
 }
 
+/// pg_restore "hatada dur" kapalıyken: atlanan hatalarla çıkış 1 ve sayı satırı → `completed_with_errors`.
+fn restore_inv(lines: &[&str], exit: &str, tolerates: bool, tool: pgt_backup::ToolKind) -> pgt_backup::Invocation {
+    let mut args: Vec<&str> = Vec::new();
+    for l in lines {
+        args.extend(["--line", l]);
+    }
+    args.extend(["--exit", exit]);
+    let mut i = inv(&args, None);
+    i.tool = tool;
+    i.tolerates_ignored_errors = tolerates;
+    i
+}
+
+#[tokio::test]
+async fn ignored_restore_errors_complete_with_errors() {
+    use pgt_backup::ToolKind::{PgRestore, Psql};
+    let tt = r#"pg_restore: error: could not execute query: ERROR:  unrecognized configuration parameter "transaction_timeout""#;
+    let tail = "pg_restore: warning: errors ignored on restore: 1";
+    let go = |i| async move {
+        let mut sink = VecSink::default();
+        let s = run(i, None, JobKind::Restore, None, &mut sink, CancelToken::new()).await;
+        finished_matches(&sink, &s);
+        s
+    };
+    let s = go(restore_inv(&[tt, tail], "1", true, PgRestore)).await;
+    assert_eq!((s.outcome, s.exit_code, s.errors, s.warnings), (JobOutcome::CompletedWithErrors, Some(1), 1, 1));
+    // İpucu bu sonuçta da verilir (ipucu 4, pg_restore metni).
+    assert!(s.hint.as_deref().is_some_and(|h| h.contains("transaction_timeout") && h.contains("pg_restore")), "{s:?}");
+    // Sayı satırı yoksa (erken çıkış) ya da "hatada dur" açıksa ya da çıkış kodu farklıysa: failed.
+    assert_eq!(go(restore_inv(&[tt], "1", true, PgRestore)).await.outcome, JobOutcome::Failed);
+    assert_eq!(go(restore_inv(&[tt, tail], "1", false, PgRestore)).await.outcome, JobOutcome::Failed);
+    assert_eq!(go(restore_inv(&[tt, tail], "2", true, PgRestore)).await.outcome, JobOutcome::Failed);
+    // psql işi bu kurala girmez; ipucu 4 düz SQL metnidir.
+    let p = go(restore_inv(&[r#"psql:a.sql:9: ERROR:  unrecognized configuration parameter "transaction_timeout""#], "3", false, Psql)).await;
+    assert_eq!(p.outcome, JobOutcome::Failed);
+    assert!(p.hint.as_deref().is_some_and(|h| h.contains("pg_dump ile yeniden")), "{p:?}");
+    // Yedekleme işinde aynı satır sonucu değiştirmez.
+    let mut sink = VecSink::default();
+    let b = run(restore_inv(&[tail], "1", true, PgRestore), None, JobKind::Backup, None, &mut sink, CancelToken::new()).await;
+    assert_eq!(b.outcome, JobOutcome::Failed);
+}
+
 #[tokio::test]
 async fn spawn_failure_is_reported() {
     let mut i = inv(&[], None);

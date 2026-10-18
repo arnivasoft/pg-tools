@@ -59,7 +59,8 @@ async fn every_format_roundtrips_into_a_new_database() {
             if source == SourceFormat::Plain && env.old_server() {
                 // psql ilk satırda (SET transaction_timeout) durur: net hata ve ipucu, içerik denetlenmez.
                 assert_eq!(s.outcome, JobOutcome::Failed, "{what}");
-                assert!(s.hint.as_deref().is_some_and(|h| h.contains("transaction_timeout")), "{what}: {s:?}");
+                // psql ipucu düz SQL'i anlatır: yedeği aynı ana sürüm pg_dump ile yeniden alın ya da custom.
+                assert!(s.hint.as_deref().is_some_and(|h| h.contains("transaction_timeout") && h.contains("custom")), "{what}: {s:?}");
                 eprintln!("{what}: sunucu 17'den eski, plain geri yükleme araç 18 ile yapılamıyor (ipucu doğrulandı)");
                 env.drop(tgt).await;
                 continue;

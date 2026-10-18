@@ -16,9 +16,9 @@
 //! Gelecekler `Box::pin` ile kutulanır (bkz. ddl.rs: ana iş parçacığı yığını).
 
 use pgt_backup::{
-    BackupEvent, BackupRequest, BackupScope, Conn, EventSink, Invocation, JobKind, JobPlan, JobSummary, RegisterError,
-    RestoreRequest, RestoreSource, RestoreTarget, Secret, SourceFormat, ToolDetection, ToolKind, ToolSet, backup_invocation,
-    pattern_regex, restore_invocation, windows_name_problems,
+    ArchiveInfo, BackupEvent, BackupRequest, BackupScope, Conn, EventSink, Invocation, JobKind, JobPlan, JobSummary,
+    RegisterError, RestoreRequest, RestoreSource, RestoreTarget, Secret, SourceFormat, ToolDetection, ToolKind, ToolSet,
+    backup_invocation, pattern_regex, plain_backup_note, restore_invocation, windows_name_problems,
 };
 use pgt_core::config::ServerConfig;
 use pgt_core::connection::Target;
@@ -113,12 +113,20 @@ async fn password(state: &AppState, server_id: Uuid) -> CmdResult<Option<Secret>
 /// Kapsamdaki tablo sayısı sorgusu (ilerleme toplamı). Ad değerleri yalnız parametredir. Yalnız `relkind = 'r'`
 /// sayılır: pg_dump "dumping contents of table" satırını veri taşıyan tablolar (bölümler dahil) için yazar;
 /// bölümlenmiş üst tablo (`p`) ve MV (`m`, verisi REFRESH ile gelir) için yazmaz (Docker testiyle ölçüldü).
+/// Uzantı üyesi tablolar (`pg_depend.deptype = 'e'`) da sayılmaz: pg_dump onları `CREATE EXTENSION` ile yazar,
+/// verisini yalnız yapılandırma tablosuysa (`pg_extension.extconfig`, NULL olabilir) döker; bu tablolar sayılır (şema/tablo
+/// kapsamında uzantı dökülmezse toplam biraz fazla kalabilir: ön yüz `done`'u `total` ile sınırlar).
 macro_rules! count_base {
     () => {
         concat!(
             "SELECT count(*)::int4 FROM pg_catalog.pg_class c ",
             "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace ",
-            "WHERE c.relkind = 'r' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'"
+            "WHERE c.relkind = 'r' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' ",
+            "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d ",
+            "JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid ",
+            "WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND d.objid = c.oid ",
+            "AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype = 'e' ",
+            "AND NOT COALESCE(c.oid = ANY (e.extconfig), false))"
         )
     };
 }
@@ -165,6 +173,18 @@ pub fn pattern_match_query(scope: &BackupScope) -> Option<(&'static str, Vec<Str
 
 const AMBIGUOUS_PATTERN: &str = "Ad ASCII dışı karakter içeriyor: araç adı joker desenle aktarır ve desen başka nesnelere de \
      uyuyor. Veritabanının tamamını yedekleyin ya da nesneyi yeniden adlandırın.";
+const PATTERN_CHECK_FAILED: &str = "Ad ASCII dışı karakter içeriyor ve joker desenin başka nesnelere uyup uymadığı \
+     denetlenemedi. Veritabanının tamamını yedekleyin ya da yeniden deneyin.";
+
+/// Joker desen denetiminin sonucu (saf): sorgu hatası da plan hatasıdır (kapalı kalınır). Denetim plan ve başlatma
+/// anında yapılır; arada ya da iş sürerken desene uyan yeni nesne oluşturulursa (TOCTOU) o da yedeğe girebilir.
+pub fn pattern_check(count: pgt_core::Result<i32>) -> Option<FieldError> {
+    match count {
+        Ok(n) if n <= 1 => None,
+        Ok(_) => Some(FieldError { path: "scope.name".into(), message: AMBIGUOUS_PATTERN.into() }),
+        Err(_) => Some(FieldError { path: "scope.name".into(), message: PATTERN_CHECK_FAILED.into() }),
+    }
+}
 
 /// Sorguyu kapsam veritabanında çalıştırır; tek `int4` döner.
 async fn count_in(state: &AppState, server_id: Uuid, database_oid: u32, sql: &'static str, params: Vec<String>) -> pgt_core::Result<i32> {
@@ -253,14 +273,17 @@ async fn prepare_backup(
         }
     }
     if let Some((sql, params)) = pattern_match_query(&req.scope)
-        && Box::pin(count_in(state, server_id, database_oid, sql, params)).await.is_ok_and(|n| n > 1)
+        && let Some(e) = pattern_check(Box::pin(count_in(state, server_id, database_oid, sql, params)).await)
     {
-        return Ok(Err(vec![FieldError { path: "scope.name".into(), message: AMBIGUOUS_PATTERN.into() }]));
+        return Ok(Err(vec![e]));
     }
-    let inv = match backup_invocation(&tool, &conn, req) {
+    let mut inv = match backup_invocation(&tool, &conn, req) {
         Ok(inv) => inv,
         Err(errors) => return Ok(Err(errors)),
     };
+    if let Some(note) = plain_backup_note(req.format, tool.version.version_num, version) {
+        inv.notes.push(note.to_string());
+    }
     if let Some(plan) = inv.output.clone() {
         let checked = tokio::task::spawn_blocking(move || pgt_backup::check_output(&plan)).await;
         match checked {
@@ -272,15 +295,17 @@ async fn prepare_backup(
     Ok(Ok(inv))
 }
 
-/// Geri yükleme çağrısı (algılanan formatla) ya da alan hataları.
+/// Geri yükleme çağrısı (algılanan formatla; arşivde özetiyle) ya da alan hataları. Arşivde özet bir kez okunur
+/// (`pg_restore --list`, en yeni araçla) ve hem araç seçiminde (`choose_restore`: arşivi üreten pg_dump ve sunucu
+/// sürümü) hem ilerleme toplamında kullanılır. Hiçbir araç yol ANSI denetiminden geçmeden çalışmaz.
 async fn prepare_restore(
     state: &AppState,
     server_id: Uuid,
     database_oid: Option<u32>,
     req: &RestoreRequest,
-) -> CmdResult<Result<(Invocation, SourceFormat), Vec<FieldError>>> {
+) -> CmdResult<Result<(Invocation, Option<ArchiveInfo>), Vec<FieldError>>> {
     let config = server_config(state, server_id)?;
-    server_version(state, server_id)?;
+    let version = server_version(state, server_id)?;
     let path = req.path.clone();
     let sniffed = tokio::task::spawn_blocking(move || pgt_backup::sniff_path(&path))
         .await
@@ -297,10 +322,23 @@ async fn prepare_restore(
             return Ok(Err(vec![FieldError { path: "target".into(), message: "Hedef veritabanı seçilmedi.".into() }]));
         }
     };
-    let kind = if format == SourceFormat::Plain { ToolKind::Psql } else { ToolKind::PgRestore };
     let sets = Box::pin(tool_sets(state, false)).await.sets;
-    let tool: ToolSet = match pgt_backup::tools::choose(&sets, kind, 0) {
-        Ok(t) => t.clone(),
+    let (picked, archive) = if format == SourceFormat::Plain {
+        // psql: sürüm önemsiz (düz SQL'in uyumu dosyayı üreten pg_dump'a bağlıdır); en yeni.
+        (pgt_backup::tools::choose(&sets, ToolKind::Psql, 0).cloned(), None)
+    } else {
+        if let Err(m) = pgt_backup::tools::choose(&sets, ToolKind::PgRestore, 0) {
+            return Ok(Err(tool_error(m)));
+        }
+        let info = match Box::pin(pgt_backup::archive_info(&req.path, format, &sets)).await {
+            Ok(i) => i,
+            Err(message) => return Ok(Err(vec![FieldError { path: "path".into(), message }])),
+        };
+        let dumped_by = info.archive_version.as_deref().and_then(pgt_backup::tools::archive_version_num);
+        (pgt_backup::tools::choose_restore(&sets, version, dumped_by).cloned(), Some(info))
+    };
+    let tool: ToolSet = match picked {
+        Ok(t) => t,
         Err(m) => return Ok(Err(tool_error(m))),
     };
     let conn = Conn::from_server(&config, &database, tool.version.version_num);
@@ -311,7 +349,7 @@ async fn prepare_restore(
         }
     }
     // Kullanılmayan araç yuvası denetlenmez; aynı küme iki yuvaya verilir.
-    Ok(restore_invocation((&tool, &tool), &conn, &maintenance, req, format).map(|inv| (inv, format)))
+    Ok(restore_invocation((&tool, &tool), &conn, &maintenance, req, format).map(|inv| (inv, archive)))
 }
 
 /// `Channel<BackupEvent>` alıcısı: gönderim hatası (pencere gitti) işi iptal ettirir.
@@ -404,23 +442,14 @@ pub async fn restore_start(
     // Kilit her şeyden önce: kilitli sunucuda araç bulma ya da bağlantı bile yapılmaz.
     restore_gate(config.read_only_lock, true, Risk::Safe, false, false, false).map_err(gate_payload)?;
     let prepared = Box::pin(prepare_restore(&state, server_id, database_oid, &request)).await?;
-    let (inv, format) = match prepared {
+    let (inv, archive) = match prepared {
         Ok(p) => p,
         Err(errors) => return Err(errors_payload(&errors)),
     };
     restore_gate(false, true, inv.risk, config.is_production(), confirmed, confirmed_production).map_err(gate_payload)?;
     let password = Box::pin(password(&state, server_id)).await?;
-    let total = if format == SourceFormat::Plain {
-        None
-    } else {
-        let sets = Box::pin(tool_sets(&state, false)).await.sets;
-        Box::pin(pgt_backup::inspect(&request.path, &sets))
-            .await
-            .ok()
-            .and_then(|s| s.archive)
-            .map(|a| a.items)
-            .filter(|n| *n > 0)
-    };
+    // Plan sırasında okunan özet yeniden kullanılır (ikinci `pg_restore --list` yok).
+    let total = pgt_backup::restore_total(&request, archive.as_ref());
     let (token, _guard) = state.backup.register(job_id, None).map_err(register_payload)?;
     let mut sink = ChannelSink(on_event);
     Ok(Box::pin(pgt_backup::run(inv, password, JobKind::Restore, total, &mut sink, token)).await)
@@ -492,6 +521,23 @@ mod tests {
         let (sql, params) = pattern_match_query(&BackupScope::Schema { name: "şema".into() }).unwrap();
         assert!(sql.contains("$1") && !sql.contains('ş'));
         assert_eq!(params, vec!["^(.ema)$".to_string()]);
+    }
+
+    #[test]
+    fn pattern_check_fails_closed() {
+        assert_eq!(pattern_check(Ok(0)), None);
+        assert_eq!(pattern_check(Ok(1)), None);
+        let amb = pattern_check(Ok(2)).unwrap();
+        assert_eq!((amb.path.as_str(), amb.message.as_str()), ("scope.name", AMBIGUOUS_PATTERN));
+        let failed = pattern_check(Err(Error::NotConnected)).unwrap();
+        assert_eq!((failed.path.as_str(), failed.message.as_str()), ("scope.name", PATTERN_CHECK_FAILED));
+    }
+
+    #[test]
+    fn count_query_skips_extension_members_but_keeps_config_tables() {
+        for sql in [COUNT_DATABASE, COUNT_SCHEMA, COUNT_TABLE] {
+            assert!(sql.contains("deptype = 'e'") && sql.contains("extconfig"), "{sql}");
+        }
     }
 
     #[test]

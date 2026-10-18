@@ -189,6 +189,11 @@ pub struct Invocation {
     pub risk: Risk,
     pub notes: Vec<String>,
     pub output: Option<OutputPlan>,
+    /// Çalıştırılan araç (ipucu metni araca göre seçilir).
+    pub tool: ToolKind,
+    /// `pg_restore` "hatada dur" kapalı: hatalar atlanır ve araç sonunda `errors ignored on restore: N` yazıp
+    /// 1 ile çıkar. Yürütücü bu durumu `completed_with_errors` sayar (bkz. `runner`).
+    pub tolerates_ignored_errors: bool,
 }
 
 /// Bağlantı zaman aşımı (sn), spec §1.
@@ -265,6 +270,70 @@ pub fn windows_name_problems(conn: &Conn) -> Vec<FieldError> {
     }
     errors
 }
+
+/// Windows kod sayfasında birebir temsil edilemeyen yol iletisi (bkz. [`crate::ansi`]).
+pub const ANSI_PATH_MESSAGE: &str = "Bu yol Windows kod sayfasında güvenle temsil edilemiyor; araç onu farklı karakterlerle \
+     alır. Yalnız sistem kod sayfasındaki karakterleri içeren bir yol seçin.";
+const ANSI_VALUE_MESSAGE: &str = "Bu değer Windows kod sayfasında güvenle temsil edilemiyor; araç onu farklı karakterlerle alır.";
+
+/// Ortam anahtarının plan alan yolu (ANSI denetimi). `PGDATABASE`/`PGUSER` burada denetlenmez: Windows'ta ASCII
+/// dışı ad zaten plan hatasıdır ([`windows_name_problems`], daha katı); sabit ASCII değerler atlanır.
+fn env_field(key: &str) -> Option<&'static str> {
+    match key {
+        "PGHOST" => Some("host"),
+        "PGSSLROOTCERT" => Some("ssl.rootCert"),
+        "PGSSLCERT" => Some("ssl.clientCert"),
+        "PGSSLKEY" => Some("ssl.clientKey"),
+        _ => None,
+    }
+}
+
+/// Kurulan çağrının ANSI gidiş-dönüş denetimi (Windows'ta best-fit argv enjeksiyonuna karşı; diğer sistemlerde
+/// etkisiz). Yol alanları çağıranca ayrıca (alan yoluyla) denetlenir; bu süpürme çalıştırılabilir yolu, ortam
+/// değerlerini ve geri kalan her argümanı kapsar. `skip_arg`: `windows_name_problems` ile denetlenen bağlantı
+/// dizesi argümanı (veritabanı adı içerir).
+fn ansi_sweep(exe: &str, args: &[String], env: &[(String, String)], skip_arg: Option<usize>, errors: &mut Vec<FieldError>) {
+    use crate::ansi::ensure_ansi_roundtrip as ok;
+    if !ok(exe) {
+        errors.push(field("tool", ANSI_PATH_MESSAGE));
+    }
+    for (key, value) in env {
+        if let Some(path) = env_field(key)
+            && !ok(value)
+        {
+            let msg = if key == "PGHOST" { ANSI_VALUE_MESSAGE } else { ANSI_PATH_MESSAGE };
+            errors.push(field(path, msg));
+        }
+    }
+    // Yol alanı hatası zaten yazıldıysa aynı argüman için ikinci, genel hata eklenmez.
+    if errors.is_empty()
+        && args.iter().enumerate().any(|(i, a)| Some(i) != skip_arg && !ok(a))
+    {
+        errors.push(field("request", ANSI_VALUE_MESSAGE));
+    }
+}
+
+fn check_ansi_path(path: &str, name: &str, errors: &mut Vec<FieldError>) {
+    if !path.is_empty() && !crate::ansi::ensure_ansi_roundtrip(path) {
+        errors.push(field(name, ANSI_PATH_MESSAGE));
+    }
+}
+
+/// Düz SQL yedeği için sunucu sürümü notu: 17+ `pg_dump` düz çıktıya `SET transaction_timeout = 0;` yazar
+/// (hedef sunucu bilinmez); 17'den eski sunucu bunu tanımaz ve `psql` (`ON_ERROR_STOP`) ilk satırda durur.
+/// Arşiv formatlarında `pg_restore` bağlandığı sunucuya göre davranır; not yalnız plain içindir.
+pub const PLAIN_OLD_SERVER_NOTE: &str = "Bu yedek `SET transaction_timeout` içerir; PostgreSQL < 17 sunucuya düz SQL olarak geri \
+     yüklenemez. Aynı ana sürüm pg_dump kullanın ya da custom formatı seçin.";
+
+/// Plain yedek, 17+ `pg_dump` ve 17'den eski sunucu ise [`PLAIN_OLD_SERVER_NOTE`] (sunucu sürümü 0: bilinmiyor).
+pub fn plain_backup_note(format: DumpFormat, tool_version_num: u32, server_version_num: u32) -> Option<&'static str> {
+    (format == DumpFormat::Plain && tool_version_num >= 170_000 && server_version_num > 0 && server_version_num < 170_000)
+        .then_some(PLAIN_OLD_SERVER_NOTE)
+}
+
+/// Düz SQL geri yükleme güvenlik notu (psql meta komutları).
+pub const PLAIN_META_NOTE: &str = "Düz SQL dosyası psql meta komutları (\\!, \\connect, \\copy … program) çalıştırabilir; \
+     yalnız güvendiğiniz dosyaları yükleyin.";
 
 fn field(path: &str, message: impl Into<String>) -> FieldError {
     FieldError {
@@ -432,6 +501,7 @@ pub fn backup_invocation(
     }
     let is_dir = req.format == DumpFormat::Directory;
     let final_path = check_path(&req.output_path, "outputPath", is_dir, &mut errors);
+    check_ansi_path(&final_path, "outputPath", &mut errors);
 
     let o = &req.options;
     let plain = req.format == DumpFormat::Plain;
@@ -574,6 +644,10 @@ pub fn backup_invocation(
 
     let exe = exe(tool, ToolKind::PgDump);
     let env = base_env(conn, &conn.database, "pg-tools backup");
+    ansi_sweep(&exe, &args, &env, None, &mut errors);
+    if !errors.is_empty() {
+        return Err(errors);
+    }
     Ok(Invocation {
         preview: preview(&exe, &args, &env),
         exe,
@@ -587,6 +661,8 @@ pub fn backup_invocation(
             partial_path,
             is_dir,
         }),
+        tool: ToolKind::PgDump,
+        tolerates_ignored_errors: false,
     })
 }
 
@@ -630,6 +706,7 @@ pub fn restore_invocation(
             }
         }
         let path = check_path(&req.path, "path", false, &mut errors);
+        check_ansi_path(&path, "path", &mut errors);
         if !errors.is_empty() {
             return Err(errors);
         }
@@ -647,11 +724,16 @@ pub fn restore_invocation(
         notes.push(
             "Düz SQL psql ile çalıştırılır; içerik taranmaz ve ilk hatada durulur.".to_string(),
         );
+        notes.push(PLAIN_META_NOTE.to_string());
         if !o.single_transaction {
             notes.push(partial_note.to_string());
         }
         let exe = exe(psql_tool, ToolKind::Psql);
         let env = base_env(conn, &conn.database, "pg-tools restore");
+        ansi_sweep(&exe, &args, &env, None, &mut errors);
+        if !errors.is_empty() {
+            return Err(errors);
+        }
         return Ok(Invocation {
             preview: preview(&exe, &args, &env),
             exe,
@@ -661,6 +743,8 @@ pub fn restore_invocation(
             risk: Risk::DataLoss,
             notes,
             output: None,
+            tool: ToolKind::Psql,
+            tolerates_ignored_errors: false,
         });
     }
 
@@ -718,6 +802,7 @@ pub fn restore_invocation(
         src == SourceFormat::Directory,
         &mut errors,
     );
+    check_ansi_path(&path, "path", &mut errors);
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -787,6 +872,11 @@ pub fn restore_invocation(
     }
     let exe = exe(restore_tool, ToolKind::PgRestore);
     let env = base_env(conn, database, "pg-tools restore");
+    // `--dbname` değeri (indeks 3) veritabanı adını taşır; `windows_name_problems` ile denetlenir.
+    ansi_sweep(&exe, &args, &env, Some(3), &mut errors);
+    if !errors.is_empty() {
+        return Err(errors);
+    }
     Ok(Invocation {
         preview: preview(&exe, &args, &env),
         exe,
@@ -800,6 +890,8 @@ pub fn restore_invocation(
         },
         notes,
         output: None,
+        tool: ToolKind::PgRestore,
+        tolerates_ignored_errors: !o.exit_on_error,
     })
 }
 
@@ -1868,4 +1960,78 @@ mod tests {
         assert!(env.contains(&("PGSSLMODE".into(), "require".into())));
     }
 
+    /// Windows'ta best-fit eşlemesiyle değişen değerler (sistem ACP'si UTF-8 ise birebir taşınır: beklenti
+    /// sistemden okunur). Diğer sistemlerde hiçbir değer reddedilmez.
+    fn ansi_rejects(s: &str) -> bool {
+        !crate::ansi::ensure_ansi_roundtrip(s)
+    }
+
+    #[test]
+    fn best_fit_paths_are_plan_errors() {
+        // U+FF02 `＂` best-fit ile `"` olur: araç argv'sinde tırnağı kapatıp `-h` enjekte ederdi.
+        let evil = format!("{}{SEP}x＂ -h evil.example ＂.dump", out_dir());
+        let dash = format!("{}{SEP}－－clean.sql", out_dir());
+        let want = |name: &str, bad: bool| if bad { vec![name.to_string()] } else { vec![] };
+        let breq_at = |p: &str| BackupRequest {
+            scope: BackupScope::Database,
+            format: DumpFormat::Custom,
+            options: BackupOptions::default(),
+            output_path: p.into(),
+        };
+        let b = |p: &str| paths(backup_invocation(&tools(), &conn(), &breq_at(p)));
+        assert_eq!(b(&evil), want("outputPath", ansi_rejects("＂")));
+        assert_eq!(b(&dash), want("outputPath", ansi_rejects("－")));
+        let r = |p: &str, src| {
+            let req = RestoreRequest { path: p.into(), target: RestoreTarget::Existing, options: RestoreOptions::default() };
+            paths(restore_invocation((&tools(), &tools()), &conn(), "postgres", &req, src))
+        };
+        assert_eq!(r(&evil, SourceFormat::Custom), want("path", ansi_rejects("＂")));
+        assert_eq!(r(&dash, SourceFormat::Plain), want("path", ansi_rejects("－")));
+        if cfg!(windows) && ansi_rejects("＂") {
+            let e = backup_invocation(&tools(), &conn(), &breq_at(&evil)).unwrap_err();
+            assert_eq!(e[0].message, ANSI_PATH_MESSAGE);
+        }
+        // Türkçe yol 1254'te birebir taşınır (sistem ACP'si buna göre karar verir).
+        let tr = format!("{}{SEP}ğüşıöç.dump", out_dir());
+        assert_eq!(b(&tr), want("outputPath", ansi_rejects("ğüşıöç")));
+    }
+
+    #[test]
+    fn best_fit_env_values_and_tool_dir_are_plan_errors() {
+        let bad = ansi_rejects("＂");
+        let k = Conn { client_cert: Some(format!("{}{SEP}c＂.crt", out_dir())), host: "h－x".into(), ..ssl_conn() };
+        let req = breq(BackupScope::Database, DumpFormat::Custom, BackupOptions::default(), "a.backup");
+        let got = paths(backup_invocation(&tools(), &k, &req));
+        assert_eq!(got, if bad { vec!["host".to_string(), "ssl.clientCert".to_string()] } else { vec![] });
+        let t = ToolSet { dir: format!("{}{SEP}bin＂ -h x", out_dir()), ..tools() };
+        assert_eq!(paths(backup_invocation(&t, &conn(), &req)), if bad { vec!["tool".to_string()] } else { vec![] });
+    }
+
+    #[test]
+    fn plain_backup_warns_for_old_server_with_new_pg_dump() {
+        assert_eq!(plain_backup_note(DumpFormat::Plain, 180001, 160004), Some(PLAIN_OLD_SERVER_NOTE));
+        assert_eq!(plain_backup_note(DumpFormat::Plain, 170000, 100023), Some(PLAIN_OLD_SERVER_NOTE));
+        assert_eq!(plain_backup_note(DumpFormat::Plain, 160004, 160004), None);
+        assert_eq!(plain_backup_note(DumpFormat::Plain, 180001, 170002), None);
+        assert_eq!(plain_backup_note(DumpFormat::Custom, 180001, 160004), None);
+        assert_eq!(plain_backup_note(DumpFormat::Plain, 180001, 0), None);
+        assert!(PLAIN_OLD_SERVER_NOTE.contains("transaction_timeout") && PLAIN_OLD_SERVER_NOTE.contains("custom"));
+    }
+
+    #[test]
+    fn restore_invocation_marks_tool_and_ignored_errors() {
+        let r = |exit_on_error, src| {
+            let o = RestoreOptions { exit_on_error, ..Default::default() };
+            let i = restore_ok(&rreq(RestoreTarget::Existing, o), src);
+            (i.tool, i.tolerates_ignored_errors)
+        };
+        assert_eq!(r(false, SourceFormat::Custom), (ToolKind::PgRestore, true));
+        assert_eq!(r(true, SourceFormat::Custom), (ToolKind::PgRestore, false));
+        assert_eq!(r(false, SourceFormat::Plain), (ToolKind::Psql, false));
+        let i = restore_ok(&rreq(RestoreTarget::Existing, RestoreOptions::default()), SourceFormat::Plain);
+        assert!(i.notes.iter().any(|n| n == PLAIN_META_NOTE), "{:?}", i.notes);
+        assert!(PLAIN_META_NOTE.contains(r"\!") && PLAIN_META_NOTE.contains(r"\connect"));
+        let b = backup_ok(&breq(BackupScope::Database, DumpFormat::Custom, BackupOptions::default(), "a.backup"));
+        assert_eq!((b.tool, b.tolerates_ignored_errors), (ToolKind::PgDump, false));
+    }
 }

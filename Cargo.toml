@@ -25,6 +25,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-platform-verifier = "0.7"
 keyring-core = "1"
 windows-native-keyring-store = { version = "1.1", default-features = false }
+# Yalnız ANSI kod sayfası gidiş-dönüş denetimi (pgt-backup `ansi`); bağımlılık ağacında zaten var.
+windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1.27", features = ["v4", "serde"] }

@@ -1,7 +1,7 @@
 //! Yürütücü testlerinin ortak yardımcıları: sahte araçla `Invocation` ve olay toplayan alıcı.
 #![allow(dead_code)]
 
-use pgt_backup::{BackupEvent, EventSink, Invocation, LineSeverity, OutputPlan, PARTIAL_SUFFIX};
+use pgt_backup::{BackupEvent, EventSink, Invocation, LineSeverity, OutputPlan, PARTIAL_SUFFIX, ToolKind};
 use pgt_ddl::Risk;
 
 pub const FAKE: &str = env!("CARGO_BIN_EXE_pgt-fake-tool");
@@ -17,6 +17,8 @@ pub fn inv(args: &[&str], output: Option<OutputPlan>) -> Invocation {
         risk: Risk::Safe,
         notes: Vec::new(),
         output,
+        tool: ToolKind::PgDump,
+        tolerates_ignored_errors: false,
     }
 }
 

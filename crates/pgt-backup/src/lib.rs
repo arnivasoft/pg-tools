@@ -3,6 +3,7 @@
 //!
 //! `tracing`'e yalnız iş türü, süre, çıkış kodu ve sonuç yazılır; yol, argüman ve nesne adı yazılmaz.
 
+pub mod ansi;
 pub mod args;
 pub mod detect;
 pub mod events;
@@ -13,14 +14,15 @@ pub mod registry;
 pub mod runner;
 pub mod tools;
 
+pub use ansi::ensure_ansi_roundtrip;
 pub use args::{
     BackupOptions, BackupRequest, BackupScope, Conn, DumpFormat, Invocation, OutputPlan, PARTIAL_SUFFIX,
-    RestoreOptions, RestoreRequest, RestoreTarget, backup_invocation, dump_pattern, pattern_regex, restore_invocation,
-    windows_name_problems,
+    RestoreOptions, RestoreRequest, RestoreTarget, backup_invocation, dump_pattern, pattern_regex, plain_backup_note,
+    restore_invocation, windows_name_problems,
 };
 pub use detect::{ArchiveInfo, SourceFormat, is_gzip, parse_list, sniff_format};
-pub use lines::{LineSeverity, classify, failure_hint, progress_tick};
-pub use inspect::{RestoreSource, inspect, sniff_path};
+pub use lines::{LineSeverity, classify, failure_hint, failure_hint_for, ignored_errors, progress_tick};
+pub use inspect::{RestoreSource, archive_info, inspect, restore_total, sniff_path};
 pub use model::{JobKind, JobPlan, ToolDetection, ToolKind, ToolSet, ToolVersion};
 pub use events::{BackupEvent, EventSink, JobOutcome, JobSummary};
 pub use registry::{CancelToken, JobGuard, JobRegistry, RegisterError};

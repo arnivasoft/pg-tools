@@ -10,7 +10,7 @@ export type ToolDetection = { sets: Array<ToolSet>, problem: string | null,
  */
 chosenDump: string | null, 
 /**
- * Seçilen `pg_restore` klasörü (en yeni).
+ * Seçilen `pg_restore` klasörü: sunucuyla aynı ana sürüm, yoksa en yeni (arşiv sürümü burada bilinmez).
  */
 chosenRestore: string | null, 
 /**

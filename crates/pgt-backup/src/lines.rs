@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::model::JobKind;
+use crate::model::{JobKind, ToolKind};
 
 /// Satır önemi.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -28,6 +28,12 @@ const RESTORE_VERSION_HINT: &str = "Arşiv bu pg_restore'dan yeni bir pg_dump il
 const OLD_SERVER_HINT: &str = "Araç bu sunucudan yeni ve sunucunun tanımadığı bir ayar (transaction_timeout) gönderdi: \
      sunucuyla aynı ana sürümden pg_dump/pg_restore/psql kurup Ayarlardan bin klasörü olarak seçin; \
      \"hatada dur\" kapalıyken pg_restore bu satırı atlayıp devam eder.";
+
+/// Düz SQL (psql) işinde ipucu 4: `SET transaction_timeout` satırı dosyanın kendisindedir (17+ pg_dump yazar);
+/// psql sürümü önemsizdir.
+const OLD_SERVER_PLAIN_HINT: &str = "Düz SQL yedeği bu sunucudan yeni bir pg_dump ile alınmış ve sunucunun tanımadığı bir \
+     ayar (transaction_timeout) içeriyor: yedeği sunucuyla aynı ana sürümden pg_dump ile yeniden alın ya da custom \
+     formatı kullanın.";
 
 /// Sunucu iletisi önem sözcükleri (psql'in yazdığı `ERROR:  …`). Türkçe `lc_messages` karşılıkları sunucunun tr
 /// çevirisinden: ERROR → `HATA:`, FATAL → `ÖLÜMCÜL (FATAL):`, PANIC → `KRİTİK:`, WARNING → `UYARI:`.
@@ -153,6 +159,26 @@ pub fn failure_hint(lines: &[String]) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// [`failure_hint`], çalışan araca göre: psql işinde ipucu 4 düz SQL metnidir.
+pub fn failure_hint_for(lines: &[String], tool: ToolKind) -> Option<&'static str> {
+    match failure_hint(lines) {
+        Some(OLD_SERVER_HINT) if tool == ToolKind::Psql => Some(OLD_SERVER_PLAIN_HINT),
+        h => h,
+    }
+}
+
+/// `pg_restore`'un sonunda yazdığı atlanan hata sayısı: 12+ `pg_restore: warning: errors ignored on restore: N`,
+/// 10/11 `WARNING: errors ignored on restore: N`. Başka satırda `None`.
+pub fn ignored_errors(line: &str) -> Option<u32> {
+    let t = line.trim_end();
+    let rest = match strip_tool(t) {
+        Some(("pg_restore", rest)) => rest.strip_prefix("warning: ")?,
+        Some(_) => return None,
+        None => t.strip_prefix("WARNING: ")?,
+    };
+    rest.strip_prefix("errors ignored on restore: ")?.trim().parse().ok()
 }
 
 #[cfg(test)]
@@ -291,6 +317,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parses_ignored_error_count() {
+        assert_eq!(ignored_errors("pg_restore: warning: errors ignored on restore: 3"), Some(3));
+        assert_eq!(ignored_errors("pg_restore.exe: warning: errors ignored on restore: 12\r"), Some(12));
+        assert_eq!(ignored_errors("WARNING: errors ignored on restore: 1"), Some(1));
+        assert_eq!(ignored_errors("pg_dump: warning: errors ignored on restore: 1"), None);
+        assert_eq!(ignored_errors("pg_restore: warning: errors ignored on restore: x"), None);
+        assert_eq!(ignored_errors("pg_restore: error: could not execute query"), None);
+        assert_eq!(ignored_errors(""), None);
+    }
+
     fn l(lines: &[&str]) -> Vec<String> {
         lines.iter().map(|s| s.to_string()).collect()
     }
@@ -349,6 +386,12 @@ mod tests {
             None
         );
         assert_eq!(failure_hint(&[]), None);
+        // psql işinde ipucu 4 düz SQL yedeğini anlatır; diğer ipuçları araçtan bağımsızdır.
+        let tt_lines = l(&[r#"psql:C:/y/a.sql:9: ERROR:  unrecognized configuration parameter "transaction_timeout""#]);
+        let plain = failure_hint_for(&tt_lines, ToolKind::Psql).unwrap();
+        assert!(plain.contains("pg_dump ile yeniden") && plain.contains("custom"), "{plain}");
+        assert_eq!(failure_hint_for(&tt_lines, ToolKind::PgRestore), Some(tt));
+        assert_eq!(failure_hint_for(&l(&["no password supplied"]), ToolKind::Psql), Some(pw));
         // Parola sorunu önceliklidir.
         assert_eq!(
             failure_hint(&l(&[

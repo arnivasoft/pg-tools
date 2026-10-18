@@ -47,7 +47,8 @@ pub async fn envs(test: &str) -> Vec<Env> {
                 continue;
             }
         };
-        let restore = tools::choose(&sets, ToolKind::PgRestore, 0).unwrap().clone();
+        // Uygulamayla aynı seçim: arşivi bu `pg_dump` üretir.
+        let restore = tools::choose_restore(&sets, version, Some(dump.version.version_num)).unwrap().clone();
         let psql = tools::choose(&sets, ToolKind::Psql, 0).unwrap().clone();
         out.push(Env { ts, version, dump, restore, psql, sets: sets.clone() });
     }
@@ -120,9 +121,14 @@ INSERT INTO app.p SELECT g, g % 10 FROM generate_series(1, 20) g;
 CREATE MATERIALIZED VIEW app.mv AS SELECT count(*) AS c FROM app.a;
 "#;
 
-/// Uygulamanın ilerleme toplamı sorgusuyla aynı süzgeç (`relkind = 'r'`, sistem şemaları hariç).
+/// Uygulamanın ilerleme toplamı sorgusuyla aynı süzgeç (`relkind = 'r'`, sistem şemaları ve yapılandırma tablosu
+/// olmayan uzantı üyeleri hariç; `src-tauri/src/backup.rs` `count_base!`). 10–18'de sözdizimi de böylece sınanır.
 pub const TABLE_COUNT: &str = "SELECT count(*)::int4 FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-     WHERE c.relkind = 'r' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'";
+     WHERE c.relkind = 'r' AND n.nspname <> 'information_schema' AND n.nspname !~ '^pg_' \
+     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid \
+     WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass AND d.objid = c.oid \
+     AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass AND d.deptype = 'e' \
+     AND NOT COALESCE(c.oid = ANY (e.extconfig), false))";
 
 pub async fn fixture(env: &Env, name: &str) {
     env.fresh(name).await;
@@ -174,12 +180,14 @@ impl Env {
     }
 }
 
-/// Geri yükleme sonucu: yeni sunucuda temiz başarı; eski sunucuda yalnız `transaction_timeout` hatası ve ipucu.
+/// Geri yükleme sonucu: yeni sunucuda temiz başarı; eski sunucuda yalnız `transaction_timeout` hatası,
+/// `completed_with_errors` (pg_restore hatayı atlayıp 1 ile çıkar) ve ipucu.
 pub fn restored(env: &Env, s: &JobSummary, sink: &VecSink, what: &str) {
     if !env.old_server() {
         return ok(s, sink, what);
     }
     let errors: Vec<String> = sink.lines().into_iter().filter(|(sev, _)| *sev == pgt_backup::LineSeverity::Error).map(|(_, t)| t).collect();
     assert!(!errors.is_empty() && errors.iter().all(|t| t.contains("transaction_timeout")), "{what}: {:?}", sink.lines());
-    assert!(s.outcome == JobOutcome::Success || s.hint.as_deref().is_some_and(|h| h.contains("transaction_timeout")), "{what}: {s:?}");
+    assert_eq!(s.outcome, JobOutcome::CompletedWithErrors, "{what}: {s:?}");
+    assert!(s.hint.as_deref().is_some_and(|h| h.contains("transaction_timeout")), "{what}: {s:?}");
 }

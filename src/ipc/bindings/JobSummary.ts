@@ -4,6 +4,7 @@ import type { JobOutcome } from "./JobOutcome";
 /**
  * İşin özeti; son `Finished` olayıyla aynı bilgidir ve komutun dönüş değeridir.
  * `warnings`/`errors` gösterilmeyen (sınır aşan) satırları da sayar. `output_path` yalnız başarıda doludur.
+ * `hint` yalnız `failed` ve `completed_with_errors` sonuçlarında dolabilir.
  */
 export type JobSummary = { outcome: JobOutcome, exitCode: number | null, elapsedMs: number, warnings: number, errors: number, outputPath: string | null, hint: string | null, 
 /**
