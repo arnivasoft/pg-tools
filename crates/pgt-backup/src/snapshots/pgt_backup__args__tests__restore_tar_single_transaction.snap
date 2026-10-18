@@ -1,0 +1,28 @@
+---
+source: crates/pgt-backup/src/args.rs
+expression: "render(&restore_ok(&rreq(RestoreTarget::Existing, options),\nSourceFormat::Tar))"
+---
+exe: <BIN>/pg_restore
+args:
+  --verbose
+  --format=tar
+  --dbname
+  dbname='satış'
+  --single-transaction
+  --schema-only
+  --no-privileges
+  <DIR>/kaynak
+env:
+  PGHOST=db.local
+  PGPORT=5432
+  PGUSER=app user
+  PGDATABASE=satış
+  PGSSLMODE=prefer
+  PGAPPNAME=pg-tools restore
+  PGCONNECT_TIMEOUT=15
+  LC_MESSAGES=C
+preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE="satış" PGSSLMODE=prefer PGAPPNAME="pg-tools restore" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_restore" --verbose --format=tar --dbname "dbname='satış'" --single-transaction --schema-only --no-privileges "<DIR>/kaynak"
+risk: Destructive
+notes:
+  - Hatalar atlanır ve sonunda sayıları bildirilir; durmak için "hatada dur" seçin.
+output: -

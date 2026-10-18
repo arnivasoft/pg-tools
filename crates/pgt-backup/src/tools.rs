@@ -37,18 +37,28 @@ pub fn parse_version(stdout: &str) -> Option<ToolVersion> {
         }
     }
     let major = *parts.first()?;
+    let minor = parts.get(1).copied().unwrap_or(0);
+    // Taşmasız aritmetik; alan sınırını aşan parça (10+ için minor ≥ 10000, 9.x için ≥ 100) başka sürüme
+    // karışacağından reddedilir.
     let version_num = if major >= 10 {
-        major * 10_000 + parts.get(1).copied().unwrap_or(0)
+        if minor >= 10_000 {
+            return None;
+        }
+        major.checked_mul(10_000)?.checked_add(minor)?
     } else {
-        major * 10_000 + parts.get(1).copied().unwrap_or(0) * 100 + parts.get(2).copied().unwrap_or(0)
+        let patch = parts.get(2).copied().unwrap_or(0);
+        if minor >= 100 || patch >= 100 {
+            return None;
+        }
+        major * 10_000 + minor * 100 + patch
     };
     Some(ToolVersion { major, version_num, text: text.to_string() })
 }
 
-/// Tekrar eleme anahtarı: sondaki ayraçlar atılır; Windows'ta büyük/küçük harf duyarsız.
+/// Tekrar eleme anahtarı: sondaki ayraçlar atılır; Windows'ta büyük/küçük harf duyarsız ve `/` ile `\` aynıdır.
 fn dedupe_key(dir: &str) -> String {
     let t = dir.trim_end_matches(['\\', '/']);
-    if cfg!(windows) { t.to_lowercase() } else { t.to_string() }
+    if cfg!(windows) { t.replace('/', "\\").to_lowercase() } else { t.to_string() }
 }
 
 fn join(base: &str, rest: &[&str]) -> String {
@@ -85,6 +95,10 @@ pub fn candidate_dirs(
         let normalized = trimmed.trim_end_matches(['\\', '/']);
         // Kök ("/" ya da "C:\") ayraçsız kalmasın.
         let normalized = if normalized.is_empty() || normalized.ends_with(':') { trimmed } else { normalized };
+        // Güvenlik: göreli klasör ("." ya da göreli ayar) `--version` ile CWD'deki bir ikiliyi çalıştırabilir.
+        if !Path::new(normalized).is_absolute() {
+            return;
+        }
         if seen.insert(dedupe_key(normalized)) {
             out.push(normalized.to_string());
         }
@@ -124,7 +138,7 @@ pub fn candidate_dirs(
     out
 }
 
-fn exe_path(dir: &str, kind: ToolKind) -> PathBuf {
+pub(crate) fn exe_path(dir: &str, kind: ToolKind) -> PathBuf {
     Path::new(dir).join(format!("{}{}", kind.program(), std::env::consts::EXE_SUFFIX))
 }
 
@@ -239,11 +253,15 @@ pub fn choose(sets: &[ToolSet], kind: ToolKind, server_version_num: u32) -> Resu
             Some(s) => format!("bulunan en yeni {}: {}", kind.program(), s.version.text),
             None => format!("hiç {} bulunamadı", kind.program()),
         };
-        format!(
-            "Sunucu sürümü {} için uygun {} yok ({found}). {NO_TOOLS_HINT}",
-            major_text(server_version_num),
-            kind.program()
-        )
+        // Sürüm bilinmiyorsa (0; pg_restore/psql çağrıları) sürüm cümlesi yazılmaz.
+        let target = if server_version_num == 0 {
+            String::new()
+        } else {
+            format!("Sunucu sürümü {} için ", major_text(server_version_num))
+        };
+        let program = kind.program();
+        let head = if target.is_empty() { format!("Uygun {program} yok") } else { format!("{target}uygun {program} yok") };
+        format!("{head} ({found}). {NO_TOOLS_HINT}")
     })
 }
 
@@ -284,6 +302,13 @@ mod tests {
         assert_eq!(parse_version("pg_dump (PostgreSQL)"), None);
         assert_eq!(parse_version("bozuk çıktı"), None);
         assert_eq!(parse_version("pg_dump (PostgreSQL) x.y"), None);
+        // Saçma girdi taşma yapmaz; ara sürüm alanı taşarsa reddedilir.
+        assert_eq!(parse_version("pg_dump (PostgreSQL) 4294967295.1"), None);
+        assert_eq!(parse_version("pg_dump (PostgreSQL) 500000.0"), None);
+        assert_eq!(parse_version("pg_dump (PostgreSQL) 16.10000"), None);
+        assert_eq!(parse_version("pg_dump (PostgreSQL) 16.9999"), v("16.9999", 16, 169999));
+        assert_eq!(parse_version("psql (PostgreSQL) 9.100.1"), None);
+        assert_eq!(parse_version("psql (PostgreSQL) 9.6.100"), None);
     }
 
     fn j(a: &str, rest: &[&str]) -> String {
@@ -314,11 +339,12 @@ mod tests {
         // PATH'te 18\bin büyük harfle ve sondaki ayraçla yine yer alır; boş girdi atlanır.
         let mut pg18_variant = pg18.to_uppercase();
         pg18_variant.push(std::path::MAIN_SEPARATOR);
-        let path_var = ["/usr/bin".to_string(), String::new(), pg18_variant].join(sep);
+        let usr = if cfg!(windows) { r"D:\usr\bin".to_string() } else { "/usr/bin".to_string() };
+        let path_var = [usr.clone(), String::new(), pg18_variant].join(sep);
         let setting = j(pf, &["Custom", "bin"]);
         let got = candidate_dirs(Some(&setting), Some(&path_var), &[pf.to_string(), pf86.to_string(), pf.to_string()], &list);
         // Yeni sürüm önce; PATH'teki biçim korunur ve Program Files'taki 18 (Windows'ta) tekrar sayılmaz.
-        let mut want = vec![setting.clone(), "/usr/bin".to_string(), pg18.to_uppercase()];
+        let mut want = vec![setting.clone(), usr.clone(), pg18.to_uppercase()];
         if !cfg!(windows) {
             want.push(pg18.clone());
         }
@@ -329,7 +355,31 @@ mod tests {
         assert_eq!(got, want);
         assert_eq!(candidate_dirs(None, None, &[], &list), Vec::<String>::new());
         // Boş ayar yok sayılır.
-        assert_eq!(candidate_dirs(Some("  "), Some("/a"), &[], &list), vec!["/a".to_string()]);
+        let a = j(pf, &["a"]);
+        assert_eq!(candidate_dirs(Some("  "), Some(&a), &[], &list), vec![a.clone()]);
+    }
+
+    #[test]
+    fn candidates_drop_relative_dirs() {
+        // Göreli klasör (".", "bin", göreli ayar) CWD'deki ikiliyi çalıştırabilir; elenir.
+        let pf = if cfg!(windows) { r"C:\Program Files" } else { "/pf" };
+        let a = j(pf, &["a"]);
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let path_var = [".", "bin", a.as_str(), r"..\x", "../y"].join(sep);
+        let got = candidate_dirs(Some("tools"), Some(&path_var), &[], &|_| vec![]);
+        assert_eq!(got, vec![a]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn candidates_dedupe_mixed_separators_on_windows() {
+        let got = candidate_dirs(
+            Some(r"C:\PG\18\bin"),
+            Some(r"c:/pg/18/bin;C:\PG\18\bin/;C:/Other;\NoDrive;C:rel"),
+            &[],
+            &|_| vec![],
+        );
+        assert_eq!(got, vec![r"C:\PG\18\bin".to_string(), "C:/Other".to_string()]);
     }
 
     fn set(dir: &str, text: &str, num: u32, dump: bool, restore: bool, psql: bool) -> ToolSet {
@@ -375,6 +425,12 @@ mod tests {
         // Hiç araç yok.
         let none = choose(&[], ToolKind::PgDump, 160000).unwrap_err();
         assert!(none.contains("16") && none.contains("Ayarlardan"), "{none}");
+        // Sunucu sürümü bilinmiyorsa (0) iletide sürüm cümlesi yok.
+        let unknown = choose(&[], ToolKind::PgRestore, 0).unwrap_err();
+        assert!(
+            !unknown.contains("Sunucu sürümü") && unknown.contains("pg_restore") && unknown.contains("Ayarlardan"),
+            "{unknown}"
+        );
     }
 
     #[test]

@@ -1,0 +1,23 @@
+---
+source: crates/pgt-backup/src/args.rs
+expression: render(&backup_ok(&req))
+---
+exe: <BIN>/pg_dump
+args:
+  --verbose
+  --format=custom
+  --file
+  <DIR>/satış.backup.pgt-partial
+env:
+  PGHOST=db.local
+  PGPORT=5432
+  PGUSER=app user
+  PGDATABASE=satış
+  PGSSLMODE=prefer
+  PGAPPNAME=pg-tools backup
+  PGCONNECT_TIMEOUT=15
+  LC_MESSAGES=C
+preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE="satış" PGSSLMODE=prefer PGAPPNAME="pg-tools backup" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_dump" --verbose --format=custom --file "<DIR>/satış.backup.pgt-partial"
+risk: Safe
+notes:
+output: final=<DIR>/satış.backup partial=<DIR>/satış.backup.pgt-partial dir=false

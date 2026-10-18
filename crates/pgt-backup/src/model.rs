@@ -63,3 +63,10 @@ impl ToolKind {
         }
     }
 }
+
+/// İş türü (ilerleme sayımı ve günlük için). Düz SQL geri yükleme de `Restore`'dur (psql satırları sayılmaz).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobKind {
+    Backup,
+    Restore,
+}

@@ -6,6 +6,8 @@ rust-version.workspace = true
 
 [dependencies]
 pgt-core.workspace = true
+# `FieldError` ve `Risk` tek TS tipi kalsın diye yeniden kullanılır (döngü yok: pgt-ddl pgt-backup'a bağlı değil).
+pgt-ddl.workspace = true
 tokio.workspace = true
 serde.workspace = true
 ts-rs.workspace = true
@@ -14,3 +16,5 @@ tracing.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+insta.workspace = true
+serde_json.workspace = true

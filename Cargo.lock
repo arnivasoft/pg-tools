@@ -2588,8 +2588,11 @@ dependencies = [
 name = "pgt-backup"
 version = "0.1.0"
 dependencies = [
+ "insta",
  "pgt-core",
+ "pgt-ddl",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

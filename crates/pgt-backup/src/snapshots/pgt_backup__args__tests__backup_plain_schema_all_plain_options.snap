@@ -1,0 +1,35 @@
+---
+source: crates/pgt-backup/src/args.rs
+expression: render(&backup_ok(&req))
+---
+exe: <BIN>/pg_dump
+args:
+  --verbose
+  --format=plain
+  --file
+  <DIR>/a.sql.gz.pgt-partial
+  --clean
+  --if-exists
+  --create
+  --column-inserts
+  --no-owner
+  --no-privileges
+  --compress=6
+  --encoding
+  UTF8
+  --schema
+  "Satış ""Şema"""
+env:
+  PGHOST=db.local
+  PGPORT=5432
+  PGUSER=app user
+  PGDATABASE=satış
+  PGSSLMODE=prefer
+  PGAPPNAME=pg-tools backup
+  PGCONNECT_TIMEOUT=15
+  LC_MESSAGES=C
+preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE="satış" PGSSLMODE=prefer PGAPPNAME="pg-tools backup" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_dump" --verbose --format=plain --file "<DIR>/a.sql.gz.pgt-partial" --clean --if-exists --create --column-inserts --no-owner --no-privileges --compress=6 --encoding UTF8 --schema "\"Satış \"\"Şema\"\"\""
+risk: Safe
+notes:
+  - Çıktı gzip ile sıkıştırılır (.sql.gz); psql ile yüklemeden önce açılmalıdır.
+output: final=<DIR>/a.sql.gz partial=<DIR>/a.sql.gz.pgt-partial dir=false
