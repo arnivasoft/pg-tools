@@ -3,17 +3,17 @@ source: crates/pgt-ddl/src/build/maintenance.rs
 expression: out
 ---
 Index: [Destructive non-tx] REINDEX INDEX s.i  -- Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler.
-Index: [Safe non-tx] REINDEX (VERBOSE) INDEX CONCURRENTLY s.i
-Index: [Safe non-tx] REINDEX INDEX CONCURRENTLY s.i
+Index: [Safe non-tx] REINDEX (VERBOSE) INDEX CONCURRENTLY s.i  -- Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.
+Index: [Safe non-tx] REINDEX INDEX CONCURRENTLY s.i  -- Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.
 Table: [Destructive non-tx] REINDEX TABLE s.t  -- Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler.
-Table: [Safe non-tx] REINDEX (VERBOSE) TABLE CONCURRENTLY s.t
-Table: [Safe non-tx] REINDEX TABLE CONCURRENTLY s.t
+Table: [Safe non-tx] REINDEX (VERBOSE) TABLE CONCURRENTLY s.t  -- Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.
+Table: [Safe non-tx] REINDEX TABLE CONCURRENTLY s.t  -- Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.
 MaterializedView: [Destructive non-tx] REINDEX TABLE s.t  -- Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler.
-MaterializedView: [Safe non-tx] REINDEX (VERBOSE) TABLE CONCURRENTLY s.t
-MaterializedView: [Safe non-tx] REINDEX TABLE CONCURRENTLY s.t
+MaterializedView: [Safe non-tx] REINDEX (VERBOSE) TABLE CONCURRENTLY s.t  -- Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.
+MaterializedView: [Safe non-tx] REINDEX TABLE CONCURRENTLY s.t  -- Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.
 Schema: [Destructive non-tx] REINDEX SCHEMA s  -- Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler. Tablolar sırayla kilitlenir.
-Schema: [Safe non-tx] REINDEX (VERBOSE) SCHEMA CONCURRENTLY s
-Schema: [Safe non-tx] REINDEX SCHEMA CONCURRENTLY s
+Schema: [Safe non-tx] REINDEX (VERBOSE) SCHEMA CONCURRENTLY s  -- Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.
+Schema: [Safe non-tx] REINDEX SCHEMA CONCURRENTLY s  -- Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.
 Database: [Destructive non-tx] REINDEX DATABASE d  -- Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler. Tablolar sırayla kilitlenir.
-Database: [Safe non-tx] REINDEX (VERBOSE) DATABASE CONCURRENTLY d
-Database: [Safe non-tx] REINDEX DATABASE CONCURRENTLY d
+Database: [Safe non-tx] REINDEX (VERBOSE) DATABASE CONCURRENTLY d  -- Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.
+Database: [Safe non-tx] REINDEX DATABASE CONCURRENTLY d  -- Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.

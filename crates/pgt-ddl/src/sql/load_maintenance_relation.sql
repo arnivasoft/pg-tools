@@ -1,6 +1,7 @@
 -- Bakım hedefi: tablo/bölümlenmiş tablo/MV. $1 = pg_class oid'i (yoksa satır yok → NotFound).
 -- `indexes`: CLUSTER USING'de kullanılabilir indeksler (geçerli, kısmi olmayan, erişim yöntemi kümelemeyi
--- destekleyen), ad (bayt) sırasıyla; `cluster_index`: `indisclustered` indeks. Adlar ham metin (tırnaklama üreticide).
+-- destekleyen), ad (bayt) sırasıyla; `cluster_index`: geçerli (`indisvalid`) `indisclustered` indeks (geçersiz indeksle
+-- düz CLUSTER sunucuda başarısız olur). Adlar ham metin (tırnaklama üreticide).
 SELECT n.nspname::text AS schema,
        c.relname::text AS name,
        c.relkind::text AS relkind,
@@ -18,7 +19,7 @@ SELECT n.nspname::text AS schema,
        (SELECT ic.relname::text
         FROM pg_index x
         JOIN pg_class ic ON ic.oid = x.indexrelid
-        WHERE x.indrelid = c.oid AND x.indisclustered
+        WHERE x.indrelid = c.oid AND x.indisclustered AND x.indisvalid
         ORDER BY ic.relname
         LIMIT 1) AS cluster_index
 FROM pg_class c

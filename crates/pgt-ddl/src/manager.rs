@@ -23,7 +23,8 @@
 //! false` reddedilir; (2a) istisna: `target_for`'dan önce, Database türü dahil her zaman `Target::Database` (bkz.
 //! `apply_target`); (4) hedef `load_maintenance_target` ile yeniden yüklenip eşitlik aranır; (4a) uygulanmaz (bakım
 //! veritabanını kapatmaz); `created` ve uygulama sonrası doğrulama yoktur. İlerleme (`maintenance_progress`) yalnız
-//! kendi uygulama pid'imizin `pg_stat_progress_*` satırını katalog havuzundan okur.
+//! kendi uygulama pid'imizin `pg_stat_progress_*` satırını katalog havuzundan okur (pid yalnız bakım uygulamalarında
+//! okunur).
 //!
 //! Günlük yalnızca işlem/nesne türü, ifade sayısı, süre ve sonuç kodunu içerir; SQL, ad, değer ve parola asla.
 
@@ -353,7 +354,7 @@ pub const ACL_ROLE_MISSING_HINT: &str = "Alıcı rol bulunamadı; rol listesini 
 /// Plan 24: bakım işleminde kilit zaman aşımı (55P03; genel lock_timeout ipucunun yerine geçer).
 pub const MAINTENANCE_LOCK_HINT: &str = "Nesne başka bir oturumca kilitli; daha sonra deneyin ya da lock timeout'u artırın.";
 /// Plan 24: bakım yetkisizliği (42501).
-pub const MAINTENANCE_PRIVILEGE_HINT: &str = "Bakım işlemi için tablonun sahibi (ya da PG 17+'da MAINTAIN yetkisi) gerekir.";
+pub const MAINTENANCE_PRIVILEGE_HINT: &str = "Bakım işlemi için nesnenin sahibi (ya da PG 17+'da MAINTAIN yetkisi) gerekir.";
 /// Plan 24: seçenek bu nesnede desteklenmiyor (0A000; ör. REINDEX CONCURRENTLY sistem kataloğunda).
 pub const MAINTENANCE_UNSUPPORTED_HINT: &str = "Bu nesnede bu seçenek desteklenmiyor.";
 /// Plan 24: transaction bloğu içinde çalıştırılamaz (25001). Bakım ifadeleri transaction dışıdır; beklenmez, savunma.
@@ -1029,11 +1030,14 @@ impl DdlManager {
         reg.set_handle(cancel.clone());
         // Çağıran gelecek çalışırken düşerse (ör. pencere kapanışı) sunucudaki ifade iptal edilir.
         let mut guard = CancelOnDrop { handle: cancel, rt, armed: true };
-        // Sıra: yuva → bağlantı → pid. En iyi çaba: okunamazsa ilerleme sorgusu `None` döner, uygulama sürer
-        // (bağlantı koptuysa ilk ifade zaten hata verir).
-        match client.query_one("SELECT pg_backend_pid()", &[]).await {
-            Ok(row) => reg.set_backend_pid(row.get(0)),
-            Err(e) => tracing::debug!(op, sqlstate = e.code().map(|c| c.code()), "arka uç pid'i okunamadı"),
+        // Sıra: yuva → bağlantı → pid. Yalnız bakım uygulamalarında (ilerleme yalnız onlar için sorulur; diğer DDL
+        // uygulamaları fazladan gidiş-dönüş yapmaz). En iyi çaba: okunamazsa ilerleme sorgusu `None` döner, uygulama
+        // sürer (bağlantı koptuysa ilk ifade zaten hata verir).
+        if op == "maintenance" {
+            match client.query_one("SELECT pg_backend_pid()", &[]).await {
+                Ok(row) => reg.set_backend_pid(row.get(0)),
+                Err(e) => tracing::debug!(op, sqlstate = e.code().map(|c| c.code()), "arka uç pid'i okunamadı"),
+            }
         }
         // İletiler ifadelerle eşzamanlı okunur (kanal birikmez); metin hiçbir yere yazılmaz.
         let mut messages = apply::MessageBuf::default();
@@ -1116,14 +1120,16 @@ impl DdlManager {
         lock_timeout_ms: u32,
         password: Option<(&str, &Secret)>,
     ) -> Result<ApplyOutcome> {
-        self.apply_statements_as(Uuid::new_v4(), server, target, statements, lock_timeout_ms, password).await
+        self.apply_statements_as(Uuid::new_v4(), "test", server, target, statements, lock_timeout_ms, password).await
     }
 
-    /// `apply_statements`; `apply_id` çağırandan (iptal/pid testleri).
+    /// `apply_statements`; `apply_id` ve `op` çağırandan (iptal/pid testleri: pid yalnız `op = "maintenance"`).
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn apply_statements_as(
         &self,
         apply_id: Uuid,
+        op: &'static str,
         server: Uuid,
         target: Target,
         statements: &[Statement],
@@ -1132,7 +1138,7 @@ impl DdlManager {
     ) -> Result<ApplyOutcome> {
         let exec = materialize_for(statements, password.map(|p| p.0), password.map(|p| p.1))?;
         let job = Job {
-            op: "test",
+            op,
             kind: ObjectKind::Schema,
             target,
             lock_timeout_ms,
@@ -3164,7 +3170,68 @@ mod tests {
             }
         }
 
-        /// Uygulama sürerken yuvada arka uç pid'i vardır (uygulama bağlantısının pid'i), bitince düşer.
+        /// İlerleme sorgularının sayaç seçimi aşamaya göredir: görünüm yerine sabit satırlarla (`VALUES`) sunucuda
+        /// çalıştırılır (görünümlere satır eklenemez; her sürümde aynı). `(aşama, done, total, unit)` beklenir.
+        #[tokio::test]
+        async fn progress_counters_follow_phase() {
+            type Row = (String, Option<i64>, Option<i64>, Option<String>);
+            async fn run(c: &tokio_postgres::Client, sql: &str, view: &str, values: &str) -> Vec<Row> {
+                let from = format!("FROM {view} p");
+                assert!(sql.contains(&from), "{view}");
+                let sql = sql.replace(&from, &format!("FROM ({values}) p")).replace("p.pid = $1", "true");
+                let rows = c.query(sql.as_str(), &[]).await.unwrap_or_else(|e| panic!("{view}: {e}"));
+                rows.iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))).collect()
+            }
+            let row = |phase: &str, done: Option<i64>, total: Option<i64>, unit: Option<&str>| -> Row {
+                (phase.into(), done, total, unit.map(Into::into))
+            };
+            for ts in test_servers() {
+                let c = admin_client(&ts, &ts.config.maintenance_db).await;
+                // create_index: tarama aşamalarında blok; ağaca yüklemede satır (eski blok sayacı dolu kalsa da).
+                let ci = "SELECT * FROM (VALUES \
+                    ('building index: scanning table'::text, 10::int8, 4::int8, 0::int8, 0::int8), \
+                    ('building index: loading tuples in tree', 10, 10, 500, 120), \
+                    ('index validation: scanning index', 8, 2, 0, 0), \
+                    ('index validation: sorting tuples', 8, 8, 0, 0), \
+                    ('waiting for writers before build', 0, 0, 0, 0), \
+                    ('building index: scanning table', 0, 0, 0, 0), \
+                    (NULL, NULL, NULL, NULL, NULL)) v(phase, blocks_total, blocks_done, tuples_total, tuples_done)";
+                let got = run(&c, PROGRESS_CREATE_INDEX_SQL, "pg_stat_progress_create_index", ci).await;
+                assert_eq!(
+                    got,
+                    [
+                        row("building index: scanning table", Some(4), Some(10), Some("blocks")),
+                        row("building index: loading tuples in tree", Some(120), Some(500), Some("tuples")),
+                        row("index validation: scanning index", Some(2), Some(8), Some("blocks")),
+                        row("index validation: sorting tuples", None, None, None),
+                        row("waiting for writers before build", None, None, None),
+                        row("building index: scanning table", None, None, None),
+                        row("unknown", None, None, None),
+                    ]
+                );
+                // vacuum: taramada taranan, yığın vakumunda vakumlanan blok; diğer aşamalarda belirsiz.
+                let vac = "SELECT * FROM (VALUES \
+                    ('scanning heap'::text, 100::int8, 40::int8, 0::int8), \
+                    ('vacuuming heap', 100, 100, 30), \
+                    ('vacuuming indexes', 100, 100, 0), \
+                    ('scanning heap', NULL, NULL, NULL), \
+                    (NULL, NULL, NULL, NULL)) v(phase, heap_blks_total, heap_blks_scanned, heap_blks_vacuumed)";
+                let got = run(&c, PROGRESS_VACUUM_SQL, "pg_stat_progress_vacuum", vac).await;
+                assert_eq!(
+                    got,
+                    [
+                        row("scanning heap", Some(40), Some(100), Some("blocks")),
+                        row("vacuuming heap", Some(30), Some(100), Some("blocks")),
+                        row("vacuuming indexes", None, None, None),
+                        row("scanning heap", None, None, None),
+                        row("unknown", None, None, None),
+                    ]
+                );
+            }
+        }
+
+        /// Bakım uygulaması sürerken yuvada arka uç pid'i vardır (uygulama bağlantısının pid'i), bitince düşer.
+        /// Diğer DDL uygulamaları pid okumaz (fazladan gidiş-dönüş yok).
         #[tokio::test]
         async fn backend_pid_is_recorded_during_apply() {
             for ts in test_servers() {
@@ -3172,9 +3239,33 @@ mod tests {
                 let t = ts.clone();
                 guarded(&ts, tag, async move {
                     let (admin, dm, db, _dir) = setup(&t, tag).await;
+                    let plan = [st("SELECT pg_sleep(0.5)", false)];
+                    // Bakım dışı işlem: uygulama süresince pid kaydedilmez.
+                    let other = Uuid::new_v4();
+                    let apply = dm.apply_statements_as(other, "alter", t.config.id, Target::Database(db), &plan, 5000, None);
+                    // Yuva açılana dek, sonra yuva düşene dek yoklanır (sınırlı süre).
+                    let watch = async {
+                        let (mut registered, mut seen) = (false, false);
+                        let deadline = Instant::now() + Duration::from_secs(10);
+                        while Instant::now() < deadline {
+                            let open = dm.cancels.len() > 0;
+                            if registered && !open {
+                                break;
+                            }
+                            registered |= open;
+                            seen |= dm.cancels.backend_pid(other).is_some();
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        (registered, seen)
+                    };
+                    let (out, (registered, seen)) = tokio::join!(apply, watch);
+                    assert!(matches!(out, Ok(ApplyOutcome::Applied { .. })), "{out:?}");
+                    assert!(registered, "uygulama yuvası görülmedi");
+                    assert!(!seen, "bakım dışı uygulamada pid okunmamalı");
+
                     let id = Uuid::new_v4();
                     let plan = [st("SELECT pg_sleep(1.5)", false)];
-                    let apply = dm.apply_statements_as(id, t.config.id, Target::Database(db), &plan, 5000, None);
+                    let apply = dm.apply_statements_as(id, "maintenance", t.config.id, Target::Database(db), &plan, 5000, None);
                     let watch = async {
                         for _ in 0..100 {
                             if let Some(pid) = dm.cancels.backend_pid(id) {
@@ -3218,7 +3309,7 @@ mod tests {
                     let dm2 = dm.clone();
                     let task = tokio::spawn(async move {
                         let plan = [st("DO $$ BEGIN RAISE NOTICE 'once'; PERFORM pg_sleep(30); END $$", false)];
-                        dm2.apply_statements_as(id, server, Target::Database(db), &plan, 5000, None).await
+                        dm2.apply_statements_as(id, "maintenance", server, Target::Database(db), &plan, 5000, None).await
                     });
                     // İfade uykuda (NOTICE gönderilmiş) olana dek bekle.
                     let mut sleeping = false;

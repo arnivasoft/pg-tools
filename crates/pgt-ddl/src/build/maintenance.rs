@@ -11,7 +11,9 @@ use crate::quote::{qualified, quote_ident};
 
 const LOCK_NOTE: &str = "Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.";
 const REINDEX_NOTE: &str = "Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler.";
-const REINDEX_MANY_NOTE: &str = " Tablolar sırayla kilitlenir.";
+const MANY_NOTE: &str = " Tablolar sırayla kilitlenir.";
+const DISK_NOTE: &str = " Tablo boyutu kadar ek boş disk alanı gerekir.";
+const CCNEW_NOTE: &str = "Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.";
 const COMPOSED_BROKEN: &str = "Üretilen ifade güvenli biçimde kurulamadı (ad tırnak/yorum sınırını bozuyor).";
 
 /// Üretici girişi: doğrular, tek ifade üretir.
@@ -77,13 +79,16 @@ pub fn maintenance(ctx: &BuildCtx, target: &MaintenanceTarget, op: &MaintenanceO
     if !composed_is_clean(&sql) {
         return Err(vec![err("object", COMPOSED_BROKEN)]);
     }
-    let note = if risk != Risk::Destructive {
-        None
-    } else if let MaintenanceOp::Reindex(_) = op {
-        let many = matches!(target.kind, MaintenanceTargetKind::Schema | MaintenanceTargetKind::Database);
-        Some(if many { format!("{REINDEX_NOTE}{REINDEX_MANY_NOTE}") } else { REINDEX_NOTE.to_string() })
-    } else {
-        Some(LOCK_NOTE.to_string())
+    // Çok tablolu hedef (şema/veritabanı): kilit tablo tablo alınır.
+    let many = matches!(target.kind, MaintenanceTargetKind::Schema | MaintenanceTargetKind::Database);
+    let many_note = if many { MANY_NOTE } else { "" };
+    let note = match op {
+        // CONCURRENTLY güvenli (risk Safe) ama yarım kalırsa geçersiz indeks bırakabilir.
+        MaintenanceOp::Reindex(o) if o.concurrently => Some(CCNEW_NOTE.to_string()),
+        _ if risk != Risk::Destructive => None,
+        MaintenanceOp::Reindex(_) => Some(format!("{REINDEX_NOTE}{many_note}")),
+        // VACUUM FULL / CLUSTER: tablo yeniden yazılır.
+        _ => Some(format!("{LOCK_NOTE}{many_note}{DISK_NOTE}")),
     };
     Ok(Plan { statements: vec![stmt_nt(sql, risk, note.as_deref())], warnings: vec![] })
 }
@@ -431,20 +436,24 @@ mod tests {
             let p = maintenance(&ctx(170000), t, &op).unwrap();
             (p.statements[0].risk, p.statements[0].note.clone(), p.warnings.len())
         };
-        let lock = "Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.";
+        let lock = "Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler. Tablo boyutu kadar ek boş disk alanı gerekir.";
+        let lock_many = "Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler. Tablolar sırayla kilitlenir. \
+                         Tablo boyutu kadar ek boş disk alanı gerekir.";
+        let ccnew = "Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir.";
         let mut ct = tgt(Table);
         ct.cluster_index = Some("i1".into());
         assert_eq!(risk(&tgt(Table), MaintenanceOp::Vacuum(vac())), (Risk::Safe, None, 0));
-        assert_eq!(
-            risk(&tgt(Table), MaintenanceOp::Vacuum(VacuumOptions { full: true, ..vac() })),
-            (Risk::Destructive, Some(lock.into()), 0)
-        );
+        let full = || MaintenanceOp::Vacuum(VacuumOptions { full: true, ..vac() });
+        for k in [Table, MaterializedView] {
+            assert_eq!(risk(&tgt(k), full()), (Risk::Destructive, Some(lock.into()), 0), "{k:?}");
+        }
+        assert_eq!(risk(&tgt(Database), full()), (Risk::Destructive, Some(lock_many.into()), 0));
         assert_eq!(risk(&tgt(Table), MaintenanceOp::Analyze(ana())).0, Risk::Safe);
         for k in [Index, Table, Schema, Database] {
             let r = risk(&tgt(k), MaintenanceOp::Reindex(rei()));
             assert_eq!(r.0, Risk::Destructive, "{k:?}");
             let r = risk(&tgt(k), MaintenanceOp::Reindex(ReindexOptions { concurrently: true, verbose: false }));
-            assert_eq!((r.0, r.1), (Risk::Safe, None), "{k:?}");
+            assert_eq!((r.0, r.1.as_deref()), (Risk::Safe, Some(ccnew)), "{k:?}");
         }
         assert_eq!(risk(&ct, MaintenanceOp::Cluster(clu())), (Risk::Destructive, Some(lock.into()), 0));
         let rn = "Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler.";

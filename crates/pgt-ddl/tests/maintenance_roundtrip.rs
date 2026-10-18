@@ -124,6 +124,18 @@ async fn loads_each_kind_body(ts: TestServer, tag: &'static str) {
     // Bölüm sıradan tablodur.
     let p1 = ld(&env, ObjectKind::Table, env.class_oid(S, "p1").await).await;
     assert!(!p1.partitioned && p1.editable, "{p1:?}");
+
+    // Geçersiz (ör. yarım kalmış CONCURRENTLY) kümeleme indeksi `clusterIndex` sayılmaz (düz CLUSTER sunucuda
+    // başarısız olurdu); `indexes`'te de yoktur. Geçersizlik katalogda doğrudan işaretlenir (süper kullanıcı testi).
+    env.sql(&format!(
+        "CREATE TABLE {S}.ci (id int, a int);
+         CREATE INDEX ci_a ON {S}.ci (a);
+         ALTER TABLE {S}.ci CLUSTER ON ci_a;
+         UPDATE pg_index SET indisvalid = false WHERE indexrelid = '{S}.ci_a'::regclass;"
+    ))
+    .await;
+    let ci = ld(&env, ObjectKind::Table, env.class_oid(S, "ci").await).await;
+    assert_eq!(ci, base(K::Table, Some(S), "ci"));
 }
 
 docker_test!(partitioned_table_and_index, partitioned_body, "mtpart");
@@ -392,6 +404,32 @@ async fn partitioned_ops_body(ts: TestServer, tag: &'static str) {
     eprintln!("PG {}: bölümlenmiş VACUUM → bölüm last_vacuum={vacuumed} iletiler={vm:?}; ANALYZE → bölüm last_analyze={analyzed} iletiler={am:?}", env.version);
     assert!(vacuumed && analyzed, "PG {}: bölüm işlenmedi (VACUUM {vm:?}, ANALYZE {am:?})", env.version);
     assert!(vm.iter().chain(&am).all(|m| !m.starts_with("WARNING")), "{vm:?} {am:?}");
+
+    // REINDEX (PG 14+) ve CLUSTER USING (PG 15+) bölümlenmiş tabloda: yüklenen hedeften üretici, sunucuda düz.
+    let rx = maintenance(&ctx, &p, &reindex(false, false));
+    if env.version >= 140000 {
+        let sql = &rx.unwrap().statements[0].sql;
+        assert_eq!(sql, &format!("REINDEX TABLE {S}.p"));
+        let m = run_collect(&env, sql).await.unwrap_or_else(|e| panic!("REINDEX: {e}"));
+        assert!(m.iter().all(|m| !m.starts_with("WARNING")), "{m:?}");
+    } else {
+        assert!(rx.is_err(), "PG {}: bölümlenmiş REINDEX reddedilmeli", env.version);
+    }
+    let using = MaintenanceOp::Cluster(ClusterOptions { verbose: false, using_index: Some("p_k".into()) });
+    let cluster = maintenance(&ctx, &p, &using);
+    if env.version >= 150000 {
+        let sql = &cluster.unwrap().statements[0].sql;
+        assert_eq!(sql, &format!("CLUSTER {S}.p USING p_k"));
+        let m = run_collect(&env, sql).await.unwrap_or_else(|e| panic!("CLUSTER: {e}"));
+        assert!(m.iter().all(|m| !m.starts_with("WARNING")), "{m:?}");
+    } else {
+        assert!(cluster.is_err(), "PG {}: bölümlenmiş CLUSTER reddedilmeli", env.version);
+    }
+    // Kümeleme indeksi olmayan bölümlenmiş tabloda düz CLUSTER üreticide reddedilir (sunucuya gitmez).
+    let plain = MaintenanceOp::Cluster(ClusterOptions { verbose: false, using_index: None });
+    let errs = maintenance(&ctx, &p, &plain).expect_err("düz CLUSTER reddedilmeli");
+    let want = if env.version >= 150000 { "options.usingIndex" } else { "op" };
+    assert_eq!(errs.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), [want], "{errs:?}");
 }
 
 docker_test!(full_with_disable_page_skipping_is_rejected_by_server, full_dps_body, "mtfdps");
@@ -663,7 +701,13 @@ async fn progress_body(ts: TestServer, tag: &'static str) {
         let (dm2, server, db) = (dm.clone(), env.server, env.db_oid);
         let task = tokio::spawn(async move { dm2.apply(server, db, &req, o).await });
         let mut seen = vec![];
+        // Sınırlı yoklama: 120 sn'de bitmezse iptal edilip test düşer (asılı kalmaz).
+        let deadline = Instant::now() + Duration::from_secs(120);
         while !task.is_finished() {
+            if Instant::now() >= deadline {
+                dm.cancel(id).await.unwrap();
+                panic!("PG {}: {op:?} 120 sn içinde bitmedi", env.version);
+            }
             let p = dm.maintenance_progress(env.server, env.db_oid, id).await.expect("ilerleme sorgusu hatasız olmalı");
             seen.extend(p);
             tokio::time::sleep(Duration::from_millis(5)).await;

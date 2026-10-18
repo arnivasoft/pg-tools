@@ -618,7 +618,13 @@ async fn maintenance_logging_body(ts: TestServer) {
     let dm2 = dm.clone();
     let task = tokio::spawn(async move { dm2.apply(server, db, &full, o).await });
     // Kilit beklerken ilerleme sorgusu (kayıtlı kimlik: katalog sorgusu çalışır, günlükte yalnız işlem adı).
+    // Sınırlı: lock_timeout 1,5 sn; 30 sn'de bitmezse iptal edilip test düşer (asılı kalmaz).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !task.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            dm.cancel(id).await.unwrap();
+            panic!("bakım uygulaması 30 sn içinde bitmedi");
+        }
         dm.maintenance_progress(server, db, id).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
