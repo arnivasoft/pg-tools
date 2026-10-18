@@ -41,6 +41,17 @@ function clusterDefault(t: MaintenanceTarget): string | null {
   return t.clusterIndex ?? t.indexes[0] ?? null;
 }
 
+/**
+ * İşlem hedefte bütünüyle kullanılamıyorsa gerekçe (yoksa null). `opsFor` Rust aynası olarak kalır; bu, Rust `cluster()`
+ * op hatasını (sistem nesnesi) ve "kümeleme indeksi de seçilebilir indeks de yok" durumunu (plan 2.3) yansıtır.
+ */
+export function opBlocked(op: OpName, target: MaintenanceTarget): string | null {
+  if (op !== "cluster") return null;
+  if (target.system) return tm.excl.clusterSystem;
+  if (target.indexes.length === 0 && target.clusterIndex === null) return tm.excl.clusterNoIndex;
+  return null;
+}
+
 export function defaultOperation(op: OpName, target: MaintenanceTarget, versionNum: number | null): MaintenanceOp {
   switch (op) {
     case "vacuum":
@@ -113,6 +124,10 @@ export function normalize(op: MaintenanceOp, target: MaintenanceTarget, versionN
       if (!s.skipLocked!.enabled) o.skipLocked = false;
       if (!s.indexCleanup!.enabled || (o.indexCleanup === "auto" && !s.indexCleanupAuto!.enabled)) o.indexCleanup = null;
       if (!s.parallel!.enabled) o.parallel = null;
+      else if (o.parallel !== null) {
+        // 0–1024 tamsayı: kesir atılır, negatif 0, fazla 1024; sayı değilse null.
+        o.parallel = Number.isNaN(o.parallel) ? null : Math.min(1024, Math.max(0, Math.trunc(o.parallel)));
+      }
       return o;
     }
     case "analyze":
@@ -121,9 +136,11 @@ export function normalize(op: MaintenanceOp, target: MaintenanceTarget, versionN
       return s.concurrently!.enabled ? op : { ...op, concurrently: false };
     case "cluster":
       // Listede olmayan indeks seçimi varsayılana döner.
-      return op.usingIndex !== null && !target.indexes.includes(op.usingIndex)
-        ? { ...op, usingIndex: clusterDefault(target) }
-        : op;
+      if (op.usingIndex !== null) {
+        return target.indexes.includes(op.usingIndex) ? op : { ...op, usingIndex: clusterDefault(target) };
+      }
+      // USING boş ve tabloda kümeleme indeksi de yoksa (arka uç reddeder) ilk indekse düşer.
+      return target.clusterIndex === null && target.indexes.length > 0 ? { ...op, usingIndex: clusterDefault(target) } : op;
   }
 }
 
@@ -171,7 +188,7 @@ const MAX_ERRORS = 3;
 
 /**
  * İlerleme yoklayıcısı: istekler sırayla çalışır (önceki bitmeden yenisi yok), `stop` sonrası geri çağrı yok,
- * 3 ardışık hatada `onStop("errors")`. Zamanlayıcı ve getirici enjekte edilir.
+ * 3 ardışık hatada `onStop("errors")`. stop()+start() çakışmasında eski turun yanıtı nesil sayacıyla atılır. Zamanlayıcı ve getirici enjekte edilir.
  */
 export function createProgressPoller(deps: {
   fetch: () => Promise<MaintenanceProgress | null>;
@@ -189,11 +206,9 @@ export function createProgressPoller(deps: {
   };
   const tick = async (g: number) => {
     cancel = null;
+    let p: MaintenanceProgress | null;
     try {
-      const p = await deps.fetch();
-      if (g !== gen) return;
-      failures = 0;
-      deps.onUpdate(p);
+      p = await deps.fetch();
     } catch {
       if (g !== gen) return;
       if (++failures >= MAX_ERRORS) {
@@ -202,6 +217,16 @@ export function createProgressPoller(deps: {
         deps.onStop("errors");
         return;
       }
+      arm(g);
+      return;
+    }
+    if (g !== gen) return;
+    failures = 0;
+    // onUpdate getirme hatası sayılmaz; fırlatsa da yoklama sürer.
+    try {
+      deps.onUpdate(p);
+    } catch {
+      // Dinleyici hatası yutulur (günlüğe yazılmaz); yoklama sürer.
     }
     if (g === gen) arm(g);
   };

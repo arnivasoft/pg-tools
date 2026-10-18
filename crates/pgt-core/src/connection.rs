@@ -133,10 +133,16 @@ pub struct Notice {
     pub hint: Option<String>,
 }
 
+/// Yerelleştirilmemiş önem adı (`WARNING`, `NOTICE`…); `lc_messages` Türkçe iken `severity()` "UYARI" döner.
+/// Ayrıştırılmış değer yoksa (PG < 9.6) yerelleştirilmiş metne düşer.
+fn severity_name(parsed: Option<tokio_postgres::error::Severity>, localized: &str) -> String {
+    parsed.map_or_else(|| localized.to_string(), |s| s.to_string())
+}
+
 impl From<&tokio_postgres::error::DbError> for Notice {
     fn from(db: &tokio_postgres::error::DbError) -> Self {
         Notice {
-            severity: db.severity().to_string(),
+            severity: severity_name(db.parsed_severity(), db.severity()),
             code: db.code().code().to_string(),
             message: db.message().to_string(),
             detail: db.detail().map(str::to_string),
@@ -591,6 +597,19 @@ fn timeout_ms(value: &str) -> Option<u64> {
 }
 
 /// Katalog profilinin üç ayarı gerçekten etkin mi? (`settings_ok_for(Catalog, …)`.)
+#[cfg(test)]
+mod severity_tests {
+    use super::severity_name;
+    use tokio_postgres::error::Severity;
+
+    #[test]
+    fn severity_is_non_localized() {
+        assert_eq!(severity_name(Some(Severity::Warning), "UYARI"), "WARNING");
+        assert_eq!(severity_name(Some(Severity::Log), "KAYIT"), "LOG");
+        assert_eq!(severity_name(None, "UYARI"), "UYARI");
+    }
+}
+
 #[cfg(test)]
 fn session_settings_ok(read_only: &str, statement_timeout: &str, search_path: &str) -> bool {
     settings_ok_for(SessionProfile::Catalog, read_only, statement_timeout, search_path)

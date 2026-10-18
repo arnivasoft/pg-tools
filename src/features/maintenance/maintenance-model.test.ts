@@ -12,6 +12,7 @@ import {
   messageSummary,
   needsCcnewNotice,
   normalize,
+  opBlocked,
   optionStates,
   opsFor,
   progressView,
@@ -375,5 +376,58 @@ describe("createProgressPoller", () => {
     s.poller.start();
     s.poller.start();
     expect(s.timers).toHaveLength(1);
+  });
+});
+
+describe("opBlocked", () => {
+  it("cluster: sistem nesnesi ve indeks yokluğu", () => {
+    expect(opBlocked("cluster", target({ system: true }))).toBe("Sistem nesnelerinde CLUSTER kullanılamaz");
+    expect(opBlocked("cluster", target({ indexes: [] }))).toContain("kümeleme indeksi yok");
+    expect(opBlocked("cluster", target({ indexes: [], clusterIndex: "i1" }))).toBeNull();
+    expect(opBlocked("cluster", target())).toBeNull();
+  });
+  it("diğer işlemler engellenmez", () => {
+    for (const o of ["vacuum", "analyze", "reindex"] as const) expect(opBlocked(o, target({ system: true, indexes: [] }))).toBeNull();
+  });
+});
+
+describe("normalize ek kurallar", () => {
+  it("PARALLEL 0–1024 tamsayıya sıkıştırılır", () => {
+    const par = (n: number) => (normalize(vac({ parallel: n }), target(), 170000) as Vac).parallel;
+    expect(par(2.9)).toBe(2);
+    expect(par(-3)).toBe(0);
+    expect(par(5000)).toBe(1024);
+    expect(par(1024)).toBe(1024);
+    expect(par(Number.NaN)).toBeNull();
+  });
+  it("USING boş + kümeleme indeksi yok -> ilk indeks", () => {
+    const op: MaintenanceOp = { op: "cluster", verbose: false, usingIndex: null };
+    expect(normalize(op, target(), null)).toMatchObject({ usingIndex: "i1" });
+    expect(normalize(op, target({ clusterIndex: "i2" }), null)).toMatchObject({ usingIndex: null });
+    expect(normalize(op, target({ indexes: [] }), null)).toMatchObject({ usingIndex: null });
+  });
+  it("poller: onUpdate fırlatması hata sayılmaz", async () => {
+    const timers: (() => void)[] = [];
+    let stopped = 0;
+    const p = createProgressPoller({
+      fetch: async () => null,
+      schedule: (cb) => {
+        timers.push(cb);
+        return () => {};
+      },
+      onUpdate: () => {
+        throw new Error("ui");
+      },
+      onStop: () => stopped++,
+    });
+    p.start();
+    for (let i = 0; i < 4; i++) {
+      timers.shift()?.();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+    expect(stopped).toBe(0);
+    expect(timers.length).toBeGreaterThan(0);
   });
 });

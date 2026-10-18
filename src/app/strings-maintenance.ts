@@ -11,6 +11,8 @@ export const tm = {
     full: "FULL ile birlikte kullanılamaz",
     systemObject: "Sistem nesnelerinde kullanılamaz",
     noIndex: "Tabloda seçilebilir indeks yok",
+    clusterSystem: "Sistem nesnelerinde CLUSTER kullanılamaz",
+    clusterNoIndex: "Tabloda kümeleme indeksi yok ve seçilebilir indeks bulunmuyor",
   },
   ops: {
     vacuum: "VACUUM",
