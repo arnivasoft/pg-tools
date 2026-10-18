@@ -668,3 +668,14 @@ Bilinen sınırlar:
 - [ ] Varsayılan yetkiler — klavye: bir bölüm ızgarasında (ör. Tablolar) Tab ile hücreye gir, ok tuşlarıyla bir hücreye git ve Space'e art arda bas → her basışta durum değişir, odak ve etkin hücre aynı hücrede kalır (bölüm yeniden çizilip odak kaybolmaz); başka bölümün etkin hücresi de korunur. bir bölümün "Alıcı ekle" alanına yazıp başka bölümde bir hücreyi değiştirince yazılan metin kaybolmaz; bir satır kaldırılınca odak komşu satırın ilk hücresine gider. **[—]**
 - [ ] Varsayılan yetkiler — hata yolları: bölüm hücre/satır hataları ilgili bölümün ızgarasında; `sections`, `sections[i].baseline`, `old.*` genel şeritte. **[—]**
 - [ ] Bilinen sınır — Inspector DDL: bir yetki uygulandıktan sonra Inspector DDL sekmesi kendiliğinden yenilenmez (eski ACL satırları görünür); düğümü yeniden seçince güncel DDL gelir. Hata değildir, takip işidir (spec §8.1). **[—]**
+
+## Bakım işlemleri arka ucu (Plan 24)
+
+Plan 24 yalnızca arka uçtur; GUI maddeleri Plan 25'te ("Bakım…" diyaloğu) eklenir. Arka uç elle sınanmaz; Docker testleriyle (`maintenance_roundtrip`, `manager`, `logging`) PG 10–18'de doğrulanır. Sözleşme: `docs/superpowers/specs/2026-10-18-maintenance-design.md` §6.
+
+- VACUUM (FULL'suz/FULL, FREEZE, ANALYZE, VERBOSE, SKIP_LOCKED, INDEX_CLEANUP, PARALLEL), ANALYZE, REINDEX (INDEX/TABLE/SCHEMA/DATABASE, CONCURRENTLY PG 12+) ve CLUSTER (USING) gerçekten çalışır ve etkisi doğrulanır (`last_vacuum`/`last_analyze`, relfilenode, `indisclustered`).
+- `VERBOSE` çıktısı `ApplyOutcome.messages`'a düşer; tüm DDL uygulamaları (ör. `DROP … CASCADE` NOTICE'ları) ileti döndürür. Üst sınır 500 ileti, alan başına 4 KiB.
+- Kilit zaman aşımı (55P03 + ipucu), iptal (57014; ileti ve pid yuvası temizliği) ve ilerleme sorgusu (`maintenance_progress`; zamanlamaya bağlı, `null` kabul) sınanır.
+- Kapılar: kilitli sunucu, bayat hedef (`PLAN_CHANGED`), Destructive onayı, sistem şemasında CLUSTER/CONCURRENTLY reddi, günlükte SQL/ad/ileti metni yok.
+- Sürüm kapılı atlamalar: SKIP_LOCKED/INDEX_CLEANUP/CONCURRENTLY/cluster ve create_index ilerlemesi PG 12+; PARALLEL ve analyze ilerlemesi PG 13+; INDEX_CLEANUP AUTO PG 14+; bölümlenmiş REINDEX PG 14+, bölümlenmiş CLUSTER PG 15+; ANALYZE PG 10'da parantezsiz.
+- Bilinen sınırlar: bölümlenmiş indeks ve geçici şema hedefleri salt okunur; çoklu tablo/kolon listesi, `REINDEX SYSTEM`, `TABLESPACE` kapsam dışı.

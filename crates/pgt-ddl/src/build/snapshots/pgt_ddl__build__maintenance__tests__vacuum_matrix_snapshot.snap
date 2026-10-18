@@ -1,0 +1,10 @@
+---
+source: crates/pgt-ddl/src/build/maintenance.rs
+expression: out
+---
+Table: [Safe non-tx] VACUUM s.t
+Table: [Destructive non-tx] VACUUM (FULL, ANALYZE, VERBOSE) s.t  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler. Tablo boyutu kadar ek boş disk alanı gerekir.
+MaterializedView: [Safe non-tx] VACUUM s.t
+MaterializedView: [Destructive non-tx] VACUUM (FULL, ANALYZE, VERBOSE) s.t  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler. Tablo boyutu kadar ek boş disk alanı gerekir.
+Database: [Safe non-tx] VACUUM
+Database: [Destructive non-tx] VACUUM (FULL, ANALYZE, VERBOSE)  -- Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler. Tablolar sırayla kilitlenir. Tablo boyutu kadar ek boş disk alanı gerekir.

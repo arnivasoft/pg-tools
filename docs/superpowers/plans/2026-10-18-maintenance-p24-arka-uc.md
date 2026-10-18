@@ -20,7 +20,7 @@
   - PG 13+: `PARALLEL`; `pg_stat_progress_analyze`.
   - PG 14+: `INDEX_CLEANUP AUTO`.
   - PG 15+: bölümlenmiş tabloda `CLUSTER`.
-- **Risk sınıfları:** spec §1 "Risk" aynen. Destructive ifadelerde `Statement.note` kilit notunu taşır ("Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler.").
+- **Risk sınıfları:** spec §1 "Risk" aynen. Destructive ifadelerde `Statement.note` kilit notunu taşır: VACUUM FULL/CLUSTER "Tablo boyunca ACCESS EXCLUSIVE kilit alır; okuma/yazma bekler."; REINDEX (CONCURRENTLY'siz) "Tabloda SHARE, indekste ACCESS EXCLUSIVE kilit alır; yazma ve indeksi kullanan okumalar bekler." (SCHEMA/DATABASE: + " Tablolar sırayla kilitlenir.").
 - **İletiler:**
   - Sınır: en çok 500 ileti; her `message`/`detail`/`hint` alanı en çok 4096 bayt. Kesilen alan UTF-8 sınırında kesilir ve sonuna `…` eklenir. Sınır aşılırsa son ileti "N ileti daha gösterilmedi" olur.
   - Toplama bağlantı düşene kadar sürer: ifade bittikten sonra kuyruktaki iletiler de alınır (son NOTICE'lar).
@@ -181,7 +181,7 @@ pub struct ServerMessage { pub severity: String, pub code: Option<String>, pub m
 
 ```rust
 // PlanRequest
-Maintenance { object: ObjectRef, target: MaintenanceTarget, op: MaintenanceOp },   // op() = "maintenance", kind() = object.kind
+Maintenance { object: ObjectRef, target: MaintenanceTarget, #[serde(rename = "operation")] op: MaintenanceOp },   // JSON: {op:"maintenance", object, target, operation}; op() = "maintenance"
 impl DdlManager {
     pub async fn load_maintenance_target(&self, server: Uuid, database_oid: u32, obj: ObjectRef) -> Result<MaintenanceTarget>;
     pub async fn maintenance_progress(&self, server: Uuid, database_oid: u32, apply_id: Uuid) -> Result<Option<MaintenanceProgress>>;

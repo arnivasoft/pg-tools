@@ -19,12 +19,19 @@
 //! reddedilir; (4) `old` ilgili yükleyicinin (`load_acl`/`load_default_acl`) çıktısına birebir eşit olmalı; (4a)
 //! uygulanmaz. Başarılı uygulamadan sonra yetkiler yeniden yüklenir; `grants` istenenden farklıysa `ACL_WARNING`.
 //!
+//! Bakım istekleri (Plan 24): (2c) nesne türü bakım türü olmalı ve `target.kind`'a uymalı; (2b) `target.editable =
+//! false` reddedilir; (2a) istisna: `target_for`'dan önce, Database türü dahil her zaman `Target::Database` (bkz.
+//! `apply_target`); (4) hedef `load_maintenance_target` ile yeniden yüklenip eşitlik aranır; (4a) uygulanmaz (bakım
+//! veritabanını kapatmaz); `created` ve uygulama sonrası doğrulama yoktur. İlerleme (`maintenance_progress`) yalnız
+//! kendi uygulama pid'imizin `pg_stat_progress_*` satırını katalog havuzundan okur (pid yalnız bakım uygulamalarında
+//! okunur).
+//!
 //! Günlük yalnızca işlem/nesne türü, ifade sayısı, süre ve sonuç kodunu içerir; SQL, ad, değer ve parola asla.
 
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use pgt_core::connection::{ConnectionManager, MAX_STATEMENT_TIMEOUT_MS, Target};
+use pgt_core::connection::{ConnectionManager, DedicatedConn, MAX_STATEMENT_TIMEOUT_MS, Target};
 use pgt_core::registry::Registry;
 use pgt_core::{Error, ErrorPayload, Result};
 use serde::{Deserialize, Serialize};
@@ -41,6 +48,7 @@ use crate::error_codes::{
 };
 use crate::load::{self, ObjectRef};
 use crate::lookup::{self, LookupItem, LookupRequest};
+use crate::maintenance::{MaintenanceOp, MaintenanceProgress, MaintenanceTarget};
 use crate::model::*;
 use crate::plan::{PlanView, Risk, Statement};
 use crate::secret::Secret;
@@ -70,6 +78,15 @@ pub enum PlanRequest {
     Privileges { object: ObjectRef, old: AclDef, new: AclDef, cascade: bool },
     /// Varsayılan yetkiler (ALTER DEFAULT PRIVILEGES; Plan 20). Veritabanı kapsamlıdır.
     DefaultPrivileges { scope: DefaultAclScope, old: DefaultAclDef, new: DefaultAclDef },
+    /// Bakım işlemi (VACUUM / ANALYZE / REINDEX / CLUSTER; Plan 24). `target` `ddl_load_maintenance_target`'ın
+    /// çıktısıdır ve uygulamada yeniden yüklenip eşitlik aranır (bkz. `Alter`). Her zaman bağlı veritabanında
+    /// (`Target::Database`) çalışır, Database türünde de. İşlem JSON'da `operation` alanındadır: `op` istek etiketidir.
+    Maintenance {
+        object: ObjectRef,
+        target: MaintenanceTarget,
+        #[serde(rename = "operation")]
+        op: MaintenanceOp,
+    },
 }
 
 impl PlanRequest {
@@ -80,6 +97,7 @@ impl PlanRequest {
             PlanRequest::Drop { .. } => "drop",
             PlanRequest::Privileges { .. } => "privileges",
             PlanRequest::DefaultPrivileges { .. } => "default_privileges",
+            PlanRequest::Maintenance { .. } => "maintenance",
         }
     }
 
@@ -87,7 +105,7 @@ impl PlanRequest {
         match self {
             PlanRequest::Create { def, .. } | PlanRequest::Drop { def, .. } => def.kind(),
             PlanRequest::Alter { new, .. } => new.kind(),
-            PlanRequest::Privileges { object, .. } => object.kind,
+            PlanRequest::Privileges { object, .. } | PlanRequest::Maintenance { object, .. } => object.kind,
             // Veritabanı kapsamlı vekil: hedef çözümü `Schema` ile aynı kuraldır (veritabanı OID'i gerekir).
             PlanRequest::DefaultPrivileges { .. } => ObjectKind::Schema,
         }
@@ -115,6 +133,21 @@ pub struct ApplyOptions {
     pub password: Option<Secret>,
 }
 
+/// Uygulama sırasında sunucunun gönderdiği NOTICE/INFO/WARNING iletisi (ör. `DROP … CASCADE`, `VACUUM VERBOSE`).
+/// Alanlar en çok 4096 bayttır (UTF-8 sınırında kesilip `…` eklenir); metin günlüğe/diske yazılmaz.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ServerMessage {
+    pub severity: String,
+    /// SQLSTATE; sınır aşımını bildiren yapay iletide yok.
+    pub code: Option<String>,
+    pub message: String,
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+}
+
+/// Uygulama sonucu. Günlüğe yazmayın (`Debug` dahil): sunucu ileti metni (`messages`, `error`) içerir.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(tag = "outcome", rename_all = "snake_case", rename_all_fields = "camelCase")]
 #[ts(export)]
@@ -130,6 +163,10 @@ pub enum ApplyOutcome {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         warnings: Option<Vec<String>>,
+        /// Sunucu iletileri (en çok 500; aşılırsa son ileti kalan sayıyı bildirir). Yoksa alan yazılmaz.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        #[ts(as = "Option<Vec<ServerMessage>>", optional)]
+        messages: Vec<ServerMessage>,
     },
     /// `failed_index`: başarısız ifadenin 0 tabanlı sırası; `committed`: kalıcılaşmış (transaction dışı ya da önceki blok)
     /// ifade sayısı; `sqlstate`: PG hata kodu (ör. `57014` iptal, `55P03` kilit zaman aşımı; bağlantı hatasında yok).
@@ -147,6 +184,10 @@ pub enum ApplyOutcome {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         created: Option<ObjectRef>,
+        /// Hataya kadar gelen sunucu iletileri (`Applied.messages` ile aynı sınırlar). Yoksa alan yazılmaz.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        #[ts(as = "Option<Vec<ServerMessage>>", optional)]
+        messages: Vec<ServerMessage>,
     },
 }
 
@@ -310,6 +351,14 @@ pub const ACL_PRIVILEGE_HINT: &str = "Yetki vermek/geri almak için nesnenin sah
 pub const DEFAULT_ACL_PRIVILEGE_HINT: &str = "FOR ROLE için o rolün üyesi (ya da süper kullanıcı) olmak gerekir.";
 /// Plan 20 Karar 15: alıcı rol yok (42704).
 pub const ACL_ROLE_MISSING_HINT: &str = "Alıcı rol bulunamadı; rol listesini yenileyin.";
+/// Plan 24: bakım işleminde kilit zaman aşımı (55P03; genel lock_timeout ipucunun yerine geçer).
+pub const MAINTENANCE_LOCK_HINT: &str = "Nesne başka bir oturumca kilitli; daha sonra deneyin ya da lock timeout'u artırın.";
+/// Plan 24: bakım yetkisizliği (42501).
+pub const MAINTENANCE_PRIVILEGE_HINT: &str = "Bakım işlemi için nesnenin sahibi (ya da PG 17+'da MAINTAIN yetkisi) gerekir.";
+/// Plan 24: seçenek bu nesnede desteklenmiyor (0A000; ör. REINDEX CONCURRENTLY sistem kataloğunda).
+pub const MAINTENANCE_UNSUPPORTED_HINT: &str = "Bu nesnede bu seçenek desteklenmiyor.";
+/// Plan 24: transaction bloğu içinde çalıştırılamaz (25001). Bakım ifadeleri transaction dışıdır; beklenmez, savunma.
+pub const MAINTENANCE_TX_HINT: &str = "Bu bakım işlemi transaction bloğu içinde çalıştırılamaz; yeniden deneyin.";
 
 /// Çağıran gelecek düşerse sunucudaki ifadeyi iptal eder (`armed` yalnızca çalıştırıcı bitince kapanır).
 pub(crate) struct CancelOnDrop {
@@ -368,6 +417,12 @@ fn request_shape_refusal(req: &PlanRequest) -> Option<&'static str> {
         PlanRequest::Privileges { object, .. } if !acl_supported(object.kind) => Some(crate::load_acl::UNSUPPORTED_KIND_MSG),
         PlanRequest::Privileges { object, old, .. } if object.kind != old.kind => Some(INVALID_DEF),
         PlanRequest::DefaultPrivileges { scope, old, .. } if scope.role.as_ref().is_some_and(|r| *r != old.role) => Some(INVALID_DEF),
+        // Plan 24: bakımı olmayan tür → yükleyicinin iletisi; nesne türü ↔ hedef türü uyuşmazlığı → `INVALID_DEF`.
+        PlanRequest::Maintenance { object, target, .. } => match crate::load_maintenance::target_kind(object.kind) {
+            None => Some(crate::load_maintenance::NO_MAINTENANCE_MSG),
+            Some(k) if k != target.kind => Some(INVALID_DEF),
+            Some(_) => None,
+        },
         _ => None,
     }
 }
@@ -388,6 +443,8 @@ fn read_only_refusal(req: &PlanRequest) -> Option<String> {
             let first = old.unsupported.iter().find(|u| *u != crate::load_acl::LARGE_OBJECTS_REASON);
             return refuse(old.editable, first);
         }
+        // Plan 24: salt okunur hedef (bölümlenmiş indeks, geçici şema, geçersiz UTF-8 ad).
+        PlanRequest::Maintenance { target, .. } => return refuse(target.editable, target.unsupported.first()),
         PlanRequest::Alter { old, .. } => old,
         PlanRequest::Drop { def, .. } => def,
     };
@@ -407,7 +464,7 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
     const GENERIC: &str = "desteklenmeyen özellik";
     let Some(e) = entry else { return GENERIC };
     // (önek, gerekçe): ilk eşleşen kazanır; sabit girdiler kendi metniyle.
-    const PREFIXES: [(&str, &str); 39] = [
+    const PREFIXES: [(&str, &str); 41] = [
         ("LANGUAGE ", "desteklenmeyen dil (C/internal)"),
         ("BEGIN ATOMIC", "BEGIN ATOMIC (SQL standart gövde)"),
         ("AGGREGATE", "aggregate fonksiyonu"),
@@ -447,6 +504,9 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
         ("veren rolden farklı", "veren rolden farklı (beklenmeyen varsayılan yetki girdisi)"),
         ("üreticinin kabul etmediği", "üreticinin kabul etmediği ad ya da şema"),
         ("geçerli UTF-8 olmayan ad", "geçerli UTF-8 olmayan ad"),
+        // Plan 24 bakım hedefi yükleyicisi (`load_maintenance`).
+        ("bölümlenmiş indeks", "bölümlenmiş indeks"),
+        ("geçici şema", "geçici şema (başka oturumun nesneleri)"),
         // Yükleyicinin `'<kod>' türü …` biçimleri (ilişki/tip/kısıt türü).
         ("'", ""),
     ];
@@ -488,6 +548,19 @@ impl HintCtx {
 
 /// Uygulama hedefi: yükleyiciyle aynı tek kural (`load::target_for`).
 pub(crate) use crate::load::target_for;
+
+/// (2a) İsteğin uygulama hedefi. İstisna (Plan 24): bakım istekleri `target_for`'dan önce ele alınır ve Database türü
+/// dahil her zaman bağlı veritabanında (`Target::Database(database_oid)`) çalışır — VACUUM/ANALYZE/REINDEX DATABASE
+/// bağlı olunan veritabanını işler (yükleyici `load_maintenance_target` de bu veritabanını doğrular); bakım veritabanı
+/// kullanılmaz. `database_oid = None` → `NEEDS_DATABASE`. Diğer istekler `target_for` kuralındadır.
+fn apply_target(req: &PlanRequest, database_oid: Option<u32>) -> Result<Target> {
+    match req {
+        PlanRequest::Maintenance { .. } => database_oid
+            .map(Target::Database)
+            .ok_or_else(|| Error::Invalid(crate::error_codes::NEEDS_DATABASE.to_string())),
+        _ => target_for(req.kind(), database_oid),
+    }
+}
 
 /// (4a) Bakım veritabanının kendisini yeniden adlandıran, taşıyan, bağlantıya kapatan (ALLOW_CONNECTIONS false ya da
 /// CONNECTION LIMIT 0) ya da silen istek (`old`/`def`
@@ -581,7 +654,14 @@ fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> 
     let role_missing = acl_op
         && !matches!(kind, ObjectKind::Type | ObjectKind::Domain)
         && ["GRANT ", "REVOKE ", "ALTER DEFAULT PRIVILEGES "].iter().any(|p| sql.starts_with(p));
+    let maintenance = op == "maintenance";
     Some(match (code, kind) {
+        // Plan 24: bakım işlemleri türden bağımsız kendi ipuçlarını alır; diğer kollar (ör. Database 55006) uygulanmaz.
+        // 57014 (iptal) ipucusuz: iptal iletisi yeter.
+        ("42501", _) if maintenance => MAINTENANCE_PRIVILEGE_HINT,
+        ("0A000", _) if maintenance => MAINTENANCE_UNSUPPORTED_HINT,
+        ("25001", _) if maintenance => MAINTENANCE_TX_HINT,
+        _ if maintenance => return None,
         ("2BP01", ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Type | ObjectKind::Domain) if op == "drop" => {
             VIEW_DEPENDENTS_HINT
         }
@@ -621,6 +701,8 @@ fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> 
 fn override_hint_for(kind: ObjectKind, op: &str, sql: &str, code: &str, pg_hint: bool) -> Option<&'static str> {
     let routine = matches!(kind, ObjectKind::Function | ObjectKind::Procedure);
     Some(match (code, kind) {
+        // Plan 24: bakımda kilit zaman aşımı (`apply::failure_payload`'ın genel ipucunun yerine).
+        ("55P03", _) if op == "maintenance" => MAINTENANCE_LOCK_HINT,
         // Plan 20 Karar 15: PG bağımlı yetkilerde "Use CASCADE to revoke them too." der; arayüzdeki karşılığı söylenir.
         ("2BP01", _) if op == "privileges" => ACL_DEPENDENTS_HINT,
         ("2BP01", _) if routine && op == "alter" && (sql.starts_with("DROP FUNCTION ") || sql.starts_with("DROP PROCEDURE ")) => {
@@ -824,7 +906,7 @@ impl DdlManager {
             return Err(Error::Invalid(m));
         }
         // (2a)
-        let target = target_for(req.kind(), database_oid)?;
+        let target = apply_target(req, database_oid)?;
         // (3) — sürüm oturumun önbelleğinden okunur (bağlantı açılmaz).
         let view = plan_view(req, load::server_version(&self.mgr, server).await?);
         if !view.errors.is_empty() {
@@ -851,6 +933,11 @@ impl DdlManager {
                 // (2a) veritabanı kapsamlı hedefi doğruladı.
                 let Target::Database(db) = target else { return Err(Error::Invalid(INVALID_DEF.into())) };
                 crate::load_acl::load_default_acl(&self.mgr, server, db, scope.clone()).await? == *expected
+            }
+            // Plan 24: hedef yeniden yüklenir (yeniden adlandırma, silme, sahte şema/ad → fark ya da `NotFound`).
+            Some(Expected::Maintenance(object, expected)) => {
+                let Target::Database(db) = target else { return Err(Error::Invalid(INVALID_DEF.into())) };
+                crate::load_maintenance::load_maintenance_target(&self.mgr, server, db, object).await? == *expected
             }
         };
         if !unchanged {
@@ -925,6 +1012,7 @@ impl DdlManager {
                 position: None,
                 error: apply::failure_payload(&apply::cancelled_error()),
                 created: None,
+                messages: vec![],
             });
         }
         // Kendi havuz bağlantımız (Gezgin/katalog) yeniden adlandırma/taşıma/silmeyi 55006 ile engellemesin (Karar 8).
@@ -938,16 +1026,32 @@ impl DdlManager {
                 return Err(e);
             }
         };
-        reg.set_handle(conn.cancel.clone());
+        let DedicatedConn { client, mut notices, cancel, .. } = conn;
+        reg.set_handle(cancel.clone());
         // Çağıran gelecek çalışırken düşerse (ör. pencere kapanışı) sunucudaki ifade iptal edilir.
-        let mut guard = CancelOnDrop { handle: conn.cancel.clone(), rt, armed: true };
-        let result = apply::run_statements(&conn.client, &exec, &reg).await;
+        let mut guard = CancelOnDrop { handle: cancel, rt, armed: true };
+        // Sıra: yuva → bağlantı → pid. Yalnız bakım uygulamalarında (ilerleme yalnız onlar için sorulur; diğer DDL
+        // uygulamaları fazladan gidiş-dönüş yapmaz). En iyi çaba: okunamazsa ilerleme sorgusu `None` döner, uygulama
+        // sürer (bağlantı koptuysa ilk ifade zaten hata verir).
+        if op == "maintenance" {
+            match client.query_one("SELECT pg_backend_pid()", &[]).await {
+                Ok(row) => reg.set_backend_pid(row.get(0)),
+                Err(e) => tracing::debug!(op, sqlstate = e.code().map(|c| c.code()), "arka uç pid'i okunamadı"),
+            }
+        }
+        // İletiler ifadelerle eşzamanlı okunur (kanal birikmez); metin hiçbir yere yazılmaz.
+        let mut messages = apply::MessageBuf::default();
+        let result = apply::with_messages(apply::run_statements(&client, &exec, &reg), &mut notices, &mut messages).await;
         guard.armed = false;
         drop(reg);
         // Somutlaşmış parola ifadesi (varsa) burada sıfırlanarak düşer.
         drop(exec);
-        // Uygulama bağlantısı, havuzdaki katalog sorgusundan (`find_created`) önce kapanır.
-        drop(conn);
+        // Uygulama bağlantısı, havuzdaki katalog sorgusundan (`find_created`) önce kapanır; kapanışa dek gelen
+        // son iletiler de alınır.
+        drop(client);
+        apply::drain_closed(&mut notices, &mut messages).await;
+        drop(notices);
+        let messages = messages.finish();
         // Arada (ör. Gezgin yenilemesi) açılmış bağlantı ve eski ad önbelleği de bırakılır.
         for &oid in &release {
             self.mgr.release_database(server, oid).await;
@@ -975,7 +1079,7 @@ impl DdlManager {
                     tracing::info!(op, ?kind, outcome = "acl_mismatch", "DDL sonrası yetki farkı");
                     warnings.push(ACL_WARNING.to_string());
                 }
-                ApplyOutcome::Applied { statements: count, elapsed_ms, created, warnings: (!warnings.is_empty()).then_some(warnings) }
+                ApplyOutcome::Applied { statements: count, elapsed_ms, created, warnings: (!warnings.is_empty()).then_some(warnings), messages }
             }
             RunResult::Failed { failed_index, committed, error, outcome_unknown, position } => {
                 let sqlstate = apply::sqlstate(&error).map(str::to_string);
@@ -999,7 +1103,7 @@ impl DdlManager {
                     (Some(def), 1..) => self.find_created(server, target, def).await,
                     _ => None,
                 };
-                ApplyOutcome::Failed { failed_index, committed, sqlstate, position, error, created }
+                ApplyOutcome::Failed { failed_index, committed, sqlstate, position, error, created, messages }
             }
         })
     }
@@ -1016,13 +1120,29 @@ impl DdlManager {
         lock_timeout_ms: u32,
         password: Option<(&str, &Secret)>,
     ) -> Result<ApplyOutcome> {
+        self.apply_statements_as(Uuid::new_v4(), "test", server, target, statements, lock_timeout_ms, password).await
+    }
+
+    /// `apply_statements`; `apply_id` ve `op` çağırandan (iptal/pid testleri: pid yalnız `op = "maintenance"`).
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn apply_statements_as(
+        &self,
+        apply_id: Uuid,
+        op: &'static str,
+        server: Uuid,
+        target: Target,
+        statements: &[Statement],
+        lock_timeout_ms: u32,
+        password: Option<(&str, &Secret)>,
+    ) -> Result<ApplyOutcome> {
         let exec = materialize_for(statements, password.map(|p| p.0), password.map(|p| p.1))?;
         let job = Job {
-            op: "test",
+            op,
             kind: ObjectKind::Schema,
             target,
             lock_timeout_ms,
-            apply_id: Uuid::new_v4(),
+            apply_id,
             created: None,
             object: None,
             release: vec![],
@@ -1182,6 +1302,41 @@ impl DdlManager {
         let r = crate::load_acl::load_acl(&self.mgr, server, database_oid, obj).await;
         tracing::debug!(op = "load_acl", kind = ?obj.kind, outcome = if r.is_ok() { "ok" } else { "error" }, "DDL yetki yüklemesi");
         r
+    }
+
+    /// Bakım hedefi (Plan 24; her türde veritabanı kapsamlı: Database türünde de bağlı veritabanı).
+    pub async fn load_maintenance_target(&self, server: Uuid, database_oid: u32, obj: ObjectRef) -> Result<MaintenanceTarget> {
+        let r = crate::load_maintenance::load_maintenance_target(&self.mgr, server, database_oid, obj).await;
+        tracing::debug!(op = "load_maintenance_target", kind = ?obj.kind, outcome = if r.is_ok() { "ok" } else { "error" }, "DDL bakım hedefi yüklemesi");
+        r
+    }
+
+    /// Süren uygulamanın bakım ilerlemesi (Plan 24): yalnız bu `apply_id`'nin uygulama bağlantısının pid'i için,
+    /// havuzdaki katalog bağlantısıyla (uygulama bağlantısı kullanılmaz). Bilinmeyen/bitmiş kimlik ya da pid henüz
+    /// okunmadıysa bağlantı açmadan `Ok(None)`; görünümde satır yoksa (ilerleme bildirmeyen aşama/işlem) `Ok(None)`.
+    /// Sorgu sürerken uygulama biterse (yuva düştüyse ya da pid değiştiyse) sonuç atılır: başka oturumun satırı
+    /// gösterilmez. Ad/aşama metni günlüğe yazılmaz.
+    pub async fn maintenance_progress(&self, server: Uuid, database_oid: u32, apply_id: Uuid) -> Result<Option<MaintenanceProgress>> {
+        let Some(pid) = self.cancels.backend_pid(apply_id) else { return Ok(None) };
+        let sql = progress_sql(load::server_version(&self.mgr, server).await?);
+        let row = self
+            .mgr
+            .run(server, Target::Database(database_oid), move |c| {
+                let sql = sql.clone();
+                async move { c.client.query_opt(sql.as_str(), &[&pid]).await }
+            })
+            .await;
+        tracing::debug!(op = "maintenance_progress", outcome = if row.is_ok() { "ok" } else { "error" }, "DDL bakım ilerlemesi");
+        let Some(row) = row? else { return Ok(None) };
+        if self.cancels.backend_pid(apply_id) != Some(pid) {
+            return Ok(None);
+        }
+        // Paniksiz okuma: SQL `phase`'i `coalesce` ile doldurur; beklenmeyen tür/NULL yine de belirsiz ilerlemeye düşer.
+        let opt_i64 = |c: &str| row.try_get::<_, Option<i64>>(c).ok().flatten();
+        let (done, total) = progress_counts(opt_i64("done"), opt_i64("total"));
+        let phase = row.try_get::<_, Option<String>>("phase").ok().flatten().unwrap_or_else(|| "unknown".into());
+        let unit = row.try_get::<_, Option<String>>("unit").ok().flatten();
+        Ok(Some(MaintenanceProgress { phase, done, total, unit }))
     }
 
     /// Bir rolün (genel ya da şema kapsamlı) varsayılan yetkileri (Plan 20; veritabanı kapsamlı).
@@ -1486,13 +1641,15 @@ enum Expected<'a> {
     Acl(ObjectRef, &'a AclDef),
     /// DefaultPrivileges: `load_default_acl(scope)`.
     DefaultAcl(&'a DefaultAclScope, &'a DefaultAclDef),
+    /// Maintenance: `load_maintenance_target(object)` (Plan 24).
+    Maintenance(ObjectRef, &'a MaintenanceTarget),
 }
 
 impl Expected<'_> {
     /// Değiştirilen nesne (varsayılan yetkilerde yok).
     fn object(&self) -> Option<ObjectRef> {
         match self {
-            Expected::Def(o, _) | Expected::Acl(o, _) => Some(*o),
+            Expected::Def(o, _) | Expected::Acl(o, _) | Expected::Maintenance(o, _) => Some(*o),
             Expected::DefaultAcl(..) => None,
         }
     }
@@ -1506,6 +1663,7 @@ fn object_check(req: &PlanRequest) -> Option<Expected<'_>> {
         PlanRequest::Drop { object, def, .. } => Some(Expected::Def(*object, def)),
         PlanRequest::Privileges { object, old, .. } => Some(Expected::Acl(*object, old)),
         PlanRequest::DefaultPrivileges { scope, old, .. } => Some(Expected::DefaultAcl(scope, old)),
+        PlanRequest::Maintenance { object, target, .. } => Some(Expected::Maintenance(*object, target)),
     }
 }
 
@@ -1520,7 +1678,37 @@ pub(crate) fn plan_view(req: &PlanRequest, version_num: u32) -> PlanView {
         PlanRequest::Drop { def, cascade, force, .. } => {
             build::drop_with(def, build::DropOptions { cascade: *cascade, force: *force }, &ctx(false))
         }
+        // REINDEX CONCURRENTLY `ReindexOptions`'tan gelir (`ctx.concurrently` kullanılmaz).
+        PlanRequest::Maintenance { target, op, .. } => build::maintenance::maintenance(&ctx(false), target, op),
     })
+}
+
+// ---- bakım ilerlemesi (Plan 24) ----
+
+const PROGRESS_VACUUM_SQL: &str = include_str!("sql/maintenance_progress_vacuum.sql");
+const PROGRESS_CLUSTER_SQL: &str = include_str!("sql/maintenance_progress_cluster.sql");
+const PROGRESS_CREATE_INDEX_SQL: &str = include_str!("sql/maintenance_progress_create_index.sql");
+const PROGRESS_ANALYZE_SQL: &str = include_str!("sql/maintenance_progress_analyze.sql");
+
+/// İlerleme sorgusu: sürümde bulunan `pg_stat_progress_*` görünümleri tek gidiş-dönüşte (`UNION ALL`, `$1` = pid).
+/// vacuum 9.6+, cluster ve create_index 12+, analyze 13+; PG 10–11'de yalnız vacuum görünümü sorgulanır (diğerleri
+/// yoktur, sorgu hata verirdi). Bir pid aynı anda en çok bir görünümde görünür (VACUUM FULL yalnız cluster'da).
+fn progress_sql(version_num: u32) -> String {
+    let mut parts = vec![PROGRESS_VACUUM_SQL];
+    if version_num >= 120000 {
+        parts.extend([PROGRESS_CLUSTER_SQL, PROGRESS_CREATE_INDEX_SQL]);
+    }
+    if version_num >= 130000 {
+        parts.push(PROGRESS_ANALYZE_SQL);
+    }
+    // Satır sonu: dosyaların son satırı yorumsuzdur ama yine de `)` yeni satırda (yorum parantezi yutmasın).
+    let body: Vec<String> = parts.iter().map(|p| format!("({}\n)", p.trim_end())).collect();
+    format!("{} LIMIT 1", body.join("\nUNION ALL\n"))
+}
+
+/// Sayaçlar `u64`'e; negatif (beklenmez) ya da boş → `None`.
+fn progress_counts(done: Option<i64>, total: Option<i64>) -> (Option<u64>, Option<u64>) {
+    (done.and_then(|v| u64::try_from(v).ok()), total.and_then(|v| u64::try_from(v).ok()))
 }
 
 /// (8) `lock_timeout` sınırı (`SessionProfile::Ddl` doğrulamasıyla aynı; bağlantıdan önce).
@@ -1812,9 +2000,9 @@ mod tests {
         let mut v = v;
         v.as_object_mut().unwrap().remove("password");
         assert_eq!(serde_json::from_value::<ApplyOptions>(v).unwrap(), o);
-        let a = serde_json::to_value(ApplyOutcome::Applied { statements: 2, elapsed_ms: 7, created: None, warnings: None }).unwrap();
+        let a = serde_json::to_value(ApplyOutcome::Applied { statements: 2, elapsed_ms: 7, created: None, warnings: None, messages: vec![] }).unwrap();
         assert_eq!(a, json!({"outcome": "applied", "statements": 2, "elapsedMs": 7, "created": null}));
-        let w = ApplyOutcome::Applied { statements: 1, elapsed_ms: 1, created: None, warnings: Some(vec!["u".into()]) };
+        let w = ApplyOutcome::Applied { statements: 1, elapsed_ms: 1, created: None, warnings: Some(vec!["u".into()]), messages: vec![] };
         assert_eq!(serde_json::to_value(w).unwrap()["warnings"], json!(["u"]));
         let f = ApplyOutcome::Failed {
             failed_index: 1,
@@ -1823,6 +2011,7 @@ mod tests {
             position: Some(12),
             error: ErrorPayload { code: "query".into(), message: "m".into(), detail: None, hint: None },
             created: None,
+            messages: vec![],
         };
         let f = serde_json::to_value(f).unwrap();
         assert_eq!((f["outcome"].clone(), f["failedIndex"].clone(), f["sqlstate"].clone()), (json!("failed"), json!(1), json!("42P07")));
@@ -1834,6 +2023,7 @@ mod tests {
             position: None,
             error: ErrorPayload { code: "query".into(), message: "m".into(), detail: None, hint: None },
             created: Some(ObjectRef { kind: ObjectKind::Database, oid: 9 }),
+            messages: vec![],
         };
         assert_eq!(serde_json::to_value(partial).unwrap()["created"], json!({"kind": "database", "oid": 9}));
         let c: CreateContext = serde_json::from_value(json!({"schemaOid": 5, "tableOid": null})).unwrap();
@@ -2601,6 +2791,188 @@ mod tests {
         assert_eq!(database_to_release(&PlanRequest::Create { def: ObjectDef::Database(d("n")), concurrently: false }), None);
     }
 
+    fn mtarget(kind: crate::maintenance::MaintenanceTargetKind, schema: Option<&str>, name: &str) -> crate::maintenance::MaintenanceTarget {
+        crate::maintenance::MaintenanceTarget {
+            kind,
+            schema: schema.map(Into::into),
+            name: name.into(),
+            table: None,
+            partitioned: false,
+            system: false,
+            cluster_index: None,
+            indexes: vec![],
+            editable: true,
+            unsupported: vec![],
+        }
+    }
+
+    fn vacuum_op(full: bool) -> crate::maintenance::MaintenanceOp {
+        crate::maintenance::MaintenanceOp::Vacuum(crate::maintenance::VacuumOptions {
+            full,
+            freeze: false,
+            analyze: false,
+            verbose: false,
+            disable_page_skipping: false,
+            skip_locked: false,
+            index_cleanup: None,
+            parallel: None,
+        })
+    }
+
+    fn maintenance_req(object_kind: ObjectKind, target: crate::maintenance::MaintenanceTarget, full: bool) -> PlanRequest {
+        PlanRequest::Maintenance { object: ObjectRef { kind: object_kind, oid: 3 }, target, op: vacuum_op(full) }
+    }
+
+    /// Plan 24: bakım isteği kapıları (saf kısım): op/kind, plan, salt okunur, biçim, hedef, nesne denetimi.
+    #[test]
+    fn maintenance_request_gates() {
+        use crate::maintenance::MaintenanceTargetKind as K;
+        let t = maintenance_req(ObjectKind::Table, mtarget(K::Table, Some("public"), "t"), false);
+        assert_eq!((t.op(), t.kind()), ("maintenance", ObjectKind::Table));
+        // Plan üreticiye bağlı: tek, transaction dışı ifade; FULL yıkıcıdır.
+        let v = plan_view(&t, 170000);
+        assert_eq!(v.statements.iter().map(|s| s.sql.as_str()).collect::<Vec<_>>(), ["VACUUM public.t"]);
+        assert!(!v.statements[0].transactional && v.risk == Risk::Safe && v.errors.is_empty());
+        let full = maintenance_req(ObjectKind::Table, mtarget(K::Table, Some("public"), "t"), true);
+        assert_eq!(plan_view(&full, 170000).risk, Risk::Destructive);
+        // Salt okunur hedef: genel gerekçe (ad içermez).
+        let mut ro = mtarget(K::Index, Some("public"), "i");
+        ro.editable = false;
+        ro.unsupported = vec![crate::load_maintenance::PARTITIONED_INDEX_REASON.into()];
+        let r = maintenance_req(ObjectKind::Index, ro, false);
+        assert_eq!(read_only_refusal(&r).unwrap(), format!("{READ_ONLY_PREFIX}bölümlenmiş indeks"));
+        let mut tmp = mtarget(K::Table, Some("pg_temp_3"), "tt");
+        tmp.editable = false;
+        tmp.unsupported = vec![crate::load_maintenance::TEMP_SCHEMA_REASON.into()];
+        let m = read_only_refusal(&maintenance_req(ObjectKind::Table, tmp, false)).unwrap();
+        assert!(m.starts_with(READ_ONLY_PREFIX) && !m.contains("pg_temp_3"), "{m}");
+        assert_eq!(read_only_refusal(&t), None);
+        // Biçim: nesne türü ile hedef türü uyuşmalı; bakımı olmayan tür ayrı iletiyle.
+        assert_eq!(request_shape_refusal(&t), None);
+        let mismatched = maintenance_req(ObjectKind::Index, mtarget(K::Table, Some("public"), "t"), false);
+        assert_eq!(request_shape_refusal(&mismatched), Some(INVALID_DEF));
+        let view = maintenance_req(ObjectKind::View, mtarget(K::Table, Some("public"), "t"), false);
+        assert_eq!(request_shape_refusal(&view), Some(crate::load_maintenance::NO_MAINTENANCE_MSG));
+        // Hedef: Database türü dahil her zaman bağlı veritabanı (bakım veritabanı değil); `None` → NEEDS_DATABASE.
+        let db = maintenance_req(ObjectKind::Database, mtarget(K::Database, None, "d"), false);
+        for r in [&t, &db] {
+            assert_eq!(apply_target(r, Some(5)).unwrap(), Target::Database(5), "{r:?}");
+            assert!(matches!(apply_target(r, None), Err(Error::Invalid(m)) if m == NEEDS_DATABASE), "{r:?}");
+        }
+        // Diğer istekler `target_for` kuralında kalır.
+        let dbdrop = PlanRequest::Create { def: ObjectDef::Database(DatabaseDef {
+            name: "n".into(), owner: None, template: None, encoding: None, locale_provider: None, lc_collate: None, lc_ctype: None,
+            provider_locale: None, tablespace: None, connection_limit: -1, is_template: false, allow_connections: true, settings: vec![], comment: None,
+        }), concurrently: false };
+        assert_eq!(apply_target(&dbdrop, Some(5)).unwrap(), Target::Maintenance);
+        // Nesne denetimi yükleyiciyle; bakım veritabanı koruması, bırakma, created/doğrulama yok.
+        assert!(matches!(object_check(&db), Some(Expected::Maintenance(o, tg)) if o.kind == ObjectKind::Database && tg.name == "d"));
+        assert_eq!(object_check(&t).and_then(|e| e.object()).map(|o| o.oid), Some(3));
+        let named = maintenance_req(ObjectKind::Database, mtarget(K::Database, None, "postgres"), true);
+        assert_eq!(maintenance_refusal(&named, "postgres"), None);
+        assert_eq!(database_to_release(&named), None);
+        assert!(VerifyAcl::of(&named).is_none());
+        assert_eq!(HintCtx::of(&named), HintCtx::default());
+        // JSON biçimi: `op = "maintenance"` (istek etiketi); işlem `operation` alanında (kendi `op` etiketiyle),
+        // hedef camelCase.
+        let v = serde_json::to_value(&t).unwrap();
+        assert_eq!(v["op"], "maintenance");
+        assert_eq!(v["operation"]["op"], "vacuum");
+        assert_eq!(v["operation"]["full"], false);
+        assert_eq!(v["target"]["clusterIndex"], serde_json::Value::Null);
+        assert_eq!(serde_json::from_value::<PlanRequest>(v).unwrap(), t);
+    }
+
+    #[test]
+    fn maintenance_hints() {
+        let st = |sql: &str| Statement { sql: sql.into(), risk: Risk::Destructive, transactional: false, note: None, redacted: false };
+        let hint = |kind, s: &Statement, code: &str, pg: Option<&str>| failure_payload_for(kind, "maintenance", Some(s), 0, &q(code, pg)).hint;
+        let vac = st("VACUUM (FULL) public.t");
+        // 55P03: kilit ipucu (genel lock_timeout ipucunun yerine).
+        assert_eq!(hint(ObjectKind::Table, &vac, "55P03", None).as_deref(), Some(MAINTENANCE_LOCK_HINT));
+        let p = failure_payload_for(ObjectKind::Table, "maintenance", Some(&vac), 0, &q("55P03", None));
+        assert!(p.detail.is_some(), "kilit zaman aşımında PG iletisi detayda kalır");
+        // 57014: ipucu yok (iptal iletisi yeter).
+        assert_eq!(hint(ObjectKind::Table, &vac, "57014", None), None);
+        for kind in [ObjectKind::Table, ObjectKind::Index, ObjectKind::Schema, ObjectKind::Database, ObjectKind::MaterializedView] {
+            assert_eq!(hint(kind, &st("REINDEX TABLE public.t"), "42501", None).as_deref(), Some(MAINTENANCE_PRIVILEGE_HINT), "{kind:?}");
+            assert_eq!(hint(kind, &st("REINDEX TABLE CONCURRENTLY public.t"), "0A000", None).as_deref(), Some(MAINTENANCE_UNSUPPORTED_HINT));
+            assert_eq!(hint(kind, &st("VACUUM public.t"), "25001", None).as_deref(), Some(MAINTENANCE_TX_HINT));
+            // Database türünde 55006 genel veritabanı ipucu bakımda verilmez.
+            assert_eq!(hint(kind, &st("REINDEX DATABASE d"), "55006", None), None);
+            // PG'nin kendi ipucu (55P03 dışında) korunur.
+            assert_eq!(hint(kind, &vac, "42501", Some("pg")).as_deref(), Some("pg"));
+        }
+        // Diğer işlemler etkilenmez.
+        assert_eq!(failure_payload_for(ObjectKind::Table, "alter", Some(&vac), 0, &q("42501", None)).hint.as_deref(), Some(PRIVILEGE_HINT));
+        for h in [MAINTENANCE_LOCK_HINT, MAINTENANCE_PRIVILEGE_HINT, MAINTENANCE_UNSUPPORTED_HINT, MAINTENANCE_TX_HINT] {
+            assert!(!h.is_empty() && !h.contains("public.t"));
+        }
+        assert_eq!(MAINTENANCE_LOCK_HINT, "Nesne başka bir oturumca kilitli; daha sonra deneyin ya da lock timeout'u artırın.");
+    }
+
+    /// İlerleme sorgusu sürüme göre görünüm seçer: PG 10–11'de cluster/create_index/analyze görünümleri hiç yok.
+    #[test]
+    fn progress_sql_follows_server_version() {
+        let views = ["pg_stat_progress_vacuum", "pg_stat_progress_cluster", "pg_stat_progress_create_index", "pg_stat_progress_analyze"];
+        let has = |v: u32| views.map(|name| progress_sql(v).contains(name));
+        assert_eq!(has(100000), [true, false, false, false]);
+        assert_eq!(has(110000), [true, false, false, false]);
+        assert_eq!(has(120000), [true, true, true, false]);
+        assert_eq!(has(130000), [true, true, true, true]);
+        assert_eq!(has(180000), [true, true, true, true]);
+        for v in [100000, 130000] {
+            let sql = progress_sql(v);
+            assert!(sql.matches("$1").count() >= 1 && !sql.trim_end().ends_with(';'), "{sql}");
+        }
+        // Satır → model: negatif/boş sayılar `None`.
+        assert_eq!(progress_counts(Some(3), Some(10)), (Some(3), Some(10)));
+        assert_eq!(progress_counts(Some(-1), None), (None, None));
+    }
+
+    /// Bakım isteğinin kapıları bağlantı açmadan çalışır (kilit, salt okunur, biçim, NEEDS_DATABASE); ilerleme bilinmeyen
+    /// kimlikte bağlantısız da `None`.
+    #[tokio::test]
+    async fn maintenance_gates_refuse_before_connecting() {
+        use crate::error_codes::ddl_payload;
+        use crate::maintenance::MaintenanceTargetKind as K;
+        use pgt_core::config::ServerConfig;
+        let make = |locked: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let mut registry = Registry::load(dir.path().join("servers.json")).unwrap().registry;
+            let mut config = ServerConfig::new("x", "127.0.0.1", 1, "u");
+            config.read_only_lock = locked;
+            let server = config.id;
+            registry.upsert(config).unwrap();
+            (DdlManager::new(Arc::new(ConnectionManager::new()), Arc::new(RwLock::new(registry))), server, dir)
+        };
+        let o = || ApplyOptions {
+            apply_id: Uuid::new_v4(),
+            lock_timeout_ms: 5000,
+            expected_hash: String::new(),
+            confirmed: true,
+            confirmed_production: true,
+            password: None,
+        };
+        let req = maintenance_req(ObjectKind::Table, mtarget(K::Table, Some("public"), "t"), false);
+        let (locked, server, _d1) = make(true);
+        assert_eq!(ddl_payload(&locked.apply(server, Some(1), &req, o()).await.unwrap_err()).code, "locked");
+        let (dm, server, _d2) = make(false);
+        let db = maintenance_req(ObjectKind::Database, mtarget(K::Database, None, "d"), false);
+        assert!(matches!(dm.apply(server, None, &db, o()).await, Err(Error::Invalid(m)) if m == NEEDS_DATABASE));
+        let mut ro = mtarget(K::Table, Some("public"), "t");
+        ro.editable = false;
+        let m = match dm.apply(server, Some(1), &maintenance_req(ObjectKind::Table, ro, false), o()).await {
+            Err(Error::Invalid(m)) => m,
+            other => panic!("{other:?}"),
+        };
+        assert!(m.starts_with(READ_ONLY_PREFIX));
+        // Geçerli istek kapıları geçer: bağlantısız sunucuda sürüm okunamaz.
+        assert_eq!(ddl_payload(&dm.apply(server, Some(1), &db, o()).await.unwrap_err()).code, "not_connected");
+        // İlerleme: kayıtlı olmayan kimlik bağlantı açmadan `None`.
+        assert_eq!(dm.maintenance_progress(server, 1, Uuid::new_v4()).await.unwrap(), None);
+    }
+
     #[test]
     fn membership_comparison_ignores_read_only_options() {
         let mut a = role("a");
@@ -2742,6 +3114,230 @@ mod tests {
                     let bad = [st("SELEC 1", true)];
                     let out = dm.apply_statements(t.config.id, Target::Maintenance, &bad, 5000, None).await.unwrap();
                     assert!(matches!(out, ApplyOutcome::Failed { position: Some(_), .. }), "{out:?}");
+                })
+                .await;
+            }
+        }
+
+        fn outcome_messages(out: &ApplyOutcome) -> &[ServerMessage] {
+            match out {
+                ApplyOutcome::Applied { messages, .. } | ApplyOutcome::Failed { messages, .. } => messages,
+            }
+        }
+
+        /// NOTICE'lar sonuca girer: tek ileti, sınır (600 → 500), uzun ileti kesimi, başarısız ifade.
+        #[tokio::test]
+        async fn apply_collects_server_messages() {
+            for ts in test_servers() {
+                let tag = "msgs";
+                let t = ts.clone();
+                guarded(&ts, tag, async move {
+                    let (_admin, dm, db, _dir) = setup(&t, tag).await;
+                    let target = Target::Database(db);
+                    let plan = [st("DO $$ BEGIN RAISE NOTICE 'x'; END $$", true)];
+                    let out = dm.apply_statements(t.config.id, target, &plan, 5000, None).await.unwrap();
+                    assert!(matches!(out, ApplyOutcome::Applied { .. }), "{out:?}");
+                    let m = outcome_messages(&out);
+                    assert_eq!(m.len(), 1, "{m:?}");
+                    assert_eq!((m[0].severity.as_str(), m[0].code.as_deref(), m[0].message.as_str()), ("NOTICE", Some("00000"), "x"));
+
+                    // İleti yoksa boş (alan yazılmaz).
+                    let out = dm.apply_statements(t.config.id, target, &[st("SELECT 1", true)], 5000, None).await.unwrap();
+                    assert!(outcome_messages(&out).is_empty(), "{out:?}");
+
+                    // 600 NOTICE (transaction dışı ifade): 499 + taşma iletisi.
+                    let plan = [st("DO $$ BEGIN FOR i IN 1..600 LOOP RAISE NOTICE 'n%', i; END LOOP; END $$", false)];
+                    let out = dm.apply_statements(t.config.id, target, &plan, 5000, None).await.unwrap();
+                    let m = outcome_messages(&out);
+                    assert_eq!(m.len(), 500);
+                    assert_eq!(m[0].message, "n1");
+                    assert_eq!(m[498].message, "n499");
+                    assert_eq!(m[499].message, "101 ileti daha gösterilmedi");
+
+                    // Uzun ileti 4096 bayta kesilir.
+                    let plan = [st("DO $$ BEGIN RAISE NOTICE '%', repeat('ğ', 5000); END $$", true)];
+                    let out = dm.apply_statements(t.config.id, target, &plan, 5000, None).await.unwrap();
+                    let m = outcome_messages(&out);
+                    assert!(m[0].message.len() <= 4096 && m[0].message.ends_with('…'), "{}", m[0].message.len());
+
+                    // Başarısız ifadede de hataya kadar gelen iletiler döner.
+                    let plan = [st("DO $$ BEGIN RAISE NOTICE 'once'; END $$", true), st("SELEC 1", true)];
+                    let out = dm.apply_statements(t.config.id, target, &plan, 5000, None).await.unwrap();
+                    assert!(matches!(out, ApplyOutcome::Failed { failed_index: 1, .. }), "{out:?}");
+                    assert_eq!(outcome_messages(&out).iter().map(|m| m.message.as_str()).collect::<Vec<_>>(), ["once"]);
+                })
+                .await;
+            }
+        }
+
+        /// İlerleme sorgularının sayaç seçimi aşamaya göredir: görünüm yerine sabit satırlarla (`VALUES`) sunucuda
+        /// çalıştırılır (görünümlere satır eklenemez; her sürümde aynı). `(aşama, done, total, unit)` beklenir.
+        #[tokio::test]
+        async fn progress_counters_follow_phase() {
+            type Row = (String, Option<i64>, Option<i64>, Option<String>);
+            async fn run(c: &tokio_postgres::Client, sql: &str, view: &str, values: &str) -> Vec<Row> {
+                let from = format!("FROM {view} p");
+                assert!(sql.contains(&from), "{view}");
+                let sql = sql.replace(&from, &format!("FROM ({values}) p")).replace("p.pid = $1", "true");
+                let rows = c.query(sql.as_str(), &[]).await.unwrap_or_else(|e| panic!("{view}: {e}"));
+                rows.iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))).collect()
+            }
+            let row = |phase: &str, done: Option<i64>, total: Option<i64>, unit: Option<&str>| -> Row {
+                (phase.into(), done, total, unit.map(Into::into))
+            };
+            for ts in test_servers() {
+                let c = admin_client(&ts, &ts.config.maintenance_db).await;
+                // create_index: tarama aşamalarında blok; ağaca yüklemede satır (eski blok sayacı dolu kalsa da).
+                let ci = "SELECT * FROM (VALUES \
+                    ('building index: scanning table'::text, 10::int8, 4::int8, 0::int8, 0::int8), \
+                    ('building index: loading tuples in tree', 10, 10, 500, 120), \
+                    ('index validation: scanning index', 8, 2, 0, 0), \
+                    ('index validation: sorting tuples', 8, 8, 0, 0), \
+                    ('waiting for writers before build', 0, 0, 0, 0), \
+                    ('building index: scanning table', 0, 0, 0, 0), \
+                    (NULL, NULL, NULL, NULL, NULL)) v(phase, blocks_total, blocks_done, tuples_total, tuples_done)";
+                let got = run(&c, PROGRESS_CREATE_INDEX_SQL, "pg_stat_progress_create_index", ci).await;
+                assert_eq!(
+                    got,
+                    [
+                        row("building index: scanning table", Some(4), Some(10), Some("blocks")),
+                        row("building index: loading tuples in tree", Some(120), Some(500), Some("tuples")),
+                        row("index validation: scanning index", Some(2), Some(8), Some("blocks")),
+                        row("index validation: sorting tuples", None, None, None),
+                        row("waiting for writers before build", None, None, None),
+                        row("building index: scanning table", None, None, None),
+                        row("unknown", None, None, None),
+                    ]
+                );
+                // vacuum: taramada taranan, yığın vakumunda vakumlanan blok; diğer aşamalarda belirsiz.
+                let vac = "SELECT * FROM (VALUES \
+                    ('scanning heap'::text, 100::int8, 40::int8, 0::int8), \
+                    ('vacuuming heap', 100, 100, 30), \
+                    ('vacuuming indexes', 100, 100, 0), \
+                    ('scanning heap', NULL, NULL, NULL), \
+                    (NULL, NULL, NULL, NULL)) v(phase, heap_blks_total, heap_blks_scanned, heap_blks_vacuumed)";
+                let got = run(&c, PROGRESS_VACUUM_SQL, "pg_stat_progress_vacuum", vac).await;
+                assert_eq!(
+                    got,
+                    [
+                        row("scanning heap", Some(40), Some(100), Some("blocks")),
+                        row("vacuuming heap", Some(30), Some(100), Some("blocks")),
+                        row("vacuuming indexes", None, None, None),
+                        row("scanning heap", None, None, None),
+                        row("unknown", None, None, None),
+                    ]
+                );
+            }
+        }
+
+        /// Bakım uygulaması sürerken yuvada arka uç pid'i vardır (uygulama bağlantısının pid'i), bitince düşer.
+        /// Diğer DDL uygulamaları pid okumaz (fazladan gidiş-dönüş yok).
+        #[tokio::test]
+        async fn backend_pid_is_recorded_during_apply() {
+            for ts in test_servers() {
+                let tag = "pid";
+                let t = ts.clone();
+                guarded(&ts, tag, async move {
+                    let (admin, dm, db, _dir) = setup(&t, tag).await;
+                    let plan = [st("SELECT pg_sleep(0.5)", false)];
+                    // Bakım dışı işlem: uygulama süresince pid kaydedilmez.
+                    let other = Uuid::new_v4();
+                    let apply = dm.apply_statements_as(other, "alter", t.config.id, Target::Database(db), &plan, 5000, None);
+                    // Yuva açılana dek, sonra yuva düşene dek yoklanır (sınırlı süre).
+                    let watch = async {
+                        let (mut registered, mut seen) = (false, false);
+                        let deadline = Instant::now() + Duration::from_secs(10);
+                        while Instant::now() < deadline {
+                            let open = dm.cancels.len() > 0;
+                            if registered && !open {
+                                break;
+                            }
+                            registered |= open;
+                            seen |= dm.cancels.backend_pid(other).is_some();
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                        (registered, seen)
+                    };
+                    let (out, (registered, seen)) = tokio::join!(apply, watch);
+                    assert!(matches!(out, Ok(ApplyOutcome::Applied { .. })), "{out:?}");
+                    assert!(registered, "uygulama yuvası görülmedi");
+                    assert!(!seen, "bakım dışı uygulamada pid okunmamalı");
+
+                    let id = Uuid::new_v4();
+                    let plan = [st("SELECT pg_sleep(1.5)", false)];
+                    let apply = dm.apply_statements_as(id, "maintenance", t.config.id, Target::Database(db), &plan, 5000, None);
+                    let watch = async {
+                        for _ in 0..100 {
+                            if let Some(pid) = dm.cancels.backend_pid(id) {
+                                return Some(pid);
+                            }
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        None
+                    };
+                    let (out, pid) = tokio::join!(apply, watch);
+                    assert!(matches!(out, Ok(ApplyOutcome::Applied { .. })), "{out:?}");
+                    let pid = pid.expect("uygulama sırasında pid kaydedilmeli");
+                    assert!(pid > 0);
+                    assert_eq!(dm.cancels.backend_pid(id), None, "yuva düşünce pid de düşer");
+                    // Pid uygulama bağlantısınındı: artık o arka uç yok (kısa bekleme: kapanış eşzamansız).
+                    let mut gone = false;
+                    for _ in 0..50 {
+                        let n: i64 = admin.query_one("SELECT count(*) FROM pg_stat_activity WHERE pid = $1", &[&pid]).await.unwrap().get(0);
+                        if n == 0 {
+                            gone = true;
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    assert!(gone);
+                })
+                .await;
+            }
+        }
+
+        /// İptal (57014): hataya kadar gelen iletiler sonuçta kalır, pid yuvayla birlikte düşer (ilerleme `None`).
+        #[tokio::test]
+        async fn cancel_keeps_messages_and_clears_pid() {
+            for ts in test_servers() {
+                let tag = "cnmsg";
+                let t = ts.clone();
+                guarded(&ts, tag, async move {
+                    let (admin, dm, db, _dir) = setup(&t, tag).await;
+                    let dm = Arc::new(dm);
+                    let (id, server) = (Uuid::new_v4(), t.config.id);
+                    let dm2 = dm.clone();
+                    let task = tokio::spawn(async move {
+                        let plan = [st("DO $$ BEGIN RAISE NOTICE 'once'; PERFORM pg_sleep(30); END $$", false)];
+                        dm2.apply_statements_as(id, "maintenance", server, Target::Database(db), &plan, 5000, None).await
+                    });
+                    // İfade uykuda (NOTICE gönderilmiş) olana dek bekle.
+                    let mut sleeping = false;
+                    for _ in 0..300 {
+                        if let Some(pid) = dm.cancels.backend_pid(id) {
+                            let n: i64 = admin
+                                .query_one("SELECT count(*) FROM pg_stat_activity WHERE pid = $1 AND wait_event = 'PgSleep'", &[&pid])
+                                .await
+                                .unwrap()
+                                .get(0);
+                            if n == 1 {
+                                sleeping = true;
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    // Başarısızlıkta da iptal gönderilir ve görev sınırlı beklenir: temizlik asılı kalmasın.
+                    dm.cancel(id).await.unwrap();
+                    let joined = tokio::time::timeout(Duration::from_secs(15), task).await;
+                    assert!(sleeping, "ifade uykuya geçmedi");
+                    let out = joined.expect("iptal 15 sn içinde sonuçlanmalı").unwrap().unwrap();
+                    let ApplyOutcome::Failed { sqlstate, messages, error, .. } = &out else { panic!("{out:?}") };
+                    assert_eq!(sqlstate.as_deref(), Some("57014"));
+                    assert_eq!(error.hint, None);
+                    assert_eq!(messages.iter().map(|m| m.message.as_str()).collect::<Vec<_>>(), ["once"]);
+                    assert_eq!(dm.cancels.backend_pid(id), None);
+                    assert_eq!(dm.maintenance_progress(server, db, id).await.unwrap(), None);
                 })
                 .await;
             }

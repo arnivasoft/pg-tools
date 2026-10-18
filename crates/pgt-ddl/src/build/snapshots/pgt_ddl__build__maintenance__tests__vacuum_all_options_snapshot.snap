@@ -1,0 +1,5 @@
+---
+source: crates/pgt-ddl/src/build/maintenance.rs
+expression: render(&p)
+---
+[Safe non-tx] VACUUM (FREEZE, ANALYZE, VERBOSE, DISABLE_PAGE_SKIPPING, SKIP_LOCKED, INDEX_CLEANUP AUTO, PARALLEL 4) s.t

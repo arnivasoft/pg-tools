@@ -12,7 +12,7 @@
 
 use pgt_core::ErrorPayload;
 use pgt_ddl::{
-    AclDef, ApplyOptions, ApplyOutcome, CreateContext, CreatePreset, DdlTarget, DefaultAclDef, DefaultAclScope, LookupItem, LookupRequest, ObjectDef, ObjectKind, ObjectRef, PlanRequest, PlanView,
+    AclDef, ApplyOptions, ApplyOutcome, CreateContext, CreatePreset, DdlTarget, DefaultAclDef, DefaultAclScope, LookupItem, LookupRequest, MaintenanceProgress, MaintenanceTarget, ObjectDef, ObjectKind, ObjectRef, PlanRequest, PlanView,
     ddl_payload,
 };
 use tauri::State;
@@ -61,6 +61,28 @@ pub async fn ddl_load_default_acl(
     scope: DefaultAclScope,
 ) -> CmdResult<DefaultAclDef> {
     Box::pin(state.ddl.load_default_acl(server_id, database_oid, scope)).await.map_err(|e| ddl_payload(&e))
+}
+
+/// Bakım hedefi (Plan 24). Her türde veritabanı kapsamlı: Database düğümünde de `databaseOid` bağlı veritabanıdır.
+#[tauri::command]
+pub async fn ddl_load_maintenance_target(
+    state: State<'_, AppState>,
+    server_id: Uuid,
+    database_oid: u32,
+    object: ObjectRef,
+) -> CmdResult<MaintenanceTarget> {
+    Box::pin(state.ddl.load_maintenance_target(server_id, database_oid, object)).await.map_err(|e| ddl_payload(&e))
+}
+
+/// Süren bakım uygulamasının ilerlemesi (Plan 24; ön yüz ~1 sn aralıkla sorar). Bilinmeyen/bitmiş `applyId` → `null`.
+#[tauri::command]
+pub async fn ddl_maintenance_progress(
+    state: State<'_, AppState>,
+    server_id: Uuid,
+    database_oid: u32,
+    apply_id: Uuid,
+) -> CmdResult<Option<MaintenanceProgress>> {
+    Box::pin(state.ddl.maintenance_progress(server_id, database_oid, apply_id)).await.map_err(|e| ddl_payload(&e))
 }
 
 #[tauri::command]

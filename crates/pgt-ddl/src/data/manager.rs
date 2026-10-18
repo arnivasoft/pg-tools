@@ -17,7 +17,7 @@
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Instant;
 
-use pgt_core::connection::{ConnectionManager, SessionProfile, Target};
+use pgt_core::connection::{ConnectionManager, DedicatedConn, SessionProfile, Target};
 use pgt_core::registry::Registry;
 use pgt_core::{Error, Result};
 use uuid::Uuid;
@@ -222,13 +222,17 @@ impl DataManager {
         }
         let profile = SessionProfile::Data { lock_timeout_ms: opts.lock_timeout_ms };
         let conn = apply::open_apply_conn_as(&self.mgr, server, Target::Database(db_oid), profile).await?;
-        reg.set_handle(conn.cancel.clone());
+        // `notices` alıcısı hemen düşer (pgt-dash kalıbı): okunmayan kanal uygulama boyunca büyümesin; sürücü
+        // alıcısız kanala gönderim hatasını yok sayar. Veri düzenleyici sunucu iletisi göstermez.
+        let DedicatedConn { client, notices, cancel, .. } = conn;
+        drop(notices);
+        reg.set_handle(cancel.clone());
         // Çağıran gelecek çalışırken düşerse sunucudaki ifade iptal edilir.
-        let mut on_drop = CancelOnDrop { handle: conn.cancel.clone(), rt, armed: true };
-        let result = exec::run_changes(&conn.client, statements, &reg).await;
+        let mut on_drop = CancelOnDrop { handle: cancel, rt, armed: true };
+        let result = exec::run_changes(&client, statements, &reg).await;
         on_drop.armed = false;
         drop(reg);
-        drop(conn);
+        drop(client);
         Ok(match result {
             ExecResult::Done(results) => DataOutcome::Applied {
                 statements: apply::idx(statements.len()),

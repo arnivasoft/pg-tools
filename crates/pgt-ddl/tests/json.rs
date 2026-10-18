@@ -226,14 +226,16 @@ fn supporting_requests_parse() {
 #[test]
 fn outcomes_serialize_as_the_frontend_expects() {
     let created = Some(ObjectRef { kind: ObjectKind::Schema, oid: 9 });
-    let a = serde_json::to_value(ApplyOutcome::Applied { statements: 2, elapsed_ms: 7, created, warnings: None }).unwrap();
+    let a = serde_json::to_value(ApplyOutcome::Applied { statements: 2, elapsed_ms: 7, created, warnings: None, messages: vec![] }).unwrap();
     assert_eq!(a, json!({"outcome": "applied", "statements": 2, "elapsedMs": 7, "created": {"kind": "schema", "oid": 9}}));
-    let a = serde_json::to_value(ApplyOutcome::Applied { statements: 1, elapsed_ms: 1, created: None, warnings: Some(vec!["w".into()]) }).unwrap();
+    let a = serde_json::to_value(ApplyOutcome::Applied { statements: 1, elapsed_ms: 1, created: None, warnings: Some(vec!["w".into()]), messages: vec![] }).unwrap();
     assert!(a["created"].is_null());
     assert_eq!(a["warnings"], json!(["w"]));
     // Kısmi uygulama: `created` yalnızca doluysa yazılır.
     let error = ErrorPayload { code: "query".into(), message: "m".into(), detail: None, hint: None };
-    let f = ApplyOutcome::Failed { failed_index: 1, committed: 1, sqlstate: Some("42704".into()), position: None, error: error.clone(), created: None };
+    let f = ApplyOutcome::Failed { failed_index: 1, committed: 1, sqlstate: Some("42704".into()), position: None, error: error.clone(), created: None, messages: vec![] };
+    let v = serde_json::to_value(&f).unwrap();
+    assert!(v.get("messages").is_none(), "ileti yoksa alan yazılmaz");
     let v = serde_json::to_value(f).unwrap();
     assert!(v.get("created").is_none() && v["position"].is_null());
     let f = ApplyOutcome::Failed {
@@ -243,8 +245,11 @@ fn outcomes_serialize_as_the_frontend_expects() {
         position: None,
         error,
         created: Some(ObjectRef { kind: ObjectKind::Database, oid: 16390 }),
+        messages: vec![ServerMessage { severity: "NOTICE".into(), code: Some("00000".into()), message: "x".into(), detail: None, hint: None }],
     };
-    assert_eq!(serde_json::to_value(f).unwrap()["created"], json!({"kind": "database", "oid": 16390}));
+    let v = serde_json::to_value(f).unwrap();
+    assert_eq!(v["created"], json!({"kind": "database", "oid": 16390}));
+    assert_eq!(v["messages"], json!([{"severity": "NOTICE", "code": "00000", "message": "x", "detail": null, "hint": null}]));
 }
 
 #[test]
