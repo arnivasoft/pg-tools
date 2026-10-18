@@ -4,6 +4,14 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+# Yürütücü testlerinin sahte aracı. Bağımlılıkların ikilileri uygulamayla derlenmez, dağıtıma girmez.
+[[bin]]
+name = "pgt-fake-tool"
+path = "tests/support/fake_tool.rs"
+test = false
+bench = false
+doc = false
+
 [dependencies]
 pgt-core.workspace = true
 # `FieldError` ve `Risk` tek TS tipi kalsın diye yeniden kullanılır (döngü yok: pgt-ddl pgt-backup'a bağlı değil).
@@ -12,6 +20,7 @@ tokio.workspace = true
 serde.workspace = true
 ts-rs.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
