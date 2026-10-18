@@ -79,14 +79,14 @@ describe("qualifiedParts / actionsFor", () => {
     expect(actionsFor(s, node(s, "srv-down"))).toEqual(["openQueryTool", "connect", "editServer", "deleteServer", "copyName"]);
     expect(actionsFor(s, node(s, "srv-up"))).toEqual(["openQueryTool", "openDashboard", "refresh", "disconnect", "editServer", "deleteServer", "copyName"]);
     expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["createObject", "refresh", "copyName"]);
-    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "openData", "editObject", "renameObject", "privilegesObject", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "openData", "editObject", "renameObject", "privilegesObject", "maintenance", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "col-id"))).toEqual(["editObject", "copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "con-1"))).toEqual(["editObject", "copyName", "copyDdl"]);
   });
   it("Dashboard: bağlı sunucuda ve veritabanında var, bağlı olmayan sunucuda ve diğer düğümlerde yok", () => {
     expect(actionsFor(s, node(s, "srv-up"))).toContain("openDashboard");
     expect(actionsFor(s, node(s, "db-app"))).toEqual([
-      "openQueryTool", "openDashboard", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject",
+      "openQueryTool", "openDashboard", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
     expect(actionsFor(s, node(s, "srv-down"))).not.toContain("openDashboard");
@@ -251,10 +251,10 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
   });
   it("nesnelerde editObject/renameObject/dropObject, Query Tool eylemlerinden sonra", () => {
     expect(actionsFor(s, node(s, "sch-app"))).toEqual([
-      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject",
+      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
-    expect(actionsFor(s, node(s, "idx-1"))).toEqual(["editObject", "renameObject", "dropObject", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "idx-1"))).toEqual(["editObject", "renameObject", "maintenance", "dropObject", "copyName", "copyQualifiedName", "copyDdl"]);
     for (const id of ["seq-1", "ext-1"]) {
       const a = actionsFor(s, node(s, id));
       expect(a.filter((x) => DES.includes(x))).toEqual(["editObject", "renameObject", "dropObject"]);
@@ -449,7 +449,7 @@ describe("yetki eylemleri (Yetkiler… / Varsayılan yetkiler…)", () => {
       expect(des(id)).toEqual(["editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject"]);
     }
     expect(actionsFor(s, node(s, "sch-app"))).toEqual([
-      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject",
+      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
   });
@@ -485,6 +485,50 @@ describe("yetki eylemleri (Yetkiler… / Varsayılan yetkiler…)", () => {
     const l = { ...deps(s), openDesigner: vi.fn(), serverLocked: vi.fn(() => true) };
     for (const a of ACL) await executeAction(l as unknown as ActionDeps, a, "db-app");
     expect(l.openDesigner).not.toHaveBeenCalled();
+  });
+  it("Bakım…: beş türde var; sıra privileges/defaultPrivileges'ten sonra, drop'tan önce", () => {
+    for (const id of ["tbl-orders", "tbl-partition", "mv-1", "idx-1", "sch-app", "db-app"]) {
+      expect(actionsFor(s, node(s, id)), id).toContain("maintenance");
+    }
+    const all = (id: string) => actionsFor(s, node(s, id));
+    expect(all("sch-app").filter((x) => [...DES, "maintenance"].includes(x))).toEqual([
+      "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "dropObject",
+    ]);
+    expect(all("tbl-orders").filter((x) => [...DES, "maintenance"].includes(x))).toEqual([
+      "editObject", "renameObject", "privilegesObject", "maintenance", "dropObject",
+    ]);
+    expect(all("idx-1").filter((x) => [...DES, "maintenance"].includes(x))).toEqual(["editObject", "renameObject", "maintenance", "dropObject"]);
+  });
+  it("Bakım…: koleksiyon, kolon, kısıt, view, sequence, function, role, trigger vb. türlerde yok", () => {
+    for (const id of [
+      "coll-tables", "coll-cols", "coll-con", "coll-idx", "coll-part", "col-id", "col-part", "vcol-1", "con-1", "view-1", "seq-1",
+      "fn-fmt-int", "proc-1", "tfn-1", "type-1", "dom-1", "ext-1", "role-1", "trg-1", "pol-1", "ts-1", "srv-up", "srv-down",
+    ]) {
+      expect(actionsFor(s, node(s, id)), id).not.toContain("maintenance");
+    }
+  });
+  it("Bakım…: grup 3; adı Object ile bitmez; kilitli sunucuda gerekçe, kilitsizde boş", () => {
+    expect("maintenance".endsWith("Object")).toBe(false);
+    expect(groupOf("maintenance")).toBe(groupOf("editObject"));
+    const lockedTree = aclTree();
+    const srv = lockedTree.nodes.get("srv-up")!;
+    lockedTree.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
+    expect(disabledReason("maintenance", { state: () => lockedTree } as unknown as ActionDeps, "tbl-orders")).toBe(t.query.hint.locked);
+    expect(disabledReason("maintenance", { serverLocked: () => true } as unknown as ActionDeps, "sch-app")).toBe(t.query.hint.locked);
+    expect(disabledReason("maintenance", { state: () => s } as unknown as ActionDeps, "sch-app")).toBeNull();
+    // Diğer (Object olmayan) eylemler kilitle kapanmaz.
+    expect(disabledReason("copyName", { serverLocked: () => true } as unknown as ActionDeps, "sch-app")).toBeNull();
+  });
+  it("executeAction maintenance openMaintenance(id) çağırır; kilitliyse çağırmaz", async () => {
+    const d = { ...deps(s), openMaintenance: vi.fn(), serverLocked: vi.fn(() => false) };
+    await executeAction(d as unknown as ActionDeps, "maintenance", "tbl-orders");
+    expect(d.openMaintenance.mock.calls).toEqual([["tbl-orders"]]);
+    const l = { ...deps(s), openMaintenance: vi.fn(), serverLocked: vi.fn(() => true) };
+    await executeAction(l as unknown as ActionDeps, "maintenance", "tbl-orders");
+    expect(l.openMaintenance).not.toHaveBeenCalled();
+  });
+  it("Bakım… menü metni ana t.menu'de", () => {
+    expect(t.menu.maintenance).toBe("Bakım…");
   });
   it("menü metinleri ana t.menu'de", () => {
     expect(t.menu.privilegesObject).toBe("Yetkiler…");

@@ -29,5 +29,7 @@ export const isTableRowKind = (kind: NodeKind) => DDL_ROW_KINDS.includes(kind);
 export const ACL_KINDS: NodeKind[] = [
   "table", "view", "materializedView", "sequence", "function", "procedure", "triggerFunction", "schema", "database", "type", "domain",
 ];
+/** Plan 25: "Bakım…" (VACUUM/ANALYZE/REINDEX/CLUSTER) menüsünün göründüğü düğümler. */
+export const MAINTENANCE_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>(["table", "materializedView", "index", "schema", "database"]);
 /** "Varsayılan yetkiler…" yalnız veritabanı ve şema düğümlerinde. */
 export const DEFAULT_ACL_KINDS: NodeKind[] = ["database", "schema"];

@@ -8,7 +8,7 @@ import { ROOT, ancestorOfKind, isCollection, serverOf, type TreeState } from "./
 import { canOpenQueryTool } from "../query/open-kinds";
 import { canOpenDashboard } from "../dashboard/open-kinds";
 import { canOpenData } from "../data/open-kinds";
-import { ACL_KINDS, DEFAULT_ACL_KINDS, canCreateIn, canEditObject, isTableRowKind } from "../designer/ddl-kinds";
+import { ACL_KINDS, DEFAULT_ACL_KINDS, MAINTENANCE_KINDS, canCreateIn, canEditObject, isTableRowKind } from "../designer/ddl-kinds";
 
 /** Kolon/kısıt düğümünün sahibi (koleksiyonlar atlanarak ilk ata) tablo mu (görünüm/MV kolonu ya da domain kısıtı değil). */
 function ownedByTable(s: TreeState, id: string): boolean {
@@ -25,7 +25,7 @@ function ownedByTable(s: TreeState, id: string): boolean {
 export type ActionId =
   | "refresh" | "connect" | "disconnect" | "editServer" | "deleteServer"
   | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool" | "openDashboard" | "openData"
-  | "createObject" | "editObject" | "renameObject" | "privilegesObject" | "defaultPrivilegesObject" | "dropObject";
+  | "createObject" | "editObject" | "renameObject" | "privilegesObject" | "defaultPrivilegesObject" | "maintenance" | "dropObject";
 
 /**
  * Nesne diyaloğu (designer) eylemleri: adı `Object` ile biten eylemler (ana paket bütçesi için liste yerine sonek);
@@ -49,6 +49,8 @@ export interface ActionDeps {
   openData?(id: string): void;
   /** Nesne diyaloğunu aç (Schema/Sequence/Extension/Index; `drop` sekme açmaz, silme diyaloğu). */
   openDesigner?(id: string, mode: DesignerOpenMode): void;
+  /** "Bakım…" diyaloğu (Plan 25; tembel). */
+  openMaintenance?(id: string): void;
   /** Düğümün sunucusu salt okunur kilitli mi (designer eylemleri kapalı)? Verilmezse ağaçtaki sunucu düğümünün kilidi. */
   serverLocked?(nodeId: string): boolean;
   /** Sunucunun sorgu oturumlarını kapatacak işlemden (silme, bağlantı kesme) önce: açık transaction'lar için sorar. */
@@ -114,6 +116,8 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
     out.push("editObject", "renameObject");
     if (ACL_KINDS.includes(node.kind)) out.push("privilegesObject");
     if (DEFAULT_ACL_KINDS.includes(node.kind)) out.push("defaultPrivilegesObject");
+    // Plan 25: bakım (VACUUM/ANALYZE/REINDEX/CLUSTER) düzenleme grubunda, silmeden önce.
+    if (MAINTENANCE_KINDS.has(node.kind)) out.push("maintenance");
     out.push("dropObject");
   }
   else if (isTableRowKind(node.kind) && ownedByTable(s, node.id)) out.push("editObject");
@@ -127,7 +131,7 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
 /** Menüde ayırıcı yerleşimi için eylem grubu. */
 export function groupOf(a: ActionId): number {
   if (a === "openQueryTool" || a === "openDashboard" || a === "openData") return -1;
-  if (a.endsWith("Object")) return 3;
+  if (a.endsWith("Object") || a === "maintenance") return 3;
   if (a === "refresh" || a === "connect" || a === "disconnect") return 0;
   if (a === "editServer" || a === "deleteServer") return 1;
   return 2;
@@ -135,7 +139,7 @@ export function groupOf(a: ActionId): number {
 
 /** Eylem görünür ama kapalıysa gerekçesi (menüde `title`); designer eylemleri kilitli sunucuda kapalıdır. */
 export function disabledReason(a: ActionId, deps: Pick<ActionDeps, "serverLocked" | "state">, nodeId: string): string | null {
-  const locked = a.endsWith("Object") && (deps.serverLocked?.(nodeId) ?? serverOf(deps.state(), nodeId)?.flags.locked);
+  const locked = (a.endsWith("Object") || a === "maintenance") && (deps.serverLocked?.(nodeId) ?? serverOf(deps.state(), nodeId)?.flags.locked);
   return locked ? t.query.hint.locked : null;
 }
 
@@ -171,6 +175,10 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
       case "dropObject":
         // Savunma: menü kilitli sunucuda bu öğeleri gerekçesiyle zaten kapatır (açıcı da kaydı yeniden denetler).
         if (!disabledReason(action, deps, id)) deps.openDesigner?.(id, action.slice(0, -6) as DesignerOpenMode);
+        return;
+      case "maintenance":
+        // Savunma: kilitli sunucuda menü zaten kapalıdır.
+        if (!disabledReason(action, deps, id)) deps.openMaintenance?.(id);
         return;
       case "disconnect":
         if (node.serverId && deps.beforeServerChange && !(await deps.beforeServerChange(node.serverId, node.label))) return;

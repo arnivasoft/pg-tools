@@ -34,6 +34,9 @@ import { loadPasswordPromptView } from "../features/servers/PasswordPrompt";
 import { readStorage, writeStorage } from "./storage";
 import { applyTheme, loadThemePreference, nextPreference, saveThemePreference, watchSystemTheme } from "./theme";
 
+/** Bakım diyaloğu yükleyicisi (tek tanım): `lazy` ve `prefetchIdle` aynı içe aktarmayı paylaşır. */
+export const loadMaintenanceDialog = () => import("../features/maintenance/MaintenanceDialog");
+const MaintenanceDialog = lazy(() => loadMaintenanceDialog().then((m) => ({ default: m.MaintenanceDialog })));
 const ServerDialog = lazy(() => import("../features/servers/ServerDialog").then((m) => ({ default: m.ServerDialog })));
 const ImportDialog = lazy(() => import("../features/servers/ImportDialog").then((m) => ({ default: m.ImportDialog })));
 
@@ -102,6 +105,10 @@ export default function App() {
   const [importEverOpened, setImportEverOpened] = createSignal(false);
   createEffect(() => dialogOpen() && setServerEverOpened(true));
   createEffect(() => importOpen() && setImportEverOpened(true));
+  // Bakım diyaloğu (Plan 25): açıldığı düğüm kimliği; kapanınca null.
+  const [maintenanceId, setMaintenanceId] = createSignal<string | null>(null);
+  const [maintenanceEverOpened, setMaintenanceEverOpened] = createSignal(false);
+  createEffect(() => maintenanceId() !== null && setMaintenanceEverOpened(true));
   const [groups, setGroups] = createSignal<string[]>([]);
 
   const openDialog = async (serverId: string | null) => {
@@ -128,6 +135,7 @@ export default function App() {
     openQueryTool: (id) => void query.openFromNode(id),
     openDashboard: (id) => void loadDash().then((d) => d.openFromNode(id), loadFailed),
     openDesigner: (id, mode) => void loadDesigner().then((d) => d.open(id, mode), loadFailed),
+    openMaintenance: (id) => setMaintenanceId(id),
     openData: (id) => void loadData().then((d) => d.open(id), loadFailed),
     beforeServerChange: query.confirmServerChange,
     afterServerChange: (serverId, gone) => {
@@ -143,7 +151,7 @@ export default function App() {
 
   onMount(async () => {
     // İlk boyamadan sonra, boşta: tembel parçalar sessizce ısıtılır (ilk sağ tık/diyalog gecikmesiz açılsın).
-    prefetchIdle([loadExplorerMenuPopup, loadConfirmDialogView, loadPasswordPromptView, loadTxDialogs, loadErrorBadgeCard]);
+    prefetchIdle([loadExplorerMenuPopup, loadConfirmDialogView, loadPasswordPromptView, loadTxDialogs, loadErrorBadgeCard, loadMaintenanceDialog]);
     void query.restore();
     await commands.setShowSystem(showSystem()).catch(() => {
       // Arka uç varsayılanı kapalıdır: anahtar ve kayıtlı tercih buna uysun.
@@ -274,6 +282,11 @@ export default function App() {
       <prompt.View />
       <deleteConfirm.View />
       <Toaster />
+      <Show when={maintenanceEverOpened()}>
+        <Suspense>
+          <MaintenanceDialog open={maintenanceId() !== null} onClose={() => setMaintenanceId(null)} />
+        </Suspense>
+      </Show>
       <Show when={importEverOpened()}>
         <Suspense>
           <ImportDialog
