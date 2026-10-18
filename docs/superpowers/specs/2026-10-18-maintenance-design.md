@@ -1,7 +1,7 @@
 # pg-tools — Bakım İşlemleri Tasarımı (VACUUM / ANALYZE / REINDEX / CLUSTER)
 
 - **Tarih:** 2026-10-18
-- **Durum:** Plan 24 arka ucu `feat/maintenance-backend` dalında tamamlandı (Docker PG 10–18 yeşil); Plan 25 (ön yüz) kalan. Sözleşme: §6.
+- **Durum:** Plan 24 arka ucu tamamlandı (Docker PG 10–18 yeşil); Plan 25 ön yüzü uygulandı; elle kontrol bekliyor (`docs/smoke-test.md` "Bakım işlemleri arayüzü (Plan 25)"). Sözleşme: §6; uygulama notları: §7.
 - **Kapsam:** Explorer'dan bir nesne için bakım işlemi çalıştırma: seçenekler, SQL önizlemesi, kilit uyarısı, onay, uygulama, iptal, ilerleme (`pg_stat_progress_*`) ve `VERBOSE` iletileri.
 - **Temel:** `pgt-ddl` çerçevesi (`PlanRequest`, `DdlManager::apply` kapıları, `run_statements`, `CancelMap`) ve object-dialogs spec'inin risk modeli (§3).
 - **Teslim:** Plan 24 (arka uç), Plan 25 (ön yüz: "Bakım…" diyaloğu).
@@ -111,3 +111,14 @@ Kaynak: `crates/pgt-ddl/src/{maintenance,build/maintenance,load_maintenance,appl
 - **Yarım kalan `REINDEX CONCURRENTLY`:** başarısız ya da iptal edilen `REINDEX … CONCURRENTLY` geçersiz bir `*_ccnew` indeksi bırakabilir (PG davranışı). Risk Safe kalır; `Statement.note` "Başarısız/iptal edilirse geçersiz bir *_ccnew indeksi kalabilir." der. Arayüz bu notu önizlemede gösterir; başarısız/iptal sonucunda da yineler ve geçersiz indeksin elle silinmesi (`DROP INDEX CONCURRENTLY`) ya da işlemin yeniden denenmesi gerektiğini belirtir.
 - **Disk alanı:** `VACUUM FULL` ve `CLUSTER` tabloyu yeniden yazar; tablo (ve indeksleri) boyutu kadar ek boş disk gerekir. Bu, notlarının sonundadır (" Tablo boyutu kadar ek boş disk alanı gerekir."); arayüz notu olduğu gibi gösterir.
 - **WARNING iletileri vurgulanır:** `messages` içindeki `severity = "WARNING"` iletileri listede belirgin gösterilir (renk/simge) ve sonuç özetinde sayılır. Yetkisiz nesneler sunucuca atlanır ve WARNING verir (ör. veritabanı genelinde VACUUM'da sahibi olunmayan tablolar) ama sonuç `Applied`'dır; vurgu olmadan kullanıcı işlemin tamamlandığını sanır.
+
+## 7. Plan 25 uygulama notları
+
+- **Sürüm kaynağı:** sunucu düğümünün `detail` alanı (`ServerInfo.version`) `parseVersionNum` ile ayrıştırılır. Sürüm `null` ise (bağlı değil/ayrıştırılamadı) istemci kapıları uygulanmaz; sunucu reddederse hata ilgili seçeneğin altında gösterilir.
+- **Tasarımcıdan içe aktarma yok:** küçük uygulama kapısı, önizleme debounce'u (150 ms) ve kilit-zaman-aşımı listesi ana paketi büyütmemek için `maintenance-controller.ts` içine kopyalandı (designer modülünü içe aktarmak bölünmüş parçaları çeker).
+- **`opBlocked`:** işlem×hedef×sürüm uyumsuzlukları (ör. indeksi olmayan tabloda CLUSTER, sistem nesnesinde CONCURRENTLY) işlem seçicide gerekçeli devre dışı bırakılır, gizlenmez.
+- **PARALLEL kırpma:** değer 0–1024 aralığına kırpılır (sunucu sınırı); FULL ile birlikte devre dışıdır.
+- **Canlı kilit:** diyalog açıkken sunucu kilitlenirse Uygula kapanır ve "salt okunur kilitli" şeridi görünür; kapı gerekçesi başlıkta ve `aria-describedby` ile okunur.
+- **WARNING sayımı ve `pgt-core` değişikliği:** `Notice` önem derecesi artık yerelleştirilmemiş (`parsed_severity`) okunur; `lc_messages` Türkçe iken de `WARNING`/`NOTICE` gelir ve sayım güvenilirdir. Bu değişiklik Query Tool iletilerini de etkiler: önem etiketleri her zaman İngilizcedir.
+- **Bağlantı kaybı** özel ele alınmaz: yükleme sırasında yük hatası, uygulama sırasında başarısız sonuç olarak gösterilir.
+- **Paket (ölçülen):** ana paket 129,476 B, açılış kümesi 157,149 B, `__vite__mapDeps` 35; diyalog tembel parçada (`MaintenanceDialog-*.js`, 34.40 kB / gzip 11.27 kB). Ek baytlar `strings-server.ts` üzerinden geri ödendi; `bundle-budget.json` tavanları bu değerlere çekildi.

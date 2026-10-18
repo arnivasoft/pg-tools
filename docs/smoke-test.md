@@ -671,7 +671,7 @@ Bilinen sınırlar:
 
 ## Bakım işlemleri arka ucu (Plan 24)
 
-Plan 24 yalnızca arka uçtur; GUI maddeleri Plan 25'te ("Bakım…" diyaloğu) eklenir. Arka uç elle sınanmaz; Docker testleriyle (`maintenance_roundtrip`, `manager`, `logging`) PG 10–18'de doğrulanır. Sözleşme: `docs/superpowers/specs/2026-10-18-maintenance-design.md` §6.
+Plan 24 yalnızca arka uçtur; GUI maddeleri "Bakım işlemleri arayüzü (Plan 25)" bölümündedir. Arka uç elle sınanmaz; Docker testleriyle (`maintenance_roundtrip`, `manager`, `logging`) PG 10–18'de doğrulanır. Sözleşme: `docs/superpowers/specs/2026-10-18-maintenance-design.md` §6.
 
 - VACUUM (FULL'suz/FULL, FREEZE, ANALYZE, VERBOSE, SKIP_LOCKED, INDEX_CLEANUP, PARALLEL), ANALYZE, REINDEX (INDEX/TABLE/SCHEMA/DATABASE, CONCURRENTLY PG 12+) ve CLUSTER (USING) gerçekten çalışır ve etkisi doğrulanır (`last_vacuum`/`last_analyze`, relfilenode, `indisclustered`).
 - `VERBOSE` çıktısı `ApplyOutcome.messages`'a düşer; tüm DDL uygulamaları (ör. `DROP … CASCADE` NOTICE'ları) ileti döndürür. Üst sınır 500 ileti, alan başına 4 KiB.
@@ -697,3 +697,4 @@ Plan 24 yalnızca arka uçtur; GUI maddeleri Plan 25'te ("Bakım…" diyaloğu) 
 - [ ] Hatalar: hedef yüklenemezse (ör. nesne silindi) ileti ve "Yeniden dene"; başka oturumda nesneyi değiştirip uygula → `plan_changed` bilgisi ve hedef yeniden yüklenir. **[—]**
 - [ ] Klavye ve ekran okuyucu: odak diyalogda kalır; seçenekler etiketli, devre dışı gerekçesi okunur (`aria-describedby`); Enter (onay tamamsa) uygular, IME bileşiminde uygulamaz; ilerleme `progressbar` olarak okunur (yüzde ya da aşama metni); sonuç `status`, hata `alert` olarak duyurulur. **[—]**
 - [ ] Kilitli sunucu: menü devre dışı ve gerekçeli; diyalog açıkken sunucu kilitlenirse Uygula kapalı ve "salt okunur kilitli" şeridi. **[—]**
+- [ ] Query Tool iletileri: `SET lc_messages = 'tr_TR…'` olan bir oturumda `DO $$ BEGIN RAISE WARNING 'x'; RAISE NOTICE 'y'; END $$` → ileti önemi İngilizce (WARNING/NOTICE) görünür (Plan 25 `pgt-core` değişikliği). **[—]**

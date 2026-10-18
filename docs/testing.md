@@ -446,3 +446,13 @@ Elle kontrol: `docs/smoke-test.md` "Fonksiyon gövdesi düzenleyicisi (Plan 23)"
 - Sürüm kapısının sonucu ilerleme testinde zamanlamaya bağlıdır: satır dönerse alanlar tutarlı olmalı, `None` da kabul edilir; sorgu hatasız çalışmalıdır.
 
 Elle kontrol: `docs/smoke-test.md` "Bakım işlemleri arka ucu (Plan 24)".
+
+## Bakım işlemleri ön yüzü testleri (Plan 25)
+
+- `src/features/maintenance/maintenance-model.test.ts`: saf model (işlem×hedef uygunluğu, `opBlocked`, sürüm kapıları, `maintenanceRequest`, PARALLEL kırpma, ilerleme/ileti yardımcıları, WARNING sayımı).
+- `src/features/maintenance/maintenance-controller.test.ts`: denetleyici (yükleme, 150 ms önizleme debounce'u, uygulama/iptal, hedefi yeniden yükleme, canlı kilit, ilerleme yoklaması, kapatma onayı).
+- `src/features/explorer/actions.test.ts`: "Bakım…" menü öğesinin hedef türlerine göre görünürlüğü.
+- `crates/pgt-core/src/connection.rs` (`tests::severity_is_non_localized`): `Notice` önem derecesi yerelleştirilmemiş okunur.
+- Paket: `bun run bundle:check` tavanları ölçülen değerdedir (ana 129,476 B / açılış 157,149 B).
+
+Elle kontrol: `docs/smoke-test.md` "Bakım işlemleri arayüzü (Plan 25)".
