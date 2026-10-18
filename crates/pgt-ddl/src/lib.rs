@@ -24,7 +24,7 @@ pub use load::{INVALID_UTF8_REASON, ObjectRef, load, server_version};
 pub use load_acl::{load_acl, load_default_acl};
 pub use load_maintenance::load_maintenance_target;
 pub use lookup::{LookupItem, LookupRequest, lookup};
-pub use manager::{ApplyOptions, ApplyOutcome, CreateContext, DdlManager, PlanRequest};
+pub use manager::{ApplyOptions, ApplyOutcome, CreateContext, DdlManager, PlanRequest, ServerMessage};
 pub use acl::*;
 pub use maintenance::*;
 pub use model::*;

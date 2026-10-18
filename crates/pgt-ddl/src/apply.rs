@@ -10,13 +10,15 @@ use std::collections::HashMap;
 use std::sync::{Mutex as StdMutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use pgt_core::connection::{CancelHandle, ConnectionManager, DedicatedConn, SessionProfile, Target};
+use pgt_core::connection::{CancelHandle, ConnectionManager, DedicatedConn, Notice, SessionProfile, Target};
 use pgt_core::{Error, ErrorPayload, Result};
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_postgres::Client;
 use uuid::Uuid;
 
 use crate::build::role::PasswordStatement;
 use crate::error_codes::APPLY_ID_IN_USE;
+use crate::manager::ServerMessage;
 use crate::plan::Statement;
 
 /// İptal edilen ifadenin SQLSTATE'i (`query_canceled`).
@@ -105,10 +107,116 @@ impl std::fmt::Debug for ExecStatement<'_> {
     }
 }
 
+/// Uygulama başına en çok ileti sayısı (taşma iletisi dahil).
+pub(crate) const MESSAGES_MAX: usize = 500;
+/// `message`/`detail`/`hint` alanı başına en çok bayt (`…` dahil).
+pub(crate) const MESSAGE_FIELD_MAX_BYTES: usize = 4096;
+const ELLIPSIS: char = '…';
+/// Bağlantı kapanırken kalan iletiler için en çok bekleme (sürücü görevi normalde hemen biter).
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Alanı `MESSAGE_FIELD_MAX_BYTES` bayta sığdırır: UTF-8 karakter sınırında keser ve `…` ekler.
+pub(crate) fn clip_field(mut s: String) -> String {
+    if s.len() <= MESSAGE_FIELD_MAX_BYTES {
+        return s;
+    }
+    let mut cut = MESSAGE_FIELD_MAX_BYTES - ELLIPSIS.len_utf8();
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    s.truncate(cut);
+    s.push(ELLIPSIS);
+    s
+}
+
+/// Uygulama boyunca toplanan sunucu iletileri; bellek sınırlıdır (fazlası yalnızca sayılır).
+/// İçerik hiçbir zaman günlüğe yazılmaz (`Debug` türetilmez).
+#[derive(Default)]
+pub(crate) struct MessageBuf {
+    kept: Vec<ServerMessage>,
+    dropped: u64,
+}
+
+impl MessageBuf {
+    pub(crate) fn push(&mut self, n: Notice) {
+        if self.kept.len() >= MESSAGES_MAX {
+            self.dropped += 1;
+            return;
+        }
+        self.kept.push(ServerMessage {
+            severity: n.severity,
+            code: Some(n.code),
+            message: clip_field(n.message),
+            detail: n.detail.map(clip_field),
+            hint: n.hint.map(clip_field),
+        });
+    }
+
+    /// Kuyrukta bekleyenleri beklemeden alır.
+    pub(crate) fn absorb(&mut self, rx: &mut UnboundedReceiver<Notice>) {
+        while let Ok(n) = rx.try_recv() {
+            self.push(n);
+        }
+    }
+
+    /// Sonuç listesi; sınır aşıldıysa son ileti gösterilmeyen ileti sayısını bildirir (toplam `MESSAGES_MAX`).
+    pub(crate) fn finish(mut self) -> Vec<ServerMessage> {
+        if self.dropped > 0 {
+            let over = self.kept.len() - (MESSAGES_MAX - 1);
+            self.kept.truncate(MESSAGES_MAX - 1);
+            let hidden = self.dropped + over as u64;
+            self.kept.push(ServerMessage {
+                severity: "INFO".into(),
+                code: None,
+                message: format!("{hidden} ileti daha gösterilmedi"),
+                detail: None,
+                hint: None,
+            });
+        }
+        self.kept
+    }
+}
+
+/// `fut`'u beklerken gelen iletileri de alır (kanal birikmez). `biased`: önce gelecek yoklanır; ileti okuma ifadeyi
+/// bekletmez. Gelecek bitince kuyrukta kalanlar alınır (sürücü NOTICE'ı yanıtın sonundan önce kanala koyar).
+pub(crate) async fn with_messages<F: Future>(fut: F, rx: &mut UnboundedReceiver<Notice>, buf: &mut MessageBuf) -> F::Output {
+    let mut fut = std::pin::pin!(fut);
+    let mut open = true;
+    loop {
+        tokio::select! {
+            biased;
+            out = &mut fut => {
+                buf.absorb(rx);
+                return out;
+            }
+            n = rx.recv(), if open => match n {
+                Some(n) => buf.push(n),
+                None => open = false,
+            },
+        }
+    }
+}
+
+/// İstemci düştükten sonra: sürücü görevi bitip kanal kapanana dek (en çok `DRAIN_TIMEOUT`) kalan iletileri alır.
+pub(crate) async fn drain_closed(rx: &mut UnboundedReceiver<Notice>, buf: &mut MessageBuf) {
+    let drain = async {
+        while let Some(n) = rx.recv().await {
+            buf.push(n);
+        }
+    };
+    if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
+        tracing::debug!("ileti kanalı zamanında kapanmadı");
+    }
+    rx.close();
+    buf.absorb(rx);
+}
+
 #[derive(Default)]
 struct Slot {
     handle: Option<CancelHandle>,
     cancelled: bool,
+    /// Uygulama bağlantısının arka uç pid'i (ilerleme sorgusu için); yuvayla birlikte düşer.
+    backend_pid: Option<i32>,
 }
 
 /// Kayıttan önce gelen iptal isteğinin ömrü ve tutulacak en çok sayı.
@@ -141,7 +249,7 @@ impl CancelMap {
             return Err(Error::Invalid(APPLY_ID_IN_USE.into()));
         }
         let cancelled = inner.tombstones.remove(&id).is_some_and(|t| t.elapsed() < TOMBSTONE_TTL);
-        inner.slots.insert(id, Slot { handle: None, cancelled });
+        inner.slots.insert(id, Slot { handle: None, cancelled, backend_pid: None });
         Ok(Registration { map: self, id })
     }
 
@@ -180,6 +288,13 @@ impl CancelMap {
             .collect()
     }
 
+    /// Süren uygulamanın arka uç pid'i; bilinmeyen/bitmiş kimlik ya da pid henüz okunmadıysa `None`.
+    // İlerleme sorgusu (Plan 24 Görev 4) kullanır.
+    #[allow(dead_code)]
+    pub(crate) fn backend_pid(&self, id: Uuid) -> Option<i32> {
+        self.lock().slots.get(&id).and_then(|s| s.backend_pid)
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.lock().slots.len()
@@ -201,6 +316,12 @@ impl Registration<'_> {
     pub(crate) fn set_handle(&self, handle: CancelHandle) {
         if let Some(slot) = self.map.lock().slots.get_mut(&self.id) {
             slot.handle = Some(handle);
+        }
+    }
+
+    pub(crate) fn set_backend_pid(&self, pid: i32) {
+        if let Some(slot) = self.map.lock().slots.get_mut(&self.id) {
+            slot.backend_pid = Some(pid);
         }
     }
 
@@ -445,6 +566,100 @@ mod tests {
         let (a, b) = (map.register(Uuid::new_v4()).unwrap(), map.register(Uuid::new_v4()).unwrap());
         assert!(map.request_all().is_empty());
         assert!(a.cancelled() && b.cancelled());
+    }
+
+    fn notice(message: &str) -> Notice {
+        Notice { severity: "NOTICE".into(), code: "00000".into(), message: message.into(), detail: None, hint: None }
+    }
+
+    #[test]
+    fn clip_field_cuts_on_utf8_boundary_with_ellipsis() {
+        assert_eq!(clip_field("kısa".into()), "kısa");
+        let exact = "a".repeat(MESSAGE_FIELD_MAX_BYTES);
+        assert_eq!(clip_field(exact.clone()), exact, "sınırdaki alan kesilmez");
+        // 2 baytlık karakterler: kesim noktası karakter ortasına düşse de geçerli UTF-8 ve sınır içinde.
+        let long = "ğ".repeat(MESSAGE_FIELD_MAX_BYTES);
+        let c = clip_field(long);
+        assert!(c.len() <= MESSAGE_FIELD_MAX_BYTES, "{}", c.len());
+        assert!(c.ends_with('…'));
+        assert!(c.trim_end_matches('…').chars().all(|ch| ch == 'ğ'));
+        let odd = format!("a{}", "ğ".repeat(MESSAGE_FIELD_MAX_BYTES));
+        let c = clip_field(odd);
+        assert!(c.len() <= MESSAGE_FIELD_MAX_BYTES && c.ends_with('…'));
+    }
+
+    #[test]
+    fn message_buf_limits_count_and_reports_overflow() {
+        let mut buf = MessageBuf::default();
+        for i in 0..3 {
+            buf.push(notice(&format!("m{i}")));
+        }
+        let m = buf.finish();
+        assert_eq!(m.len(), 3);
+        assert_eq!((m[0].severity.as_str(), m[0].code.as_deref(), m[0].message.as_str()), ("NOTICE", Some("00000"), "m0"));
+
+        let mut buf = MessageBuf::default();
+        for i in 0..600 {
+            let mut n = notice(&format!("m{i}"));
+            n.detail = Some("d".repeat(MESSAGE_FIELD_MAX_BYTES + 10));
+            n.hint = Some("h".into());
+            buf.push(n);
+        }
+        let m = buf.finish();
+        assert_eq!(m.len(), MESSAGES_MAX);
+        assert_eq!(m[MESSAGES_MAX - 2].message, format!("m{}", MESSAGES_MAX - 2));
+        assert!(m[0].detail.as_ref().unwrap().ends_with('…'));
+        assert_eq!(m[0].hint.as_deref(), Some("h"));
+        let last = m.last().unwrap();
+        assert_eq!(last.message, format!("{} ileti daha gösterilmedi", 600 - (MESSAGES_MAX - 1)));
+        assert_eq!(last.code, None);
+
+        // Tam sınırda taşma iletisi yok.
+        let mut buf = MessageBuf::default();
+        for i in 0..MESSAGES_MAX {
+            buf.push(notice(&format!("m{i}")));
+        }
+        let m = buf.finish();
+        assert_eq!(m.len(), MESSAGES_MAX);
+        assert_eq!(m.last().unwrap().message, format!("m{}", MESSAGES_MAX - 1));
+    }
+
+    #[tokio::test]
+    async fn with_messages_collects_during_and_after_the_future() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut buf = MessageBuf::default();
+        let tx2 = tx.clone();
+        let out = with_messages(
+            async move {
+                tx2.send(notice("a")).unwrap();
+                tokio::task::yield_now().await;
+                tx2.send(notice("b")).unwrap();
+                7
+            },
+            &mut rx,
+            &mut buf,
+        )
+        .await;
+        assert_eq!(out, 7);
+        // Kapanışta kuyrukta kalanlar da alınır.
+        tx.send(notice("c")).unwrap();
+        drop(tx);
+        drain_closed(&mut rx, &mut buf).await;
+        let m: Vec<_> = buf.finish().into_iter().map(|m| m.message).collect();
+        assert_eq!(m, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn backend_pid_lives_with_the_slot() {
+        let map = CancelMap::default();
+        let id = Uuid::new_v4();
+        assert_eq!(map.backend_pid(id), None);
+        let reg = map.register(id).unwrap();
+        assert_eq!(map.backend_pid(id), None);
+        reg.set_backend_pid(4242);
+        assert_eq!(map.backend_pid(id), Some(4242));
+        drop(reg);
+        assert_eq!(map.backend_pid(id), None);
     }
 
     #[test]

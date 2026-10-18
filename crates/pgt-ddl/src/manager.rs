@@ -24,7 +24,7 @@
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use pgt_core::connection::{ConnectionManager, MAX_STATEMENT_TIMEOUT_MS, Target};
+use pgt_core::connection::{ConnectionManager, DedicatedConn, MAX_STATEMENT_TIMEOUT_MS, Target};
 use pgt_core::registry::Registry;
 use pgt_core::{Error, ErrorPayload, Result};
 use serde::{Deserialize, Serialize};
@@ -115,6 +115,20 @@ pub struct ApplyOptions {
     pub password: Option<Secret>,
 }
 
+/// Uygulama sırasında sunucunun gönderdiği NOTICE/INFO/WARNING iletisi (ör. `DROP … CASCADE`, `VACUUM VERBOSE`).
+/// Alanlar en çok 4096 bayttır (UTF-8 sınırında kesilip `…` eklenir); metin günlüğe/diske yazılmaz.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ServerMessage {
+    pub severity: String,
+    /// SQLSTATE; sınır aşımını bildiren yapay iletide yok.
+    pub code: Option<String>,
+    pub message: String,
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(tag = "outcome", rename_all = "snake_case", rename_all_fields = "camelCase")]
 #[ts(export)]
@@ -130,6 +144,10 @@ pub enum ApplyOutcome {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         warnings: Option<Vec<String>>,
+        /// Sunucu iletileri (en çok 500; aşılırsa son ileti kalan sayıyı bildirir). Yoksa alan yazılmaz.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        #[ts(as = "Option<Vec<ServerMessage>>", optional)]
+        messages: Vec<ServerMessage>,
     },
     /// `failed_index`: başarısız ifadenin 0 tabanlı sırası; `committed`: kalıcılaşmış (transaction dışı ya da önceki blok)
     /// ifade sayısı; `sqlstate`: PG hata kodu (ör. `57014` iptal, `55P03` kilit zaman aşımı; bağlantı hatasında yok).
@@ -147,6 +165,10 @@ pub enum ApplyOutcome {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         created: Option<ObjectRef>,
+        /// Hataya kadar gelen sunucu iletileri (`Applied.messages` ile aynı sınırlar). Yoksa alan yazılmaz.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        #[ts(as = "Option<Vec<ServerMessage>>", optional)]
+        messages: Vec<ServerMessage>,
     },
 }
 
@@ -925,6 +947,7 @@ impl DdlManager {
                 position: None,
                 error: apply::failure_payload(&apply::cancelled_error()),
                 created: None,
+                messages: vec![],
             });
         }
         // Kendi havuz bağlantımız (Gezgin/katalog) yeniden adlandırma/taşıma/silmeyi 55006 ile engellemesin (Karar 8).
@@ -938,16 +961,29 @@ impl DdlManager {
                 return Err(e);
             }
         };
-        reg.set_handle(conn.cancel.clone());
+        let DedicatedConn { client, mut notices, cancel, .. } = conn;
+        reg.set_handle(cancel.clone());
         // Çağıran gelecek çalışırken düşerse (ör. pencere kapanışı) sunucudaki ifade iptal edilir.
-        let mut guard = CancelOnDrop { handle: conn.cancel.clone(), rt, armed: true };
-        let result = apply::run_statements(&conn.client, &exec, &reg).await;
+        let mut guard = CancelOnDrop { handle: cancel, rt, armed: true };
+        // Sıra: yuva → bağlantı → pid. En iyi çaba: okunamazsa ilerleme sorgusu `None` döner, uygulama sürer
+        // (bağlantı koptuysa ilk ifade zaten hata verir).
+        match client.query_one("SELECT pg_backend_pid()", &[]).await {
+            Ok(row) => reg.set_backend_pid(row.get(0)),
+            Err(e) => tracing::debug!(op, sqlstate = e.code().map(|c| c.code()), "arka uç pid'i okunamadı"),
+        }
+        // İletiler ifadelerle eşzamanlı okunur (kanal birikmez); metin hiçbir yere yazılmaz.
+        let mut messages = apply::MessageBuf::default();
+        let result = apply::with_messages(apply::run_statements(&client, &exec, &reg), &mut notices, &mut messages).await;
         guard.armed = false;
         drop(reg);
         // Somutlaşmış parola ifadesi (varsa) burada sıfırlanarak düşer.
         drop(exec);
-        // Uygulama bağlantısı, havuzdaki katalog sorgusundan (`find_created`) önce kapanır.
-        drop(conn);
+        // Uygulama bağlantısı, havuzdaki katalog sorgusundan (`find_created`) önce kapanır; kapanışa dek gelen
+        // son iletiler de alınır.
+        drop(client);
+        apply::drain_closed(&mut notices, &mut messages).await;
+        drop(notices);
+        let messages = messages.finish();
         // Arada (ör. Gezgin yenilemesi) açılmış bağlantı ve eski ad önbelleği de bırakılır.
         for &oid in &release {
             self.mgr.release_database(server, oid).await;
@@ -975,7 +1011,7 @@ impl DdlManager {
                     tracing::info!(op, ?kind, outcome = "acl_mismatch", "DDL sonrası yetki farkı");
                     warnings.push(ACL_WARNING.to_string());
                 }
-                ApplyOutcome::Applied { statements: count, elapsed_ms, created, warnings: (!warnings.is_empty()).then_some(warnings) }
+                ApplyOutcome::Applied { statements: count, elapsed_ms, created, warnings: (!warnings.is_empty()).then_some(warnings), messages }
             }
             RunResult::Failed { failed_index, committed, error, outcome_unknown, position } => {
                 let sqlstate = apply::sqlstate(&error).map(str::to_string);
@@ -999,7 +1035,7 @@ impl DdlManager {
                     (Some(def), 1..) => self.find_created(server, target, def).await,
                     _ => None,
                 };
-                ApplyOutcome::Failed { failed_index, committed, sqlstate, position, error, created }
+                ApplyOutcome::Failed { failed_index, committed, sqlstate, position, error, created, messages }
             }
         })
     }
@@ -1016,13 +1052,27 @@ impl DdlManager {
         lock_timeout_ms: u32,
         password: Option<(&str, &Secret)>,
     ) -> Result<ApplyOutcome> {
+        self.apply_statements_as(Uuid::new_v4(), server, target, statements, lock_timeout_ms, password).await
+    }
+
+    /// `apply_statements`; `apply_id` çağırandan (iptal/pid testleri).
+    #[cfg(test)]
+    pub(crate) async fn apply_statements_as(
+        &self,
+        apply_id: Uuid,
+        server: Uuid,
+        target: Target,
+        statements: &[Statement],
+        lock_timeout_ms: u32,
+        password: Option<(&str, &Secret)>,
+    ) -> Result<ApplyOutcome> {
         let exec = materialize_for(statements, password.map(|p| p.0), password.map(|p| p.1))?;
         let job = Job {
             op: "test",
             kind: ObjectKind::Schema,
             target,
             lock_timeout_ms,
-            apply_id: Uuid::new_v4(),
+            apply_id,
             created: None,
             object: None,
             release: vec![],
@@ -1812,9 +1862,9 @@ mod tests {
         let mut v = v;
         v.as_object_mut().unwrap().remove("password");
         assert_eq!(serde_json::from_value::<ApplyOptions>(v).unwrap(), o);
-        let a = serde_json::to_value(ApplyOutcome::Applied { statements: 2, elapsed_ms: 7, created: None, warnings: None }).unwrap();
+        let a = serde_json::to_value(ApplyOutcome::Applied { statements: 2, elapsed_ms: 7, created: None, warnings: None, messages: vec![] }).unwrap();
         assert_eq!(a, json!({"outcome": "applied", "statements": 2, "elapsedMs": 7, "created": null}));
-        let w = ApplyOutcome::Applied { statements: 1, elapsed_ms: 1, created: None, warnings: Some(vec!["u".into()]) };
+        let w = ApplyOutcome::Applied { statements: 1, elapsed_ms: 1, created: None, warnings: Some(vec!["u".into()]), messages: vec![] };
         assert_eq!(serde_json::to_value(w).unwrap()["warnings"], json!(["u"]));
         let f = ApplyOutcome::Failed {
             failed_index: 1,
@@ -1823,6 +1873,7 @@ mod tests {
             position: Some(12),
             error: ErrorPayload { code: "query".into(), message: "m".into(), detail: None, hint: None },
             created: None,
+            messages: vec![],
         };
         let f = serde_json::to_value(f).unwrap();
         assert_eq!((f["outcome"].clone(), f["failedIndex"].clone(), f["sqlstate"].clone()), (json!("failed"), json!(1), json!("42P07")));
@@ -1834,6 +1885,7 @@ mod tests {
             position: None,
             error: ErrorPayload { code: "query".into(), message: "m".into(), detail: None, hint: None },
             created: Some(ObjectRef { kind: ObjectKind::Database, oid: 9 }),
+            messages: vec![],
         };
         assert_eq!(serde_json::to_value(partial).unwrap()["created"], json!({"kind": "database", "oid": 9}));
         let c: CreateContext = serde_json::from_value(json!({"schemaOid": 5, "tableOid": null})).unwrap();
@@ -2742,6 +2794,98 @@ mod tests {
                     let bad = [st("SELEC 1", true)];
                     let out = dm.apply_statements(t.config.id, Target::Maintenance, &bad, 5000, None).await.unwrap();
                     assert!(matches!(out, ApplyOutcome::Failed { position: Some(_), .. }), "{out:?}");
+                })
+                .await;
+            }
+        }
+
+        fn outcome_messages(out: &ApplyOutcome) -> &[ServerMessage] {
+            match out {
+                ApplyOutcome::Applied { messages, .. } | ApplyOutcome::Failed { messages, .. } => messages,
+            }
+        }
+
+        /// NOTICE'lar sonuca girer: tek ileti, sınır (600 → 500), uzun ileti kesimi, başarısız ifade.
+        #[tokio::test]
+        async fn apply_collects_server_messages() {
+            for ts in test_servers() {
+                let tag = "msgs";
+                let t = ts.clone();
+                guarded(&ts, tag, async move {
+                    let (_admin, dm, db, _dir) = setup(&t, tag).await;
+                    let target = Target::Database(db);
+                    let plan = [st("DO $$ BEGIN RAISE NOTICE 'x'; END $$", true)];
+                    let out = dm.apply_statements(t.config.id, target, &plan, 5000, None).await.unwrap();
+                    assert!(matches!(out, ApplyOutcome::Applied { .. }), "{out:?}");
+                    let m = outcome_messages(&out);
+                    assert_eq!(m.len(), 1, "{m:?}");
+                    assert_eq!((m[0].severity.as_str(), m[0].code.as_deref(), m[0].message.as_str()), ("NOTICE", Some("00000"), "x"));
+
+                    // İleti yoksa boş (alan yazılmaz).
+                    let out = dm.apply_statements(t.config.id, target, &[st("SELECT 1", true)], 5000, None).await.unwrap();
+                    assert!(outcome_messages(&out).is_empty(), "{out:?}");
+
+                    // 600 NOTICE (transaction dışı ifade): 499 + taşma iletisi.
+                    let plan = [st("DO $$ BEGIN FOR i IN 1..600 LOOP RAISE NOTICE 'n%', i; END LOOP; END $$", false)];
+                    let out = dm.apply_statements(t.config.id, target, &plan, 5000, None).await.unwrap();
+                    let m = outcome_messages(&out);
+                    assert_eq!(m.len(), 500);
+                    assert_eq!(m[0].message, "n1");
+                    assert_eq!(m[498].message, "n499");
+                    assert_eq!(m[499].message, "101 ileti daha gösterilmedi");
+
+                    // Uzun ileti 4096 bayta kesilir.
+                    let plan = [st("DO $$ BEGIN RAISE NOTICE '%', repeat('ğ', 5000); END $$", true)];
+                    let out = dm.apply_statements(t.config.id, target, &plan, 5000, None).await.unwrap();
+                    let m = outcome_messages(&out);
+                    assert!(m[0].message.len() <= 4096 && m[0].message.ends_with('…'), "{}", m[0].message.len());
+
+                    // Başarısız ifadede de hataya kadar gelen iletiler döner.
+                    let plan = [st("DO $$ BEGIN RAISE NOTICE 'once'; END $$", true), st("SELEC 1", true)];
+                    let out = dm.apply_statements(t.config.id, target, &plan, 5000, None).await.unwrap();
+                    assert!(matches!(out, ApplyOutcome::Failed { failed_index: 1, .. }), "{out:?}");
+                    assert_eq!(outcome_messages(&out).iter().map(|m| m.message.as_str()).collect::<Vec<_>>(), ["once"]);
+                })
+                .await;
+            }
+        }
+
+        /// Uygulama sürerken yuvada arka uç pid'i vardır (uygulama bağlantısının pid'i), bitince düşer.
+        #[tokio::test]
+        async fn backend_pid_is_recorded_during_apply() {
+            for ts in test_servers() {
+                let tag = "pid";
+                let t = ts.clone();
+                guarded(&ts, tag, async move {
+                    let (admin, dm, db, _dir) = setup(&t, tag).await;
+                    let id = Uuid::new_v4();
+                    let plan = [st("SELECT pg_sleep(1.5)", false)];
+                    let apply = dm.apply_statements_as(id, t.config.id, Target::Database(db), &plan, 5000, None);
+                    let watch = async {
+                        for _ in 0..100 {
+                            if let Some(pid) = dm.cancels.backend_pid(id) {
+                                return Some(pid);
+                            }
+                            tokio::time::sleep(Duration::from_millis(20)).await;
+                        }
+                        None
+                    };
+                    let (out, pid) = tokio::join!(apply, watch);
+                    assert!(matches!(out, Ok(ApplyOutcome::Applied { .. })), "{out:?}");
+                    let pid = pid.expect("uygulama sırasında pid kaydedilmeli");
+                    assert!(pid > 0);
+                    assert_eq!(dm.cancels.backend_pid(id), None, "yuva düşünce pid de düşer");
+                    // Pid uygulama bağlantısınındı: artık o arka uç yok (kısa bekleme: kapanış eşzamansız).
+                    let mut gone = false;
+                    for _ in 0..50 {
+                        let n: i64 = admin.query_one("SELECT count(*) FROM pg_stat_activity WHERE pid = $1", &[&pid]).await.unwrap().get(0);
+                        if n == 0 {
+                            gone = true;
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    assert!(gone);
                 })
                 .await;
             }
