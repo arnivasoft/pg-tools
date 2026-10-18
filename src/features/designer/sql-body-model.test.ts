@@ -4,7 +4,6 @@ import { INDENT, applyDisplayEdit, bodyLanguageMode, displayDiff, displayText, s
 /** Görüntü metnine (CodeMirror belgesi, yalnız `\n`) `[from, to)` → `insert` değişikliği. */
 const edit = (doc: string, from: number, to: number, insert: string) => doc.slice(0, from) + insert + doc.slice(to);
 
-
 describe("sql-body-model: satır sonu", () => {
   it("separatorOf: CRLF varsa CRLF, aksi halde LF", () => {
     expect(separatorOf("a\r\nb")).toBe("\r\n");
@@ -13,7 +12,7 @@ describe("sql-body-model: satır sonu", () => {
     expect(separatorOf("")).toBe("\n");
   });
 
-  it("displayText: textarea'nın göstereceği metin (CRLF ve tek \\r → LF)", () => {
+  it("displayText: düzenleyicinin (CodeMirror belgesi) göstereceği metin (CRLF ve tek \\r → LF)", () => {
     expect(displayText("a\r\nb\rc\nd")).toBe("a\nb\nc\nd");
     expect(displayText("")).toBe("");
   });

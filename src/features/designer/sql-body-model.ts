@@ -4,7 +4,8 @@
 // döner). Ham değer (taslaktaki gövde) hiç değiştirilmez: düzenleyici `displayText(ham)` gösterir, kullanıcının
 // düzenlemesini `applyDisplayEdit` ile ham metne en küçük değişiklik olarak uygular — dokunulmayan satır sonları (CRLF,
 // LF, tek `\r`, karışık) bayt bayt korunur; eklenen satır sonları ham metnin ayırıcısıyla (`separatorOf`) yazılır.
-// Dış değer değişimi (yeniden yükleme, geri al) belgeye `displayDiff` ile en küçük değişiklik olarak uygulanır (imleç korunur).
+// Dış değer değişimi (yeniden yükleme, geri al): `sql-body-sync.resyncState` — `displayDiff` ile seçim/kaydırma eşlenir, yeni
+// `EditorState` `view.setState` ile yüklenir (geri alma geçmişi sıfırlanır; metin aynıysa dokunulmaz).
 //
 // Girinti: Tab iki boşluk (`INDENT`; sekme karakteri değil — PL/pgSQL gövdelerinde yaygın biçim ve `pg_get_functiondef`
 // çıktısıyla uyumlu). CodeMirror `indentUnit` olarak kullanılır.

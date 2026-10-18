@@ -5,9 +5,13 @@
 // - Metin olduğu gibi tutulur: istemci gövdeyi değiştirmez/taramaz/tırnaklamaz. Satır sonları bayt bayt korunur:
 //   belge LF'ye normalleştirilmiş görüntüdür (`displayText`), her kullanıcı düzenlemesi ham değere en küçük değişiklik
 //   olarak uygulanır (`applyDisplayEdit`); fark yoksa `onChange` hiç çağrılmaz.
-// - Dış değer değişimi (yeniden yükleme, form düzeyi geri al) yeni bir `EditorState` ile uygulanır (`resyncState`):
-//   `onChange` yok, geri alma geçmişi sıfırlanır (Ctrl+Z eski düzenlemeleri yeni metne uygulayamaz), seçim eşlenir.
-//   Görüntüsü belgeyle aynıysa hiçbir şey yapılmaz. IME bileşimi sürerken ertelenir (bileşim bitince uygulanır).
+// - Dış değer değişimi (yeniden yükleme, form düzeyi geri al): karar `syncDecision`. Değerin görüntüsü belgeyle aynıysa
+//   (editörün kendi düzenlemesinin yankısı ya da metni değişmeyen yeniden yükleme) hiçbir şey yapılmaz — geri alma
+//   geçmişi de korunur. Metin farklıysa yeni bir `EditorState` (`resyncState`): `onChange` yok, geri alma geçmişi
+//   sıfırlanır (Ctrl+Z eski düzenlemeleri yeni metne uygulayamaz), seçim ve kaydırma konumu eşlenir.
+// - IME: kullanıcı düzenlemeleri (bileşim dahil) her zaman taslağa yazılır. Gerçek dış değişiklik bileşim sırasında
+//   gelirse ertelenir ve bileşim bitince yeniden karar verilir: araya kullanıcı yazdıysa taslak zaten belgeyle aynıdır
+//   (`noop`, kullanıcının metni kalır), yazmadıysa dış değer uygulanır.
 // - Klavye: `indentWithTab` (Tab iki boşluk girinti / Shift+Tab geri). Tuzaktan çıkış: Esc ardından Tab (2 sn içinde)
 //   odağı taşır — CodeMirror'ın tab-odak kipi (ayrıntı ve paket gerekçesi: `codemirror-setup.bodyEditingExtensions`).
 //   Salt okunurda `indentMore` `false` döner → Tab tarayıcıya kalır, odak doğrudan çıkar. `closeBrackets` yok (gövde
@@ -21,7 +25,7 @@ import { createEffect, createUniqueId, on, onCleanup, onMount, untrack } from "s
 import { tdes } from "../../app/strings-designer";
 import { bodyEditingExtensions, sharedTheme, sqlLookExtensions } from "../inspector/codemirror-setup";
 import { INDENT, applyDisplayEdit, bodyLanguageMode, displayText } from "./sql-body-model";
-import { resyncState } from "./sql-body-sync";
+import { resyncState, syncDecision } from "./sql-body-sync";
 
 export interface SqlBodyEditorProps {
   /** Düzenlenebilir içerik öğesinin (contentDOM) kimliği: etiket `for` ve odak isteği için. */
@@ -73,19 +77,22 @@ export function SqlBodyEditor(props: SqlBodyEditorProps) {
       ...(props.invalid ? { "aria-invalid": "true" } : {}),
     });
 
-  /** IME bileşimi sürerken gelen dış değer: bileşim bitince uygulanır (o ana dek kullanıcı düzenlemesi yazılmaz). */
+  /** IME bileşimi sırasında gelen gerçek dış değişiklik: bileşim bitince yeniden karar verilir. */
   let pendingSync = false;
+  const composing = () => !!view && (view.compositionStarted || view.composing);
 
-  /** Dış değeri belgeye uygular: yeni durum (geri alma geçmişi sıfır, seçim eşlenir); bileşim sürüyorsa erteler. */
+  /** Dış değeri belgeye uygular (bkz. üst yorum); yeni durumda geçmiş sıfır, seçim ve kaydırma eşlenir. */
   const syncFromValue = () => {
     if (!view) return;
-    if (view.composing) {
-      pendingSync = true;
-      return;
-    }
-    pendingSync = false;
-    const next = resyncState(view.state, displayText(props.value), extensions());
-    if (next) view.setState(next);
+    const valueDisplay = displayText(props.value);
+    const decision = syncDecision(view.state.doc, valueDisplay, composing());
+    pendingSync = decision === "defer";
+    if (decision !== "apply") return;
+    const r = resyncState(view.state, valueDisplay, extensions());
+    if (!r) return;
+    const scroll = view.scrollSnapshot().map(r.changes);
+    view.setState(r.state);
+    if (scroll) view.dispatch({ effects: scroll });
   };
 
   /** Güncel yapılandırma (compartment'lar şimdiki prop değerleriyle); ilk kurulum ve `resyncState` için. */
@@ -96,14 +103,13 @@ export function SqlBodyEditor(props: SqlBodyEditorProps) {
     attrs.of(contentAttrs()),
     bodyTheme,
     EditorView.updateListener.of((u) => {
-      if (pendingSync) {
-        // Bekleyen dış değer kazanır: bileşim bitince belge onunla değiştirilir, araya düzenleme yazılmaz.
-        if (!u.view.composing) queueMicrotask(syncFromValue);
-        return;
+      // Kullanıcı düzenlemesi (IME bileşimi dahil) her zaman yazılır; metin asla sessizce düşürülmez.
+      if (u.docChanged) {
+        const next = applyDisplayEdit(props.value, u.state.doc.toString());
+        if (next !== props.value) props.onChange(next);
       }
-      if (!u.docChanged) return;
-      const next = applyDisplayEdit(props.value, u.state.doc.toString());
-      if (next !== props.value) props.onChange(next);
+      // Bekleyen dış değişiklik: bileşim bittiyse yeniden karar (araya yazıldıysa `noop`).
+      if (pendingSync && !composing()) queueMicrotask(syncFromValue);
     }),
   ];
 
@@ -115,7 +121,7 @@ export function SqlBodyEditor(props: SqlBodyEditorProps) {
     props.ref?.(view.contentDOM);
     // Bileşim sonu her zaman bir güncelleme üretmeyebilir: bekleyen eşitleme burada da denenir.
     const onCompositionEnd = () => {
-      if (pendingSync) queueMicrotask(syncFromValue);
+      if (pendingSync) setTimeout(syncFromValue);
     };
     const dom = view.contentDOM;
     dom.addEventListener("compositionend", onCompositionEnd);

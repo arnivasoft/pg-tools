@@ -1,7 +1,7 @@
 import { defaultKeymap, history, historyKeymap, indentWithTab, temporarilySetTabFocusMode } from "@codemirror/commands";
 import { PostgreSQL, sql } from "@codemirror/lang-sql";
-import { HighlightStyle, bracketMatching, indentOnInput, indentUnit, syntaxHighlighting } from "@codemirror/language";
-import { EditorState, type Extension } from "@codemirror/state";
+import { HighlightStyle, bracketMatching, indentService, indentUnit, syntaxHighlighting } from "@codemirror/language";
+import { EditorState, countColumn, type Extension } from "@codemirror/state";
 import { EditorView, drawSelection, keymap, lineNumbers } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 
@@ -55,6 +55,10 @@ export function replaceDoc(view: EditorView, doc: string): void {
  * Düzenlenebilir gövde editörünün (designer `SqlBodyEditor`, Plan 23) temel uzantıları: satır numarası, geri alma
  * geçmişi, girinti (`indent` birimi; Tab/Shift+Tab), parantez eşleme; `closeBrackets` yok.
  *
+ * Otomatik girinti: SQL dilbilgisi PL/pgSQL bloklarını (BEGIN/IF/LOOP … END) modellemediğinden dilin girintisi yerine
+ * `indentService` en yakın boş olmayan önceki satırın girintisini kopyalar (`copyIndentColumn`); Enter ve
+ * girintileme komutları bunu kullanır. `indentOnInput` yok (bu servisle anlamsız; dilin yeniden girintileme deseni de yok).
+ *
  * Neden burada (paket): `@codemirror/commands` Sorgu Aracı ile ikinci bir tembel tüketiciden (RoutineForm) içe
  * aktarılınca Rolldown onu ayrı bir paylaşılan parçaya böler ve ana paketin `__vite__mapDeps` listesi bir girdi büyür
  * (ana +29 B, bütçe aşılır). Bu ortak modülden içe aktarıldığında commands bu parçayla aynı giriş kümesine düşer ve
@@ -69,9 +73,9 @@ export function bodyEditingExtensions(indent: string): Extension[] {
     lineNumbers(),
     history(),
     drawSelection(),
-    indentOnInput(),
     bracketMatching(),
     indentUnit.of(indent),
+    copyIndent,
     keymap.of([
       {
         key: "Escape",
@@ -86,3 +90,31 @@ export function bodyEditingExtensions(indent: string): Extension[] {
     ]),
   ];
 }
+
+/**
+ * Önceki satırlardan (en yakın önce) ilk boş olmayanın girinti sütunu (`tabSize` ile sekme genişliği); yoksa 0.
+ * Saf: `indentService` ve testler kullanır.
+ */
+export function copyIndentColumn(prevLines: Iterable<string>, tabSize: number): number {
+  for (const text of prevLines) {
+    if (text.trim() === "") continue;
+    const ws = /^[ \t]*/.exec(text)![0];
+    return countColumn(ws, tabSize);
+  }
+  return 0;
+}
+
+/**
+ * `pos` girintilenen satırın başıdır. Enter'da (benzetilmiş satır kırılması) `ctx.lineAt(pos, -1)` kırılmadan önceki
+ * parçadır (`from < pos`); girintileme komutlarında satırın kendisidir (`from === pos`) → aday bir önceki satırdan başlar.
+ */
+const copyIndent = indentService.of((ctx, pos) => {
+  const doc = ctx.state.doc;
+  const before = ctx.lineAt(pos, -1);
+  const n = doc.lineAt(pos).number;
+  function* prev(): Generator<string> {
+    if (before.from < pos) yield before.text;
+    for (let k = n - 1; k >= 1; k--) yield doc.line(k).text;
+  }
+  return copyIndentColumn(prev(), ctx.state.tabSize);
+});
