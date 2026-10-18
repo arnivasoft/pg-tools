@@ -7,7 +7,7 @@ args:
   --verbose
   --format=custom
   --dbname
-  dbname='satış'
+  dbname='satis'
   --clean
   --if-exists
   --no-owner
@@ -17,12 +17,12 @@ env:
   PGHOST=db.local
   PGPORT=5432
   PGUSER=app user
-  PGDATABASE=satış
+  PGDATABASE=satis
   PGSSLMODE=prefer
   PGAPPNAME=pg-tools restore
   PGCONNECT_TIMEOUT=15
   LC_MESSAGES=C
-preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE="satış" PGSSLMODE=prefer PGAPPNAME="pg-tools restore" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_restore" --verbose --format=custom --dbname "dbname='satış'" --clean --if-exists --no-owner --exit-on-error "<DIR>/kaynak"
+preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE=satis PGSSLMODE=prefer PGAPPNAME="pg-tools restore" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_restore" --verbose --format=custom --dbname "dbname='satis'" --clean --if-exists --no-owner --exit-on-error "<DIR>/kaynak"
 risk: DataLoss
 notes:
   - Arşivdeki nesneler hedefte varsa önce silinir.

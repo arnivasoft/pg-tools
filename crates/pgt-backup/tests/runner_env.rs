@@ -84,11 +84,11 @@ fn child_env_and_log_privacy() {
 
     // Parolayla: yalnız verilen parola.
     let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("gizli-hedef-adı.dump");
+    let target = dir.path().join("gizli-hedef-adi.dump");
     let p = plan(&target, false);
     let partial = p.partial_path.clone();
     let mut sink = VecSink::default();
-    let secret = Secret::new("s3cret-değer".to_string());
+    let secret = Secret::new("s3cret-deger".to_string());
     assert!(!format!("{secret:?}").contains("s3cret"));
     assert!(!serde_json::to_string(&secret).unwrap().contains("s3cret"));
     let s = rt.block_on(run(
@@ -100,7 +100,7 @@ fn child_env_and_log_privacy() {
         CancelToken::new(),
     ));
     assert_eq!((s.outcome, s.exit_code), (JobOutcome::Failed, Some(3)));
-    assert_eq!(env_lines(&sink), vec!["PGHOST=h.example".to_string(), "PGPASSWORD=s3cret-değer".to_string()]);
+    assert_eq!(env_lines(&sink), vec!["PGHOST=h.example".to_string(), "PGPASSWORD=s3cret-deger".to_string()]);
 
     // Günlükte yalnız tür, sonuç, çıkış kodu ve süre: parola, yol, argüman ve stderr metni yok.
     let logs = logs.lock().unwrap().clone();

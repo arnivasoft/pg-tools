@@ -7,6 +7,9 @@
 //! - `--format=directory` / `--file <yol>`: pg_dump gibi çıktıyı oluşturur (dosya ya da klasör + `toc.dat`).
 //!   Çıktı bağlantıdan önce oluşur (gerçek pg_dump plain gibi).
 //! - `--line <metin>`: stderr'e bir satır yazar.
+//! - `--line-hex <onaltılık>`: UTF-8 baytları onaltılık verilen satırı yazar. ASCII dışı metin argv'den geçmez:
+//!   yürütücü Windows'ta kod sayfasında birebir temsil edilemeyen argümanı reddeder (bkz. `ansi`), testler kod
+//!   sayfasından bağımsız kalır.
 //! - `--tables <n>`: `pg_dump: dumping contents of table "public.tK"` satırları yazar.
 //! - `--long <n>`: `n` adet `ğ` içeren tek satır yazar.
 //! - `--crlf <metin>`: satırı `\r\n` ile bitirir.
@@ -50,6 +53,13 @@ fn main() {
                 }
             }
             "--line" => writeln!(err, "{}", next(&mut i)).unwrap(),
+            "--line-hex" => {
+                let h = next(&mut i);
+                let bytes: Vec<u8> = (0..h.len()).step_by(2).map(|k| u8::from_str_radix(&h[k..k + 2], 16).unwrap()).collect();
+                err.write_all(&bytes).unwrap();
+                err.write_all(b"
+").unwrap();
+            }
             "--crlf" => write!(err, "{}\r\n", next(&mut i)).unwrap(),
             "--tables" => {
                 let n: u32 = next(&mut i).parse().unwrap();

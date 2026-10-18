@@ -142,7 +142,7 @@ async fn plain_single_transaction_rolls_back_on_error() {
     for env in envs("plain_single_transaction").await {
         let tgt = "pgt_bk_plain_tx";
         let dir = tempfile::tempdir().unwrap();
-        let sql = dir.path().join("hatalı.sql");
+        let sql = dir.path().join("hatali.sql");
         std::fs::write(&sql, "CREATE TABLE ok_t (id int);\nINSERT INTO ok_t VALUES (1);\nSELECT * FROM yok_tablo;\n").unwrap();
         let exists = |c: tokio_postgres::Client| async move {
             c.query_one("SELECT to_regclass('public.ok_t') IS NOT NULL", &[]).await.unwrap().get::<_, bool>(0)
@@ -263,9 +263,21 @@ async fn non_ascii_database_name_cannot_be_used_by_tools_on_windows() {
         env.fresh(db).await;
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("a.dump");
-        let (s, sink) = env.backup(db, BackupScope::Database, DumpFormat::Custom, &out).await;
-        assert_eq!(s.outcome, JobOutcome::Failed, "{}: araç ASCII dışı adla bağlanabildi: {:?}", env.version, sink.lines());
         assert!(!pgt_backup::windows_name_problems(&env.conn(db)).is_empty());
+        if pgt_backup::ensure_ansi_roundtrip(db) {
+            let (s, sink) = env.backup(db, BackupScope::Database, DumpFormat::Custom, &out).await;
+            assert_eq!(s.outcome, JobOutcome::Failed, "{}: araç ASCII dışı adla bağlanabildi: {:?}", env.version, sink.lines());
+        } else {
+            // Ad kod sayfasında hiç temsil edilemiyor (ör. 1252'de `ş`/`ğ`): araç çalışmadan plan hatası.
+            let req = pgt_backup::BackupRequest {
+                scope: BackupScope::Database,
+                format: DumpFormat::Custom,
+                options: Default::default(),
+                output_path: out.to_string_lossy().into_owned(),
+            };
+            let e = pgt_backup::backup_invocation(&env.dump, &env.conn(db), &req).unwrap_err();
+            assert!(e.iter().any(|e| e.path == "database"), "{e:?}");
+        }
         env.drop(db).await;
     }
 }

@@ -22,6 +22,11 @@ pub fn inv(args: &[&str], output: Option<OutputPlan>) -> Invocation {
     }
 }
 
+/// `--line-hex` değeri: UTF-8 baytlarının onaltılık yazımı (ASCII dışı metin argv'ye girmez).
+pub fn hex(s: &str) -> String {
+    s.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
 pub fn plan(final_path: &std::path::Path, is_dir: bool) -> OutputPlan {
     let final_path = final_path.to_string_lossy().into_owned();
     OutputPlan { partial_path: format!("{final_path}{PARTIAL_SUFFIX}"), final_path, is_dir }

@@ -17,12 +17,12 @@ env:
   PGHOST=db.local
   PGPORT=5432
   PGUSER=app user
-  PGDATABASE=satış
+  PGDATABASE=satis
   PGSSLMODE=prefer
   PGAPPNAME=pg-tools backup
   PGCONNECT_TIMEOUT=15
   LC_MESSAGES=C
-preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE="satış" PGSSLMODE=prefer PGAPPNAME="pg-tools backup" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_dump" --verbose --format=directory --file "<DIR>/dizin.pgt-partial" --data-only --compress=9 --jobs=4 --table "\"public\".\"a.b*?\""
+preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE=satis PGSSLMODE=prefer PGAPPNAME="pg-tools backup" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_dump" --verbose --format=directory --file "<DIR>/dizin.pgt-partial" --data-only --compress=9 --jobs=4 --table "\"public\".\"a.b*?\""
 risk: Safe
 notes:
   - Hedef klasör boş olmalı ya da hiç olmamalı.

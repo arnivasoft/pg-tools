@@ -7,7 +7,7 @@ args:
   --verbose
   --format=tar
   --dbname
-  dbname='satış'
+  dbname='satis'
   --single-transaction
   --schema-only
   --no-privileges
@@ -16,12 +16,12 @@ env:
   PGHOST=db.local
   PGPORT=5432
   PGUSER=app user
-  PGDATABASE=satış
+  PGDATABASE=satis
   PGSSLMODE=prefer
   PGAPPNAME=pg-tools restore
   PGCONNECT_TIMEOUT=15
   LC_MESSAGES=C
-preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE="satış" PGSSLMODE=prefer PGAPPNAME="pg-tools restore" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_restore" --verbose --format=tar --dbname "dbname='satış'" --single-transaction --schema-only --no-privileges "<DIR>/kaynak"
+preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE=satis PGSSLMODE=prefer PGAPPNAME="pg-tools restore" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_restore" --verbose --format=tar --dbname "dbname='satis'" --single-transaction --schema-only --no-privileges "<DIR>/kaynak"
 risk: Destructive
 notes:
   - Hatalar atlanır ve sonunda sayıları bildirilir; durmak için "hatada dur" seçin.

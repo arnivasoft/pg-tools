@@ -910,11 +910,14 @@ mod tests {
         }
     }
 
+    /// Fikstür yolları ve adları ASCII'dir: çağrı Windows'ta sistem ANSI kod sayfasında gidiş-dönüş denetiminden geçer
+    /// ([`crate::ansi`]) ve ASCII dışı metin (ör. `ş` 1252'de yok) testi makinenin kod sayfasına bağlardı. Kodlama
+    /// davranışı `best_fit_*` testlerinde (sistemden okunan beklentiyle) ve `ansi` testlerinde (açık kod sayfası) sınanır.
     fn out_dir() -> &'static str {
         if cfg!(windows) {
-            r"C:\Yedek Klasörü"
+            r"C:\Yedek Klasoru"
         } else {
-            "/Yedek Klasörü"
+            "/Yedek Klasoru"
         }
     }
 
@@ -941,7 +944,7 @@ mod tests {
             host: "db.local".into(),
             port: 5432,
             user: "app user".into(),
-            database: "satış".into(),
+            database: "satis".into(),
             sslmode: "prefer",
             root_cert: None,
             client_cert: None,
@@ -1021,7 +1024,7 @@ mod tests {
             BackupScope::Database,
             DumpFormat::Custom,
             BackupOptions::default(),
-            "satış.backup",
+            "satis.backup",
         );
         insta::assert_snapshot!(render(&backup_ok(&req)));
     }
@@ -1757,7 +1760,7 @@ mod tests {
         assert_eq!(get("PGHOST"), Some("db.local"));
         assert_eq!(get("PGPORT"), Some("5432"));
         assert_eq!(get("PGUSER"), Some("app user"));
-        assert_eq!(get("PGDATABASE"), Some("satış"));
+        assert_eq!(get("PGDATABASE"), Some("satis"));
         assert_eq!(get("PGSSLMODE"), Some("prefer"));
         assert_eq!(get("PGAPPNAME"), Some("pg-tools backup"));
         assert_eq!(get("PGCONNECT_TIMEOUT"), Some("15"));
@@ -1852,7 +1855,7 @@ mod tests {
         assert_eq!(dump_pattern(""), "\"\"");
         assert_eq!(pattern_regex("Büyük Ad"), "^(B.y.k Ad)$");
         assert_eq!(pattern_regex("a.b*?$"), r"^(a\.b\*\?\$)$");
-        let mut c = conn();
+        let mut c = Conn { database: "satış".into(), ..conn() };
         assert_eq!(windows_name_problems(&c).len(), 1);
         c.database = "app".into();
         assert!(windows_name_problems(&c).is_empty());

@@ -54,7 +54,7 @@ async fn logs_hold_no_password_path_or_names() {
     for env in &envs {
         let src = "pgt_bk_gizli_db";
         fixture(env, src).await;
-        let out = dir.path().join("gizli-yedek-adı.dump");
+        let out = dir.path().join("gizli-yedek-adi.dump");
         let scope = BackupScope::Table { schema: "app".into(), name: "Büyük Ad".into() };
         let (s, sink) = env.backup(src, scope, DumpFormat::Custom, &out).await;
         ok(&s, &sink, "yedek");

@@ -5,7 +5,7 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::{VecSink, inv, plan};
+use common::{VecSink, hex, inv, plan};
 use pgt_backup::{
     BackupEvent, CancelToken, JobKind, JobOutcome, LineSeverity, MAX_LINE_BYTES, MAX_LOG_LINES, check_output, run,
 };
@@ -18,10 +18,11 @@ fn finished_matches(sink: &VecSink, s: &pgt_backup::JobSummary) {
 
 #[tokio::test]
 async fn streams_and_classifies_lines() {
+    let warning = hex("pg_dump: warning: döngüsel yabancı anahtar");
     let i = inv(
         &[
-            "--line",
-            "pg_dump: warning: döngüsel yabancı anahtar",
+            "--line-hex",
+            &warning,
             "--line",
             "pg_dump: error: query failed",
             "--crlf",
@@ -55,7 +56,7 @@ async fn streams_and_classifies_lines() {
 async fn caps_line_count_and_length() {
     let mut sink = VecSink::default();
     let s = run(
-        inv(&["--line", "pg_dump: warning: önce", "--tables", "2500", "--line", "pg_dump: warning: son"], None),
+        inv(&["--line", "pg_dump: warning: once", "--tables", "2500", "--line", "pg_dump: warning: son"], None),
         None,
         JobKind::Backup,
         None,
@@ -286,7 +287,7 @@ async fn cancelled_run(sink: &mut VecSink, token: CancelToken) {
     let partial = p.partial_path.clone();
     let started = Instant::now();
     let s = run(
-        inv(&["--file", &partial, "--line", "hazır", "--sleep-ms", "30000"], Some(p)),
+        inv(&["--file", &partial, "--line", "hazir", "--sleep-ms", "30000"], Some(p)),
         None,
         JobKind::Backup,
         None,
@@ -305,7 +306,7 @@ async fn cancel_kills_child_and_cleans_up() {
     let token = CancelToken::new();
     let t = token.clone();
     let mut sink = VecSink::with(move |line| {
-        if line == "hazır" {
+        if line == "hazir" {
             t.cancel();
         }
         true
@@ -315,7 +316,7 @@ async fn cancel_kills_child_and_cleans_up() {
 
 #[tokio::test]
 async fn sink_gone_cancels() {
-    let mut sink = VecSink::with(|line| line != "hazır");
+    let mut sink = VecSink::with(|line| line != "hazir");
     cancelled_run(&mut sink, CancelToken::new()).await;
 }
 
