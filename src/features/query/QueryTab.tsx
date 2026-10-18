@@ -589,14 +589,14 @@ export default function QueryTab(props: { ctl: QueryController }) {
       <div
         ref={host}
         role="region"
-        aria-label={t.query.tabs.editorAria}
+        aria-label={tqt.editorAria}
         class="min-h-0 shrink-0 overflow-hidden"
         style={{ height: `${editorHeight()}px` }}
       />
       <div
         role="separator"
         aria-orientation="horizontal"
-        aria-label={t.query.tabs.resizeEditor}
+        aria-label={tqt.resizeEditor}
         class="h-1 shrink-0 cursor-row-resize border-y border-border bg-panel hover:bg-accent/40"
         onPointerDown={onSplitDown}
       />

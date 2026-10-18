@@ -1,6 +1,13 @@
 // Sunucu diyaloğunun (ServerDialog) metinleri. Yalnızca tembel parça içe aktarır; ana pakette durmasın diye ayrı modüldedir.
-// Ana paketin kullandıkları (`lockedTitle`, `cancel`, `password`, `savePassword`, `labelSuggestions`) `t.server`'da kalır.
+// Ana paketin kullandıkları (`lockedTitle`, `labelSuggestions`) `t.server`'da kalır; parola istemi (PasswordPromptView) de buradan okur.
 export const tsrv = {
+  password: "Parola",
+  savePassword: "Parolayı kaydet",
+  prompt: {
+    title: (server: string) => `${server} için parola`,
+    retry: "Parola hatalı, tekrar deneyin.",
+    connect: "Bağlan",
+  },
   titleNew: "Yeni sunucu",
   titleEdit: "Sunucuyu düzenle",
   tabs: { general: "Genel", connection: "Bağlantı", ssl: "SSL", security: "Güvenlik" },

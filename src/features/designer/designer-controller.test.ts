@@ -1731,6 +1731,34 @@ describe("Plan 22: yetki varyantları (acl / default_acl)", () => {
     expect(s.ctl.model("P1")).toMatchObject({ dirty: false, needsReload: false, postApplyWarnings: ["ACL uyarısı"] });
   });
 
+  it("başarılı uygulama Inspector'ı yeniler (yetki ve nesne sekmesi); hatası sonucu bozmaz", async () => {
+    const refreshInspector = vi.fn();
+    const s = setup({ refreshInspector });
+    await s.ctl.openAcl("P1", CTX, TBL);
+    s.ctl.editAcl("P1", grantInsert);
+    await settle();
+    s.api.ddlApply.mockResolvedValueOnce(applied());
+    await s.ctl.apply("P1");
+    await flush();
+    expect(refreshInspector).toHaveBeenCalledTimes(1);
+
+    const t = setup({ refreshInspector: () => { throw new Error("x"); } });
+    const id = await readyToApply(t);
+    await t.ctl.apply(id);
+    await flush();
+    expect(t.ctl.model(id)).toMatchObject({ status: "ready", dirty: false });
+  });
+
+  it("başarısız uygulama Inspector'ı yenilemez", async () => {
+    const refreshInspector = vi.fn();
+    const s = setup({ refreshInspector });
+    const id = await readyToApply(s);
+    s.api.ddlApply.mockResolvedValueOnce({ outcome: "failed", failedIndex: 0, committed: 0, sqlstate: "42501", position: null, error: { code: "query", message: "x", detail: null, hint: null } });
+    await s.ctl.apply(id);
+    await flush();
+    expect(refreshInspector).not.toHaveBeenCalled();
+  });
+
   it("acl: reload ddlLoadAcl kullanır", async () => {
     const s = setup();
     await s.ctl.openAcl("P1", CTX, TBL);

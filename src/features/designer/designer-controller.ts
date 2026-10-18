@@ -236,6 +236,8 @@ export interface DesignerControllerDeps {
   refreshNode(nodeId: string): Promise<void> | void;
   /** Başarılı uygulama sonrası (hatası yutulur; uygulama sonucunu etkilemez). */
   onApplied?(info: AppliedInfo): void;
+  /** Başarılı her uygulama sonrası Inspector'ı (özellikler/DDL) yeniden okut (hatası yutulur). */
+  refreshInspector?(): void;
   previewDelay?: number;
   previewDeps?: Partial<PreviewDeps>;
   newId?: () => string;
@@ -640,6 +642,11 @@ export function createDesignerController(deps: DesignerControllerDeps) {
     else notify(tdes.apply.applied(out.statements), "success");
     // Uyarılar sekmede kalıcı (yeniden yükleme `setBase` bunlara dokunmaz).
     patch(e, { postApplyWarnings: [...warnings] });
+    try {
+      deps.refreshInspector?.();
+    } catch {
+      /* Inspector yenilemesi uygulama sonucunu etkilemez */
+    }
     if (m.variant !== "object") {
       // Yetki sekmeleri: ad/ağaç değişmez; yalnız yeniden yüklenir (yükleme başarısızsa `needsReload` kalır).
       patch(e, { dirty: false, needsReload: true });

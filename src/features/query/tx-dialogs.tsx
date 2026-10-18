@@ -7,6 +7,7 @@ import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import type { QueryController } from "./query-controller";
 import { ENV_CHOICES, canCommitAny, envLabel, envLockDefault, type EnvChoice } from "./workspace-model";
+import { dialogStrings } from "../../ui/dialog-strings";
 
 export function CloseTxDialog(props: { ctl: QueryController }) {
   const g = props.ctl.closeGate;
@@ -25,7 +26,7 @@ export function CloseTxDialog(props: { ctl: QueryController }) {
       footer={
         <>
           <Button ref={cancelEl} onClick={() => g.answer("cancel")}>
-            {t.server.cancel}
+            {dialogStrings.cancel}
           </Button>
           <Show when={g.request()?.choices.includes("rollback")}>
             <Button class="!bg-danger !text-white" variant="primary" onClick={() => g.answer("rollback")}>
@@ -66,7 +67,7 @@ export function BulkTxDialog(props: { ctl: QueryController }) {
       footer={
         <>
           <Button ref={cancelEl} onClick={() => g.answer("cancel")}>
-            {t.server.cancel}
+            {dialogStrings.cancel}
           </Button>
           <Button class="!bg-danger !text-white" variant="primary" onClick={() => g.answer("rollback")}>
             {b.rollbackAll}

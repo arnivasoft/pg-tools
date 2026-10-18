@@ -10,6 +10,7 @@ import { Button } from "../../ui/Button";
 import { TabStrip, TabStripPanel } from "../../ui/TabStrip";
 import type { Explorer } from "../explorer/explorer-store";
 import { forNode } from "./for-node";
+import { inspectorRevision } from "./inspector-revision";
 import { kindLabel } from "./labels";
 import { PropertiesView } from "./PropertiesView";
 
@@ -47,13 +48,20 @@ export function Inspector(props: { explorer: Explorer }) {
     }
   };
 
+  // Kaynak `[id, sayaç]`: uygulama sonrası `refreshInspector` aynı düğümü de yeniden okutur.
   const [properties] = createResource(
-    () => selected()?.id,
-    async (id) => ({ id, value: await guarded(id, () => commands.getProperties(id)) }),
+    () => {
+      const id = selected()?.id;
+      return id === undefined ? undefined : ([id, inspectorRevision()] as const);
+    },
+    async ([id]) => ({ id, value: await guarded(id, () => commands.getProperties(id)) }),
   );
   const [ddl] = createResource(
-    () => (tab() === "ddl" ? selected()?.id : undefined),
-    async (id) => ({ id, value: await guarded(id, () => commands.getDdl(id)) }),
+    () => {
+      const id = tab() === "ddl" ? selected()?.id : undefined;
+      return id === undefined ? undefined : ([id, inspectorRevision()] as const);
+    },
+    async ([id]) => ({ id, value: await guarded(id, () => commands.getDdl(id)) }),
   );
 
   // Hatalı bir resource'un `.latest` değeri okunursa Solid hatayı fırlatır; bu yüzden önce `.error` kontrol edilir.

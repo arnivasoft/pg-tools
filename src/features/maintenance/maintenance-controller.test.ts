@@ -53,18 +53,20 @@ function setup(info: { versionNum: number | null; locked: boolean } | null = { v
   };
   const notify = vi.fn();
   const onClosed = vi.fn();
+  const refreshInspector = vi.fn();
   const deps: MaintenanceControllerDeps = {
     api: api as unknown as MaintenanceControllerDeps["api"],
     serverInfo: () => info,
     notify,
     onClosed,
+    refreshInspector,
     newId: () => `A${++ids}`,
     now: () => Date.now(),
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
   };
   const ctl = createMaintenanceController(deps);
-  return { ctl, api, notify, onClosed, setInfo: (i: typeof info) => { info = i; } };
+  return { ctl, api, notify, onClosed, refreshInspector, setInfo: (i: typeof info) => { info = i; } };
 }
 type S = ReturnType<typeof setup>;
 
@@ -230,6 +232,33 @@ describe("maintenance-controller uygulama", () => {
     await vi.advanceTimersByTimeAsync(5000);
     expect(s.api.ddlMaintenanceProgress.mock.calls.length).toBe(calls);
     expect(s.ctl.state()!.result?.kind).toBe("applied");
+  });
+
+  it("başarılı uygulama Inspector'ı yeniler (diyalog kapatılmış olsa da); başarısız/iptal yenilemez", async () => {
+    const s = setup();
+    await ready(s);
+    void s.ctl.apply();
+    await flush();
+    expect(s.refreshInspector).toHaveBeenCalledTimes(1);
+
+    const c = setup();
+    await ready(c);
+    const d = deferred<ApplyOutcome>();
+    c.api.ddlApply.mockReturnValueOnce(d.promise);
+    void c.ctl.apply();
+    await flush();
+    c.ctl.close();
+    c.ctl.answerClose(true);
+    d.resolve(applied());
+    await flush();
+    expect(c.refreshInspector).toHaveBeenCalledTimes(1);
+
+    const f = setup();
+    await ready(f);
+    f.api.ddlApply.mockResolvedValueOnce({ outcome: "failed", failedIndex: 0, committed: 0, sqlstate: "57014", position: null, error: { code: "query", message: "iptal", detail: null, hint: null } });
+    void f.ctl.apply();
+    await flush();
+    expect(f.refreshInspector).not.toHaveBeenCalled();
   });
 
   it("iptal → ddlCancel(applyId) ve 'İptal edildi'", async () => {

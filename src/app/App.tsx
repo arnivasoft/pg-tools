@@ -6,6 +6,7 @@ import { ExplorerMenu } from "../features/explorer/ExplorerMenu";
 import { createDeleteConfirm } from "../ui/ConfirmDialog";
 import { copyText } from "./clipboard";
 import { Inspector } from "../features/inspector/Inspector";
+import { refreshInspector } from "../features/inspector/inspector-revision";
 import { ROOT } from "../features/explorer/tree-model";
 import type { Dashboard } from "../features/dashboard/dash-open";
 import type { Designer } from "../features/designer/designer-open";
@@ -68,6 +69,7 @@ export default function App() {
     refreshServers: query.refreshServers,
     connect: connectServer,
     notify: toast.show,
+    refreshInspector,
     query,
   });
   // Dashboard tembel parçadadır: ilk "Dashboard'u aç"ta yüklenir (ana paket büyümez).
