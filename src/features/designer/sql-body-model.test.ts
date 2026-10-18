@@ -1,12 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { INDENT, applyDisplayEdit, displayText, separatorOf, tabEdit } from "./sql-body-model";
+import { INDENT, applyDisplayEdit, bodyLanguageMode, displayDiff, displayText, separatorOf } from "./sql-body-model";
 
-/** `tabEdit` sonucunu metne uygular. */
-function run(text: string, start: number, end: number, outdent = false) {
-  const e = tabEdit(text, start, end, outdent);
-  if (!e) return null;
-  return { text: text.slice(0, e.from) + e.insert + text.slice(e.to), sel: [e.selStart, e.selEnd] };
-}
+/** Görüntü metnine (CodeMirror belgesi, yalnız `\n`) `[from, to)` → `insert` değişikliği. */
+const edit = (doc: string, from: number, to: number, insert: string) => doc.slice(0, from) + insert + doc.slice(to);
+
 
 describe("sql-body-model: satır sonu", () => {
   it("separatorOf: CRLF varsa CRLF, aksi halde LF", () => {
@@ -45,42 +42,89 @@ describe("sql-body-model: satır sonu", () => {
   });
 });
 
-describe("sql-body-model: Tab girintisi (iki boşluk)", () => {
+describe("sql-body-model: dil kipi", () => {
+  it("sql / plpgsql (büyük-küçük harf duyarsız) → sql; diğerleri ve boş → plain", () => {
+    expect(bodyLanguageMode("sql")).toBe("sql");
+    expect(bodyLanguageMode("SQL")).toBe("sql");
+    expect(bodyLanguageMode("plpgsql")).toBe("sql");
+    expect(bodyLanguageMode("PLpgSQL")).toBe("sql");
+    expect(bodyLanguageMode("plpython3u")).toBe("plain");
+    expect(bodyLanguageMode("plperl")).toBe("plain");
+    expect(bodyLanguageMode("c")).toBe("plain");
+    expect(bodyLanguageMode("")).toBe("plain");
+  });
+});
+
+describe("sql-body-model: girinti birimi", () => {
   it("INDENT iki boşluktur", () => {
     expect(INDENT).toBe("  ");
   });
+});
 
-  it("seçimsiz Tab imlece iki boşluk ekler", () => {
-    expect(run("BEGIN\nEND;", 6, 6)).toEqual({ text: "BEGIN\n  END;", sel: [8, 8] });
-    expect(run("ab", 1, 1)).toEqual({ text: "a  b", sel: [3, 3] });
+describe("sql-body-model: displayDiff (dış değer → belge)", () => {
+  it("aynı metin → null (dispatch yok)", () => {
+    expect(displayDiff("a\nb", "a\nb")).toBeNull();
+    expect(displayDiff("", "")).toBeNull();
   });
 
-  it("seçimli Tab dokunduğu her satırı girintiler; seçim satırları kapsamaya devam eder", () => {
-    const t = "a\nb\nc";
-    expect(run(t, 0, 3)).toEqual({ text: "  a\n  b\nc", sel: [0, 7] });
-    // Seçim sonu bir satırın başındaysa o satır dahil edilmez
-    expect(run(t, 0, 4)).toEqual({ text: "  a\n  b\nc", sel: [0, 8] });
-    // Tek satır içinde seçim: satır girintilenir, seçim kayar
-    expect(run("abc", 1, 2)).toEqual({ text: "  abc", sel: [3, 4] });
+  it("ortak önek/sonek dışındaki tek değişiklik", () => {
+    expect(displayDiff("BEGIN\n  x;\nEND;", "BEGIN\n  y;\nEND;")).toEqual({ from: 8, to: 9, insert: "y" });
+    expect(displayDiff("ab", "aXb")).toEqual({ from: 1, to: 1, insert: "X" });
+    expect(displayDiff("aXb", "ab")).toEqual({ from: 1, to: 2, insert: "" });
+    expect(displayDiff("", "x")).toEqual({ from: 0, to: 0, insert: "x" });
+    expect(displayDiff("abc", "")).toEqual({ from: 0, to: 3, insert: "" });
   });
 
-  it("Shift+Tab: satır(lar)ın başından en çok iki boşluk ya da bir sekme kaldırır", () => {
-    expect(run("    a", 4, 4, true)).toEqual({ text: "  a", sel: [2, 2] });
-    expect(run(" a", 1, 1, true)).toEqual({ text: "a", sel: [0, 0] });
-    expect(run("\ta", 1, 1, true)).toEqual({ text: "a", sel: [0, 0] });
-    expect(run("  a\n  b\nc", 0, 7, true)).toEqual({ text: "a\nb\nc", sel: [0, 3] });
-    // İmleç girinti içindeyse satır başına sınırlanır
-    expect(run("  a", 1, 1, true)).toEqual({ text: "a", sel: [0, 0] });
+  it("uygulanınca hedef metni verir", () => {
+    const cases: [string, string][] = [
+      ["aaa", "aa"],
+      ["a\nb\nc", "a\nc"],
+      ["xyz", "xyzxyz"],
+      ["abc", "def"],
+    ];
+    for (const [a, b] of cases) {
+      const d = displayDiff(a, b)!;
+      expect(edit(a, d.from, d.to, d.insert)).toBe(b);
+    }
+  });
+});
+
+describe("sql-body-model: CodeMirror belge akışı (görüntü düzenlemesi → ham)", () => {
+  // Akış: belge = displayText(ham); kullanıcı düzenlemesi belgeyi değiştirir; onChange(applyDisplayEdit(ham, belge)).
+  const flow = (raw: string, from: number, to: number, insert: string) =>
+    applyDisplayEdit(raw, edit(displayText(raw), from, to, insert));
+
+  it("CRLF gövdede satır ekleme: yalnız yeni satır eklenir, diğer CRLF'ler korunur", () => {
+    const raw = "BEGIN\r\n  RETURN NEW;\r\nEND;";
+    // "BEGIN" sonrasında Enter + girinti + ifade (CodeMirror tek değişiklik olarak `\n  PERFORM 1;` ekler)
+    expect(flow(raw, 5, 5, "\n  PERFORM 1;")).toBe("BEGIN\r\n  PERFORM 1;\r\n  RETURN NEW;\r\nEND;");
   });
 
-  it("Shift+Tab: kaldırılacak girinti yoksa null (metin değişmez)", () => {
-    expect(tabEdit("a\nb", 0, 3, true)).toBeNull();
+  it("CRLF gövdede satır silme: CRLF çifti birlikte gider", () => {
+    const raw = "BEGIN\r\n  x;\r\nEND;";
+    expect(displayText(raw).slice(5, 10)).toBe("\n  x;");
+    expect(flow(raw, 5, 10, "")).toBe("BEGIN\r\nEND;");
   });
 
-  it("CRLF içeren ham metin: girinti görüntü metninde yapılır, applyDisplayEdit CRLF'yi korur", () => {
-    const raw = "a\r\nb";
-    const shown = displayText(raw);
-    const r = run(shown, 0, shown.length)!;
-    expect(applyDisplayEdit(raw, r.text)).toBe("  a\r\n  b");
+  it("CRLF gövdede satır birleştirme (satır başında Backspace)", () => {
+    expect(flow("a\r\nb", 1, 2, "")).toBe("ab");
+  });
+
+  it("karışık satır sonları: yalnız düzenlenen bölge değişir", () => {
+    const raw = "a\r\nb\nc\rd";
+    expect(flow(raw, 6, 7, "D")).toBe("a\r\nb\nc\rD");
+    // LF satırının sonuna yeni satır: dokunulmayan LF ve tek \r yerinde; eklenen satır sonu ham ayırıcı (CRLF)
+    expect(flow(raw, 3, 3, "\nX")).toBe("a\r\nb\nX\r\nc\rd");
+  });
+
+  it("çok satırlı Tab girintisi (indentMore: her satır başına INDENT) CRLF'yi korur", () => {
+    expect(applyDisplayEdit("a\r\nb", `${INDENT}a\n${INDENT}b`)).toBe("  a\r\n  b");
+  });
+
+  it("aynı metin → aynı ham (dokunmadan = alter sabit noktası), belgeye dispatch yok", () => {
+    for (const raw of ["BEGIN\r\n  x;\nEND;\r", "a\r\n", "\r", "", "x"]) {
+      expect(applyDisplayEdit(raw, displayText(raw))).toBe(raw);
+      expect(displayDiff(displayText(raw), displayText(raw))).toBeNull();
+    }
   });
 });
