@@ -432,3 +432,17 @@ Tümü `bun run test` (vitest, `environment: node`) altında koşar; DOM gerekme
 Paket: `bun run bundle:check` değişmeden geçmelidir (ana paket / açılış kümesi / `__vite__mapDeps` aynı). `@codemirror/commands`'ı `codemirror-setup.ts` dışından ikinci bir tembel tüketiciden içe aktarmak QueryTab ile paylaşılan yeni bir parça böler ve ana paketi büyütür (Plan 23 Task 1'de ölçüldü: +29 B, mapDeps 34 → 35) — düzenleme uzantıları `bodyEditingExtensions()` üzerinden alınır.
 
 Elle kontrol: `docs/smoke-test.md` "Fonksiyon gövdesi düzenleyicisi (Plan 23)".
+
+## Bakım işlemleri arka ucu testleri (Plan 24)
+
+- **Saf üretici** (`crates/pgt-ddl/src/build/maintenance.rs`, insta): her işlem × hedef × seçenek × sürüm; sürüm kapıları (kapının bir altında hata, kapıda serbest), risk/not, tek ifade ve `transactional = false`, düşmanca adlar. `cargo test -p pgt-ddl` (Docker gerekmez).
+- **Birim** (Docker'sız): ileti kesme/sınır yardımcıları (`apply.rs`: `clip_field`, `MessageBuf`), `hint_for` bakım ipuçları, `progress_sql`/`progress_counts`, `plan_view`/`read_only_refusal`.
+- **Docker** (`PGT_TEST_URLS` ya da `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`):
+  - `crates/pgt-ddl/tests/maintenance_roundtrip.rs`: yükleyici alanları ve her işlemin gerçek etkisi.
+  - `crates/pgt-ddl/tests/manager.rs`: kapılar (kilitli, bayat hedef, onay), `lock_timeout` 55P03, iptal 57014, ilerleme, `messages`.
+  - `crates/pgt-ddl/tests/logging.rs`: SQL, nesne adı ve ileti metni günlükte yok.
+- **Kapanış taramaları:** `rg "tracing::" crates/pgt-ddl/src/build/maintenance.rs crates/pgt-ddl/src/load_maintenance.rs` boş olmalı; `manager.rs` günlük çağrılarında ileti metni geçmemeli.
+- Sürüm kapılı atlamalar matris çıktısında sürümle birlikte görünür (ör. PG 10–11'de cluster/create_index ilerlemesi sorgulanmaz, PARALLEL/INDEX_CLEANUP kapı testleri hata bekler).
+- Sürüm kapısının sonucu ilerleme testinde zamanlamaya bağlıdır: satır dönerse alanlar tutarlı olmalı, `None` da kabul edilir; sorgu hatasız çalışmalıdır.
+
+Elle kontrol: `docs/smoke-test.md` "Bakım işlemleri arka ucu (Plan 24)".

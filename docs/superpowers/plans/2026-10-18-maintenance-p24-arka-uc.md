@@ -181,7 +181,7 @@ pub struct ServerMessage { pub severity: String, pub code: Option<String>, pub m
 
 ```rust
 // PlanRequest
-Maintenance { object: ObjectRef, target: MaintenanceTarget, op: MaintenanceOp },   // op() = "maintenance", kind() = object.kind
+Maintenance { object: ObjectRef, target: MaintenanceTarget, #[serde(rename = "operation")] op: MaintenanceOp },   // JSON: {op:"maintenance", object, target, operation}; op() = "maintenance"
 impl DdlManager {
     pub async fn load_maintenance_target(&self, server: Uuid, database_oid: u32, obj: ObjectRef) -> Result<MaintenanceTarget>;
     pub async fn maintenance_progress(&self, server: Uuid, database_oid: u32, apply_id: Uuid) -> Result<Option<MaintenanceProgress>>;
