@@ -144,7 +144,7 @@ export function SqlBodyEditor(props: SqlBodyEditorProps) {
     view = undefined;
   });
 
-  // Dış değer → belge. Kullanıcı düzenlemesinin geri dönüşünde görüntü belgeyle aynıdır → `resyncState` `null`, dokunulmaz.
+  // Dış değer → belge. Kullanıcı düzenlemesinin yankısında görüntü belgeyle aynıdır → `syncDecision` `noop`, dokunulmaz.
   createEffect(on(() => props.value, () => untrack(syncFromValue), { defer: true }));
   createEffect(
     on(

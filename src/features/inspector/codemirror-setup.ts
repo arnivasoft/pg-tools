@@ -56,8 +56,8 @@ export function replaceDoc(view: EditorView, doc: string): void {
  * geçmişi, girinti (`indent` birimi; Tab/Shift+Tab), parantez eşleme; `closeBrackets` yok.
  *
  * Otomatik girinti: SQL dilbilgisi PL/pgSQL bloklarını (BEGIN/IF/LOOP … END) modellemediğinden dilin girintisi yerine
- * `indentService` en yakın boş olmayan önceki satırın girintisini kopyalar (`copyIndentColumn`); Enter ve
- * girintileme komutları bunu kullanır. `indentOnInput` yok (bu servisle anlamsız; dilin yeniden girintileme deseni de yok).
+ * `indentService` girinti kopyalar: Enter bulunduğu satırın kendi girintisini, satır boşsa en yakın boş olmayan önceki
+ * satırınkini (`bodyIndentColumn`); girintileme komutları önceki dolu satırınkini (`copyIndentColumn`). `indentOnInput` yok (bu servisle anlamsız; dilin yeniden girintileme deseni de yok).
  *
  * Neden burada (paket): `@codemirror/commands` Sorgu Aracı ile ikinci bir tembel tüketiciden (RoutineForm) içe
  * aktarılınca Rolldown onu ayrı bir paylaşılan parçaya böler ve ana paketin `__vite__mapDeps` listesi bir girdi büyür
@@ -105,16 +105,27 @@ export function copyIndentColumn(prevLines: Iterable<string>, tabSize: number): 
 }
 
 /**
- * `pos` girintilenen satırın başıdır. Enter'da (benzetilmiş satır kırılması) `ctx.lineAt(pos, -1)` kırılmadan önceki
- * parçadır (`from < pos`); girintileme komutlarında satırın kendisidir (`from === pos`) → aday bir önceki satırdan başlar.
+ * Enter'da yeni satırın girinti sütunu: bulunduğu satır boş değilse (yalnız boşluk dahil) **kendi** baştaki boşluğu —
+ * imlecin önündeki boşluk ve arkasındaki metin bu girintiyle yeni satıra taşınır, var olan metnin girintisi değişmez;
+ * satır tamamen boşsa (`""`) en yakın boş olmayan önceki satırınki (`copyIndentColumn`). Saf.
+ */
+export function bodyIndentColumn(lineText: string, prevLines: Iterable<string>, tabSize: number): number {
+  if (lineText !== "") return countColumn(/^[ \t]*/.exec(lineText)![0], tabSize);
+  return copyIndentColumn(prevLines, tabSize);
+}
+
+/**
+ * Enter (`insertNewlineAndIndent`) servisi imleç konumuyla ve benzetilmiş satır kırılmasıyla çağırır; girintileme
+ * komutları (`indentSelection`) ise satır başıyla ve kırılmasız. Kırılma `ctx.lineAt(pos, -1)`'den anlaşılır: imleç satır
+ * başında değilse ya da kırılmadan önceki parça satırın tamamı değilse Enter'dır (satır başında + boş satırda iki yol
+ * aynı sonucu verir). Enter → `bodyIndentColumn`; girintileme → önceki dolu satır.
  */
 const copyIndent = indentService.of((ctx, pos) => {
   const doc = ctx.state.doc;
-  const before = ctx.lineAt(pos, -1);
-  const n = doc.lineAt(pos).number;
+  const line = doc.lineAt(pos);
+  const enter = pos !== line.from || ctx.lineAt(pos, -1).text !== line.text;
   function* prev(): Generator<string> {
-    if (before.from < pos) yield before.text;
-    for (let k = n - 1; k >= 1; k--) yield doc.line(k).text;
+    for (let k = line.number - 1; k >= 1; k--) yield doc.line(k).text;
   }
-  return copyIndentColumn(prev(), ctx.state.tabSize);
+  return enter ? bodyIndentColumn(line.text, prev(), ctx.state.tabSize) : copyIndentColumn(prev(), ctx.state.tabSize);
 });
