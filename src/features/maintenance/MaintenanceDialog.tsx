@@ -2,7 +2,7 @@
 // Ana modülleri (`app/strings`, `explorer/*`, `tree-model`, `designer/*`) içe aktarmaz: metin `strings-maintenance`tan,
 // api/ağaç/bildirim App'ten props ile gelir. Önizleme salt okunur `<pre>`dir (CodeMirror yok).
 // Klavye: Enter uygular (kapı ve onay tamamsa; IME bileşimi sırasında değil), Esc kapatır (çalışırken iptal onayı sorar).
-import { createEffect, createSignal, createUniqueId, For, on, onCleanup, Show, untrack, type JSX } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, Show, untrack, type JSX } from "solid-js";
 import { phaseLabel, tm } from "../../app/strings-maintenance";
 import type { ToastKind } from "../../app/toast-model";
 import type { MaintenanceOp } from "../../ipc/bindings/MaintenanceOp";
@@ -55,7 +55,8 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
   const deps = untrack(() => props.deps);
   const ctl = createMaintenanceController({
     api: deps.api,
-    serverInfo: (id) => serverInfoFrom(deps.tree, id),
+    // Diyalogun sunucusu için hafızalı bilgi (ağaç değişince yeniden hesaplanır; her kapı çağrısında taranmaz).
+    serverInfo: (id) => (id === currentServer() ? currentInfo() : serverInfoFrom(deps.tree, id)),
     notify: deps.notify,
     onClosed: () => props.onClose(),
     newId: () => crypto.randomUUID(),
@@ -75,6 +76,11 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
   onCleanup(() => ctl.close());
 
   const s = () => ctl.state();
+  const currentServer = createMemo(() => s()?.serverId ?? null);
+  const currentInfo = createMemo(() => {
+    const id = currentServer();
+    return id ? serverInfoFrom(deps.tree, id) : null;
+  });
   const applying = () => s()?.phase === "applying";
   const [now, setNow] = createSignal(Date.now());
   createEffect(() => {
@@ -111,7 +117,6 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
     const t = cur.target;
     const r = cur.result;
     return [
-      ctl.locked() ? tm.locked : "",
       cur.phase === "loadError" ? `${tm.loadFailed} ${cur.loadError ?? ""}` : "",
       cur.closeAsk ? tm.closeAsk : "",
       t && !t.editable ? `${tm.unsupported} ${t.unsupported.join(", ")}` : "",
@@ -188,6 +193,8 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
     >
       <div role="status" class="sr-only">{statusText()}</div>
       <div role="alert" class="sr-only">{alertText()}</div>
+      {/* Kilit ayrı bölgede: diğer uyarılar değişince yeniden duyurulmaz. */}
+      <div role="alert" class="sr-only">{ctl.locked() ? tm.locked : ""}</div>
       <Show when={s()}>
         {(cur) => (
           <div class="flex flex-col gap-3 text-[13px]" onKeyDown={onKeyDown}>
@@ -261,7 +268,7 @@ export function MaintenanceDialog(props: { nodeId: string | null; deps: Maintena
 function OpPicker(props: { ctl: MaintenanceController }) {
   const name = createUniqueId();
   const s = () => props.ctl.state()!;
-  const disabled = () => s().phase !== "ready";
+  const disabled = () => !props.ctl.editable();
   return (
     <fieldset class="flex flex-col gap-1">
       <legend class="mb-1 text-[12px] text-muted">{tm.operation}</legend>
@@ -311,8 +318,17 @@ function OptionNotes(props: { id: string; desc: string; st: OptionState | undefi
 
 function Options(props: { ctl: MaintenanceController; op: MaintenanceOp; errors: Record<string, string[]> }) {
   const states = () => props.ctl.optionStates();
-  const locked = () => props.ctl.state()?.phase !== "ready";
+  const locked = () => !props.ctl.editable();
   const field = (k: string) => (props.op as Record<string, unknown>)[k];
+  const commitParallel = (el: HTMLInputElement) => {
+    const v = el.value.trim();
+    const next = v === "" ? null : Number(v);
+    if (next === field("parallel")) return;
+    props.ctl.setOptions({ parallel: next });
+    // Kırpılmış değer (normalize) alana geri yazılır.
+    const cur = field("parallel") as number | null;
+    el.value = cur === null ? "" : String(cur);
+  };
   return (
     <fieldset class="flex flex-col gap-2">
       <legend class="mb-1 text-[12px] text-muted">{tm.options}</legend>
@@ -406,10 +422,14 @@ function Options(props: { ctl: MaintenanceController; op: MaintenanceOp; errors:
                   disabled={locked() || !par()?.enabled}
                   aria-describedby={pNotes}
                   value={(field("parallel") as number | null) ?? ""}
-                  // onInput: Enter'a basıldığında değer önizlemeye girmiş olur (bekleyen önizleme Uygula'yı kapatır).
-                  onInput={(e) => {
-                    const v = e.currentTarget.value.trim();
-                    props.ctl.setOptions({ parallel: v === "" ? null : Number(v) });
+                  // Değer change/blur'da işlenir (her tuşta kırpılmaz). Enter yalnız değeri işler, uygulamaz:
+                  // yeni önizleme bitene dek Uygula kapalıdır.
+                  onChange={(e) => commitParallel(e.currentTarget)}
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    commitParallel(e.currentTarget);
                   }}
                 />
                 <OptionNotes id={pNotes} desc={tm.opts.parallel.desc} st={par()} errors={props.errors.parallel} />

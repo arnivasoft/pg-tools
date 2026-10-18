@@ -85,6 +85,8 @@ export interface MaintenanceState {
   /** Kapatma onaylandı: iptal istendi, sonuç bekleniyor; sonra diyalog kapanır. */
   closing: boolean;
   result: MaintenanceResult | null;
+  /** Başarı/plan_changed sonrası hedef yeniden yükleniyor: seçenekler kilitli, kapı "loading". */
+  reloading: boolean;
   /** Bilgi şeridi (ör. plan_changed sonrası yeniden yükleme). */
   notice: string | null;
 }
@@ -220,7 +222,7 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
     if (!s) return;
     const g = ++gen;
     stopPreview();
-    patch(keep ? { pending: true } : { phase: "loading", loadError: null, view: null, viewFor: -1, pending: false, previewError: null });
+    patch(keep ? { pending: true, reloading: true } : { phase: "loading", reloading: false, loadError: null, view: null, viewFor: -1, pending: false, previewError: null });
     try {
       let { serverId, databaseOid, object } = s;
       if (!serverId || !object || databaseOid === null) {
@@ -240,7 +242,9 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
       setState((cur) => {
         if (!cur) return cur;
         const base: MaintenanceState = {
-          ...cur, serverId, databaseOid, object, target, phase: "ready", loadError: null,
+          // Uçuştaki uygulamanın aşaması asla ezilmez (apply kuşağı artırdığından normalde buraya gelinmez; savunma).
+          ...cur, serverId, databaseOid, object, target, phase: cur.phase === "applying" ? "applying" : "ready",
+          loadError: null, reloading: false,
           versionNum: info?.versionNum ?? null,
         };
         const ops = target.editable ? opsFor(target.kind, target.partitioned, base.versionNum) : [];
@@ -253,7 +257,7 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
     } catch (err) {
       if (g !== gen) return;
       const text = fullError(toPayload(err));
-      if (keep) patch({ notice: tm.reloadFailed, pending: false, view: null, viewFor: -1 });
+      if (keep) patch({ notice: tm.reloadFailed, pending: false, reloading: false, view: null, viewFor: -1 });
       else patch({ phase: "loadError", loadError: text });
     }
   };
@@ -270,7 +274,7 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
       versionNum: null, operation: null, version: 0, view: null, viewFor: -1, pending: false,
       previewError: null, lockTimeoutMs: DEFAULT_LOCK_TIMEOUT_MS, confirmed: false, applyId: null, startedAt: null,
       progress: null, progressStopped: false, cancelRequested: false, closeAsk: false, closing: false, result: null,
-      notice: null,
+      reloading: false, notice: null,
     });
     void loadTarget(false);
   };
@@ -295,7 +299,7 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
     const s = state();
     if (!s) return { ok: false, reason: "loading" };
     if (locked()) return { ok: false, reason: "locked" };
-    if (s.phase === "loading" || s.phase === "loadError") return { ok: false, reason: "loading" };
+    if (s.phase === "loading" || s.phase === "loadError" || s.reloading) return { ok: false, reason: "loading" };
     if (s.phase === "applying") return { ok: false, reason: "busy" };
     if (!s.target || !s.operation || opBlocked(s.operation.op, s.target) !== null) return { ok: false, reason: "unavailable" };
     if (s.pending) return { ok: false, reason: "pending" };
@@ -335,7 +339,8 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
       confirmedProduction: false, password: null,
     };
     const req = maintenanceRequest(s.object, s.target, s.operation);
-    const myGen = gen;
+    // Kuşak artar: bekleyen yeniden yükleme/önizleme yanıtları uygulama durumunu ezemez.
+    const myGen = ++gen;
     const startedAt = deps.now();
     stopPreview();
     patch({
@@ -360,7 +365,8 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
       }
       // Kilit reddi: kilit şeridi ve kapı canlı sunucu düğümünden okunur (ayrı bildirim yok).
       if (p.code === "locked") {
-        patch(base);
+        // Ağaç henüz kilidi göstermiyorsa (bayat) bilgi şeridi; gösteriyorsa yalnız canlı şerit.
+        patch({ ...base, notice: locked() ? null : tm.locked });
         schedulePreview(0);
         return;
       }
@@ -416,7 +422,7 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
 
   const editable = () => {
     const s = state();
-    return s !== null && s.phase === "ready" && s.target !== null;
+    return s !== null && s.phase === "ready" && !s.reloading && s.target !== null;
   };
   const selectOp = (name: OpName) => {
     const s = state();
@@ -458,6 +464,8 @@ export function createMaintenanceController(deps: MaintenanceControllerDeps) {
     gate,
     canApply,
     locked,
+    /** Seçenekler düzenlenebilir mi (hazır ve yeniden yüklenmiyor). */
+    editable,
     /** Sunulan işlemler ve kullanılamayanların gerekçesi. */
     ops: (): { name: OpName; reason: string | null }[] => {
       const s = state();

@@ -174,9 +174,12 @@ describe("maintenance-controller önizleme ve kapı", () => {
   it("locked reddi: ayrı bildirim yok, kilit canlı değerden; önizleme yenilenir", async () => {
     const s = setup();
     await ready(s);
-    s.api.ddlApply.mockRejectedValueOnce({ code: "locked", message: "x", detail: null, hint: null });
-    s.setInfo({ versionNum: 170000, locked: true });
+    s.api.ddlApply.mockImplementationOnce(async () => {
+      s.setInfo({ versionNum: 170000, locked: true });
+      throw { code: "locked", message: "x", detail: null, hint: null };
+    });
     await s.ctl.apply();
+    expect(s.api.ddlApply).toHaveBeenCalledTimes(1);
     await settle();
     const st = s.ctl.state()!;
     expect(st.phase).toBe("ready");
@@ -185,6 +188,16 @@ describe("maintenance-controller önizleme ve kapı", () => {
     expect(s.ctl.locked()).toBe(true);
     s.setInfo({ versionNum: 170000, locked: false });
     expect(s.ctl.canApply()).toBe(true);
+  });
+
+  it("locked reddi, ağaç bayatken (kilit görünmüyor): bilgi şeridi tm.locked", async () => {
+    const s = setup();
+    await ready(s);
+    s.api.ddlApply.mockRejectedValueOnce({ code: "locked", message: "x", detail: null, hint: null });
+    await s.ctl.apply();
+    expect(s.api.ddlApply).toHaveBeenCalledTimes(1);
+    expect(s.ctl.locked()).toBe(false);
+    expect(s.ctl.state()!.notice).toBe(tm.locked);
   });
 
   it("işlem değişimi varsayılan seçenekleri kurar ve önizler", async () => {
@@ -272,6 +285,40 @@ describe("maintenance-controller uygulama", () => {
     const last = s.api.ddlPreview.mock.calls.at(-1)![2];
     expect(last.op === "maintenance" && last.target).toEqual(fresh);
     expect(s.ctl.state()!.operation?.op).toBe("cluster");
+  });
+
+  it("yarış: başarı sonrası yeniden yükleme sürerken düzenleme ve ikinci uygulama engellenir", async () => {
+    const s = setup();
+    await ready(s);
+    const reload = deferred<MaintenanceTarget>();
+    s.api.ddlLoadMaintenanceTarget.mockReturnValueOnce(reload.promise);
+    await s.ctl.apply();
+    expect(s.ctl.state()!.result?.kind).toBe("applied");
+    expect(s.ctl.state()!.reloading).toBe(true);
+    expect(s.ctl.editable()).toBe(false);
+    s.ctl.setOptions({ verbose: true });
+    await settle();
+    expect(s.ctl.state()!.operation).toMatchObject({ op: "vacuum", verbose: false });
+    expect(s.ctl.gate()).toEqual({ ok: false, reason: "loading" });
+    await s.ctl.apply();
+    expect(s.api.ddlApply).toHaveBeenCalledTimes(1);
+    reload.resolve(target({ clusterIndex: "i1" }));
+    await settle();
+    const st = s.ctl.state()!;
+    expect(st.phase).toBe("ready");
+    expect(st.reloading).toBe(false);
+    expect(st.target?.clusterIndex).toBe("i1");
+    expect(s.ctl.canApply()).toBe(true);
+    // Şimdi ikinci uygulama sürerken eski bir yeniden yükleme aşamayı ezemez.
+    const d = deferred<ApplyOutcome>();
+    s.api.ddlApply.mockReturnValueOnce(d.promise);
+    void s.ctl.apply();
+    await flush();
+    expect(s.ctl.state()!.phase).toBe("applying");
+    d.resolve(applied());
+    await settle();
+    expect(s.api.ddlApply).toHaveBeenCalledTimes(2);
+    expect(s.ctl.state()!.phase).toBe("ready");
   });
 
   it("plan_changed reddi → hedef yeniden yüklenir ve bildirilir", async () => {
