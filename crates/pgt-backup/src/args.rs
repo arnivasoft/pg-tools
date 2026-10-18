@@ -143,6 +143,9 @@ pub struct Invocation {
     pub exe: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// Yürütücünün miras ortamdan kaldıracağı (PG* temizliğine ek) anahtarlar. `LC_ALL` `LC_MESSAGES=C`'yi
+    /// geçersiz kılar (ölçüldü: `LC_ALL=tr_TR.UTF-8` ile araç Türkçe yazar); `LANGUAGE` da gettext'i etkiler.
+    pub env_remove: Vec<String>,
     pub preview: String,
     pub risk: Risk,
     pub notes: Vec<String>,
@@ -206,7 +209,15 @@ fn check_jobs(jobs: Option<u8>) -> Option<&'static str> {
 }
 
 /// Ortak ortam (parolasız). `LC_MESSAGES=C`: istemci iletileri İngilizce olsun; satır sınıflandırma, ilerleme
-/// ve ipuçları bu iletilere dayanır (Windows'taki PostgreSQL araçları yerel dilde yazar).
+/// ve ipuçları bu iletilere dayanır (Windows'taki PostgreSQL araçları yerel dilde yazar). Miras `LC_ALL`
+/// bunu ezdiğinden `env_remove` ile kaldırılır.
+/// Miras ortamdan kaldırılacak yerel ayar anahtarları (bkz. `Invocation::env_remove`).
+pub const LOCALE_OVERRIDES: [&str; 2] = ["LC_ALL", "LANGUAGE"];
+
+fn env_remove() -> Vec<String> {
+    LOCALE_OVERRIDES.iter().map(|k| k.to_string()).collect()
+}
+
 fn base_env(conn: &Conn, database: &str, app: &str) -> Vec<(String, String)> {
     let mut env = vec![
         ("PGHOST".to_string(), conn.host.clone()),
@@ -231,7 +242,9 @@ fn base_env(conn: &Conn, database: &str, app: &str) -> Vec<(String, String)> {
 }
 
 /// Önizleme için tırnaklama: güvenli ASCII karakterler çıplak, diğerleri `"…"` içinde; denetim karakterleri
-/// kaçışlanır (önizleme tek satırdır). Yalnız gösterimdir; çalıştırmada kabuk kullanılmaz.
+/// kaçışlanır (önizleme tek satırdır). `"` öncesindeki (kapanış tırnağı dahil) ters bölüler Windows argv kuralıyla
+/// ikilenir (`"C:\dir\\"`), böylece kapanış tırnağı kaçışlı görünmez. Yalnız gösterimdir; çalıştırmada kabuk
+/// kullanılmaz.
 fn quote_preview(s: &str) -> String {
     let safe = |c: char| c.is_ascii_alphanumeric() || "-_=./:\\,+@%".contains(c);
     if !s.is_empty() && s.chars().all(safe) {
@@ -239,7 +252,17 @@ fn quote_preview(s: &str) -> String {
     }
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
+    let mut backslashes = 0usize;
     for c in s.chars() {
+        if c == '\\' {
+            backslashes += 1;
+            out.push(c);
+            continue;
+        }
+        if c == '"' {
+            out.push_str(&"\\".repeat(backslashes));
+        }
+        backslashes = 0;
         match c {
             '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
@@ -249,6 +272,7 @@ fn quote_preview(s: &str) -> String {
             c => out.push(c),
         }
     }
+    out.push_str(&"\\".repeat(backslashes));
     out.push('"');
     out
 }
@@ -333,7 +357,13 @@ pub fn backup_invocation(
             "--inserts ile --column-inserts birlikte seçilemez.",
         ));
     }
-    if o.if_exists && !o.clean {
+    // --if-exists -c gerektirir, -c yalnız plain: diğer formatlarda tek, net hata.
+    if o.if_exists && !plain {
+        errors.push(field(
+            "options.ifExists",
+            "--if-exists yalnız düz SQL (plain) formatında temizle (--clean) ile kullanılabilir.",
+        ));
+    } else if o.if_exists && !o.clean {
         errors.push(field(
             "options.ifExists",
             "--if-exists, temizle (--clean) seçeneğini gerektirir.",
@@ -445,6 +475,7 @@ pub fn backup_invocation(
         exe,
         args,
         env,
+        env_remove: env_remove(),
         risk: Risk::Safe,
         notes,
         output: Some(OutputPlan {
@@ -522,6 +553,7 @@ pub fn restore_invocation(
             exe,
             args,
             env,
+            env_remove: env_remove(),
             risk: Risk::DataLoss,
             notes,
             output: None,
@@ -656,6 +688,7 @@ pub fn restore_invocation(
         exe,
         args,
         env,
+        env_remove: env_remove(),
         risk: if o.clean || create {
             Risk::DataLoss
         } else {
@@ -1533,6 +1566,9 @@ mod tests {
         assert_eq!(get("PGCONNECT_TIMEOUT"), Some("15"));
         // Sınıflandırma ve ipuçları İngilizce iletilere dayanır (yerel Windows araçları Türkçe yazar).
         assert_eq!(get("LC_MESSAGES"), Some("C"));
+        // Miras LC_ALL, LC_MESSAGES=C'yi ezer: yürütücü bunları kaldırır (ortamda da yoklar).
+        assert_eq!(inv.env_remove, vec!["LC_ALL".to_string(), "LANGUAGE".to_string()]);
+        assert!(inv.env.iter().all(|(k, _)| !inv.env_remove.contains(k)));
         assert_eq!(get("PGSSLROOTCERT"), None);
         let r = restore_ok(
             &rreq(RestoreTarget::CreateFromArchive, Default::default()),
@@ -1579,6 +1615,29 @@ mod tests {
             .output
             .is_none()
         );
+    }
+
+    #[test]
+    fn preview_quoting_doubles_backslashes_before_quotes() {
+        assert_eq!(quote_preview(r"C:\a"), r"C:\a");
+        assert_eq!(quote_preview(r"C:\Yedek Klasörü\a"), r#""C:\Yedek Klasörü\a""#);
+        // Kapanış tırnağından önceki ters bölü ikilenir; iç `"` öncesindekiler de.
+        assert_eq!(quote_preview(r"C:\Yeni Klasör\"), r#""C:\Yeni Klasör\\""#);
+        assert_eq!(quote_preview(r#"a\"b c"#), r#""a\\\"b c""#);
+        assert_eq!(quote_preview(""), r#""""#);
+    }
+
+    #[test]
+    fn backup_if_exists_outside_plain_is_one_clear_error() {
+        let req = breq(
+            BackupScope::Database,
+            DumpFormat::Custom,
+            BackupOptions { if_exists: true, ..Default::default() },
+            "x",
+        );
+        let errs = backup_invocation(&tools(), &conn(), &req).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("yalnız düz SQL"), "{}", errs[0].message);
     }
 
     #[test]

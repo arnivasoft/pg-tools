@@ -38,8 +38,8 @@
   - Bağlantı Explorer'daki sunucu kaydının bağlantı bilgileriyle yapılır.
 - **Format:** `custom` (`-Fc`, varsayılan), `plain` (`-Fp`, .sql), `directory` (`-Fd`), `tar` (`-Ft`).
 - **Seçenekler:**
-  - Genel: yalnız şema (`-s`), yalnız veri (`-a`) (bu ikisi birbirini dışlar), sahiplik hariç (`-O`), yetkiler hariç (`-x`), `--if-exists`.
-  - Yalnız plain: `--clean` (`-c`), `--create` (`-C`; plain'de veritabanını oluşturur, diğer formatlarda arşive yazılır ve geri yüklemede kullanılır), `--inserts` / `--column-inserts` (birbirini dışlar).
+  - Genel: yalnız şema (`-s`), yalnız veri (`-a`) (bu ikisi birbirini dışlar), sahiplik hariç (`-O`), yetkiler hariç (`-x`).
+  - Yalnız plain: `--clean` (`-c`), `--if-exists` (`--clean` gerektirir; diğer formatlarda geri yüklemede verilir), `--create` (`-C`; plain'de veritabanını oluşturur, diğer formatlarda arşive yazılır ve geri yüklemede kullanılır), `--inserts` / `--column-inserts` (birbirini dışlar).
   - Sıkıştırma `-Z 0–9`: custom ve directory'de geçerli, plain'de isteğe bağlı (gzip ile .sql.gz), tar'da yok.
   - Paralel iş `-j 1–16`: yalnız directory.
   - Kodlama `-E`: isteğe bağlı, sunucu kodlama listesinden.

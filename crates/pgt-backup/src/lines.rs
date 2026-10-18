@@ -24,8 +24,9 @@ const DUMP_VERSION_HINT: &str = "Sunucu bu pg_dump'tan yeni: daha yeni bir pg_du
 const RESTORE_VERSION_HINT: &str = "Arşiv bu pg_restore'dan yeni bir pg_dump ile alınmış: daha yeni bir pg_restore \
      gerekir; Ayarlardan PostgreSQL bin klasörü seçin.";
 
-/// Sunucu iletisi önem sözcükleri (psql'in yazdığı `ERROR:  …`; Türkçe `lc_messages` karşılıklarıyla).
-const ERROR_TOKENS: [&str; 5] = ["ERROR:", "FATAL:", "PANIC:", "HATA:", "ÖLÜMCÜL:"];
+/// Sunucu iletisi önem sözcükleri (psql'in yazdığı `ERROR:  …`). Türkçe `lc_messages` karşılıkları sunucunun tr
+/// çevirisinden: ERROR → `HATA:`, FATAL → `ÖLÜMCÜL (FATAL):`, PANIC → `KRİTİK:`, WARNING → `UYARI:`.
+const ERROR_TOKENS: [&str; 6] = ["ERROR:", "FATAL:", "PANIC:", "HATA:", "ÖLÜMCÜL (FATAL):", "KRİTİK:"];
 const WARNING_TOKENS: [&str; 2] = ["WARNING:", "UYARI:"];
 
 /// Ayrıntılı (`--verbose`) bilgi satırlarının başları; bunlarda ad içindeki "ERROR:" önemi değiştirmez.
@@ -134,7 +135,9 @@ pub fn progress_tick(line: &str, kind: JobKind) -> bool {
 pub fn failure_hint(lines: &[String]) -> Option<&'static str> {
     let lower: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
     let any = |needles: &[&str]| lower.iter().any(|l| needles.iter().any(|n| l.contains(n)));
-    if any(&["password authentication failed", "no password supplied"]) {
+    // Sunucu tarafı iletisi sunucunun `lc_messages` dilindedir; tr: `"%s" kullanıcısı için şifre doğrulaması
+    // başarısız oldu`.
+    if any(&["password authentication failed", "no password supplied", "şifre doğrulaması başarısız"]) {
         Some(PASSWORD_HINT)
     } else if any(&["server version mismatch"]) {
         Some(DUMP_VERSION_HINT)
@@ -197,6 +200,11 @@ mod tests {
             ("ERROR:  permission denied", Error),
             ("WARNING:  x", Warning),
             ("psql:a.sql:2: HATA:  sözdizimi hatası", Error),
+            ("psql:a.sql:2: ÖLÜMCÜL (FATAL):  bağlantı sonlandırıldı", Error),
+            ("ÖLÜMCÜL (FATAL):  x", Error),
+            ("psql:a.sql:2: KRİTİK:  x", Error),
+            // Bilgi iletisindeki "ÖLÜMCÜL" sözcüğü tek başına önem değildir.
+            ("psql:a.sql:2: BİLGİ:  ÖLÜMCÜL değil", Info),
             ("psql:a.sql:2: UYARI:  x", Warning),
             // PG 10/11 araçları
             (
@@ -287,6 +295,13 @@ mod tests {
         ]))
         .unwrap();
         assert!(pw.contains("parola"), "{pw}");
+        // Türkçe lc_messages'lı sunucu.
+        assert_eq!(
+            failure_hint(&l(&[
+                "pg_dump: error: connection to server at \"h\", port 5432 failed: ÖLÜMCÜL (FATAL):  \"u\" kullanıcısı için şifre doğrulaması başarısız oldu"
+            ])),
+            Some(pw)
+        );
         assert_eq!(
             failure_hint(&l(&[
                 "pg_restore: error: connection to server failed: fe_sendauth: no password supplied"
