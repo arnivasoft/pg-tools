@@ -1,0 +1,30 @@
+---
+source: crates/pgt-backup/src/args.rs
+expression: "render(&restore_ok(&rreq(RestoreTarget::Existing, options),\nSourceFormat::Custom))"
+---
+exe: <BIN>/pg_restore
+args:
+  --verbose
+  --format=custom
+  --dbname
+  dbname='satis'
+  --clean
+  --if-exists
+  --no-owner
+  --exit-on-error
+  <DIR>/kaynak
+env:
+  PGHOST=db.local
+  PGPORT=5432
+  PGUSER=app user
+  PGDATABASE=satis
+  PGSSLMODE=prefer
+  PGAPPNAME=pg-tools restore
+  PGCONNECT_TIMEOUT=15
+  LC_MESSAGES=C
+preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE=satis PGSSLMODE=prefer PGAPPNAME="pg-tools restore" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_restore" --verbose --format=custom --dbname "dbname='satis'" --clean --if-exists --no-owner --exit-on-error "<DIR>/kaynak"
+risk: DataLoss
+notes:
+  - Arşivdeki nesneler hedefte varsa önce silinir.
+  - İş yarıda kalırsa veritabanı yarım kalabilir (tek transaction kapalı).
+output: -

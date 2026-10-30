@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod backup;
 mod commands;
 mod dash;
 mod data;
@@ -36,6 +37,8 @@ fn main() {
                 // Uçuştaki DDL uygulamasının sahibi (arayüz) gitti: iptal et (sunucu tarafı tx bağlantı düşünce geri alınır).
                 state.ddl.cancel_all();
                 state.data.cancel_all();
+                // Yedekleme/geri yükleme işlerinin sahibi gitti: çocuk süreçler sonlandırılır, geçici çıktı silinir.
+                state.backup.cancel_all();
                 tauri::async_runtime::spawn(async move { query::close_all_on_reload(&query).await });
             }
         })
@@ -123,6 +126,14 @@ fn main() {
             store_cmds::settings_get,
             store_cmds::settings_set_history,
             store_cmds::settings_set_editor,
+            store_cmds::settings_set_pg_bin_dir,
+            backup::backup_tools,
+            backup::backup_plan,
+            backup::backup_start,
+            backup::backup_cancel,
+            backup::restore_inspect,
+            backup::restore_plan,
+            backup::restore_start,
         ])
         .build(tauri::generate_context!())
         .expect("pg-tools başlatılamadı")
@@ -134,9 +145,11 @@ fn main() {
                 state.dash.close_all();
                 // Uçuştaki DDL iptalleri arka planda gönderilir; süreç bitmeden ulaşmaları için kısa bekleme.
                 let ddl_cancels = state.ddl.cancel_all() + state.data.cancel_all();
+                // Yedekleme işleri iptal edilir: yürütücü çocuğu sonlandırır ve geçici çıktıyı siler (kısa bekleme).
+                let backup_cancels = state.backup.cancel_all();
                 // Zaman aşımı geleceği çalışma zamanı İÇİNDE kurulmalı: dışarıda `tokio::time::timeout` "no reactor running" ile panikler.
                 tauri::async_runtime::block_on(async move {
-                    if ddl_cancels > 0 {
+                    if ddl_cancels > 0 || backup_cancels > 0 {
                         tokio::time::sleep(Duration::from_millis(500)).await;
                     }
                     let _ = tokio::time::timeout(Duration::from_secs(7), query.close_all()).await;

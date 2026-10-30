@@ -9,4 +9,8 @@ checkEnabled: boolean,
 /**
  * Biçimlendirici seçenekleri (tasarım §5.1); eski dosyalarda yok → varsayılanlar.
  */
-format: FormatOptions, };
+format: FormatOptions, 
+/**
+ * Yedekleme araçları için kullanıcının seçtiği PostgreSQL bin klasörü; eski dosyalarda yok → `None`.
+ */
+pgBinDir: string | null, };

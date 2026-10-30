@@ -1,0 +1,29 @@
+---
+source: crates/pgt-backup/src/args.rs
+expression: render(&inv)
+---
+exe: <BIN>/pg_dump
+args:
+  --verbose
+  --format=tar
+  --file
+  <DIR>/a.tar.pgt-partial
+  --schema-only
+  --create
+env:
+  PGHOST=db.local
+  PGPORT=5432
+  PGUSER=app user
+  PGDATABASE=satis
+  PGSSLMODE=verify-full
+  PGSSLROOTCERT=<DIR>/root.crt
+  PGSSLCERT=<DIR>/client.crt
+  PGSSLKEY=<DIR>/client.key
+  PGAPPNAME=pg-tools backup
+  PGCONNECT_TIMEOUT=15
+  LC_MESSAGES=C
+preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE=satis PGSSLMODE=verify-full PGSSLROOTCERT="<DIR>/root.crt" PGSSLCERT="<DIR>/client.crt" PGSSLKEY="<DIR>/client.key" PGAPPNAME="pg-tools backup" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/pg_dump" --verbose --format=tar --file "<DIR>/a.tar.pgt-partial" --schema-only --create
+risk: Safe
+notes:
+  - --create arşive yazılır; geri yüklemede "arşivdeki adla oluştur" hedefiyle kullanılır.
+output: final=<DIR>/a.tar partial=<DIR>/a.tar.pgt-partial dir=false

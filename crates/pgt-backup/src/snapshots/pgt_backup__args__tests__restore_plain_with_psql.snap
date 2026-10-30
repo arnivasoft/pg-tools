@@ -1,0 +1,30 @@
+---
+source: crates/pgt-backup/src/args.rs
+expression: render(&inv)
+---
+exe: <BIN>/psql
+args:
+  --no-psqlrc
+  --set
+  ON_ERROR_STOP=1
+  --single-transaction
+  --file
+  <DIR>/kaynak
+env:
+  PGHOST=db.local
+  PGPORT=5432
+  PGUSER=app user
+  PGDATABASE=satis
+  PGSSLMODE=verify-full
+  PGSSLROOTCERT=<DIR>/root.crt
+  PGSSLCERT=<DIR>/client.crt
+  PGSSLKEY=<DIR>/client.key
+  PGAPPNAME=pg-tools restore
+  PGCONNECT_TIMEOUT=15
+  LC_MESSAGES=C
+preview: PGHOST=db.local PGPORT=5432 PGUSER="app user" PGDATABASE=satis PGSSLMODE=verify-full PGSSLROOTCERT="<DIR>/root.crt" PGSSLCERT="<DIR>/client.crt" PGSSLKEY="<DIR>/client.key" PGAPPNAME="pg-tools restore" PGCONNECT_TIMEOUT=15 LC_MESSAGES=C PGPASSWORD=*** "<BIN>/psql" --no-psqlrc --set ON_ERROR_STOP=1 --single-transaction --file "<DIR>/kaynak"
+risk: DataLoss
+notes:
+  - Düz SQL psql ile çalıştırılır; içerik taranmaz ve ilk hatada durulur.
+  - Düz SQL dosyası psql meta komutları (\!, \connect, \copy … program) çalıştırabilir; yalnız güvendiğiniz dosyaları yükleyin.
+output: -
