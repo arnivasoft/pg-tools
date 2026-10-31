@@ -77,16 +77,16 @@ describe("qualifiedParts / actionsFor", () => {
   });
   it("menu per node kind", () => {
     expect(actionsFor(s, node(s, "srv-down"))).toEqual(["openQueryTool", "connect", "editServer", "deleteServer", "copyName"]);
-    expect(actionsFor(s, node(s, "srv-up"))).toEqual(["openQueryTool", "openDashboard", "refresh", "disconnect", "editServer", "deleteServer", "copyName"]);
+    expect(actionsFor(s, node(s, "srv-up"))).toEqual(["openQueryTool", "openDashboard", "refresh", "disconnect", "restore", "editServer", "deleteServer", "copyName"]);
     expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["createObject", "refresh", "copyName"]);
-    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "openData", "editObject", "renameObject", "privilegesObject", "maintenance", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "openData", "editObject", "renameObject", "privilegesObject", "maintenance", "backup", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "col-id"))).toEqual(["editObject", "copyName", "copyQualifiedName", "copyDdl"]);
     expect(actionsFor(s, node(s, "con-1"))).toEqual(["editObject", "copyName", "copyDdl"]);
   });
   it("Dashboard: bağlı sunucuda ve veritabanında var, bağlı olmayan sunucuda ve diğer düğümlerde yok", () => {
     expect(actionsFor(s, node(s, "srv-up"))).toContain("openDashboard");
     expect(actionsFor(s, node(s, "db-app"))).toEqual([
-      "openQueryTool", "openDashboard", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "dropObject",
+      "openQueryTool", "openDashboard", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "restore", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
     expect(actionsFor(s, node(s, "srv-down"))).not.toContain("openDashboard");
@@ -251,7 +251,7 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
   });
   it("nesnelerde editObject/renameObject/dropObject, Query Tool eylemlerinden sonra", () => {
     expect(actionsFor(s, node(s, "sch-app"))).toEqual([
-      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "dropObject",
+      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
     expect(actionsFor(s, node(s, "idx-1"))).toEqual(["editObject", "renameObject", "maintenance", "dropObject", "copyName", "copyQualifiedName", "copyDdl"]);
@@ -449,7 +449,7 @@ describe("yetki eylemleri (Yetkiler… / Varsayılan yetkiler…)", () => {
       expect(des(id)).toEqual(["editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject"]);
     }
     expect(actionsFor(s, node(s, "sch-app"))).toEqual([
-      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "dropObject",
+      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
   });
@@ -533,5 +533,80 @@ describe("yetki eylemleri (Yetkiler… / Varsayılan yetkiler…)", () => {
   it("menü metinleri ana t.menu'de", () => {
     expect(t.menu.privilegesObject).toBe("Yetkiler…");
     expect(t.menu.defaultPrivilegesObject).toBe("Varsayılan yetkiler…");
+  });
+});
+
+describe("Yedekle… / Geri yükle… (Plan 27)", () => {
+  const s = (() => {
+    const tree = sampleTree();
+    const add = (id: string, parent: string, kind: NodeKind, label: string, extra: Partial<TreeNode> = {}) => {
+      tree.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, color: null, tag: null, ...extra });
+      tree.parent.set(id, parent);
+      tree.children.set(parent, [...(tree.children.get(parent) ?? []), id]);
+    };
+    add("coll-seq", "sch-app", "sequenceCollection", "Sequences", { hasChildren: true });
+    add("seq-1", "coll-seq", "sequence", "s");
+    add("coll-views", "sch-app", "viewCollection", "Views", { hasChildren: true });
+    add("view-1", "coll-views", "view", "v");
+    add("coll-mvs", "sch-app", "materializedViewCollection", "MVs", { hasChildren: true });
+    add("mv-1", "coll-mvs", "materializedView", "m");
+    add("coll-proc", "sch-app", "procedureCollection", "Procedures", { hasChildren: true });
+    add("proc-1", "coll-proc", "procedure", "p(integer)");
+    add("coll-roles", "srv-up", "roleCollection", "Roles", { hasChildren: true });
+    add("role-1", "coll-roles", "role", "app_user");
+    add("sch-sys", "db-app", "schema", "pg_catalog", { flags: { ...flags, system: true } });
+    return tree;
+  })();
+  const all = (id: string) => actionsFor(s, node(s, id));
+
+  it("backup beş türde var", () => {
+    for (const id of ["db-app", "sch-app", "tbl-orders", "mv-1", "seq-1"]) expect(all(id), id).toContain("backup");
+  });
+  it("backup koleksiyon, index, view, function, role, column, sistem şeması ve bölüm tablosunda yok", () => {
+    for (const id of ["coll-tables", "coll-cols", "coll-part", "coll-fn", "idx-1", "view-1", "fn-fmt-int", "proc-1", "role-1", "col-id", "sch-sys", "tbl-partition", "srv-up", "srv-down"]) {
+      expect(all(id), id).not.toContain("backup");
+    }
+  });
+  it("restore veritabanında ve bağlı sunucuda var; bağlı olmayan sunucuda ve şemada yok", () => {
+    expect(all("db-app")).toContain("restore");
+    expect(all("srv-up")).toContain("restore");
+    expect(all("srv-down")).not.toContain("restore");
+    expect(all("sch-app")).not.toContain("restore");
+    expect(all("tbl-orders")).not.toContain("restore");
+  });
+  it("sıra: maintenance, backup, restore, dropObject; bağlı sunucuda disconnect, restore, editServer", () => {
+    expect(all("db-app").filter((x) => ["maintenance", "backup", "restore", "dropObject"].includes(x))).toEqual(["maintenance", "backup", "restore", "dropObject"]);
+    expect(all("sch-app").filter((x) => ["maintenance", "backup", "restore", "dropObject"].includes(x))).toEqual(["maintenance", "backup", "dropObject"]);
+    expect(all("srv-up")).toEqual(["openQueryTool", "openDashboard", "refresh", "disconnect", "restore", "editServer", "deleteServer", "copyName"]);
+  });
+  it("grup 3; adları Object ile bitmez", () => {
+    expect(groupOf("backup")).toBe(3);
+    expect(groupOf("restore")).toBe(3);
+    expect("backup".endsWith("Object") || "restore".endsWith("Object")).toBe(false);
+  });
+  it("kilitli sunucuda restore kapalı (gerekçeli), backup açık", () => {
+    const locked = sampleTree();
+    const srv = locked.nodes.get("srv-up")!;
+    locked.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
+    const d = { state: () => locked } as unknown as ActionDeps;
+    expect(disabledReason("restore", d, "db-app")).toBe(t.query.hint.locked);
+    expect(disabledReason("backup", d, "db-app")).toBeNull();
+    expect(disabledReason("restore", { state: () => s } as unknown as ActionDeps, "db-app")).toBeNull();
+    expect(disabledReason("restore", { serverLocked: () => true } as unknown as ActionDeps, "srv-up")).toBe(t.query.hint.locked);
+  });
+  it("executeAction openBackup(id, kip) çağırır; kilitte restore çağrılmaz", async () => {
+    const d = { ...deps(s), openBackup: vi.fn(), serverLocked: vi.fn(() => false) };
+    await executeAction(d as unknown as ActionDeps, "backup", "tbl-orders");
+    await executeAction(d as unknown as ActionDeps, "restore", "db-app");
+    expect(d.openBackup.mock.calls).toEqual([["tbl-orders", "backup"], ["db-app", "restore"]]);
+    const l = { ...deps(s), openBackup: vi.fn(), serverLocked: vi.fn(() => true) };
+    await executeAction(l as unknown as ActionDeps, "restore", "db-app");
+    expect(l.openBackup).not.toHaveBeenCalled();
+    await executeAction(l as unknown as ActionDeps, "backup", "db-app");
+    expect(l.openBackup.mock.calls).toEqual([["db-app", "backup"]]);
+  });
+  it("menü metinleri ana t.menu'de", () => {
+    expect(t.menu.backup).toBe("Yedekle…");
+    expect(t.menu.restore).toBe("Geri yükle…");
   });
 });

@@ -60,6 +60,8 @@ export const t = {
     privilegesObject: "Yetkiler…",
     defaultPrivilegesObject: "Varsayılan yetkiler…",
     maintenance: "Bakım…",
+    backup: "Yedekle…",
+    restore: "Geri yükle…",
     dropObject: "Sil…",
     gone: "Bu öğe artık yok.",
     disconnected: "Bağlantı kesildi.",

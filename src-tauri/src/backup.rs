@@ -461,6 +461,44 @@ pub async fn backup_cancel(state: State<'_, AppState>, job_id: Uuid) -> CmdResul
     Ok(())
 }
 
+/// "Klasörü göster" için Gezgin bağımsız değişkeni: `/select,"<yol>"` (saf; yol günlüğe yazılmaz).
+/// Tırnak ve denetim karakteri reddedilir; Windows'ta yol mutlak olmalıdır.
+pub fn reveal_arg(path: &str) -> Result<String, &'static str> {
+    if path.chars().any(|c| c == '"' || c.is_control()) {
+        return Err("Yol geçersiz karakter içeriyor.");
+    }
+    #[cfg(windows)]
+    if !std::path::Path::new(path).is_absolute() {
+        return Err("Tam (mutlak) yol gerekir.");
+    }
+    Ok(format!("/select,\"{path}\""))
+}
+
+/// Dosyayı (ya da klasörü) Windows Gezgini'nde seçili gösterir; Gezgin beklenmez. `/select` yalnız seçer, çalıştırmaz.
+#[tauri::command]
+pub fn backup_reveal(path: String) -> CmdResult<()> {
+    let arg = reveal_arg(&path).map_err(|m| payload("invalid", m, None))?;
+    if !std::path::Path::new(&path).exists() {
+        return Err(payload("not_found", "Dosya ya da klasör bulunamadı.", None));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let exe = std::path::Path::new(&root).join("explorer.exe");
+        std::process::Command::new(exe)
+            .raw_arg(arg)
+            .spawn()
+            .map(drop)
+            .map_err(|_| payload("invalid", "Gezgin başlatılamadı.", None))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = arg;
+        Err(payload("invalid", "Bu işlem yalnız Windows'ta desteklenir.", None))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,5 +583,16 @@ mod tests {
         let p = errors_payload(&[FieldError { path: "options.jobs".into(), message: "m".into() }]);
         assert_eq!((p.code.as_str(), p.message.as_str(), p.detail.as_deref()), ("invalid_request", "m", Some("options.jobs")));
         assert_eq!(register_payload(RegisterError::SameTarget).code, "busy");
+    }
+
+    #[test]
+    fn reveal_arg_quotes_absolute_paths_and_rejects_bad_ones() {
+        #[cfg(windows)]
+        {
+            assert_eq!(reveal_arg("C:\\Yedek\\ş ı.backup"), Ok("/select,\"C:\\Yedek\\ş ı.backup\"".to_string()));
+            assert_eq!(reveal_arg("yedek\\a.backup"), Err("Tam (mutlak) yol gerekir."));
+        }
+        assert_eq!(reveal_arg("C:\\x\"y"), Err("Yol geçersiz karakter içeriyor."));
+        assert_eq!(reveal_arg("C:\\x\ny"), Err("Yol geçersiz karakter içeriyor."));
     }
 }
