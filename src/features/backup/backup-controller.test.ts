@@ -456,6 +456,22 @@ describe("yedek denetleyicisi: başlatma ve olaylar", () => {
     expect(s.refreshNode).not.toHaveBeenCalled();
   });
 
+  it("başarılı yedekten sonra yol temizlenir, sürüm artar ve plan yenilenir", async () => {
+    const s = setup();
+    const { ctl, p } = await started(s);
+    const v = ctl.state()!.version;
+    s.api.backupPlan.mockClear();
+    s.jobs[0]!.onEvent(finished("success"));
+    expect(ctl.state()!.outputPath).toBe("");
+    expect(ctl.state()!.version).toBe(v + 1);
+    expect(ctl.state()!.pending).toBe(true);
+    await settle();
+    expect(s.api.backupPlan).toHaveBeenCalledTimes(1);
+    expect(lastBackupReq(s).outputPath).toBe("");
+    s.jobs[0]!.result.resolve(summary("success"));
+    await p;
+  });
+
   it("sonuç start dönüşünden gelirse de kurulur (finished olayı gelmeden)", async () => {
     const s = setup();
     const { ctl, p } = await started(s);
@@ -948,9 +964,9 @@ describe("geri yükleme denetleyicisi: hedef ve plan", () => {
   it("hedef değişince de onay sıfırlanır; setConfirm sürümü artırmaz", async () => {
     const s = setup();
     const ctl = await withSource(s);
-    ctl.setConfirm({ checked: true });
     const v = ctl.state()!.version;
-    expect(v).toBe(ctl.state()!.version);
+    ctl.setConfirm({ checked: true });
+    expect(ctl.state()!.version).toBe(v);
     ctl.setTarget("create_from_archive");
     expect(ctl.state()!.confirm.checked).toBe(false);
   });
@@ -1167,6 +1183,52 @@ describe("geri yükleme denetleyicisi: onay, başlatma, kilit", () => {
     await p;
     expect(ctl.state()!.startError).toContain(tb.passwordAdvice);
     expect(ctl.state()!.phase).toBe("ready");
+  });
+});
+
+describe("geri yükleme denetleyicisi: bayat onay ve yarışlar", () => {
+  it("plan beklerken verilen onay yok sayılır; yeni plan data_loss ise onay yeniden istenir", async () => {
+    const s = setup();
+    const ctl = await withSource(s);
+    s.api.restorePlan.mockResolvedValue(plan("pg_restore PGPASSWORD=***", "data_loss"));
+    ctl.setOption("clean", true);
+    expect(ctl.state()!.pending).toBe(true);
+    ctl.setConfirm({ checked: true, typedName: "Ana" });
+    expect(ctl.state()!.confirm).toEqual({ checked: false, typedName: "" });
+    await settle();
+    expect(ctl.state()!.plan!.risk).toBe("data_loss");
+    expect(ctl.gate()).toEqual({ kind: "needsConfirm" });
+    await ctl.start();
+    expect(s.api.restoreStart).not.toHaveBeenCalled();
+  });
+
+  it("uçuştaki plan sürerken (pending) onay kabul edilmez", async () => {
+    const s = setup();
+    const ctl = await withSource(s);
+    const a = deferred<JobPlan>();
+    s.api.restorePlan.mockReturnValueOnce(a.promise);
+    ctl.setOption("noOwner", true);
+    await settle();
+    ctl.setConfirm({ checked: true });
+    expect(ctl.state()!.confirm.checked).toBe(false);
+    a.resolve(plan("pg_restore PGPASSWORD=***", "destructive"));
+    await flush();
+    expect(ctl.state()!.confirm.checked).toBe(false);
+    ctl.setConfirm({ checked: true });
+    expect(ctl.state()!.confirm.checked).toBe(true);
+  });
+
+  it("setTargetDb eşzamanlı çağrılarda son seçim kazanır", async () => {
+    const s = setup();
+    const ctl = await withSource(s, "srv");
+    const a = deferred<DdlTarget>();
+    s.api.ddlTargetOf.mockReturnValueOnce(a.promise);
+    const p1 = ctl.setTargetDb("db1");
+    await ctl.setTargetDb("db2");
+    a.resolve(ddlTarget(5));
+    await p1;
+    expect(ctl.state()!.databaseOid).toBe(8);
+    expect(ctl.state()!.dbNodeId).toBe("db2");
   });
 });
 

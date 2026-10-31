@@ -225,7 +225,7 @@ function createCore<S extends Common>(deps: BackupControllerDeps, mode: Mode<S>)
       return;
     }
     if (stale()) return;
-    patch({ plan, planFor: version, pending: false, planError: null } as Partial<S>);
+    patch({ plan, planFor: version, pending: false, planError: null, ...(mode.onBump?.() ?? {}) } as Partial<S>);
   };
   const schedulePlan = (delay = PLAN_DELAY_MS) => {
     stopPlan();
@@ -379,6 +379,7 @@ function createCore<S extends Common>(deps: BackupControllerDeps, mode: Mode<S>)
     launch: (jobId: string, onEvent: (e: BackupEvent) => void) => Promise<JobSummary>,
     side: (summary: JobSummary) => void,
     settled: (summary: JobSummary) => Partial<S>,
+    after?: () => void,
   ): Promise<void> => {
     const jobId = deps.newId();
     const g = gen;
@@ -401,6 +402,7 @@ function createCore<S extends Common>(deps: BackupControllerDeps, mode: Mode<S>)
       if (cur.closing) return finishClose();
       const log = cur.log.summary === null ? ({ ...cur.log, summary } as JobLog) : cur.log;
       patch({ phase: "ready", closeAsk: false, log, ...settled(summary) } as Partial<S>);
+      after?.();
     };
     const onEvent = (ev: BackupEvent) => {
       if (done || g !== gen) return;
@@ -546,6 +548,10 @@ export function createBackupController(deps: BackupControllerDeps) {
       (jobId, onEvent) => api.backupStart(serverId, oid, req, jobId, onEvent),
       () => {},
       (summary) => (summary.outcome === "success" ? { outputPath: "" } : {}),
+      // Yol temizlenince plan eski yolu göstermesin: sürüm artar, plan yenilenir.
+      () => {
+        if (raw()?.outputPath === "") core.bump();
+      },
     );
   };
 
@@ -600,6 +606,7 @@ export function createRestoreController(deps: BackupControllerDeps) {
   });
   const { raw, patch } = core;
   let inspectToken = 0;
+  let targetToken = 0;
 
   /** Kilit canlı ağaçtaki sunucu düğümünden okunur (bakım diyaloğuyla aynı tek kaynak). */
   const liveLocked = (s: RestoreState): boolean => serverNodeOf(deps.tree(), s.nodeId)?.flags.locked ?? false;
@@ -702,9 +709,10 @@ export function createRestoreController(deps: BackupControllerDeps) {
   const setTargetDb = async (nodeId: string): Promise<void> => {
     if (!core.editable()) return;
     const g = core.gen();
+    const mine = ++targetToken;
     try {
       const t = await api.ddlTargetOf(nodeId);
-      if (!core.isCurrent(g) || !core.editable()) return;
+      if (!core.isCurrent(g) || !core.editable() || mine !== targetToken) return;
       const oid = t.databaseOid ?? (t.object?.kind === "database" ? t.object.oid : null);
       if (oid === null) {
         patch({ planError: tb.loadFailed });
@@ -712,7 +720,7 @@ export function createRestoreController(deps: BackupControllerDeps) {
       }
       core.bump({ databaseOid: oid, dbNodeId: nodeId });
     } catch (err) {
-      if (core.isCurrent(g)) patch({ planError: errorText(toPayload(err)) });
+      if (core.isCurrent(g) && mine === targetToken) patch({ planError: errorText(toPayload(err)) });
     }
   };
 
@@ -724,7 +732,8 @@ export function createRestoreController(deps: BackupControllerDeps) {
 
   const setConfirm = (c: Partial<{ checked: boolean; typedName: string }>) => {
     const s = raw();
-    if (!s || s.phase === "running") return;
+    // Bayat ya da bekleyen planın üzerine onay verilemez: yeni plan gelince sıfırlanırdı / yanlış riske taşınırdı.
+    if (!s || s.phase === "running" || s.pending || s.planFor !== s.version) return;
     patch({ confirm: { ...s.confirm, ...c } });
   };
 
