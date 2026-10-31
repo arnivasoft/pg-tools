@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { t } from "../../app/strings";
+import { thint } from "./strings-hint";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import { hintFor, isQueryErrorCode } from "./errors";
 
@@ -17,14 +18,14 @@ describe("isQueryErrorCode", () => {
 
 describe("hintFor", () => {
   it("kod tabanlı", () => {
-    expect(hintFor(p("tx_failed"))).toBe(t.query.hint.rollback);
-    expect(hintFor(p("session_reset"))).toBe(t.query.hint.sessionReset);
+    expect(hintFor(p("tx_failed"))).toBe(thint.rollback);
+    expect(hintFor(p("session_reset"))).toBe(thint.sessionReset);
     expect(hintFor(p("locked"))).toBe(t.query.hint.locked);
   });
   it("25001 ileti/ayrıntıdan", () => {
-    expect(hintFor(p("query", "VACUUM cannot run inside a transaction block"))).toBe(t.query.hint.autocommit);
-    expect(hintFor(p("query", "x", "CREATE DATABASE CANNOT RUN INSIDE A TRANSACTION BLOCK"))).toBe(t.query.hint.autocommit);
-    expect(hintFor(p("query", "x", "SQLSTATE 25001"))).toBe(t.query.hint.autocommit);
+    expect(hintFor(p("query", "VACUUM cannot run inside a transaction block"))).toBe(thint.autocommit);
+    expect(hintFor(p("query", "x", "CREATE DATABASE CANNOT RUN INSIDE A TRANSACTION BLOCK"))).toBe(thint.autocommit);
+    expect(hintFor(p("query", "x", "SQLSTATE 25001"))).toBe(thint.autocommit);
   });
   it("ilgisiz", () => {
     expect(hintFor(p("query", "syntax error"))).toBeNull();

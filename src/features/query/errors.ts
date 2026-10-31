@@ -1,4 +1,5 @@
 import { t } from "../../app/strings";
+import { thint } from "./strings-hint";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { QueryErrorCode } from "../../ipc/bindings/QueryErrorCode";
 
@@ -24,11 +25,11 @@ export function isQueryErrorCode(code: string): code is QueryErrorCode {
 const NO_TX = /cannot run inside a transaction block|\b25001\b/i;
 
 export function hintFor(payload: ErrorPayload): string | null {
-  if (payload.code === "tx_failed") return t.query.hint.rollback;
-  if (payload.code === "session_reset") return t.query.hint.sessionReset;
+  if (payload.code === "tx_failed") return thint.rollback;
+  if (payload.code === "session_reset") return thint.sessionReset;
   if (payload.code === "locked") return t.query.hint.locked;
   if (payload.code === "query" && (NO_TX.test(payload.message) || NO_TX.test(payload.detail ?? ""))) {
-    return t.query.hint.autocommit;
+    return thint.autocommit;
   }
   return null;
 }

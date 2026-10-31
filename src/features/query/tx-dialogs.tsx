@@ -1,7 +1,7 @@
 // Işlem kapatma / toplu işlem / ortam diyalogları (Kobalte Dialog çeker): ana pakette statik içe aktarılmaz,
 // ilk gerekli olduğunda `loadTxDialogs` ile tembel iner.
 import { For, Show, createSignal } from "solid-js";
-import { t } from "../../app/strings";
+import { ttx } from "./strings-tx";
 import { tenv } from "./strings-env";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
@@ -11,7 +11,7 @@ import { dialogStrings } from "../../ui/dialog-strings";
 
 export function CloseTxDialog(props: { ctl: QueryController }) {
   const g = props.ctl.closeGate;
-  const c = t.query.close;
+  const c = ttx.close;
   let cancelEl: HTMLButtonElement | undefined;
   return (
     <Dialog
@@ -51,7 +51,7 @@ export function CloseTxDialog(props: { ctl: QueryController }) {
 
 export function BulkTxDialog(props: { ctl: QueryController }) {
   const g = props.ctl.bulkGate;
-  const b = t.query.bulk;
+  const b = ttx.bulk;
   let cancelEl: HTMLButtonElement | undefined;
   const list = () => g.request()?.list ?? [];
   return (
