@@ -288,7 +288,13 @@ pub(crate) fn explain_gates(
 ) -> Result<(String, Planned)> {
     let ranges = scope_ranges(sql, scope)?;
     let [range] = ranges.as_slice() else { return Err(ExplainError::Scope.into()) };
-    let text = explain_sql(&sql[range.clone()], opts, version_num)?;
+    // Baştaki yorum (pg_hint_plan ipucu) ifadeyle birlikte gider; seçimde yalnız seçili kısımdan.
+    let floor = match scope {
+        Scope::Selection { start, .. } => byte_at_char(sql, start),
+        _ => 0,
+    };
+    let start = crate::explain::leading_comments_start(sql, floor, range.start);
+    let text = explain_sql(&sql[start..range.end], opts, version_num)?;
     let mut planned = plan_script(&text, Scope::All, guard)?;
     if planned.len() != 1 {
         return Err(ExplainError::Scope.into());
@@ -2208,6 +2214,17 @@ mod tests {
         let (text, _) = explain_gate("select 1 -- son\n;", Scope::Selection { start: 0, end: 17 }, plain, PLAIN, true).unwrap();
         assert_eq!(text, "EXPLAIN (FORMAT JSON, SUMMARY) select 1");
         assert_eq!(msg(explain_gate("explain select 1", Scope::All, plain, PLAIN, true)), ExplainError::AlreadyExplain.message());
+        // Baştaki yorum (ipucu) korunur; kapılar sarmalanmış metinde yine doğru sınıflar.
+        let (text, _) = explain_gate("/*+ SeqScan(t) */ select * from t;", Scope::All, plain, PLAIN, true).unwrap();
+        assert_eq!(text, "EXPLAIN (FORMAT JSON, SUMMARY) /*+ SeqScan(t) */ select * from t");
+        let (text, _) = explain_gate("select 1; /*+ x */ select 2", Scope::AtCursor { offset: 25 }, plain, PLAIN, true).unwrap();
+        assert_eq!(text, "EXPLAIN (FORMAT JSON, SUMMARY) /*+ x */ select 2");
+        let (text, _) = explain_gate("/*+ x */ select 2", Scope::Selection { start: 9, end: 17 }, plain, PLAIN, true).unwrap();
+        assert_eq!(text, "EXPLAIN (FORMAT JSON, SUMMARY) select 2");
+        assert_eq!(msg(explain_gate("/* x */ delete from t", Scope::All, analyze, PLAIN, false)), CONFIRMATION_REQUIRED);
+        assert_eq!(explain_gate("/* x */ delete from t", Scope::All, analyze, PLAIN, true).unwrap().1.plan.kind, StmtKind::Write);
+        assert_eq!(msg(explain_gate("-- x\nupdate t set a = 1", Scope::All, analyze, LOCKED, true)), LOCKED_WRITE_MESSAGE);
+        assert_eq!(msg(explain_gate("/* x */ explain select 1", Scope::All, plain, PLAIN, true)), ExplainError::AlreadyExplain.message());
         assert_eq!(msg(explain_gate("vacuum t", Scope::All, plain, PLAIN, true)), ExplainError::Unsupported.message());
     }
 

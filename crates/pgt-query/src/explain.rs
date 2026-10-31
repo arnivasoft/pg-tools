@@ -184,14 +184,25 @@ pub fn explainable(stmt: &str, version_num: u32) -> Result<(), ExplainError> {
     }
 }
 
-/// İfadenin sarmalanacak çekirdeği: tam bir ifade olmalı; baştaki ve sondaki yorumlar, boşluklar ve `;` atılır
-/// (aradakiler olduğu gibi kalır).
+/// `sql[floor..start]` içinde `start`'tan hemen önce gelen (aralarında başka belirteç olmayan) yorumların başı;
+/// yorum yoksa `start`. İfadenin baştaki yorumu (ör. pg_hint_plan ipucu `/*+ … */`) ifadeye aittir.
+pub(crate) fn leading_comments_start(sql: &str, floor: usize, start: usize) -> usize {
+    lex(&sql[floor..start])
+        .iter()
+        .rev()
+        .take_while(|t| t.kind == Kind::Comment)
+        .last()
+        .map_or(start, |t| floor + t.start)
+}
+
+/// İfadenin sarmalanacak çekirdeği: tam bir ifade olmalı; baştaki yorumlar (ipuçları) aynen kalır, baştaki
+/// boşluklar ile sondaki yorumlar, boşluklar ve `;` atılır (aradakiler olduğu gibi kalır).
 fn core(stmt: &str) -> Result<&str, ExplainError> {
     let parts = split(stmt);
     let [one] = parts.as_slice() else { return Err(ExplainError::Scope) };
     let toks = tokens(&stmt[one.start..one.end]);
     let last = toks.last().ok_or(ExplainError::Scope)?;
-    Ok(&stmt[one.start..one.start + last.end])
+    Ok(&stmt[leading_comments_start(stmt, 0, one.start)..one.start + last.end])
 }
 
 /// `EXPLAIN (FORMAT JSON, …) <ifade>` metni. Sürüm altı ya da ANALYZE'sız kullanılamayan seçenek doğrulama
@@ -373,11 +384,13 @@ mod tests {
     }
 
     #[test]
-    fn trailing_semicolon_and_comments_are_trimmed() {
+    fn leading_comments_kept_trailing_semicolon_and_comments_trimmed() {
         for (sql, want) in [
             ("select 1;", "select 1"),
             ("select 1 ; -- son", "select 1"),
-            ("-- baş\n/* c */ select 1 -- son\n", "select 1"),
+            ("-- baş\n/* c */ select 1 -- son\n", "-- baş\n/* c */ select 1"),
+            ("  /*+ IndexScan(t) */ select * from t;", "/*+ IndexScan(t) */ select * from t"),
+            ("/* a */ ; /* b */ select 1", "/* b */ select 1"),
             ("select 1 /* son */", "select 1"),
             ("select a -- ara\n  from t;\n", "select a -- ara\n  from t"),
             ("select ';' as x;", "select ';' as x"),
@@ -426,6 +439,15 @@ mod tests {
             assert_eq!(analyze(&sql).kind, kind, "{sql}");
         }
         assert!(analyze(&explain_sql("delete from t", &a, V17).unwrap()).danger.is_some());
+        // Baştaki yorum (ipucu) sınıflandırmayı şaşırtmaz.
+        let hinted = explain_sql("/* x */ delete from t", &a, V17).unwrap();
+        assert_eq!(hinted, "EXPLAIN (FORMAT JSON, ANALYZE) /* x */ delete from t");
+        assert_eq!(analyze(&hinted).kind, StmtKind::Write);
+        assert!(analyze(&hinted).danger.is_some());
+        assert_eq!(analyze(&explain_sql("-- x\ndelete from t", &opts(), V17).unwrap()).kind, StmtKind::Select);
+        // "Zaten EXPLAIN" ve uygunluk baştaki yorumun ötesine bakar.
+        assert_eq!(explain_sql("/*+ x */ explain select 1", &opts(), V17), Err(ExplainError::AlreadyExplain));
+        assert_eq!(explain_sql("-- x\nvacuum t", &opts(), V17), Err(ExplainError::Unsupported));
     }
 
     #[test]
