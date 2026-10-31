@@ -146,3 +146,49 @@ describe("openScript (designer betiği Query Tool'da)", () => {
     expect(notify).toHaveBeenCalledWith(expect.any(String), "error");
   });
 });
+
+describe("sekme kapanışı süren istekle", () => {
+  async function closeSetup(close: () => Promise<null>) {
+    const api = {
+      listServers: vi.fn(async () => [{ ...server, label: "test" }]),
+      qtDraftsSave: vi.fn(async () => null),
+      qtDraftsRemove: vi.fn(async () => null),
+      qtClose: vi.fn(close),
+    } as unknown as Api;
+    const notify = vi.fn();
+    const ctl = createQueryController({ api, notify, tree: emptyTree, connect: async () => true, serversChanged: () => {} });
+    await ctl.openScript({ serverId: "S1", databaseOid: 1, database: "app", text: "select 1" });
+    const id = ctl.tabs.state.tabs[0].id;
+    ctl.patch(id, { session: "sess", run: { ...ctl.model(id)!.run, status: "idle" }, op: "explain" });
+    return { ctl, api, notify, id };
+  }
+
+  it("EXPLAIN sürerken kapanış rollback (iptal) ister ve sekme kapanır", async () => {
+    const { ctl, api, id } = await closeSetup(async () => null);
+    await ctl.requestClose(id);
+    expect(api.qtClose).toHaveBeenCalledWith("sess", "rollback");
+    expect(ctl.model(id)).toBeUndefined();
+  });
+
+  it("kapanış başarısızsa süren işin op'u ezilmez (EXPLAIN meşgul işareti kalır)", async () => {
+    let fail: (e: unknown) => void = () => {};
+    const { ctl, api, notify, id } = await closeSetup(() => new Promise<null>((_, rej) => (fail = rej)));
+    const p = ctl.requestClose(id);
+    await vi.waitFor(() => expect(ctl.model(id)?.op).toBe("explain"));
+    await ctl.requestClose(id); // çift kapanış yok sayılır
+    fail({ code: "busy", message: "meşgul", detail: null, hint: null });
+    await p;
+    expect(api.qtClose).toHaveBeenCalledTimes(1);
+    expect(ctl.model(id)?.op).toBe("explain");
+    expect(notify).toHaveBeenCalledWith(expect.any(String), "error");
+  });
+
+  it("boşta sekmede başarısız kapanış op'u null'a döndürür", async () => {
+    const { ctl, id } = await closeSetup(async () => {
+      throw { code: "busy", message: "meşgul", detail: null, hint: null };
+    });
+    ctl.patch(id, { op: null });
+    await ctl.requestClose(id);
+    expect(ctl.model(id)?.op).toBeNull();
+  });
+});

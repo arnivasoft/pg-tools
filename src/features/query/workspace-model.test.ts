@@ -137,6 +137,15 @@ describe("kapanış diyaloğu", () => {
     expect(choicePolicy("commit")).toBe("commit");
     expect(choicePolicy("rollback")).toBe("rollback");
   });
+
+  it("süren istek (EXPLAIN, dışa aktarma, Daha fazla, seçenekler) meşguliyettir: rollback; transaction'da Kaydet yok", () => {
+    for (const op of ["explain", "export", "more", "options"]) {
+      expect(closePlan("s", run({}), op)).toEqual({ kind: "close", policy: "rollback", busy: true });
+      expect(closePlan("s", run({ tx: "inTransaction" }), op)).toEqual({ kind: "confirm", choices: ["rollback", "cancel"], busy: true });
+    }
+    expect(closePlan("s", run({}), null)).toEqual({ kind: "close", policy: "refuse", busy: false });
+    expect(closePlan(null, run({}), "explain")).toEqual({ kind: "close", policy: null, busy: false });
+  });
 });
 
 describe("uygulama kapanışı / sunucu değişimi sekme listesi", () => {

@@ -9,6 +9,11 @@ const CODES: Record<QueryErrorCode, true> = {
   tx_failed: true,
   open_transaction: true,
   session_reset: true,
+  explain_scope: true,
+  explain_already: true,
+  explain_unsupported: true,
+  explain_option: true,
+  explain_too_large: true,
 };
 
 export function isQueryErrorCode(code: string): code is QueryErrorCode {

@@ -15,6 +15,7 @@ use pgt_query::check::{CheckDiag, CheckTarget};
 use pgt_query::complete::{CompletionItem, CompletionRequest};
 use pgt_query::error_codes::query_payload;
 use pgt_query::events::{EventSink, QueryEvent};
+use pgt_query::explain::{ExplainOptions, ExplainResult};
 use pgt_query::export::{CsvOptions, ExportSummary};
 use pgt_query::format::FormatOptions;
 use pgt_query::session::{ClosePolicy, QueryManager, Scope, SessionId, SessionOptions, StmtPlan, TxAction, TxState};
@@ -113,6 +114,20 @@ pub async fn qt_run(
 pub async fn qt_more(state: State<'_, AppState>, session: Uuid, stmt_index: u32, on_event: Channel<QueryEvent>) -> CmdResult<()> {
     let mut sink = ChannelSink(on_event);
     Box::pin(more_with_sink(&state.query, session, stmt_index, &mut sink)).await
+}
+
+/// Kapsamdaki tek ifadenin planı (`EXPLAIN (FORMAT JSON, …)`); kapılar `qt_run` ile aynıdır (sarmalanmış metin
+/// sınıflandırılır), ANALYZE ile yazan ifade transaction dışındaysa otomatik geri alınır. İptal `qt_cancel` ile.
+#[tauri::command]
+pub async fn qt_explain(
+    state: State<'_, AppState>,
+    session: Uuid,
+    sql: String,
+    scope: Scope,
+    options: ExplainOptions,
+    confirmed: bool,
+) -> CmdResult<ExplainResult> {
+    Box::pin(state.query.explain(session, &sql, scope, options, confirmed)).await.map_err(|e| query_payload(&e))
 }
 
 /// Eşzamanlı ve kilitsiz: çalışan ifadeyi (ya da dışa aktarmayı) iptal eder.

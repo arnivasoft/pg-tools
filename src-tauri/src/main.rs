@@ -81,6 +81,7 @@ fn main() {
             query::qt_analyze,
             query::qt_run,
             query::qt_more,
+            query::qt_explain,
             query::qt_cancel,
             query::qt_tx,
             query::qt_tx_state,

@@ -35,6 +35,9 @@ use crate::parse_guard::{Background, BackgroundGuard, Parsed, RESTORE_LOCK_TIMEO
 use crate::scoped::{Plan, Source};
 use crate::classify::{Danger, StmtKind, TxOp, analyze as classify, tx_op};
 use crate::events::{EventSink, QueryEvent};
+use crate::explain::{
+    EXPLAIN_MAX_BYTES, ExplainError, ExplainOptions, ExplainResult, auto_rollback, explain_sql, note as explain_note,
+};
 use crate::exec::{DEFAULT_CHUNK, ExecConfig, Executor, Path, StmtOutcome, cursor_capable};
 use crate::export::{CsvFile, CsvOptions, EXPORT_CHUNK, ExportSummary, check_target};
 use crate::split::{split, stmt_at};
@@ -271,6 +274,33 @@ pub(crate) fn check_gates(planned: &[Planned], confirmed: bool) -> Result<()> {
         return Err(Error::Invalid(CONFIRMATION_REQUIRED.into()));
     }
     Ok(())
+}
+
+/// EXPLAIN'in ağ öncesi adımları: kapsam tam bir ifade olmalı, sarmalanmış metin üretilir (uygunluk ve seçenek
+/// kapıları) ve **sarmalanmış metin** üzerinden plan + kilit/onay kapıları çalışır.
+pub(crate) fn explain_gates(
+    sql: &str,
+    scope: Scope,
+    opts: &ExplainOptions,
+    version_num: u32,
+    guard: Guard,
+    confirmed: bool,
+) -> Result<(String, Planned)> {
+    let ranges = scope_ranges(sql, scope)?;
+    let [range] = ranges.as_slice() else { return Err(ExplainError::Scope.into()) };
+    // Baştaki yorum (pg_hint_plan ipucu) ifadeyle birlikte gider; seçimde yalnız seçili kısımdan.
+    let floor = match scope {
+        Scope::Selection { start, .. } => byte_at_char(sql, start),
+        _ => 0,
+    };
+    let start = crate::explain::leading_comments_start(sql, floor, range.start);
+    let text = explain_sql(&sql[start..range.end], opts, version_num)?;
+    let mut planned = plan_script(&text, Scope::All, guard)?;
+    if planned.len() != 1 {
+        return Err(ExplainError::Scope.into());
+    }
+    check_gates(&planned, confirmed)?;
+    Ok((text, planned.remove(0)))
 }
 
 /// Durum makinesinin girdisi: ifadenin transaction işlemi (yoksa `None`) ve başarılı olup olmadığı.
@@ -818,6 +848,24 @@ async fn resync(slot: &SessionSlot, exec: &mut Executor) {
     exec.set_in_tx(probed != TxState::Idle);
 }
 
+/// EXPLAIN'in otomatik geri alması (`exec_internal`: izlenen durum değişmez). Hata ya da iptalden sonra da çalışır;
+/// geç gelen bir iptal isteğine karşı bir kez yinelenir, yine olmazsa sunucu yoklanır. Oturum transaction dışında
+/// kaldıysa `true`.
+async fn rollback_explain(slot: &SessionSlot, exec: &mut Executor) -> bool {
+    for _ in 0..2 {
+        match exec.exec_internal("ROLLBACK").await {
+            Ok(_) => {
+                exec.set_in_tx(false);
+                slot.set_state(TxState::Idle);
+                return true;
+            }
+            Err(e) => tracing::debug!(code = %ErrorPayload::from(&e).code, "EXPLAIN geri alması başarısız"),
+        }
+    }
+    resync(slot, exec).await;
+    slot.state() == TxState::Idle
+}
+
 fn user_cancelled() -> Error {
     Error::Query { sqlstate: None, message: CANCELLED_MESSAGE.into(), detail: None, hint: None }
 }
@@ -1150,6 +1198,118 @@ impl QueryManager {
         }
         sink.send(QueryEvent::ScriptDone { stmts_run, stopped_on_error: stopped });
         Ok(())
+    }
+
+    /// Kapsamdaki **tek** ifadenin planı (`EXPLAIN (FORMAT JSON, …)`, metin `explain::explain_sql`). Kapılar
+    /// sarmalanmış metnin sınıflandırmasıyla çalışır (kilit, tehlike, üretim yazımı, `confirmed`); oturum meşgulse
+    /// `BUSY`, transaction `Failed` ise ret. ANALYZE ile yazan ifade, `rollback` açık ve oturum transaction dışındaysa
+    /// `BEGIN … ROLLBACK` içinde çalışır; geri alma hata ya da iptalde de yapılır ve oturum `Idle` kalır. Manuel
+    /// kipte transaction dışındaki geri alınmayan bir ANALYZE, `run` gibi önce otomatik `BEGIN` alır (ANALYZE'sız
+    /// EXPLAIN hiçbir şey çalıştırmadığından transaction açmaz). İptal `cancel` ile; `statement_timeout` oturumunkidir.
+    pub async fn explain(
+        &self,
+        session: SessionId,
+        sql: &str,
+        scope: Scope,
+        opts: ExplainOptions,
+        confirmed: bool,
+    ) -> Result<ExplainResult> {
+        let slot = self.slot(session)?;
+        if scope_ranges(sql, scope)?.len() != 1 {
+            return Err(ExplainError::Scope.into());
+        }
+        let version = self.mgr.info(slot.server).ok_or(Error::NotConnected)?.version_num;
+        let (text, p) = explain_gates(sql, scope, &opts, version, slot.guard, confirmed)?;
+        let mut inner = lock_user(&slot).await?;
+        step(slot.state(), TxEvent::Ok(None))?;
+        disarm(&mut inner);
+        slot.cancel.begin();
+        let result = self.explain_locked(&slot, &mut inner, &text, &p, &opts).await;
+        slot.cancel.end();
+        self.finish(&slot, &mut inner).await;
+        result
+    }
+
+    async fn explain_locked(
+        &self,
+        slot: &SessionSlot,
+        inner: &mut Inner,
+        text: &str,
+        p: &Planned,
+        opts: &ExplainOptions,
+    ) -> Result<ExplainResult> {
+        self.wake(slot, inner).await?;
+        let mode = inner.opts.mode;
+        let Some(exec) = inner.exec.as_mut() else { return Err(Error::NotConnected) };
+        // Izgaranın açık imleci (autocommit'te çalıştırıcının transaction'ı) önce kapanır; geri alma onu bozmasın.
+        close_cursor_quietly(exec).await;
+        if slot.cancel.requested() {
+            return Err(user_cancelled());
+        }
+        let kind = p.plan.kind;
+        let state = slot.state();
+        let rollback = auto_rollback(opts, kind, state);
+        if rollback || (opts.analyze && mode == TxMode::Manual && state == TxState::Idle) {
+            if let Err(e) = exec.exec_internal("BEGIN").await {
+                resync(slot, exec).await;
+                return Err(e);
+            }
+            exec.set_in_tx(true);
+            if !rollback {
+                slot.set_state(TxState::InTransaction);
+            }
+            if slot.cancel.requested() {
+                if rollback {
+                    rollback_explain(slot, exec).await;
+                }
+                return Err(user_cancelled());
+            }
+        }
+        let started = std::time::Instant::now();
+        let handle = exec.cancel_handle();
+        let (result, notices) = cancellable(&slot.cancel, &handle, exec.explain_text(text)).await;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let requested = slot.cancel.requested();
+        // Hata ya da iptalde de: transaction açık (ya da `aborted`) kalmamalı.
+        let rolled_back = rollback && rollback_explain(slot, exec).await;
+        let ok = result.is_ok();
+        tracing::debug!(?kind, elapsed_ms, rolled_back, ok, notices = notices.len(), "EXPLAIN tamamlandı");
+        if ok && p.creates_session_state {
+            // Oturum düzeyi advisory kilit ROLLBACK ile de bırakılmaz.
+            inner.dirty = true;
+        }
+        if !rollback {
+            if ok && kind != StmtKind::Select {
+                slot.invalidate_completions();
+                inner.dirty = true;
+            }
+            let before = slot.state();
+            let ev = if ok { TxEvent::Ok(None) } else { TxEvent::Error(None) };
+            slot.set_state(step(before, ev).unwrap_or(before));
+            if !ok {
+                resync(slot, exec).await;
+            }
+            let touched = ok && touches_lock_timeout(text);
+            note_lock_timeout(&mut inner.pending_lock_timeout, &mut inner.lock_timeout_set_in_tx, slot.state(), touched, false);
+        }
+        let is_cancel = result.as_ref().err().is_some_and(is_cancel_error);
+        let json = result.map_err(|e| match e {
+            Error::Query { message, .. } if requested && is_cancel => {
+                Error::Query { sqlstate: None, message: CANCELLED_MESSAGE.into(), detail: Some(message), hint: None }
+            }
+            e => e,
+        })?;
+        if json.len() > EXPLAIN_MAX_BYTES {
+            return Err(ExplainError::TooLarge.into());
+        }
+        Ok(ExplainResult {
+            json,
+            notices,
+            elapsed_ms,
+            rolled_back,
+            sql: text.to_string(),
+            note: explain_note(opts, kind, rolled_back, slot.state()),
+        })
     }
 
     /// Uykudaki ya da bağlantısı kopmuş oturumu yeniden bağlar. Kopan bağlantıda açık transaction varsa
@@ -2017,6 +2177,68 @@ mod tests {
         let err = qm.run(plain, "select 1", Scope::All, 0, false, &mut Nop).await.unwrap_err();
         assert!(matches!(err, Error::Invalid(_)), "{err:?}");
         assert!(matches!(qm.tx_state(Uuid::new_v4()), Err(Error::NotFound(_))));
+    }
+
+    fn explain_gate(sql: &str, scope: Scope, opts: ExplainOptions, guard: Guard, confirmed: bool) -> Result<(String, Planned)> {
+        explain_gates(sql, scope, &opts, 170_000, guard, confirmed)
+    }
+
+    #[test]
+    fn explain_gates_classify_the_wrapped_text() {
+        let plain = ExplainOptions::default();
+        let analyze = ExplainOptions { analyze: true, ..plain };
+        let msg = |r: Result<(String, Planned)>| match r {
+            Err(Error::Invalid(m)) => m,
+            other => panic!("Invalid bekleniyordu: {:?}", other.map(|(t, _)| t)),
+        };
+        // Kilitli sunucu: ANALYZE ile yazan ifade reddedilir, düz EXPLAIN serbesttir.
+        assert_eq!(msg(explain_gate("update t set a = 1 where id = 1", Scope::All, analyze, LOCKED, true)), LOCKED_WRITE_MESSAGE);
+        let (text, p) = explain_gate("update t set a = 1 where id = 1", Scope::All, plain, LOCKED, false).unwrap();
+        assert_eq!(text, "EXPLAIN (FORMAT JSON, SUMMARY) update t set a = 1 where id = 1");
+        assert_eq!(p.plan.kind, StmtKind::Select);
+        // Tehlike ve üretim yazımı yalnız ANALYZE ile onay ister.
+        assert_eq!(msg(explain_gate("delete from t", Scope::All, analyze, PLAIN, false)), CONFIRMATION_REQUIRED);
+        assert_eq!(explain_gate("delete from t", Scope::All, analyze, PLAIN, true).unwrap().1.plan.kind, StmtKind::Write);
+        explain_gate("delete from t", Scope::All, plain, PLAIN, false).unwrap();
+        assert_eq!(msg(explain_gate("insert into t values (1)", Scope::All, analyze, PROD, false)), CONFIRMATION_REQUIRED);
+        explain_gate("insert into t values (1)", Scope::All, plain, PROD, false).unwrap();
+        assert_eq!(msg(explain_gate("execute q", Scope::All, analyze, PROD, false)), CONFIRMATION_REQUIRED);
+        assert_eq!(msg(explain_gate("execute q", Scope::All, analyze, LOCKED, true)), LOCKED_WRITE_MESSAGE);
+        // Tam bir ifade: çoklu seçim ve boş kapsam reddedilir; ikinci ifade sarmalanmış metne girmez.
+        let scope = ExplainError::Scope.message();
+        assert_eq!(msg(explain_gate("select 1; drop table t", Scope::All, plain, PLAIN, true)), scope);
+        assert_eq!(msg(explain_gate("select 1; drop table t", Scope::Selection { start: 0, end: 22 }, plain, PLAIN, true)), scope);
+        assert_eq!(msg(explain_gate("  -- yorum\n", Scope::All, plain, PLAIN, true)), scope);
+        let (text, _) = explain_gate("select 1; drop table t", Scope::AtCursor { offset: 3 }, plain, PLAIN, true).unwrap();
+        assert_eq!(text, "EXPLAIN (FORMAT JSON, SUMMARY) select 1");
+        let (text, _) = explain_gate("select 1 -- son\n;", Scope::Selection { start: 0, end: 17 }, plain, PLAIN, true).unwrap();
+        assert_eq!(text, "EXPLAIN (FORMAT JSON, SUMMARY) select 1");
+        assert_eq!(msg(explain_gate("explain select 1", Scope::All, plain, PLAIN, true)), ExplainError::AlreadyExplain.message());
+        // Baştaki yorum (ipucu) korunur; kapılar sarmalanmış metinde yine doğru sınıflar.
+        let (text, _) = explain_gate("/*+ SeqScan(t) */ select * from t;", Scope::All, plain, PLAIN, true).unwrap();
+        assert_eq!(text, "EXPLAIN (FORMAT JSON, SUMMARY) /*+ SeqScan(t) */ select * from t");
+        let (text, _) = explain_gate("select 1; /*+ x */ select 2", Scope::AtCursor { offset: 25 }, plain, PLAIN, true).unwrap();
+        assert_eq!(text, "EXPLAIN (FORMAT JSON, SUMMARY) /*+ x */ select 2");
+        let (text, _) = explain_gate("/*+ x */ select 2", Scope::Selection { start: 9, end: 17 }, plain, PLAIN, true).unwrap();
+        assert_eq!(text, "EXPLAIN (FORMAT JSON, SUMMARY) select 2");
+        assert_eq!(msg(explain_gate("/* x */ delete from t", Scope::All, analyze, PLAIN, false)), CONFIRMATION_REQUIRED);
+        assert_eq!(explain_gate("/* x */ delete from t", Scope::All, analyze, PLAIN, true).unwrap().1.plan.kind, StmtKind::Write);
+        assert_eq!(msg(explain_gate("-- x\nupdate t set a = 1", Scope::All, analyze, LOCKED, true)), LOCKED_WRITE_MESSAGE);
+        assert_eq!(msg(explain_gate("/* x */ explain select 1", Scope::All, plain, PLAIN, true)), ExplainError::AlreadyExplain.message());
+        assert_eq!(msg(explain_gate("vacuum t", Scope::All, plain, PLAIN, true)), ExplainError::Unsupported.message());
+    }
+
+    #[tokio::test]
+    async fn explain_rejects_before_any_connection() {
+        let qm = manager();
+        let plain = qm.insert_sleeping(PLAIN, TxState::Idle);
+        let opts = ExplainOptions::default();
+        let err = qm.explain(plain, "select 1; select 2", Scope::All, opts, true).await.unwrap_err();
+        assert!(matches!(&err, Error::Invalid(m) if m == ExplainError::Scope.message()), "{err:?}");
+        // Sunucu bağlı değil (sürüm bilinmez): kapsamdan sonra `NotConnected`.
+        let err = qm.explain(plain, "select 1", Scope::All, opts, true).await.unwrap_err();
+        assert!(matches!(err, Error::NotConnected), "{err:?}");
+        assert!(matches!(qm.explain(Uuid::new_v4(), "select 1", Scope::All, opts, true).await, Err(Error::NotFound(_))));
     }
 
     #[tokio::test]

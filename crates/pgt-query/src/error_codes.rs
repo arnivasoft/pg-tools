@@ -33,11 +33,32 @@ pub enum QueryErrorCode {
     /// Durumlu oturumun bağlantısı koptu ve yeniden kuruldu; SET/geçici tablo/advisory kilit kaybolmuş olabilir.
     /// Bir kez döner; yeni bağlantı hazırdır, tekrar çalıştırma çalışır.
     SessionReset,
+    /// EXPLAIN: kapsamda tam olarak bir ifade yok (boş ya da birden çok ifade).
+    ExplainScope,
+    /// EXPLAIN: ifade zaten EXPLAIN.
+    ExplainAlready,
+    /// EXPLAIN: ifade EXPLAIN'e uygun değil (ya da sunucu sürümü desteklemiyor).
+    ExplainUnsupported,
+    /// EXPLAIN: seçenek sunucu sürümünde ya da ANALYZE'sız kullanılamaz.
+    ExplainOption,
+    /// EXPLAIN: plan metni boyut sınırını aştı.
+    ExplainTooLarge,
 }
 
 /// Arayüzün eşleştirebileceği kodların tam listesi (`QueryErrorCode`'un serde adları).
-pub const QUERY_ERROR_CODES: [&str; 6] =
-    ["confirmation_required", "locked", "busy", "tx_failed", "open_transaction", "session_reset"];
+pub const QUERY_ERROR_CODES: [&str; 11] = [
+    "confirmation_required",
+    "locked",
+    "busy",
+    "tx_failed",
+    "open_transaction",
+    "session_reset",
+    "explain_scope",
+    "explain_already",
+    "explain_unsupported",
+    "explain_option",
+    "explain_too_large",
+];
 
 impl QueryErrorCode {
     pub fn as_str(self) -> &'static str {
@@ -48,6 +69,11 @@ impl QueryErrorCode {
             QueryErrorCode::TxFailed => QUERY_ERROR_CODES[3],
             QueryErrorCode::OpenTransaction => QUERY_ERROR_CODES[4],
             QueryErrorCode::SessionReset => QUERY_ERROR_CODES[5],
+            QueryErrorCode::ExplainScope => QUERY_ERROR_CODES[6],
+            QueryErrorCode::ExplainAlready => QUERY_ERROR_CODES[7],
+            QueryErrorCode::ExplainUnsupported => QUERY_ERROR_CODES[8],
+            QueryErrorCode::ExplainOption => QUERY_ERROR_CODES[9],
+            QueryErrorCode::ExplainTooLarge => QUERY_ERROR_CODES[10],
         }
     }
 
@@ -62,7 +88,10 @@ impl QueryErrorCode {
             m if m == OPEN_TX_MESSAGE => (Self::OpenTransaction, OPEN_TX_MESSAGE),
             m if m == MODE_IN_TX_MESSAGE => (Self::OpenTransaction, MODE_IN_TX_MESSAGE),
             m if m == SESSION_RESET_MESSAGE => (Self::SessionReset, SESSION_RESET_MESSAGE),
-            _ => return None,
+            m => {
+                let e = crate::explain::ExplainError::from_message(m)?;
+                (e.code(), e.message())
+            }
         })
     }
 }
@@ -110,6 +139,25 @@ mod tests {
     }
 
     #[test]
+    fn explain_errors_map_to_explain_codes() {
+        use crate::explain::ExplainError;
+        for (e, code) in [
+            (ExplainError::Scope, "explain_scope"),
+            (ExplainError::AlreadyExplain, "explain_already"),
+            (ExplainError::Unsupported, "explain_unsupported"),
+            (ExplainError::MergeVersion, "explain_unsupported"),
+            (ExplainError::SettingsVersion, "explain_option"),
+            (ExplainError::WalVersion, "explain_option"),
+            (ExplainError::WalNeedsAnalyze, "explain_option"),
+            (ExplainError::BuffersNeedsAnalyze, "explain_option"),
+            (ExplainError::TooLarge, "explain_too_large"),
+        ] {
+            let p = query_payload(&Error::from(e));
+            assert_eq!((p.code.as_str(), p.message.as_str()), (code, e.message()));
+        }
+    }
+
+    #[test]
     fn unknown_invalid_and_other_errors_keep_their_generic_codes() {
         let p = query_payload(&Error::Invalid("açık imleç yok".into()));
         assert_eq!(p.code, "invalid");
@@ -129,6 +177,11 @@ mod tests {
             QueryErrorCode::TxFailed,
             QueryErrorCode::OpenTransaction,
             QueryErrorCode::SessionReset,
+            QueryErrorCode::ExplainScope,
+            QueryErrorCode::ExplainAlready,
+            QueryErrorCode::ExplainUnsupported,
+            QueryErrorCode::ExplainOption,
+            QueryErrorCode::ExplainTooLarge,
         ];
         for c in all {
             assert_eq!(serde_json::to_value(c).unwrap(), c.as_str());

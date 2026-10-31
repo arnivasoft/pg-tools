@@ -1,0 +1,40 @@
+---
+source: crates/pgt-query/src/explain.rs
+expression: out
+---
+varsayılan [100023]
+  EXPLAIN (FORMAT JSON, SUMMARY) select * from t
+analyze [100023]
+  EXPLAIN (FORMAT JSON, ANALYZE) select * from t
+analyze+buffers [100023]
+  EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS) select * from t
+analyze pg18 (buffers kapalı) [180000]
+  EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS OFF) select * from t
+analyze+buffers pg18 [180000]
+  EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS) select * from t
+buffers analyzesiz pg12 [120000]
+  HATA ExplainOption: ANALYZE'sız BUFFERS PostgreSQL 13 ve üstünde kullanılabilir.
+buffers analyzesiz pg13 [130000]
+  EXPLAIN (FORMAT JSON, BUFFERS, SUMMARY) select * from t
+settings pg10 [100023]
+  HATA ExplainOption: SETTINGS seçeneği PostgreSQL 12 ve üstünde kullanılabilir.
+settings pg12 [120000]
+  EXPLAIN (FORMAT JSON, SETTINGS, SUMMARY) select * from t
+wal pg12 [120000]
+  HATA ExplainOption: WAL seçeneği PostgreSQL 13 ve üstünde kullanılabilir.
+wal analyzesiz pg13 [130000]
+  HATA ExplainOption: WAL seçeneği yalnız ANALYZE ile kullanılabilir.
+wal pg13 [130000]
+  EXPLAIN (FORMAT JSON, ANALYZE, WAL) select * from t
+timing kapalı analyzesiz (yok sayılır) [100023]
+  EXPLAIN (FORMAT JSON, SUMMARY) select * from t
+timing kapalı [100023]
+  EXPLAIN (FORMAT JSON, ANALYZE, TIMING OFF) select * from t
+summary kapalı analyzesiz [100023]
+  EXPLAIN (FORMAT JSON) select * from t
+summary kapalı analyze [100023]
+  EXPLAIN (FORMAT JSON, ANALYZE, SUMMARY OFF) select * from t
+costs kapalı + verbose [100023]
+  EXPLAIN (FORMAT JSON, VERBOSE, COSTS OFF, SUMMARY) select * from t
+hepsi pg17 [170002]
+  EXPLAIN (FORMAT JSON, ANALYZE, VERBOSE, COSTS OFF, SETTINGS, BUFFERS, WAL, TIMING OFF, SUMMARY OFF) select * from t

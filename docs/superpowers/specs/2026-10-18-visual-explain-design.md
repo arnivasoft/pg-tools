@@ -1,7 +1,7 @@
 # pg-tools — Görsel EXPLAIN Tasarımı
 
 - **Tarih:** 2026-10-18
-- **Durum:** Taslak (Plan 28 yazıldı)
+- **Durum:** Plan 28 uygulandı (arka uç PG 10–18 matrisi yeşil, ön yüz birim testleri yeşil); elle kontrol bekliyor (bkz. §4)
 - **Kapsam:** Query Tool'da imleçteki ya da seçili **tek** ifadenin planını `EXPLAIN (FORMAT JSON, …)` ile alıp ağaç olarak göstermek. Gösterilenler: düğüm türü, nesne, maliyet, tahmin/gerçek satır sapması, gerçek süre (özel/dahil), döngü, buffer, en pahalı düğümler, düğüm ayrıntı paneli. Ayrıca kullanıcının kendi çalıştırdığı `EXPLAIN (FORMAT JSON)` sonucunu da plan olarak açabilmek.
 - **Teslim:** Plan 28 (arka uç komutu + ön yüz "Plan" paneli; tek plan). Yedekleme ön yüzü Plan 27 olarak ayrılmıştır.
 
@@ -32,3 +32,30 @@
 - Rust birim: ifade kapsamı (tek/çok/boş), EXPLAIN'e uygunluk tablosu, seçenek sürüm kapıları, üretilen metin (insta), rollback koşulu (Idle/InTransaction/Failed × Write/Select), sınıflandırma ile kapılar.
 - Docker PG 10–18: basit SELECT planı JSON döner ve ayrıştırılır (ön yüz modeline uygun örnek kayıt olarak saklanır), ANALYZE + BUFFERS, `EXPLAIN ANALYZE DELETE` rollback ile satırlar silinmez, manuel modda açık transaction'da rollback yapılmaz, kilitli sunucuda `EXPLAIN ANALYZE UPDATE` reddedilir ama düz `EXPLAIN UPDATE` serbest, `statement_timeout`/iptal.
 - vitest: ayrıştırıcı (sürümlerin örnek JSON'ları — Docker testinin ürettiği örnekler fixture olarak), özel/dahil süre, sapma, en pahalı düğümler, büyük plan daraltma kuralı, ham JSON'dan açma.
+
+## 4. Uygulama notları (Plan 28)
+
+**Ölçümler.** Plan başı: ana paket 129,421 B, açılış kümesi 157,094 B. Plan sonu: ana paket **129,044 B**, açılış kümesi **156,717 B** (net −377 B; `qtExplain` sarıcısının baytı, yalnız QueryTab'ın kullandığı `t.query.results` metin bloğu `tqt.results`'e taşınarak geri ödendi). Son inceleme düzeltmeleri sonrası: ana paket **128,466 B**, açılış kümesi **156,139 B** (kapanış/`op` düzeltmesinin baytı, yalnız ContextBar'ın kullandığı `t.query.ctx` metinleri `tqt.ctx`'e taşınarak fazlasıyla geri ödendi). `scripts/bundle-budget.json` tavanları ölçülen değere eşittir. Doğrulama: `bun run typecheck`, `bun run test` (93 dosya, 1695 test), `bun run build`, `bun run bundle:check`, `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf` (`cargo test --workspace`), `cargo clippy --workspace --all-targets -- -D warnings` yeşil.
+
+**Kararlar.**
+- Fixture'lar (`src/features/query/fixtures/plan-pg10..18.json`) Docker testinden `PGT_WRITE_PLAN_FIXTURES=1` ile yazılır ve commit edilir; içlerinde yalnız test tablo adları vardır.
+- `EXPLAIN ANALYZE EXECUTE` yazma sayılır (hazır ifadenin ne yaptığı bilinmez).
+- Otomatik geri alma başarısız olursa (ROLLBACK iki kez başarısız, oturum yoklaması transaction görürse) `rolledBack = false` döner ve "açık transaction" notu verilir; "geri alındı" denmez.
+- Manuel kipte, transaction dışında ve geri alma kapalıyken yazan ANALYZE, `qt_run` gibi örtük `BEGIN` açar; düz EXPLAIN transaction açmaz.
+- 32 MiB sınırı yanıt sınırıdır: sunucu yanıtı belleğe alındıktan sonra denetlenir (bellek tepe noktasını sınırlamaz).
+- Model türlerinde maliyet/satır alanları ve `actual.startup/total` `null` olabilir (COSTS OFF / TIMING OFF); görünüm bunları "—" gösterir, 0 göstermez. `PlanSummary`'ye `totalMs`, `planningBuffers`, `details` eklendi.
+- CTE alt planının süresi hem kendi düğümünde hem CTE Scan'de görünür (PG ölçüm kuralı); üst düğümün özel süresi 0'a kırpılabilir. Paralel düğümlerde dahil süre işçilerin toplamıdır. İkisi için görünümde not vardır.
+- F7 EXPLAIN'i her zaman ANALYZE'sız, Shift+F7 her zaman ANALYZE ile çalıştırır; ContextBar düğmesi menüdeki ANALYZE seçimini kullanır. Kapısı kapalı seçenekler gönderilmez. Seçimler sekme başına bellekte tutulur.
+- `confirmation_required` öğe taşımadığı için onay öğeleri ön yüzde `qt_analyze` + `decide` ile üretilir; bayrak çıkmazsa (ör. `EXECUTE`) ifade metniyle tek öğe gösterilir. Onaydan sonra tam bir kez `confirmed: true` ile yeniden denenir.
+- Sunucu sürümü ön yüzde gezgin düğümünün kısa sürüm metninden ("16.4") türetilir; bilinmezse yalnız ANALYZE bağımlılıkları uygulanır, sürüm kapılarının son sözü arka uçtadır.
+- Baştaki yorumlar (ör. pg_hint_plan ipucu `/*+ … */`) sarmalanan metinde aynen kalır: `EXPLAIN (FORMAT JSON, …) /*+ … */ SELECT …`; "zaten EXPLAIN", uygunluk ve sınıflandırma yorumların ötesine bakar. Sondaki `;` ve ondan sonraki yorumlar atılır. Seçim kapsamında yalnız seçili kısımdaki yorum alınır.
+- EXPLAIN de `qt_set_options` gibi ızgaranın açık imlecini kapatır; ön yüz sunucu kilidine varan her istekten sonra `optionsChanged` gönderir ("Daha fazla" kapanır). Kilit öncesi retlerde (meşgul, kilit, onay, `explain_*` doğrulama) imleç açık kalır.
+- Sekme kapanışında süren istek (`op`: EXPLAIN, dışa aktarma, "Daha fazla", seçenekler) meşguliyet sayılır: `rollback` (iptal + geri al) politikası seçilir ve transaction'da COMMIT sunulmaz. Kapanış süren işin `op`'unu ezmez; kapanamazsa iş kendi `finally`'siyle biter.
+- Menüde devre dışı seçeneğin işareti Shift+F7'nin göndereceği değeri gösterir (ANALYZE kapalıyken TIMING/geri alma saklı değeriyle; sürüm altı seçenek işaretsiz).
+- Geçmişe yalnız başarılı EXPLAIN, çalıştırılan EXPLAIN metniyle yazılır (sunucu hatası geçmişe girmez; `qt_run`'dan farklı).
+
+**Bilinen eksikler.**
+- F7 yalnız editör odaktayken yakalanır; ağaç/ızgara/ContextBar odaktayken WebView2'nin "imleçle gezinme" istemi açılabilir (smoke maddesi).
+- Plan ağacı sanallaştırılmaz; 200+ düğümde ilk 3 düzey açık başlar.
+- Plan alt sekmelerinde (Ağaç / Ham JSON) ok tuşu gezintisi yok; devre dışı menü öğelerinin gerekçesi ekran okuyucuya bağlanmamıştır.
+- Docker'da DECLARE, `WITH … DELETE` ve `SELECT … INTO` geri alma senaryoları ayrıca sınanmaz (birim tablosu kapsar).

@@ -8,11 +8,14 @@
 .PARAMETER SkipPerf
   5.000 tablolu performans testini (five_thousand_tables_stay_within_budget) atla; matris süresinin
   çoğunu bu test oluşturur. Varsayılan: çalıştırılır.
+.PARAMETER NoFailFast
+  İlk başarısız test ikilisinde durma (cargo test --no-fail-fast); tüm sonuçları görmek için.
 #>
 param(
     [string[]]$Versions = @("10", "11", "12", "13", "14", "15", "16", "17", "18"),
     [switch]$KeepContainers,
-    [switch]$SkipPerf
+    [switch]$SkipPerf,
+    [switch]$NoFailFast
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,10 +63,12 @@ try {
     Start-Sleep -Seconds 3
 
     $env:PGT_TEST_URLS = ($urls -join ",")
+    $cargoArgs = @("test", "--workspace", "--all-features")
+    if ($NoFailFast) { $cargoArgs += "--no-fail-fast" }
     if ($SkipPerf) {
-        cargo test --workspace --all-features -- --skip five_thousand_tables_stay_within_budget
+        cargo @cargoArgs -- --skip five_thousand_tables_stay_within_budget
     } else {
-        cargo test --workspace --all-features
+        cargo @cargoArgs
     }
     if ($LASTEXITCODE -ne 0) { throw "testler başarısız" }
 }

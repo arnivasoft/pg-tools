@@ -4,4 +4,4 @@
  * `QueryManager`'ın `Error::Invalid(<işaret>)` ile bildirdiği reddin kodu. `invalid` (diğer her geçersiz girdi)
  * ve öteki genel kodlar (`query`, `not_found`, `not_connected`, …) `pgt_core::ErrorPayload`'dan gelir.
  */
-export type QueryErrorCode = "confirmation_required" | "locked" | "busy" | "tx_failed" | "open_transaction" | "session_reset";
+export type QueryErrorCode = "confirmation_required" | "locked" | "busy" | "tx_failed" | "open_transaction" | "session_reset" | "explain_scope" | "explain_already" | "explain_unsupported" | "explain_option" | "explain_too_large";

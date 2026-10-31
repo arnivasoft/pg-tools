@@ -130,10 +130,11 @@ pub fn analyze(stmt_sql: &str) -> Analysis {
         "with" if s.has_dml() => StmtKind::Write,
         "with" if s.has_at_base("into") => StmtKind::Ddl,
         "with" => StmtKind::Select,
-        // EXPLAIN ANALYZE ifadeyi gerçekten çalıştırır (DML, CREATE TABLE AS, SELECT INTO, REFRESH).
+        // EXPLAIN ANALYZE ifadeyi gerçekten çalıştırır (DML, CREATE TABLE AS, SELECT INTO, REFRESH; EXECUTE'un
+        // hazırlanmış gövdesi görünmez, yazıyor sayılır).
         "explain"
             if s.has_any(&["analyze", "analyse"])
-                && (s.has_dml() || s.has_any(&["create", "refresh", "into"])) =>
+                && (s.has_dml() || s.has_any(&["create", "refresh", "into", "execute"])) =>
         {
             StmtKind::Write
         }
@@ -296,6 +297,7 @@ mod tests {
             ("explain analyze create table t2 as select 1", Write),
             ("explain analyze select * into t2 from t", Write),
             ("explain delete from t", Select),
+            ("explain analyze execute q", Write), ("explain execute q", Select),
             ("copy t to program 'x'", Write),
             ("copy (delete from t returning *) to stdout", Write),
             ("copy (select 1) to stdout", Select),

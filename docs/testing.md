@@ -469,3 +469,15 @@ Elle kontrol: `docs/smoke-test.md` "Bakım işlemleri arayüzü (Plan 25)".
 - **Kapanış taramaları:** `rg "PGPASSWORD" crates src-tauri` yalnız yürütücüde, argüman üreticide ve testlerde çıkmalı; `rg "tracing::" crates/pgt-backup` alanlarında yol, ad ya da metin içermemeli.
 
 Elle kontrol: `docs/smoke-test.md` "Yedekleme arka ucu (Plan 26)".
+
+## Görsel EXPLAIN testleri (Plan 28)
+
+- **Birim** (Docker'sız, `cargo test -p pgt-query`): `explain.rs` — EXPLAIN'e uygunluk tablosu, tek ifade kapsamı (`;`/sondaki yorum temizliği, baştaki yorum/ipucu korunur, çok ifade reddi), seçenek sürüm kapıları ve üretilen metin (insta), geri alma koşul tablosu (Idle/InTransaction/Failed × Write/Select); `session.rs` — kapıların sarmalanmış metinde çalışması, bağlantıdan önce ret; `classify.rs` — `EXPLAIN ANALYZE EXECUTE` yazma.
+- **Docker** (`scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`): `crates/pgt-query/tests/explain.rs` — JSON plan ve NOTICE'lar, ANALYZE yazımlarının geri alınması, hata/iptal/`statement_timeout` sonrası geri alma ve `idle` oturum, açık ve başarısız transaction, satır kilitlerinin bırakılması, kilitli/üretim kapıları, kapsam/seçenek kapıları ve meşgul oturum.
+- **Fixture üretimi:** `PGT_WRITE_PLAN_FIXTURES=1` ile matris çalıştırılırsa `plan_json_notices_and_fixtures` her sürüm için `src/features/query/fixtures/plan-pgNN.json` yazar; değişiklik commit edilir.
+- **vitest:** `plan-model.test.ts` (PG 10/14/17/18 fixture'ları, dahil/özel süre, sapma eşikleri, `Never executed`, `Workers`, COSTS/TIMING OFF, bilinmeyen anahtarlar, bozuk/aşırı derin JSON, `looksLikePlanResult`, 1000 düğüm < 50 ms), `plan-view-model.test.ts`, `explain-model.test.ts` (seçenek kapıları, onay ve tek yeniden deneme), `explain-controller.test.ts` (meşgul/iptal, hata sonrası plan korunması, notlar, geçmiş), `editor-keys.test.ts` (F7/Shift+F7).
+- **Kapanış taraması:** `rg -l "strings-plan" src` yalnız `src/features/query` altındaki tembel Query Tool dosyalarını döndürmeli.
+- Paket: `bun run bundle:check` tavanları ölçülen değerdedir (ana 128,466 B / açılış 156,139 B; son inceleme düzeltmeleri sonrası).
+
+Elle kontrol: `docs/smoke-test.md` "Görsel EXPLAIN arayüzü (Plan 28)".
+
