@@ -20,6 +20,7 @@ export const tb = {
   startRestore: "Geri yükle",
   again: "Yeniden başlat",
   reveal: "Klasörü göster",
+  revealFailed: "Klasör gösterilemedi.",
   scope: "Kapsam",
   scopeDatabase: (db: string) => `Veritabanı: ${db}`,
   scopeSchema: (db: string, schema: string) => `Şema: ${db} / ${schema}`,
