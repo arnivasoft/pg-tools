@@ -41,7 +41,7 @@ export interface ExplainControllerDeps {
     qtAnalyze: (session: string, sql: string, scope: Scope) => Promise<StmtPlan[]>;
     qtHistoryPushMany: (entries: HistoryEntry[]) => Promise<number>;
   };
-  ctl: Pick<QueryController, "model" | "patch" | "update" | "ensureSession" | "sessionLost" | "refreshTx">;
+  ctl: Pick<QueryController, "model" | "patch" | "update" | "dispatch" | "ensureSession" | "sessionLost" | "refreshTx">;
   /** Editördeki metin ve kapsam; editör bu sekmeyi göstermiyorsa null (istek yapılmaz). */
   snapshot: (id: string) => Snapshot | null;
   /** İstekten hemen önce (tamamlamayı kapat, hata işaretini sil, denetimi geçersiz kıl). */
@@ -60,6 +60,17 @@ export interface ExplainControllerDeps {
   newId?: () => string;
   now?: () => number;
 }
+
+/** Sunucu kilidine (ve imleci kapatmaya) varmadan dönen hatalar; bunlarda ızgaranın imleci açık kalır. */
+const BEFORE_LOCK = new Set<string>([
+  "busy",
+  "locked",
+  "confirmation_required",
+  "explain_scope",
+  "explain_already",
+  "explain_unsupported",
+  "explain_option",
+]);
 
 export function createExplainController(deps: ExplainControllerDeps) {
   const { ctl } = deps;
@@ -159,6 +170,10 @@ export function createExplainController(deps: ExplainControllerDeps) {
         payload: deps.payload,
       });
       if (!ctl.model(id)) return; // sekme kapandı
+      // Sunucu kilidine ulaşan istek ızgaranın açık imlecini kapatır (`qt_set_options` gibi): "Daha fazla" kapanır.
+      if (out.kind === "done" || (out.kind === "rejected" && !BEFORE_LOCK.has(out.error.code))) {
+        ctl.dispatch(id, { type: "optionsChanged" });
+      }
       if (out.kind === "done") onDone(id, out.result);
       else if (out.kind === "rejected") onError(id, out.error);
     } finally {

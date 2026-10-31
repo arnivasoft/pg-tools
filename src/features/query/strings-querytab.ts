@@ -3,6 +3,29 @@
 export const tqt = {
   editorAria: "SQL editörü",
   resizeEditor: "Editör yüksekliği",
+  // Plan 28 ana paket telafisi: eskiden ana `t.query.ctx` (yalnız ContextBar kullanıyordu; diğerleri ana pakette).
+  ctx: {
+    mode: "Transaction modu",
+    modes: { autocommit: "Autocommit", manual: "Manuel" },
+    modeLocked: "Açık transaction varken mod değiştirilemez.",
+    timeout: "Zaman aşımı",
+    timeoutLabel: (ms: number) => (ms === 0 ? "Sınırsız" : ms < 60_000 ? `${ms / 1000} sn` : `${ms / 60_000} dk`),
+    run: "Çalıştır",
+    runHint: "İmleçteki ifadeyi ya da seçimi çalıştır (Ctrl+Enter)",
+    runAll: "Tümünü çalıştır",
+    runAllHint: "Tüm betiği çalıştır (F5)",
+    cancel: "İptal",
+    cancelHint: "Çalışan sorguyu iptal et (Ctrl+.)",
+    commit: "Commit",
+    rollback: "Rollback",
+    production: "Üretim",
+    lost: "Oturum kapandı",
+    reconnect: "Yeniden bağlan",
+    noSession: "Bağlı değil — ilk çalıştırmada bağlanır",
+    opening: "Bağlanıyor…",
+    cancelling: "İptal ediliyor…",
+    ariaLabel: "Sorgu bağlamı",
+  },
   // Plan 28 ana paket telafisi: eskiden ana `t.query.results` (yalnız QueryTab kullanıyordu; `sessionLost` ana pakette kaldı).
   results: {
     panesAria: "Sonuç bölmeleri",

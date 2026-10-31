@@ -61,6 +61,7 @@ function setup(over: Partial<ExplainControllerDeps> = {}) {
     ctl: {
       model: (id: string) => models.get(id),
       update,
+      dispatch: vi.fn(),
       patch: (id: string, p: Partial<TabModel>) => update(id, (m) => ({ ...m, ...p })),
       ensureSession: vi.fn(async (id: string) => models.get(id)?.session ?? null),
       sessionLost: vi.fn(),
@@ -194,5 +195,25 @@ describe("explain denetleyicisi", () => {
     expect(s.ex.plan("a")).toBe(p);
     expect(s.models.get("a")!.notes).toEqual([{ level: "error", text: tplan.errNoPlan }]);
     expect(s.panes).toEqual(["a:plan", "a:messages"]);
+  });
+
+  it("sunucuya varan istek ızgaranın imlecini kapatır (\"Daha fazla\" kapanır); kilit öncesi retlerde kapanmaz", async () => {
+    const s = setup();
+    const dispatch = s.deps.ctl.dispatch as ReturnType<typeof vi.fn>;
+    await s.ex.explain("a", "plain");
+    expect(dispatch).toHaveBeenCalledWith("a", { type: "optionsChanged" });
+    dispatch.mockClear();
+    s.api.qtExplain.mockRejectedValueOnce(err("syntax", "sözdizimi"));
+    await s.ex.explain("a", "plain");
+    expect(dispatch).toHaveBeenCalledWith("a", { type: "optionsChanged" });
+    dispatch.mockClear();
+    for (const code of ["busy", "explain_already", "locked"]) {
+      s.api.qtExplain.mockRejectedValueOnce(err(code));
+      await s.ex.explain("a", "plain");
+    }
+    s.api.qtExplain.mockRejectedValueOnce(err("confirmation_required"));
+    (s.deps.confirm as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    await s.ex.explain("a", "analyze");
+    expect(dispatch).not.toHaveBeenCalled();
   });
 });

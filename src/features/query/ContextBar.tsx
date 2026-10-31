@@ -32,7 +32,7 @@ export function ContextBar(props: {
   /** Sekmede EXPLAIN sürüyor: İptal etkin, durum metni gösterilir. */
   explaining?: string | null;
 }) {
-  const c = t.query.ctx;
+  const c = { ...t.query.ctx, ...tqt.ctx };
   const m = () => props.model;
   const production = () => isProductionLabel(props.config?.label);
   const line = () => serverLineColor(props.config);

@@ -135,6 +135,8 @@ export function createQueryController(deps: QueryControllerDeps) {
   // ---- taslaklar
   // Kapanan sekmeler: süren bir kayıt kaldırmadan sonra işlenirse sekme bir sonraki açılışta geri gelmesin.
   const closed = new Set<string>();
+  /** Kapanış isteği süren sekmeler (`op` başka bir işte olabilir; çift kapanışı önler). */
+  const closing = new Set<string>();
   const inflight = new Map<string, Promise<void>>();
   const saveDraft = async (id: string) => {
     const e = entries.get(id);
@@ -407,7 +409,9 @@ export function createQueryController(deps: QueryControllerDeps) {
   };
 
   const closeWith = async (id: string, session: string, policy: ClosePolicy): Promise<"closed" | "openTx" | "failed"> => {
-    patch(id, { op: "closing" });
+    // Süren bir işin (EXPLAIN, dışa aktarma…) `op`'u ezilmez: kendi `finally`'si onu bırakır, kapanamazsa iş sürer.
+    if (model(id)?.op === null) patch(id, { op: "closing" });
+    closing.add(id);
     try {
       await api.qtClose(session, policy);
       return "closed";
@@ -418,7 +422,8 @@ export function createQueryController(deps: QueryControllerDeps) {
       notify(t.query.close.failed(e.message), "error");
       return "failed";
     } finally {
-      if (entries.has(id)) patch(id, { op: null });
+      closing.delete(id);
+      if (model(id)?.op === "closing") patch(id, { op: null });
     }
   };
 
@@ -434,8 +439,8 @@ export function createQueryController(deps: QueryControllerDeps) {
 
   const requestClose = async (id: string): Promise<void> => {
     const m = model(id);
-    if (!m || m.op === "closing") return;
-    let plan = closePlan(m.session, m.run);
+    if (!m || m.op === "closing" || closing.has(id)) return;
+    let plan = closePlan(m.session, m.run, m.op);
     if (plan.kind === "close") {
       if (plan.policy === null || !m.session) return removeTab(id);
       if (plan.busy) notify(t.query.close.closing, "info");
@@ -446,7 +451,7 @@ export function createQueryController(deps: QueryControllerDeps) {
       await refreshTx(id);
       const again = model(id);
       if (!again) return;
-      plan = closePlan(again.session, again.run);
+      plan = closePlan(again.session, again.run, again.op);
       if (plan.kind === "close") plan = { kind: "confirm", choices: ["commit", "rollback", "cancel"], busy: false };
     }
     const cur = model(id);

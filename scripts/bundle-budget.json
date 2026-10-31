@@ -1,7 +1,7 @@
 {
-  "mainMaxBytes": 129044,
+  "mainMaxBytes": 128466,
   "forbiddenInMain": ["@kobalte/", "@floating-ui/", "@corvu/", "solid-prevent-scroll", "solid-presence"],
   "enforceForbidden": true,
-  "startupMaxBytes": 156717,
+  "startupMaxBytes": 156139,
   "htmlPreloads": ["solid", "web"]
 }

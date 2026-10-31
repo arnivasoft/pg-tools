@@ -113,16 +113,19 @@ const isRunning = (s: RunState) => s.status === "running" || s.status === "cance
  * - oturum yok → doğrudan kapat (`policy: null`);
  * - açık/hatalı transaction → diyalog (`closeChoices`; hatalıda/meşgulde COMMIT yok);
  * - meşgul ama transaction yok → `rollback` (çalışan sorgu iptal edilir; ≤ ~10 sn) ve bilgi;
+ *   süren bir istek (`op`: EXPLAIN, dışa aktarma, "Daha fazla", seçenekler) da meşguliyettir — arka uç kilidi
+ *   tutar, `refuse` meşgul hatasıyla döner;
  * - boşta → `refuse` (durum bayatsa arka uç `open_transaction` döner, o zaman diyalog gösterilir).
  */
 export type ClosePlan =
   | { kind: "close"; policy: ClosePolicy | null; busy: boolean }
   | { kind: "confirm"; choices: CloseChoice[]; busy: boolean };
 
-export function closePlan(session: string | null, run: RunState): ClosePlan {
+export function closePlan(session: string | null, run: RunState, op: string | null = null): ClosePlan {
   if (!session || run.status === "lost" || run.status === "noSession") return { kind: "close", policy: null, busy: false };
-  const busy = isRunning(run);
-  const choices = closeChoices(run);
+  // `tx` (COMMIT/ROLLBACK sürüyor) zorla kapatılmaz; `closing` çağıranda elenir.
+  const busy = isRunning(run) || (op !== null && op !== "tx");
+  const choices = closeChoices(run).filter((c) => !busy || c !== "commit");
   if (choices.length > 0) return { kind: "confirm", choices, busy };
   return { kind: "close", policy: busy ? "rollback" : "refuse", busy };
 }
