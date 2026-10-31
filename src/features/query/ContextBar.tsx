@@ -1,5 +1,5 @@
 import { Lock, Play, PlayCircle, RotateCcw, SpellCheck, Square, Check, Undo2 } from "lucide-solid";
-import { For, Show, createEffect, createMemo, createSignal, onCleanup } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, onCleanup, type JSX } from "solid-js";
 import { t } from "../../app/strings";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { TxMode } from "../../ipc/bindings/TxMode";
@@ -27,6 +27,10 @@ export function ContextBar(props: {
   /** Ayarlarda yazarken denetim açık mı (kapalıysa düğme görünmez). */
   checkEnabled: boolean;
   onToggleCheck: () => void;
+  /** "Planı göster" düğmesi + seçenek menüsü (QueryTab verir; plan modülleri yalnız QueryTab'dan içe aktarılır). */
+  explain?: JSX.Element;
+  /** Sekmede EXPLAIN sürüyor: İptal etkin, durum metni gösterilir. */
+  explaining?: string | null;
 }) {
   const c = t.query.ctx;
   const m = () => props.model;
@@ -51,6 +55,7 @@ export function ContextBar(props: {
 
   const statusText = () => {
     if (m().serverGone) return c.serverGone;
+    if (props.explaining && m().op === "explain") return props.explaining;
     switch (status()) {
       case "noSession":
         return c.noSession;
@@ -122,9 +127,10 @@ export function ContextBar(props: {
         <Button class="h-7 text-[12px]" disabled={!canStart()} title={c.runAllHint} onClick={() => props.onRunAll()}>
           <PlayCircle size={13} /> {c.runAll}
         </Button>
-        <Button class="h-7 text-[12px]" disabled={!canCancel(m().run)} title={c.cancelHint} onClick={() => props.onCancel()}>
+        <Button class="h-7 text-[12px]" disabled={!canCancel(m().run) && !(props.explaining && m().op === "explain")} title={c.cancelHint} onClick={() => props.onCancel()}>
           <Square size={12} /> {c.cancel}
         </Button>
+        {props.explain}
         <Show when={m().options.mode === "manual" || txOpen()}>
           <Button class="h-7 text-[12px]" disabled={!canCommit(m().run) || m().op !== null} onClick={() => props.onCommit()}>
             <Check size={13} /> {c.commit}

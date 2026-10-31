@@ -118,20 +118,8 @@ export const t = {
       ariaLabel: "Sorgu bağlamı",
     },
     results: {
-      panesAria: "Sonuç bölmeleri",
-      result: "Sonuç",
-      messages: "Mesajlar",
-      history: "Geçmiş",
-      cellPanel: "Hücre paneli",
-      none: "Henüz sonuç yok. Çalıştırmak için Ctrl+Enter ya da F5.",
-      noColumns: "Bu ifade satır döndürmedi; ayrıntı için Mesajlar'a bakın.",
-      rerun: "Tekrar çalıştır",
-      lockedItem: (n: number, reason: string) => `İfade ${n}: ${reason}`,
-      runError: (m: string) => `Çalıştırılamadı: ${m}`,
-      moreFailed: (m: string) => `Daha fazla satır alınamadı: ${m}`,
-      txFailed: (m: string) => `Transaction komutu başarısız: ${m}`,
+      // Yalnız sorgu denetleyicisi (ana paket) kullanır; QueryTab metinleri `tqt.results`te (tembel parça).
       sessionLost: "Oturum kapandı (sunucu bağlantısı kesildi, kayıt değişti ya da sayfa yenilendi). Açık transaction varsa geri alındı.",
-      busy: "Oturum meşgul; çalışan işlem bitince yeniden deneyin.",
     },
     close: {
       title: "Açık transaction",

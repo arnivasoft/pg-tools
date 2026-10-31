@@ -3,6 +3,22 @@
 export const tqt = {
   editorAria: "SQL editörü",
   resizeEditor: "Editör yüksekliği",
+  // Plan 28 ana paket telafisi: eskiden ana `t.query.results` (yalnız QueryTab kullanıyordu; `sessionLost` ana pakette kaldı).
+  results: {
+    panesAria: "Sonuç bölmeleri",
+    result: "Sonuç",
+    messages: "Mesajlar",
+    history: "Geçmiş",
+    cellPanel: "Hücre paneli",
+    none: "Henüz sonuç yok. Çalıştırmak için Ctrl+Enter ya da F5.",
+    noColumns: "Bu ifade satır döndürmedi; ayrıntı için Mesajlar'a bakın.",
+    rerun: "Tekrar çalıştır",
+    lockedItem: (n: number, reason: string) => `İfade ${n}: ${reason}`,
+    runError: (m: string) => `Çalıştırılamadı: ${m}`,
+    moreFailed: (m: string) => `Daha fazla satır alınamadı: ${m}`,
+    txFailed: (m: string) => `Transaction komutu başarısız: ${m}`,
+    busy: "Oturum meşgul; çalışan işlem bitince yeniden deneyin.",
+  },
   messages: {
     ariaLabel: "Mesajlar",
     empty: "Mesaj yok.",

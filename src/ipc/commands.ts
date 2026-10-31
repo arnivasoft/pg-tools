@@ -7,6 +7,8 @@ import type { CompletionRequest } from "./bindings/CompletionRequest";
 import type { CsvOptions } from "./bindings/CsvOptions";
 import type { AppSettings } from "./bindings/AppSettings";
 import type { DraftTab } from "./bindings/DraftTab";
+import type { ExplainOptions } from "./bindings/ExplainOptions";
+import type { ExplainResult } from "./bindings/ExplainResult";
 import type { ExportSummary } from "./bindings/ExportSummary";
 import type { FormatOptions } from "./bindings/FormatOptions";
 import type { HistoryEntry } from "./bindings/HistoryEntry";
@@ -96,6 +98,9 @@ export const commands = {
     call<null>("qt_run", { session, sql, scope, limit, confirmed, onEvent: channel(onEvent) }),
   qtMore: (session: string, stmtIndex: number, onEvent: (ev: QueryEvent) => void) =>
     call<null>("qt_more", { session, stmtIndex, onEvent: channel(onEvent) }),
+  // Görsel EXPLAIN: kapsamdaki tek ifadenin planı (JSON metni); kapılar qt_run ile aynı (`confirmation_required`, `locked`).
+  qtExplain: (session: string, sql: string, scope: Scope, options: ExplainOptions, confirmed: boolean) =>
+    call<ExplainResult>("qt_explain", { session, sql, scope, options, confirmed }),
   qtCancel: (session: string) => call<null>("qt_cancel", { session }),
   qtTx: (session: string, action: TxAction) => call<TxState>("qt_tx", { session, action }),
   qtTxState: (session: string) => call<TxState>("qt_tx_state", { session }),

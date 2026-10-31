@@ -33,17 +33,15 @@ import { sqlLookExtensions } from "../inspector/codemirror-setup";
 import { mapMarks, type CheckView, type LintMark } from "./check-model";
 import { formatTransaction } from "./format-edit";
 import { scopeFromEditor } from "./offsets";
+import { editorKeys, type EditorKeyHandlers, type RunKind } from "./editor-keys";
 import { tqt } from "./strings-querytab";
 
-export type RunKind = "stmt" | "all";
+export type { RunKind };
 export type ErrorRange = { from: number; to: number };
 
-export interface QueryEditorHandlers {
-  onRun(kind: RunKind): void;
-  onCancel(): void;
+/** Kısayollar (`editor-keys`): Ctrl+Enter, F5, Ctrl+., Ctrl+Shift+F, F7 / Shift+F7. */
+export interface QueryEditorHandlers extends EditorKeyHandlers {
   onChange(doc: string): void;
-  /** Ctrl+Shift+F. */
-  onFormat?(): void;
   /** Kullanıcı düzenlemesi (`docChanged`, programatik değil), seçim ya da görünür alan değişimi. */
   onUpdate?(u: { edited: boolean; moved: boolean }): void;
   complete: CompletionSource;
@@ -225,34 +223,8 @@ function normalizeRange(r: ErrorRange, len: number): ErrorRange | null {
 }
 
 export function createQueryEditor(parent: HTMLElement, doc: string, handlers: QueryEditorHandlers): QueryEditor {
-  const run = (kind: RunKind) => () => {
-    handlers.onRun(kind);
-    return true;
-  };
   const extensions = [
-    Prec.highest(
-      keymap.of([
-        { key: "Mod-Enter", run: run("stmt"), preventDefault: true },
-        { key: "F5", run: run("all"), preventDefault: true }, // WebView yeniden yüklemesin
-        {
-          key: "Ctrl-.",
-          run: () => {
-            handlers.onCancel();
-            return true;
-          },
-          preventDefault: true,
-        },
-        { key: "Mod-/", run: toggleComment, preventDefault: true },
-        {
-          key: "Mod-Shift-f",
-          run: () => {
-            handlers.onFormat?.();
-            return true;
-          },
-          preventDefault: true,
-        },
-      ]),
-    ),
+    Prec.highest(keymap.of([...editorKeys(handlers), { key: "Mod-/", run: toggleComment, preventDefault: true }])),
     lineNumbers(),
     errorGutter,
     history(),

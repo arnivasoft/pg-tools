@@ -19,7 +19,7 @@ import {
   type EnvChoice, type PendingTx, type TabTxInfo,
 } from "./workspace-model";
 
-export type TabOp = "more" | "export" | "tx" | "closing" | "options" | null;
+export type TabOp = "more" | "export" | "tx" | "closing" | "options" | "explain" | null;
 
 /** Mesajlar'da gösterilen yerel not (kilit, boş betik, red, oturum sıfırlandı …). */
 export interface TabNote {
@@ -545,6 +545,8 @@ export function createQueryController(deps: QueryControllerDeps) {
     tabs,
     servers,
     serverConfig,
+    /** Gezgin ağacı (görsel EXPLAIN seçenek kapıları için sunucu sürümü: sunucu düğümünün `detail`i). */
+    tree: deps.tree,
     refreshServers,
     everQuery,
     model,

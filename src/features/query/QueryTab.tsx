@@ -1,5 +1,6 @@
 // Sorgu çalışma alanı (tembel yüklenir): tek CodeMirror editörü (sekme başına `EditorState`), bağlam şeridi,
-// sonuç ızgarası / Mesajlar / Geçmiş. Çalıştırma akışı burada; sekme yaşam döngüsü `query-controller`dadır.
+// sonuç ızgarası / Mesajlar / Geçmiş / Plan. Çalıştırma akışı burada; sekme yaşam döngüsü `query-controller`dadır.
+// Görsel EXPLAIN akışı ve sekme başına plan durumu `explain-controller`dadır (QueryTab yalnız bağlar).
 import { closeCompletion } from "@codemirror/autocomplete";
 import type { EditorState } from "@codemirror/state";
 import { Download, PanelRight } from "lucide-solid";
@@ -27,6 +28,9 @@ import { createCompletionSource } from "./completion";
 import { runWithGuards, type Snapshot } from "./confirm-model";
 import { createQueryEditor, type QueryEditor, type RunKind } from "./editor";
 import { EditorSettings } from "./EditorSettings";
+import { createExplainController } from "./explain-controller";
+import { versionNumFromShort, type ExplainKind } from "./explain-model";
+import { ExplainMenu } from "./ExplainMenu";
 import { hintFor } from "./errors";
 import { exportSql, exportTarget } from "./export";
 import { createExportUi } from "./ExportUi";
@@ -39,8 +43,11 @@ import { errorRange } from "./offsets";
 import type { QueryController, TabNote } from "./query-controller";
 import { ResultGrid, type ActiveCell } from "./ResultGrid";
 import { ResultStrip } from "./ResultStrip";
+import { looksLikePlanResult } from "./plan-model";
+import { PlanView } from "./PlanView";
 import { MAX_TAB_ROWS } from "./result-model";
 import { canCancel, canCommit, canLoadMoreRows, canRollback } from "./run-model";
+import { tplan } from "./strings-plan";
 import { isQueryTabId } from "./tabs-store";
 import { routeError, sameScope, swapEditorState, type SavedView } from "./workspace-model";
 
@@ -57,12 +64,12 @@ const MIN_EDITOR = 80;
 const FORMAT_FAILED = "biçimlendirilemedi";
 const DEFAULT_FORMAT: FormatOptions = { keywordCase: "upper", indent: 2, comma: "trailing", maxLine: 120 };
 
-type ResultPane = "result" | "messages" | "history";
+type ResultPane = "result" | "messages" | "history" | "plan";
 type EditorPrefs = { checkEnabled: boolean; format: FormatOptions };
 
 export default function QueryTab(props: { ctl: QueryController }) {
   const ctl = props.ctl;
-  const r = t.query.results;
+  const r = tqt.results;
   /** Etkin sorgu sekmesi; "Nesne" ya da dashboard etkinse `null` (editör geçişi/çalıştırma/denetim yok). */
   const activeId = () => {
     const a = ctl.tabs.state.activeId;
@@ -162,6 +169,40 @@ export default function QueryTab(props: { ctl: QueryController }) {
   );
   onCleanup(() => checker.dispose());
 
+  // ---- görsel EXPLAIN (F7 / Shift+F7 / ContextBar düğmesi; ızgaradaki kendi EXPLAIN çıktınız)
+  /** Sunucu sürümü: gezgindeki sunucu düğümünün kısa sürümü ("16.4"); bilinmiyorsa null (kapıyı arka uç uygular). */
+  const serverVersion = (serverId: string | null): number | null => {
+    if (!serverId) return null;
+    for (const n of ctl.tree().nodes.values()) if (n.kind === "server" && n.serverId === serverId) return versionNumFromShort(n.detail);
+    return null;
+  };
+  const explainer = createExplainController({
+    api: commands,
+    ctl,
+    snapshot: (id) => (editor && shownId() === id && activeId() === id ? editor.getSnapshot("stmt") : null),
+    beforeRun: (id) => {
+      if (editor && shownId() === id) {
+        closeCompletion(editor.view); // tamamlama oturum kilidini (≤5 sn) tutabilir
+        editor.setErrorMark(null);
+      }
+      checker.invalidate();
+    },
+    confirm: (items, production) => runConfirm.ask(items, production),
+    production: (id) => isProductionLabel(ctl.serverConfig(ctl.model(id)?.serverId ?? null)?.label),
+    version: (id) => serverVersion(ctl.model(id)?.serverId ?? null),
+    showPane: (id, p) => {
+      if (shownId() === id) setPane(p);
+    },
+    route: routeError,
+    hint: hintFor,
+    notifyBusy: () => notify(r.busy),
+    payload: toPayload,
+  });
+  const explain = (kind: ExplainKind) => {
+    const id = shownId();
+    if (id && activeId() === id) void explainer.explain(id, kind);
+  };
+
   const snapView = (): SavedView<EditorState> | null =>
     editor ? { state: editor.getState(), scrollTop: editor.view.scrollDOM.scrollTop, scrollLeft: editor.view.scrollDOM.scrollLeft } : null;
 
@@ -175,6 +216,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
       },
       onUpdate: ({ edited }) => (edited ? checker.edited() : checker.moved()),
       onFormat: () => void formatNow(),
+      onExplain: explain,
       complete,
     });
     ctl.setRunner((kind) => void run(kind));
@@ -239,6 +281,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
   createEffect(() => {
     const ids = new Set(ctl.tabs.state.tabs.map((x) => x.id));
     for (const k of [...book.keys()]) if (!ids.has(k)) book.delete(k);
+    explainer.prune(ids);
     const s = untrack(shownId);
     if (s !== null && !ids.has(s)) setShownId(null);
   });
@@ -374,7 +417,13 @@ export default function QueryTab(props: { ctl: QueryController }) {
   const cancel = () => {
     const id = shownId();
     const m = id ? ctl.model(id) : undefined;
-    if (!id || !m?.session || !canCancel(m.run)) return;
+    if (!id || !m?.session) return;
+    if (m.op === "explain") {
+      // EXPLAIN sürüyor: çalıştırma durumu değişmez; iptal hatası Mesajlar'a düşer.
+      void commands.qtCancel(m.session).catch((e) => notify(toPayload(e).message));
+      return;
+    }
+    if (!canCancel(m.run)) return;
     ctl.dispatch(id, { type: "cancelRequested" });
     void commands.qtCancel(m.session).catch((e) => notify(toPayload(e).message));
   };
@@ -542,6 +591,11 @@ export default function QueryTab(props: { ctl: QueryController }) {
     const s = selectedStmt();
     return s && s.columns.length > 0 ? `${shownId()}:${result()?.runId}:${s.index}` : null;
   });
+  /** Seçili ifade kullanıcının kendi `EXPLAIN (FORMAT JSON)` çıktısıysa hücre metni ("Planı göster"). */
+  const gridPlan = createMemo(() => {
+    const s = selectedStmt();
+    return s && looksLikePlanResult(s.columns, s.rows) ? s.rows[0][0] : null;
+  });
   const messageCount = () => (result()?.messages.length ?? 0) + (model()?.notes.length ?? 0);
   const canExportNow = () => {
     const m = model();
@@ -583,6 +637,19 @@ export default function QueryTab(props: { ctl: QueryController }) {
               const cur = id ? ctl.model(id) : undefined;
               if (id && cur) ctl.patch(id, { checkOff: !cur.checkOff });
             }}
+            explaining={tplan.explaining}
+            explain={
+              <ExplainMenu
+                options={explainer.options(shownId() ?? "")}
+                version={serverVersion(m().serverId)}
+                disabled={!canExportNow()}
+                onExplain={explain}
+                onOption={(key, value) => {
+                  const id = shownId();
+                  if (id) explainer.setOption(id, key, value);
+                }}
+              />
+            }
           />
         )}
       </Show>
@@ -606,8 +673,24 @@ export default function QueryTab(props: { ctl: QueryController }) {
             {paneButton("result", () => r.result)}
             {paneButton("messages", () => (messageCount() > 0 ? `${r.messages} (${messageCount()})` : r.messages))}
             {paneButton("history", () => r.history)}
+            {paneButton("plan", () => tplan.pane)}
           </div>
           <div class="flex-1" />
+          <Show when={pane() === "result" && gridPlan()}>
+            {(json) => (
+              <Button
+                variant="ghost"
+                class="h-6 text-[12px]"
+                title={tplan.gridOpenHint}
+                onClick={() => {
+                  const id = shownId();
+                  if (id) explainer.openJson(id, json());
+                }}
+              >
+                {tplan.gridOpen}
+              </Button>
+            )}
+          </Show>
           <Button
             variant="ghost"
             class="h-6 text-[12px]"
@@ -697,6 +780,9 @@ export default function QueryTab(props: { ctl: QueryController }) {
                   <MessagesView messages={result()?.messages ?? []} />
                 </div>
               </div>
+            </Match>
+            <Match when={pane() === "plan"}>
+              <PlanView entry={explainer.plan(shownId() ?? "")} />
             </Match>
             <Match when={pane() === "history"}>
               <div class="flex h-full min-h-0 flex-col">
