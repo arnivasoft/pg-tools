@@ -11,7 +11,8 @@ import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import { Field, inputClass } from "../../ui/Field";
 import { TabPanel, Tabs } from "../../ui/Tabs";
-import { SERVER_COLORS, emptyForm, formFromConfig, suggestLock, toConfig, type FormTab, type ServerForm } from "./server-form";
+import { SERVER_COLORS, emptyForm, formFromConfig, toConfig, type FormTab, type ServerForm } from "./server-form-model";
+import { suggestLock } from "./server-form";
 import { dialogStrings } from "../../ui/dialog-strings";
 
 const SSL_MODES: SslMode[] = ["disable", "prefer", "require", "verify-ca", "verify-full"];

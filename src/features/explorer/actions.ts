@@ -8,7 +8,7 @@ import { ROOT, ancestorOfKind, isCollection, serverOf, type TreeState } from "./
 import { canOpenQueryTool } from "../query/open-kinds";
 import { canOpenDashboard } from "../dashboard/open-kinds";
 import { canOpenData } from "../data/open-kinds";
-import { ACL_KINDS, DEFAULT_ACL_KINDS, MAINTENANCE_KINDS, canCreateIn, canEditObject, isTableRowKind } from "../designer/ddl-kinds";
+import { ACL_KINDS, BACKUP_KINDS, DEFAULT_ACL_KINDS, MAINTENANCE_KINDS, canCreateIn, canEditObject, isTableRowKind } from "../designer/ddl-kinds";
 
 /** Kolon/kısıt düğümünün sahibi (koleksiyonlar atlanarak ilk ata) tablo mu (görünüm/MV kolonu ya da domain kısıtı değil). */
 function ownedByTable(s: TreeState, id: string): boolean {
@@ -25,7 +25,7 @@ function ownedByTable(s: TreeState, id: string): boolean {
 export type ActionId =
   | "refresh" | "connect" | "disconnect" | "editServer" | "deleteServer"
   | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool" | "openDashboard" | "openData"
-  | "createObject" | "editObject" | "renameObject" | "privilegesObject" | "defaultPrivilegesObject" | "maintenance" | "dropObject";
+  | "createObject" | "editObject" | "renameObject" | "privilegesObject" | "defaultPrivilegesObject" | "maintenance" | "backup" | "restore" | "dropObject";
 
 /**
  * Nesne diyaloğu (designer) eylemleri: adı `Object` ile biten eylemler (ana paket bütçesi için liste yerine sonek);
@@ -51,6 +51,8 @@ export interface ActionDeps {
   openDesigner?(id: string, mode: DesignerOpenMode): void;
   /** "Bakım…" diyaloğu (Plan 25; tembel). */
   openMaintenance?(id: string): void;
+  /** "Yedekle…" / "Geri yükle…" diyaloğu (Plan 27; tembel, tek örnek). */
+  openBackup?(id: string, mode: "backup" | "restore"): void;
   /** Düğümün sunucusu salt okunur kilitli mi (designer eylemleri kapalı)? Verilmezse ağaçtaki sunucu düğümünün kilidi. */
   serverLocked?(nodeId: string): boolean;
   /** Sunucunun sorgu oturumlarını kapatacak işlemden (silme, bağlantı kesme) önce: açık transaction'lar için sorar. */
@@ -105,7 +107,7 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
   if (node.kind === "serverGroup") return ["refresh", "copyName"];
   if (node.kind === "server") {
     return node.flags.connected
-      ? [...q, "refresh", "disconnect", "editServer", "deleteServer", "copyName"]
+      ? [...q, "refresh", "disconnect", "restore", "editServer", "deleteServer", "copyName"]
       : [...q, "connect", "editServer", "deleteServer", "copyName"];
   }
   if (isCollection(node.kind)) return canCreateIn(node.kind) ? ["createObject", "refresh", "copyName"] : ["refresh", "copyName"];
@@ -118,6 +120,9 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
     if (DEFAULT_ACL_KINDS.includes(node.kind)) out.push("defaultPrivilegesObject");
     // Plan 25: bakım (VACUUM/ANALYZE/REINDEX/CLUSTER) düzenleme grubunda, silmeden önce.
     if (MAINTENANCE_KINDS.has(node.kind)) out.push("maintenance");
+    // Plan 27: yedekleme bakımın ardından; bölüm (partition) altında şema atadan okunamadığı için yok. Sistem nesnesi yok.
+    if (BACKUP_KINDS.has(node.kind) && !node.flags.system && !underPartitions(s, node.id)) out.push("backup");
+    if (node.kind === "database") out.push("restore");
     out.push("dropObject");
   }
   else if (isTableRowKind(node.kind) && ownedByTable(s, node.id)) out.push("editObject");
@@ -131,7 +136,7 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
 /** Menüde ayırıcı yerleşimi için eylem grubu. */
 export function groupOf(a: ActionId): number {
   if (a === "openQueryTool" || a === "openDashboard" || a === "openData") return -1;
-  if (a.endsWith("Object") || a === "maintenance") return 3;
+  if (a.endsWith("Object") || a === "maintenance" || a === "backup" || a === "restore") return 3;
   if (a === "refresh" || a === "connect" || a === "disconnect") return 0;
   if (a === "editServer" || a === "deleteServer") return 1;
   return 2;
@@ -139,7 +144,8 @@ export function groupOf(a: ActionId): number {
 
 /** Eylem görünür ama kapalıysa gerekçesi (menüde `title`); designer eylemleri kilitli sunucuda kapalıdır. */
 export function disabledReason(a: ActionId, deps: Pick<ActionDeps, "serverLocked" | "state">, nodeId: string): string | null {
-  const locked = (a.endsWith("Object") || a === "maintenance") && (deps.serverLocked?.(nodeId) ?? serverOf(deps.state(), nodeId)?.flags.locked);
+  // `backup` kilitte açıktır (salt okunur); `restore` kapanır.
+  const locked = (a.endsWith("Object") || a === "maintenance" || a === "restore") && (deps.serverLocked?.(nodeId) ?? serverOf(deps.state(), nodeId)?.flags.locked);
   return locked ? t.query.hint.locked : null;
 }
 
@@ -179,6 +185,11 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
       case "maintenance":
         // Savunma: kilitli sunucuda menü zaten kapalıdır.
         if (!disabledReason(action, deps, id)) deps.openMaintenance?.(id);
+        return;
+      case "backup":
+      case "restore":
+        // Savunma: kilitli sunucuda menü restore'u zaten kapatır.
+        if (!disabledReason(action, deps, id)) deps.openBackup?.(id, action);
         return;
       case "disconnect":
         if (node.serverId && deps.beforeServerChange && !(await deps.beforeServerChange(node.serverId, node.label))) return;

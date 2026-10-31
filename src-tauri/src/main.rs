@@ -132,6 +132,7 @@ fn main() {
             backup::backup_plan,
             backup::backup_start,
             backup::backup_cancel,
+            backup::backup_reveal,
             backup::restore_inspect,
             backup::restore_plan,
             backup::restore_start,

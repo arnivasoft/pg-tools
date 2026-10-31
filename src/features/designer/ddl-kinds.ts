@@ -31,5 +31,7 @@ export const ACL_KINDS: NodeKind[] = [
 ];
 /** Plan 25: "Bakım…" (VACUUM/ANALYZE/REINDEX/CLUSTER) menüsünün göründüğü düğümler. */
 export const MAINTENANCE_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>(["table", "materializedView", "index", "schema", "database"]);
+/** Plan 27: "Yedekle…" (pg_dump kapsamı) menüsünün göründüğü düğümler; tablo kapsamı MV ve sequence'i de içerir. */
+export const BACKUP_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>(["database", "schema", "table", "materializedView", "sequence"]);
 /** "Varsayılan yetkiler…" yalnız veritabanı ve şema düğümlerinde. */
 export const DEFAULT_ACL_KINDS: NodeKind[] = ["database", "schema"];

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
-import { emptyForm, formFromConfig, groupsOf, isProductionLabel, suggestLock, toConfig } from "./server-form";
+import { groupsOf, isProductionLabel, suggestLock } from "./server-form";
+import { emptyForm, formFromConfig, toConfig } from "./server-form-model";
 
 const ID = "11111111-1111-4111-8111-111111111111";
 

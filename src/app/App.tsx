@@ -38,6 +38,9 @@ import { applyTheme, loadThemePreference, nextPreference, saveThemePreference, w
 /** Bakım diyaloğu yükleyicisi (tek tanım): `lazy` ve `prefetchIdle` aynı içe aktarmayı paylaşır. */
 export const loadMaintenanceDialog = () => import("../features/maintenance/MaintenanceDialog");
 const MaintenanceDialog = lazy(() => loadMaintenanceDialog().then((m) => ({ default: m.MaintenanceDialog })));
+/** Yedekleme / geri yükleme diyalogları (Plan 27): tembel parça; `prefetchIdle` ile ısıtılır. */
+export const loadBackupDialogs = () => import("../features/backup/BackupDialogs");
+const BackupDialogs = lazy(() => loadBackupDialogs().then((m) => ({ default: m.BackupDialogs })));
 const ServerDialog = lazy(() => import("../features/servers/ServerDialog").then((m) => ({ default: m.ServerDialog })));
 const ImportDialog = lazy(() => import("../features/servers/ImportDialog").then((m) => ({ default: m.ImportDialog })));
 
@@ -111,6 +114,10 @@ export default function App() {
   const [maintenanceId, setMaintenanceId] = createSignal<string | null>(null);
   const [maintenanceEverOpened, setMaintenanceEverOpened] = createSignal(false);
   createEffect(() => maintenanceId() !== null && setMaintenanceEverOpened(true));
+  // Yedekleme / geri yükleme (Plan 27): tek diyalog, tek iş; kapanınca null.
+  const [backupJob, setBackupJob] = createSignal<{ mode: "backup" | "restore"; nodeId: string } | null>(null);
+  const [backupEverOpened, setBackupEverOpened] = createSignal(false);
+  createEffect(() => backupJob() !== null && setBackupEverOpened(true));
   const [groups, setGroups] = createSignal<string[]>([]);
 
   const openDialog = async (serverId: string | null) => {
@@ -138,6 +145,7 @@ export default function App() {
     openDashboard: (id) => void loadDash().then((d) => d.openFromNode(id), loadFailed),
     openDesigner: (id, mode) => void loadDesigner().then((d) => d.open(id, mode), loadFailed),
     openMaintenance: (id) => setMaintenanceId(id),
+    openBackup: (id, mode) => setBackupJob({ mode, nodeId: id }),
     openData: (id) => void loadData().then((d) => d.open(id), loadFailed),
     beforeServerChange: query.confirmServerChange,
     afterServerChange: (serverId, gone) => {
@@ -153,7 +161,7 @@ export default function App() {
 
   onMount(async () => {
     // İlk boyamadan sonra, boşta: tembel parçalar sessizce ısıtılır (ilk sağ tık/diyalog gecikmesiz açılsın).
-    prefetchIdle([loadExplorerMenuPopup, loadConfirmDialogView, loadPasswordPromptView, loadTxDialogs, loadErrorBadgeCard, loadMaintenanceDialog]);
+    prefetchIdle([loadExplorerMenuPopup, loadConfirmDialogView, loadPasswordPromptView, loadTxDialogs, loadErrorBadgeCard, loadMaintenanceDialog, loadBackupDialogs]);
     void query.restore();
     await commands.setShowSystem(showSystem()).catch(() => {
       // Arka uç varsayılanı kapalıdır: anahtar ve kayıtlı tercih buna uysun.
@@ -287,6 +295,11 @@ export default function App() {
       <Show when={maintenanceEverOpened()}>
         <Suspense>
           <MaintenanceDialog nodeId={maintenanceId()} deps={lazyDeps()} onClose={() => setMaintenanceId(null)} />
+        </Suspense>
+      </Show>
+      <Show when={backupEverOpened()}>
+        <Suspense>
+          <BackupDialogs job={backupJob()} deps={{ ...lazyDeps(), explorer: explorer.controller }} onClose={() => setBackupJob(null)} />
         </Suspense>
       </Show>
       <Show when={importEverOpened()}>
