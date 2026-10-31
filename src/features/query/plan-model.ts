@@ -244,7 +244,7 @@ const AGG_STRATEGY: Record<string, string> = {
 function labelFrom(nodeType: string, o: Obj): string {
   let base = nodeType;
   const strategy = str(o["Strategy"]);
-  if (nodeType === "Aggregate" && strategy && AGG_STRATEGY[strategy]) base = AGG_STRATEGY[strategy];
+  if (nodeType === "Aggregate" && strategy && Object.hasOwn(AGG_STRATEGY, strategy)) base = AGG_STRATEGY[strategy];
   if (nodeType === "SetOp") {
     if (strategy === "Hashed") base = "HashSetOp";
     const cmd = str(o["Command"]);
@@ -372,8 +372,13 @@ export function parsePlan(json: string): { root: PlanNode; summary: PlanSummary 
   if (!isObj(top) || !isObj(top["Plan"]) || typeof top["Plan"]["Node Type"] !== "string") {
     return { error: tplan.errNoPlan };
   }
-  const root = buildNode(top["Plan"], { v: 0 });
-  return { root, summary: readSummary(top, root) };
+  try {
+    const root = buildNode(top["Plan"], { v: 0 });
+    return { root, summary: readSummary(top, root) };
+  } catch {
+    // Aşırı derin (özyineleme sınırı) ya da beklenmedik biçimli plan: istisna dışarı sızmaz.
+    return { error: tplan.errNoPlan };
+  }
 }
 
 /** Ölçüt: ANALYZE süresi varsa özel süre, yoksa özel maliyet (spec §1 "En pahalı 5 düğüm"). */

@@ -400,6 +400,14 @@ describe("bozuk girdi", () => {
       expect(parsePlan(s), s).toEqual({ error: tplan.errNoPlan });
     }
   });
+  it("prototip adlı Strategy ve aşırı derin plan istisna fırlatmaz", () => {
+    const agg = { "Node Type": "Aggregate", Strategy: "constructor", "Total Cost": 1 };
+    expect("root" in parsePlan(JSON.stringify([{ Plan: agg }]))).toBe(true);
+    // JSON.stringify da bu derinlikte taşar; metin elle kurulur.
+    const depth = 100_000;
+    const deep = '[{"Plan":' + '{"Node Type":"Result","Plans":['.repeat(depth) + '{"Node Type":"Result"}' + "]}".repeat(depth) + "}]";
+    expect(parsePlan(deep)).toEqual({ error: tplan.errNoPlan });
+  });
   it("Plans dizisi değilse ya da öğesi nesne değilse yok sayılır, ayrıntıda kalır", () => {
     const { root } = ok(wrap({ ...scan(), Plans: "garip" }));
     expect(root.children).toEqual([]);
