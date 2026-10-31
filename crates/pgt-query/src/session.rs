@@ -843,19 +843,21 @@ async fn resync(slot: &SessionSlot, exec: &mut Executor) {
 }
 
 /// EXPLAIN'in otomatik geri alması (`exec_internal`: izlenen durum değişmez). Hata ya da iptalden sonra da çalışır;
-/// geç gelen bir iptal isteğine karşı bir kez yinelenir, yine olmazsa sunucu yoklanır.
-async fn rollback_explain(slot: &SessionSlot, exec: &mut Executor) {
+/// geç gelen bir iptal isteğine karşı bir kez yinelenir, yine olmazsa sunucu yoklanır. Oturum transaction dışında
+/// kaldıysa `true`.
+async fn rollback_explain(slot: &SessionSlot, exec: &mut Executor) -> bool {
     for _ in 0..2 {
         match exec.exec_internal("ROLLBACK").await {
             Ok(_) => {
                 exec.set_in_tx(false);
                 slot.set_state(TxState::Idle);
-                return;
+                return true;
             }
             Err(e) => tracing::debug!(code = %ErrorPayload::from(&e).code, "EXPLAIN geri alması başarısız"),
         }
     }
     resync(slot, exec).await;
+    slot.state() == TxState::Idle
 }
 
 fn user_cancelled() -> Error {
@@ -1262,12 +1264,10 @@ impl QueryManager {
         let (result, notices) = cancellable(&slot.cancel, &handle, exec.explain_text(text)).await;
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let requested = slot.cancel.requested();
-        if rollback {
-            // Hata ya da iptalde de: transaction açık (ya da `aborted`) kalmamalı.
-            rollback_explain(slot, exec).await;
-        }
+        // Hata ya da iptalde de: transaction açık (ya da `aborted`) kalmamalı.
+        let rolled_back = rollback && rollback_explain(slot, exec).await;
         let ok = result.is_ok();
-        tracing::debug!(?kind, elapsed_ms, rolled_back = rollback, ok, notices = notices.len(), "EXPLAIN tamamlandı");
+        tracing::debug!(?kind, elapsed_ms, rolled_back, ok, notices = notices.len(), "EXPLAIN tamamlandı");
         if ok && p.creates_session_state {
             // Oturum düzeyi advisory kilit ROLLBACK ile de bırakılmaz.
             inner.dirty = true;
@@ -1300,9 +1300,9 @@ impl QueryManager {
             json,
             notices,
             elapsed_ms,
-            rolled_back: rollback,
+            rolled_back,
             sql: text.to_string(),
-            note: explain_note(opts, kind, rollback, slot.state()),
+            note: explain_note(opts, kind, rolled_back, slot.state()),
         })
     }
 
