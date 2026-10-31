@@ -79,6 +79,18 @@ export function effectiveOptions(opts: ExplainOptions, kind: ExplainKind, versio
   return out;
 }
 
+/**
+ * Menüde görünen işaretler: açık seçenekte saklı değer; devre dışı seçenekte ANALYZE ile (Shift+F7) gönderilecek
+ * değer (ör. ANALYZE kapalıyken TIMING/geri alma saklı değeriyle; sürüm altı seçenek kapalı) — işaret gönderilene doğru.
+ */
+export function shownOptions(opts: ExplainOptions, version: number | null): ExplainOptions {
+  const gates = optionGates(opts, version);
+  const sent = effectiveOptions(opts, "analyze", version);
+  const out: ExplainOptions = { ...opts };
+  for (const k of MENU_OPTIONS) if (gates[k].reason !== null) out[k] = sent[k];
+  return out;
+}
+
 export interface ExplainDeps {
   session: string;
   options: ExplainOptions;

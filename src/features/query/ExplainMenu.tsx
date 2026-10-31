@@ -6,7 +6,7 @@ import { ChevronDown, ListTree } from "lucide-solid";
 import { For, Show } from "solid-js";
 import type { ExplainOptions } from "../../ipc/bindings/ExplainOptions";
 import { Button } from "../../ui/Button";
-import { MENU_OPTIONS, optionGates, type ExplainKind, type MenuOption } from "./explain-model";
+import { MENU_OPTIONS, optionGates, shownOptions, type ExplainKind, type MenuOption } from "./explain-model";
 import { tplan } from "./strings-plan";
 
 const itemClass =
@@ -20,6 +20,7 @@ export function ExplainMenu(props: {
   onOption: (key: MenuOption, value: boolean) => void;
 }) {
   const gates = () => optionGates(props.options, props.version);
+  const shown = () => shownOptions(props.options, props.version);
   return (
     <div class="flex items-center">
       <Button
@@ -59,7 +60,7 @@ export function ExplainMenu(props: {
                 return (
                   <DropdownMenu.CheckboxItem
                     class={itemClass}
-                    checked={props.options[key] && reason() === null}
+                    checked={shown()[key]}
                     disabled={reason() !== null}
                     closeOnSelect={false}
                     title={reason() ?? undefined}

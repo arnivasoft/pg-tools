@@ -8,6 +8,7 @@ import {
   effectiveOptions,
   explainWithGuards,
   optionGates,
+  shownOptions,
   versionNumFromShort,
   type ExplainDeps,
 } from "./explain-model";
@@ -69,6 +70,18 @@ describe("seçenek kapıları", () => {
     expect(effectiveOptions({ ...chosen, analyze: false }, "analyze", 130_000)).toEqual(chosen);
     // Düğme: menüdeki seçim; PG 11'de SETTINGS/WAL atılır.
     expect(effectiveOptions(chosen, "menu", 110_000)).toEqual({ ...chosen, wal: false, settings: false });
+  });
+
+  it("menü işaretleri: devre dışı seçenek Shift+F7'nin göndereceği değeri gösterir", () => {
+    // ANALYZE kapalı: TIMING ve geri alma (varsayılan açık) işaretli görünür, WAL saklı değeriyle.
+    expect(shownOptions(DEFAULT_EXPLAIN, 170_000)).toEqual(DEFAULT_EXPLAIN);
+    const off = { ...DEFAULT_EXPLAIN, timing: false, rollback: false, wal: true };
+    expect(shownOptions(off, 170_000)).toEqual(off);
+    // Sürüm altı: PG 11'de SETTINGS/WAL hiç gönderilmez → işaretsiz; saklı değer değişmez.
+    const pg11 = { ...DEFAULT_EXPLAIN, analyze: true, settings: true, wal: true };
+    expect(shownOptions(pg11, 110_000)).toEqual({ ...pg11, settings: false, wal: false });
+    // Açık seçenekler saklı değeri gösterir (ANALYZE dahil).
+    expect(shownOptions({ ...DEFAULT_EXPLAIN, verbose: true }, null)).toEqual({ ...DEFAULT_EXPLAIN, verbose: true });
   });
 });
 
