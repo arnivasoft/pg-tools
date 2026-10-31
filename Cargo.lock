@@ -2678,6 +2678,7 @@ name = "pgt-query"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "insta",
  "pgt-core",
  "serde",
  "serde_json",

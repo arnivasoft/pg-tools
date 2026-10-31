@@ -271,6 +271,28 @@ impl Executor {
             .collect())
     }
 
+    /// EXPLAIN metnini çalıştırır ve tek hücreli sonucu (plan metni) döndürür; ifade sürerken gelen NOTICE'lar
+    /// (en çok `NOTICES_PER_STMT_MAX`) hata durumunda da döner. Açık imlece ve transaction izlemesine dokunmaz
+    /// (EXPLAIN bir transaction komutu değildir); çağıran önce imleci kapatmalıdır.
+    pub(crate) async fn explain_text(&mut self, sql: &str) -> (Result<String>, Vec<NoticeInfo>) {
+        // Önceki işlemlerden kalan iletiler bu ifadeye yazılmasın.
+        self.notices.absorb(&mut self.conn.notices);
+        self.notices.reset();
+        self.last_path = None;
+        let result = self.simple(sql).await;
+        self.notices.absorb(&mut self.conn.notices);
+        let notices: Vec<NoticeInfo> = std::mem::take(&mut self.notices.kept).into_iter().map(NoticeInfo::from).collect();
+        self.notices.reset();
+        let text = result.map_err(Error::from_query).and_then(|messages| {
+            let mut rows = text_rows(&messages);
+            match (rows.len(), rows.first().map(Vec::len)) {
+                (1, Some(1)) => rows.swap_remove(0).swap_remove(0).ok_or_else(unexpected_plan),
+                _ => Err(unexpected_plan()),
+            }
+        });
+        (text, notices)
+    }
+
     /// İfadenin sonuç sütun adları (`prepare`); boş liste satır döndürmeyen ifade demektir.
     pub(crate) async fn prepare_columns(&mut self, sql: &str) -> Result<Vec<String>> {
         let prepared = with_notices(self.conn.client.prepare(sql), &mut self.conn.notices, &mut self.notices).await;
@@ -871,6 +893,10 @@ impl Executor {
             _ => {}
         }
     }
+}
+
+fn unexpected_plan() -> Error {
+    Error::Query { sqlstate: None, message: "Plan alınamadı: sunucu beklenmeyen bir sonuç döndürdü.".into(), detail: None, hint: None }
 }
 
 fn text_rows(messages: &[SimpleQueryMessage]) -> TextRows {
