@@ -756,7 +756,8 @@ Plan 26 yalnızca arka uçtur; GUI maddeleri Plan 27'de eklenecektir. Arka uç e
 - [ ] `-j` ve `-1` birbirini dışlar; tar formatında `-j` devre dışıdır. **[—]**
 - [ ] PG 16 sunucuya 18 `pg_restore` ile geri yükleme "Tamamlandı, N hata" (`completed_with_errors`) gösterir ve veri yüklenmiştir. **[—]**
 - [ ] İptal edilen geri yüklemede "yarım kalmış olabilir" uyarısı görünür. **[—]**
-- [ ] Başarılı geri yüklemeden sonra Explorer'da yeni veritabanı görünür (mevcut hedefte veritabanı düğümü yenilenir). **[—]**
+- [ ] Mevcut hedefe başarılı geri yüklemeden sonra Explorer'da açık şema/tablo listeleri güncellenir (veritabanı altındaki yüklü listeler yenilenir). **[—]**
+- [ ] "Arşivdeki adla oluştur" ile başarılı geri yüklemeden sonra "Databases" altında yeni veritabanı görünür. **[—]**
 - [ ] Düz SQL geri yüklemede psql meta komutları notu görünür. **[—]**
 - [ ] ANSI dışı yol (`C:\Temp\a＂ -h x ＂.dump`) hedef/kaynak olarak seçilince hata yol alanının altında görünür (genel "başarısız" değil). **[—]**
 - [ ] Türkçe karakterli yol (kod sayfası 1254; ör. `C:\Yedek\ş ı.backup`) ile yedek ve geri yükleme çalışır. **[—]**

@@ -41,6 +41,7 @@ import {
   normalizeBackup,
   normalizeRestore,
   restoreGate,
+  restoreRefreshIds,
   saveFilters,
   serverMajor,
   suggestFileName,
@@ -65,10 +66,11 @@ export interface BackupControllerDeps {
     | "ddlTargetOf" | "ddlLookup" | "listChildren" | "backupTools" | "backupPlan" | "backupStart" | "backupCancel" | "backupReveal"
     | "restoreInspect" | "restorePlan" | "restoreStart" | "settingsGet" | "settingsSetPgBinDir"
   >;
-  tree: () => { nodes: Map<string, TreeNode>; parent: Map<string, string> };
+  tree: () => { nodes: Map<string, TreeNode>; parent: Map<string, string>; children: Map<string, string[]> };
   servers: () => ServerConfig[];
   connect: (serverId: string) => Promise<boolean>;
-  refreshNode?: (nodeId: string) => void;
+  /** Düğümleri verilen sırayla (üstten alta) yeniler; hata yutulur. */
+  refreshNodes?: (nodeIds: string[]) => void;
   refreshInspector?: () => void;
   notify: (text: string, kind: ToastKind) => void;
   pick: Picker;
@@ -756,16 +758,25 @@ export function createRestoreController(deps: BackupControllerDeps) {
     const serverId = s.serverId;
     const oid = oidOf(s);
     const req = requestOf(s);
-    // Yenilenecek düğüm başlangıçta yakalanır: diyalog kapansa da iş bitince Explorer güncellenir.
-    const refreshId = s.target === "existing" ? s.dbNodeId : (serverNodeOf(deps.tree(), s.nodeId)?.id ?? s.nodeId);
+    // Hedef düğümler başlangıçta yakalanır: diyalog kapansa da iş bitince Explorer güncellenir. Yüklü listeler bitişte okunur.
+    const target = s.target;
+    const dbNodeId = s.dbNodeId;
+    const serverNodeId = serverNodeOf(deps.tree(), s.nodeId)?.id ?? s.nodeId;
     await core.runJob(
       (jobId, onEvent) => api.restoreStart(serverId, oid, req, jobId, confirmed, confirmedProduction, onEvent),
       (summary) => {
         if (summary.outcome !== "success" && summary.outcome !== "completed_with_errors") return;
-        if (refreshId) deps.refreshNode?.(refreshId);
+        try {
+          const ids = restoreRefreshIds(deps.tree(), target, dbNodeId, serverNodeId);
+          if (ids.length > 0) deps.refreshNodes?.(ids);
+        } catch {
+          /* yenileme sonucu etkilemez */
+        }
         deps.refreshInspector?.();
       },
       () => ({ confirm: { checked: false, typedName: "" } }),
+      // Plan sonuçtan sonra yeniden istenir (yedeklemedeki gibi): sürüm artar, onay sıfırlanır.
+      () => core.bump(),
     );
   };
 

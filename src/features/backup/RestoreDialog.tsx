@@ -174,6 +174,7 @@ export function RestoreDialog(props: { ctl: RestoreController; tree: () => { nod
                 pgBinDir={cur().pgBinDir}
                 binDirError={cur().binDirError}
                 serverMajor={cur().serverMajor}
+                sourceFormat={cur().source?.format ?? null}
                 disabled={!ready()}
                 onChoose={() => ctl.chooseBinDir()}
                 onClear={() => ctl.clearBinDir()}

@@ -476,7 +476,7 @@ vitest ortamı `node`'dur; mantık saf modelde ve denetleyicide tutulur, GUI ell
 
 | Dosya | Kapsam |
 |---|---|
-| `src/features/backup/backup-model.test.ts` | Saf model: kapsam (`backupScopeOf`), önerilen dosya adı ve uzantı değişimi (`suggestFileName`, `swapExtension`), alan yolu ayrıştırma (`splitFieldErrors`), seçenek dışlamaları, kapılar (`canStart`, `restoreGate`, `confirmFlags`), olay uygulama (`applyEvent`: 2000 satır sınırı, uzun satır), `progressView`, `resultView`/ipuçları, `toolAdvice` |
+| `src/features/backup/backup-model.test.ts` | Saf model: kapsam (`backupScopeOf`), önerilen dosya adı ve uzantı değişimi (`suggestFileName`, `swapExtension`), alan yolu ayrıştırma (`splitFieldErrors`), seçenek dışlamaları, kapılar (`canStart`, `restoreGate`, `confirmFlags`), olay uygulama (`applyEvent`: satırlar taşma satırı dahil olduğu gibi tutulur, sınır arka uçtadır; uzun satır), araç seçimi (`toolFor`), geri yükleme sonrası yenilenecek düğümler (`restoreRefreshIds`), `progressView`, `resultView`/ipuçları, `toolAdvice` |
 | `src/features/backup/backup-controller.test.ts` | Yedek/geri yükleme denetleyicileri: bağlantı ve `not_connected` yeniden denemesi, plan yenileme ve bayat yanıt, format değişince yol uyarlanması, onayın sıfırlanması, çalışırken kapatma/iptal yarışları, kapalı diyaloğa gelen olay, sonuç sonrası yeniden başlatma, Explorer yenileme |
 | `src/features/explorer/actions.test.ts` | `backup`/`restore` menü görünürlüğü ve devre dışılığı (beş tür; sistem, bölüm, bağlı olmayan sunucu, kilit) |
 | `src-tauri/src/backup.rs` (`reveal_arg`) | `backup_reveal` argümanı: boşluk/virgül/Türkçe karakter korunur; çift tırnak ve denetim karakteri reddedilir (`cargo test -p pg-tools reveal`) |

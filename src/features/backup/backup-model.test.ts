@@ -17,6 +17,8 @@ import {
   backupScopeOf,
   canStart,
   chosenTool,
+  toolFor,
+  restoreRefreshIds,
   confirmFlags,
   defaultBackupOptions,
   defaultRestoreOptions,
@@ -517,5 +519,38 @@ describe("errorText", () => {
   it("diğer kodlarda message ve varsa hint", () => {
     expect(errorText({ code: "busy", message: "Meşgul.", detail: "gizli", hint: null })).toBe("Meşgul.");
     expect(errorText({ code: "x", message: "Hata.", detail: null, hint: "Şunu yapın." })).toBe("Hata. Şunu yapın.");
+  });
+});
+
+describe("toolFor (araç paneli hangi aracı gösterir)", () => {
+  it("yedekte pg_dump; geri yüklemede kaynak plain ise psql, değilse pg_restore", () => {
+    expect(toolFor("backup", null)).toEqual({ which: "dump", name: "pg_dump" });
+    expect(toolFor("backup", "plain")).toEqual({ which: "dump", name: "pg_dump" });
+    expect(toolFor("restore", null)).toEqual({ which: "restore", name: "pg_restore" });
+    expect(toolFor("restore", "custom")).toEqual({ which: "restore", name: "pg_restore" });
+    expect(toolFor("restore", "plain")).toEqual({ which: "psql", name: "psql" });
+  });
+});
+
+describe("restoreRefreshIds (geri yükleme sonrası yenilenecek listeler)", () => {
+  const kn = (id: string, kind: NodeKind): TreeNode =>
+    ({ id, kind, label: id, detail: null, hasChildren: true, serverId: "S1", flags: {} as TreeNode["flags"], color: null, tag: null });
+  const tree = (loaded: Record<string, string[]>) => {
+    const nodes = new Map<string, TreeNode>();
+    for (const [id, kind] of [["srv", "server"], ["dbc", "databaseCollection"], ["db1", "database"], ["sc", "schemaCollection"], ["sch", "schema"], ["tc", "tableCollection"], ["tbl", "table"], ["db2", "database"]] as const) nodes.set(id, kn(id, kind));
+    return { nodes, parent: new Map<string, string>(), children: new Map(Object.entries(loaded)) };
+  };
+
+  it("oluşturma: yalnız yüklü databaseCollection", () => {
+    expect(restoreRefreshIds(tree({ srv: ["dbc"], dbc: ["db1"] }), "create_from_archive", "db1", "srv")).toEqual(["dbc"]);
+    expect(restoreRefreshIds(tree({ srv: ["dbc"] }), "create_from_archive", "db1", "srv")).toEqual([]);
+    expect(restoreRefreshIds(tree({}), "create_from_archive", "db1", "srv")).toEqual([]);
+  });
+
+  it("mevcut hedef: veritabanı altındaki yüklü listeler derinlik sırasıyla; yüklenmemişler atlanır", () => {
+    const t = tree({ srv: ["dbc"], dbc: ["db1", "db2"], db1: ["sc"], sc: ["sch"], sch: ["tc"], tc: ["tbl"], db2: ["sc"] });
+    expect(restoreRefreshIds(t, "existing", "db1", "srv")).toEqual(["db1", "sc", "sch", "tc"]);
+    expect(restoreRefreshIds(tree({}), "existing", "db1", "srv")).toEqual([]);
+    expect(restoreRefreshIds(t, "existing", null, "srv")).toEqual([]);
   });
 });

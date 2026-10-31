@@ -39,7 +39,8 @@ function makeTree(locked: boolean) {
     node("tbl", "table", "a\"b"),
   ]) nodes.set(n.id, n);
   const parent = new Map<string, string>([["dbc", "srv"], ["db1", "dbc"], ["db2", "dbc"], ["sch", "db1"], ["tbl", "sch"]]);
-  return { nodes, parent };
+  const children = new Map<string, string[]>([["srv", ["dbc"]], ["dbc", ["db1", "db2"]], ["db1", ["sch"]], ["sch", ["tbl"]]]);
+  return { nodes, parent, children };
 }
 
 const ddlTarget = (oid: number): DdlTarget =>
@@ -98,14 +99,14 @@ function setup(opts: { locked?: boolean; servers?: ServerConfig[] } = {}) {
   const connect = vi.fn(async (_s: string) => true);
   const notify = vi.fn();
   const onClosed = vi.fn();
-  const refreshNode = vi.fn();
+  const refreshNodes = vi.fn();
   const refreshInspector = vi.fn();
   const deps: BackupControllerDeps = {
     api: api as unknown as BackupControllerDeps["api"],
     tree: () => makeTree(locked),
     servers: () => servers,
     connect,
-    refreshNode,
+    refreshNodes,
     refreshInspector,
     notify,
     pick,
@@ -116,7 +117,7 @@ function setup(opts: { locked?: boolean; servers?: ServerConfig[] } = {}) {
     clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
   };
   return {
-    deps, api, pick, connect, notify, onClosed, refreshNode, refreshInspector, jobs,
+    deps, api, pick, connect, notify, onClosed, refreshNodes, refreshInspector, jobs,
     setLocked: (v: boolean) => { locked = v; },
   };
 }
@@ -453,7 +454,7 @@ describe("yedek denetleyicisi: başlatma ve olaylar", () => {
     result.resolve(summary("success", { outputPath: "C:\\Yedek\\satis.backup" }));
     await p;
     expect(ctl.state()!.phase).toBe("ready");
-    expect(s.refreshNode).not.toHaveBeenCalled();
+    expect(s.refreshNodes).not.toHaveBeenCalled();
   });
 
   it("başarılı yedekten sonra yol temizlenir, sürüm artar ve plan yenilenir", async () => {
@@ -1073,7 +1074,7 @@ describe("geri yükleme denetleyicisi: onay, başlatma, kilit", () => {
     expect(s.api.restoreStart).not.toHaveBeenCalled();
   });
 
-  it("success → refreshNode(veritabanı düğümü) + refreshInspector; onay sıfırlanır", async () => {
+  it("success → refreshNodes(veritabanı düğümü) + refreshInspector; onay sıfırlanır", async () => {
     const s = setup();
     const ctl = await withSource(s);
     ctl.setConfirm({ checked: true });
@@ -1082,13 +1083,13 @@ describe("geri yükleme denetleyicisi: onay, başlatma, kilit", () => {
     s.jobs[0]!.onEvent(finished("success"));
     s.jobs[0]!.result.resolve(summary("success"));
     await p;
-    expect(s.refreshNode).toHaveBeenCalledTimes(1);
-    expect(s.refreshNode).toHaveBeenCalledWith("db1");
+    expect(s.refreshNodes).toHaveBeenCalledTimes(1);
+    expect(s.refreshNodes).toHaveBeenCalledWith(["db1", "sch"]);
     expect(s.refreshInspector).toHaveBeenCalledTimes(1);
     expect(ctl.state()!.confirm.checked).toBe(false);
   });
 
-  it("oluşturma hedefinde success → refreshNode(sunucu düğümü)", async () => {
+  it("oluşturma hedefinde success → refreshNodes(sunucu düğümü)", async () => {
     const s = setup();
     const ctl = await withSource(s, "srv");
     ctl.setConfirm({ checked: true });
@@ -1097,7 +1098,37 @@ describe("geri yükleme denetleyicisi: onay, başlatma, kilit", () => {
     expect(s.api.restoreStart.mock.calls[0]![1]).toBeNull();
     s.jobs[0]!.result.resolve(summary("success"));
     await p;
-    expect(s.refreshNode).toHaveBeenCalledWith("srv");
+    expect(s.refreshNodes).toHaveBeenCalledWith(["dbc"]);
+  });
+
+  it("success sonrası sürüm artar, plan yeniden istenir ve onay sıfırlanır", async () => {
+    const s = setup();
+    const ctl = await withSource(s);
+    ctl.setConfirm({ checked: true });
+    const p = ctl.start();
+    await flush();
+    const v = ctl.state()!.version;
+    s.api.restorePlan.mockClear();
+    s.jobs[0]!.result.resolve(summary("success"));
+    await p;
+    expect(ctl.state()!.version).toBe(v + 1);
+    await settle();
+    expect(s.api.restorePlan).toHaveBeenCalledTimes(1);
+    expect(ctl.state()!.planFor).toBe(ctl.state()!.version);
+    expect(ctl.state()!.confirm.checked).toBe(false);
+  });
+
+  it("yenileme hatası yutulur ve sonucu etkilemez", async () => {
+    const s = setup();
+    s.refreshNodes.mockImplementation(() => { throw new Error("boom"); });
+    const ctl = await withSource(s);
+    ctl.setConfirm({ checked: true });
+    const p = ctl.start();
+    await flush();
+    s.jobs[0]!.result.resolve(summary("success"));
+    await p;
+    expect(s.refreshInspector).toHaveBeenCalledTimes(1);
+    expect(ctl.state()!.log.summary?.outcome).toBe("success");
   });
 
   it("completed_with_errors → 'Tamamlandı, N hata' ve yenileme", async () => {
@@ -1112,7 +1143,7 @@ describe("geri yükleme denetleyicisi: onay, başlatma, kilit", () => {
     const st = ctl.state()!;
     expect(resultView(st.log.summary!, "restore", false).title).toBe(tb.result.completedWithErrors(3));
     expect(resultView(st.log.summary!, "restore", false).title).toContain("Tamamlandı, 3 hata");
-    expect(s.refreshNode).toHaveBeenCalledTimes(1);
+    expect(s.refreshNodes).toHaveBeenCalledTimes(1);
     expect(s.refreshInspector).toHaveBeenCalledTimes(1);
   });
 
@@ -1124,7 +1155,7 @@ describe("geri yükleme denetleyicisi: onay, başlatma, kilit", () => {
     await flush();
     s.jobs[0]!.result.resolve(summary("failed", { exitCode: 1 }));
     await p;
-    expect(s.refreshNode).not.toHaveBeenCalled();
+    expect(s.refreshNodes).not.toHaveBeenCalled();
     expect(s.refreshInspector).not.toHaveBeenCalled();
   });
 
@@ -1139,7 +1170,7 @@ describe("geri yükleme denetleyicisi: onay, başlatma, kilit", () => {
     s.jobs[0]!.result.resolve(summary("success"));
     await p;
     expect(ctl.state()).toBeNull();
-    expect(s.refreshNode).toHaveBeenCalledTimes(1);
+    expect(s.refreshNodes).toHaveBeenCalledTimes(1);
     expect(s.onClosed).not.toHaveBeenCalled();
   });
 
@@ -1152,7 +1183,7 @@ describe("geri yükleme denetleyicisi: onay, başlatma, kilit", () => {
     s.jobs[0]!.onEvent(finished("success"));
     s.jobs[0]!.result.resolve(summary("success"));
     await p;
-    expect(s.refreshNode).toHaveBeenCalledTimes(1);
+    expect(s.refreshNodes).toHaveBeenCalledTimes(1);
   });
 
   it("iptal ve kapatma onayı geri yüklemede de çalışır", async () => {

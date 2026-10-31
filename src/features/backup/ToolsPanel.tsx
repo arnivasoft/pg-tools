@@ -2,9 +2,10 @@
 // Kapalı başlar; seçili araç yoksa ya da `problem` doluysa açık başlar.
 import { createEffect, createSignal, For, on, Show } from "solid-js";
 import { tb } from "../../app/strings-backup";
+import type { SourceFormat } from "../../ipc/bindings/SourceFormat";
 import type { ToolDetection } from "../../ipc/bindings/ToolDetection";
 import { Button } from "../../ui/Button";
-import { chosenTool, toolAdvice } from "./backup-model";
+import { chosenTool, toolAdvice, toolFor } from "./backup-model";
 
 export interface ToolsPanelProps {
   job: "backup" | "restore";
@@ -13,6 +14,8 @@ export interface ToolsPanelProps {
   pgBinDir: string | null;
   binDirError: string | null;
   serverMajor: number | null;
+  /** Geri yüklemede kaynak biçimi: düz SQL ise psql gösterilir. */
+  sourceFormat?: SourceFormat | null;
   disabled: boolean;
   onChoose: () => Promise<void> | void;
   onClear: () => Promise<void> | void;
@@ -20,10 +23,10 @@ export interface ToolsPanelProps {
 }
 
 export function ToolsPanel(props: ToolsPanelProps) {
-  const which = () => (props.job === "backup" ? "dump" : "restore");
-  const toolName = () => (props.job === "backup" ? "pg_dump" : "pg_restore");
+  const which = () => toolFor(props.job, props.sourceFormat ?? null).which;
+  const toolName = () => toolFor(props.job, props.sourceFormat ?? null).name;
   const chosen = () => (props.tools ? chosenTool(props.tools, which()) : null);
-  const advice = () => toolAdvice(chosen()?.version ?? null, props.serverMajor, props.job);
+  const advice = () => toolAdvice(chosen()?.version ?? null, props.serverMajor, which() === "psql" ? "psql" : props.job);
   const problem = () => props.toolsError ?? props.tools?.problem ?? null;
   const [open, setOpen] = createSignal(chosen() === null || problem() !== null);
   // Sorun sonradan ortaya çıkarsa (yeniden tarama) bölüm açılır; sorunsuz taramada kullanıcının seçimine dokunulmaz.
@@ -37,7 +40,7 @@ export function ToolsPanel(props: ToolsPanelProps) {
       setBusy(false);
     }
   };
-  const selectedDir = () => (props.tools ? (which() === "dump" ? props.tools.chosenDump : props.tools.chosenRestore) : null);
+  const selectedDir = () => (props.tools ? (which() === "dump" ? props.tools.chosenDump : which() === "psql" ? props.tools.chosenPsql : props.tools.chosenRestore) : null);
   const bodyId = "tools-body-" + props.job;
   return (
     <section class="flex flex-col gap-1.5 rounded border border-border px-3 py-2">

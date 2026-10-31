@@ -243,6 +243,45 @@ export function chosenTool(det: ToolDetection, which: "dump" | "restore" | "psql
   return set ? { dir, version: set.version } : null;
 }
 
+/** Hangi araç gösterilir/seçilir: yedek her zaman pg_dump; geri yüklemede düz SQL kaynağı psql, diğerleri pg_restore. */
+export function toolFor(job: "backup" | "restore", format: SourceFormat | null): { which: "dump" | "restore" | "psql"; name: string } {
+  if (job === "backup") return { which: "dump", name: "pg_dump" };
+  return format === "plain" ? { which: "psql", name: "psql" } : { which: "restore", name: "pg_restore" };
+}
+
+/**
+ * Geri yükleme sonrası yenilenecek düğümler. `refresh(id)` yalnız doğrudan çocukları yeniden okur: oluşturmada sunucunun
+ * YÜKLÜ `databaseCollection` çocuğu, mevcut hedefte veritabanı altındaki YÜKLÜ tüm listeler (üstten alta, derinlik sırasıyla).
+ */
+export function restoreRefreshIds(
+  tree: { nodes: Map<string, TreeNode>; children: Map<string, string[]> },
+  target: RestoreTarget,
+  dbNodeId: string | null,
+  serverNodeId: string | null,
+): string[] {
+  if (target === "create_from_archive") {
+    if (!serverNodeId) return [];
+    return (tree.children.get(serverNodeId) ?? []).filter((c) => tree.nodes.get(c)?.kind === "databaseCollection" && tree.children.has(c));
+  }
+  if (!dbNodeId) return [];
+  const out: string[] = [];
+  let level = [dbNodeId];
+  const seen = new Set<string>();
+  while (level.length > 0) {
+    const next: string[] = [];
+    for (const id of level) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const kids = tree.children.get(id);
+      if (!kids) continue;
+      out.push(id);
+      next.push(...kids);
+    }
+    level = next;
+  }
+  return out;
+}
+
 export function errorText(p: ErrorPayload): string {
   if (p.code === "password_required") return `${p.message} ${tb.passwordAdvice}`;
   return p.hint ? `${p.message} ${p.hint}` : p.message;

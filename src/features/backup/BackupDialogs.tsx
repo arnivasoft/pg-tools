@@ -23,7 +23,7 @@ export interface BackupDialogDeps {
     | "ddlTargetOf" | "ddlLookup" | "listChildren"
   >;
   /** Explorer ağacı: düğüm kimliğinden sunucu/veritabanı/kapsam, sunucu `detail`'i sürüm, `flags.locked` kilit. */
-  tree: Accessor<{ nodes: Map<string, TreeNode>; parent: Map<string, string> }>;
+  tree: Accessor<{ nodes: Map<string, TreeNode>; parent: Map<string, string>; children: Map<string, string[]> }>;
   /** Sorgu denetleyicisinin sunucu listesi (üretim etiketi ve ad için). */
   query: { servers: () => ServerConfig[] };
   connect: (serverId: string) => Promise<boolean>;
@@ -39,9 +39,17 @@ export function BackupDialogs(props: { job: { mode: "backup" | "restore"; nodeId
     tree: () => deps.tree(),
     servers: () => deps.query.servers(),
     connect: deps.connect,
-    refreshNode: (id) => {
-      // Yenileme hatası işi etkilemez.
-      void deps.explorer.refresh(id).catch(() => {});
+    refreshNodes: (ids) => {
+      // Sırayla (üstten alta): üst liste önce yenilenir. Yenileme hatası işi etkilemez.
+      void (async () => {
+        for (const id of ids) {
+          try {
+            await deps.explorer.refresh(id);
+          } catch {
+            /* sonraki liste yine denenir */
+          }
+        }
+      })();
     },
     refreshInspector: deps.refreshInspector,
     notify: deps.notify,
