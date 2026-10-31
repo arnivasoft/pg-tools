@@ -35,7 +35,7 @@
 
 ## 4. Uygulama notları (Plan 28)
 
-**Ölçümler.** Plan başı: ana paket 129,421 B, açılış kümesi 157,094 B. Plan sonu: ana paket **129,044 B**, açılış kümesi **156,717 B** (net −377 B; `qtExplain` sarıcısının baytı, yalnız QueryTab'ın kullandığı `t.query.results` metin bloğu `tqt.results`'e taşınarak geri ödendi). `scripts/bundle-budget.json` tavanları ölçülen değere eşittir. Doğrulama: `bun run typecheck`, `bun run test` (93 dosya, 1695 test), `bun run build`, `bun run bundle:check`, `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf` (`cargo test --workspace`), `cargo clippy --workspace --all-targets -- -D warnings` yeşil.
+**Ölçümler.** Plan başı: ana paket 129,421 B, açılış kümesi 157,094 B. Plan sonu: ana paket **129,044 B**, açılış kümesi **156,717 B** (net −377 B; `qtExplain` sarıcısının baytı, yalnız QueryTab'ın kullandığı `t.query.results` metin bloğu `tqt.results`'e taşınarak geri ödendi). Son inceleme düzeltmeleri sonrası: ana paket **128,466 B**, açılış kümesi **156,139 B** (kapanış/`op` düzeltmesinin baytı, yalnız ContextBar'ın kullandığı `t.query.ctx` metinleri `tqt.ctx`'e taşınarak fazlasıyla geri ödendi). `scripts/bundle-budget.json` tavanları ölçülen değere eşittir. Doğrulama: `bun run typecheck`, `bun run test` (93 dosya, 1695 test), `bun run build`, `bun run bundle:check`, `scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf` (`cargo test --workspace`), `cargo clippy --workspace --all-targets -- -D warnings` yeşil.
 
 **Kararlar.**
 - Fixture'lar (`src/features/query/fixtures/plan-pg10..18.json`) Docker testinden `PGT_WRITE_PLAN_FIXTURES=1` ile yazılır ve commit edilir; içlerinde yalnız test tablo adları vardır.
@@ -48,6 +48,10 @@
 - F7 EXPLAIN'i her zaman ANALYZE'sız, Shift+F7 her zaman ANALYZE ile çalıştırır; ContextBar düğmesi menüdeki ANALYZE seçimini kullanır. Kapısı kapalı seçenekler gönderilmez. Seçimler sekme başına bellekte tutulur.
 - `confirmation_required` öğe taşımadığı için onay öğeleri ön yüzde `qt_analyze` + `decide` ile üretilir; bayrak çıkmazsa (ör. `EXECUTE`) ifade metniyle tek öğe gösterilir. Onaydan sonra tam bir kez `confirmed: true` ile yeniden denenir.
 - Sunucu sürümü ön yüzde gezgin düğümünün kısa sürüm metninden ("16.4") türetilir; bilinmezse yalnız ANALYZE bağımlılıkları uygulanır, sürüm kapılarının son sözü arka uçtadır.
+- Baştaki yorumlar (ör. pg_hint_plan ipucu `/*+ … */`) sarmalanan metinde aynen kalır: `EXPLAIN (FORMAT JSON, …) /*+ … */ SELECT …`; "zaten EXPLAIN", uygunluk ve sınıflandırma yorumların ötesine bakar. Sondaki `;` ve ondan sonraki yorumlar atılır. Seçim kapsamında yalnız seçili kısımdaki yorum alınır.
+- EXPLAIN de `qt_set_options` gibi ızgaranın açık imlecini kapatır; ön yüz sunucu kilidine varan her istekten sonra `optionsChanged` gönderir ("Daha fazla" kapanır). Kilit öncesi retlerde (meşgul, kilit, onay, `explain_*` doğrulama) imleç açık kalır.
+- Sekme kapanışında süren istek (`op`: EXPLAIN, dışa aktarma, "Daha fazla", seçenekler) meşguliyet sayılır: `rollback` (iptal + geri al) politikası seçilir ve transaction'da COMMIT sunulmaz. Kapanış süren işin `op`'unu ezmez; kapanamazsa iş kendi `finally`'siyle biter.
+- Menüde devre dışı seçeneğin işareti Shift+F7'nin göndereceği değeri gösterir (ANALYZE kapalıyken TIMING/geri alma saklı değeriyle; sürüm altı seçenek işaretsiz).
 - Geçmişe yalnız başarılı EXPLAIN, çalıştırılan EXPLAIN metniyle yazılır (sunucu hatası geçmişe girmez; `qt_run`'dan farklı).
 
 **Bilinen eksikler.**
