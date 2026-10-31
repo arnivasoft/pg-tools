@@ -727,6 +727,47 @@ Plan 26 yalnızca arka uçtur; GUI maddeleri Plan 27'de eklenecektir. Arka uç e
   - Geri yüklemeler birbirini engellemez; yalnız aynı hedef yola yazan yedeklemeler engellenir.
   - Son taşıma başarısızsa çıktı `.pgt-partial` olarak korunur ve iletide yeri yazar.
 
+## Yedekleme arayüzü (Plan 27)
+
+Önkoşul: Docker'da PG 10, 16 ve 17/18 sunucuları; kurulu PostgreSQL 18 istemci araçları (mümkünse 16 da); büyükçe bir tablo (ör. 5 milyon satır), Türkçe adlı şema/tablo ve bölümlenmiş tablo; "Üretim" etiketli ve bir de kilitli sunucu kaydı. Diyaloglar tembel parçadadır (`BackupDialogs-*.js`, ilk açılışta yüklenir). GUI ajanlarca sınanamaz; aşağıdakiler elle işaretlenir.
+
+- [ ] Menü görünürlüğü: "Yedekle…" veritabanı, şema, tablo, materialized view ve sequence düğümünde; "Geri yükle…" veritabanı ve bağlı sunucu düğümünde. Bölüm (partition) düğümünde, sistem şemalarında/nesnelerinde ve bağlı olmayan sunucuda görünmez. **[—]**
+- [ ] Kilitli sunucuda "Geri yükle…" gerekçeyle ("Bu sunucu salt okunur kilitli.") devre dışı, "Yedekle…" açık. **[—]**
+- [ ] Dört formatta (custom/plain/directory/tar) yedek alın: "Hedef seç…" Windows kayıt diyaloğu önerilen adla açılır (`<db>_<YYYYMMDD>_<HHmm>` + `.backup`/`.sql`/`.tar`; directory'de uzantı yok); dosya/klasör oluşur. **[—]**
+- [ ] Yol seçildikten sonra format değiştirin: önerilen uzantı yeni formata döner (directory'ye geçişte atılır), kendi yazdığınız uzantı korunur; uyumsuz hedef (dosya ↔ klasör) yol alanı altında hata verir. **[—]**
+- [ ] Mevcut bir dosyayı hedef seçince Windows "üzerine yazılsın mı?" sorusu çıkar; Hayır → yol seçilmez. **[—]**
+- [ ] Directory formatında dolu (boş olmayan) klasör seçilince hata yol alanının altında görünür. **[—]**
+- [ ] Plain seçenekleri: `--clean`/`--if-exists`/`--inserts` dışlamaları (birlikte seçilemeyenler devre dışı ve gerekçeli); sıkıştırma > 0 iken öneri `.sql.gz` olur ve not görünür. **[—]**
+- [ ] Kodlama listesi açılır ve seçim komut önizlemesine yansır. **[—]**
+- [ ] Büyük tabloda (≈5 milyon satır) ilerleme çubuğu, bayt ve geçen süre ilerler; yüzde 100'ü aşmaz. **[—]**
+- [ ] Yalnız şema yedeğinde ilerleme çubuğu belirsizdir (`aria-valuetext`). **[—]**
+- [ ] İptal: çalışan yedek "İptal ediliyor…" ile durur; hedefte geçici (`.pgt-partial`) dosya kalmaz. **[—]**
+- [ ] Çalışırken Esc ya da × → "İş sürüyor; iptal edilsin mi?" onayı; "Devam et" kapatmaz, "İptal et ve kapat" sonucu bekleyip kapatır. **[—]**
+- [ ] Başarıdan sonra "Klasörü göster" Gezgin'de dosyayı seçili açar; yol temizlenir ve plan yenilenir. **[—]**
+- [ ] "Klasörü göster" boşluk, Türkçe karakter ve virgül içeren yolda (ör. `C:\Yedek, Şubat\ş ı.backup`) doğru dosyayı seçer. **[—]**
+- [ ] Directory formatında Kaydet diyaloğu ile klasör adı seçimi: yeni (var olmayan) klasör adı yazılıp kabul edilir; "Klasörü göster" klasörü gösterir. **[—]**
+- [ ] Araç ayarları bölümü: bin klasörü seç/temizle/yeniden tara; bulunan kümeler tablosunda sürüm ve pg_dump/pg_restore/psql varlığı ve seçili işareti görünür; seçim değişince plan yenilenir. **[—]**
+- [ ] Geçersiz bin klasörü iletisi görünür; araç yokken `problem` metni gösterilir ve bölüm açık başlar (araç varken kapalı, özet satırında seçili araç ve sürüm). **[—]**
+- [ ] PG 16 sunucu + 18 araçla yedek: sürüm bilgi/uyarı satırları ("Sunucuyla aynı ana sürümden … araç önerilir") görünür. **[—]**
+- [ ] Geri yükleme kaynakları custom/directory/tar/plain: "Dosya seç…"/"Klasör seç…" sonrası inceleme göstergesi ve kaynak özeti (ilk 6 tür + "…"). **[—]**
+- [ ] `.sql.gz` kaynak seçilince açıklayıcı ileti görünür (desteklenmez; gzip açılıp seçilmeli). **[—]**
+- [ ] Geri yükleme hedefi: mevcut veritabanına ve "arşivdeki adla oluştur" (sunucu düğümünden açılınca veritabanı seçicisi dahil); düz SQL'de "arşivdeki adla oluştur" gerekçeyle devre dışı. **[—]**
+- [ ] `--clean` açılınca veri kaybı rozeti ve onay kutusu belirir; üretim etiketli sunucuda ek olarak sunucu adı yazılmadan başlatılamaz; onay kutusu işaretliyken `clean` açılırsa onay ve yazılan ad sıfırlanır. **[—]**
+- [ ] `-j` ve `-1` birbirini dışlar; tar formatında `-j` devre dışıdır. **[—]**
+- [ ] PG 16 sunucuya 18 `pg_restore` ile geri yükleme "Tamamlandı, N hata" (`completed_with_errors`) gösterir ve veri yüklenmiştir. **[—]**
+- [ ] İptal edilen geri yüklemede "yarım kalmış olabilir" uyarısı görünür. **[—]**
+- [ ] Başarılı geri yüklemeden sonra Explorer'da yeni veritabanı görünür (mevcut hedefte veritabanı düğümü yenilenir). **[—]**
+- [ ] Düz SQL geri yüklemede psql meta komutları notu görünür. **[—]**
+- [ ] ANSI dışı yol (`C:\Temp\a＂ -h x ＂.dump`) hedef/kaynak olarak seçilince hata yol alanının altında görünür (genel "başarısız" değil). **[—]**
+- [ ] Türkçe karakterli yol (kod sayfası 1254; ör. `C:\Yedek\ş ı.backup`) ile yedek ve geri yükleme çalışır. **[—]**
+- [ ] Parola ve bağlantı URL'si hiçbir yerde (önizleme, günlük, sonuç, bildirim) görünmez; önizlemede `PGPASSWORD=***`. **[—]**
+- [ ] Klavye: Enter başlatır (kapı açıkken; select odaktayken ve IME bileşimi sırasında değil), Esc kapatır (çalışırken onay sorar). **[—]**
+- [ ] Ekran okuyucu: ilerleme çubuğu değerleri okunur, sonuç `status` ve hata `alert` olarak duyurulur, günlük (2000 satıra dek) duyurulmaz. **[—]**
+- [ ] Uzun yedekte modal kilit: iş sürerken arka plandaki Explorer/sekmeler diyalog dışında tıklanamaz; diyalog açıkken ikinci bir yedek/geri yükleme başlatılamaz (tek iş). **[—]**
+- [ ] Ağ paylaşımındaki (UNC) yolda yedek sonrası "Klasörü göster": Gezgin dosyayı seçer; erişilemiyorsa hata iletisi görünür, uygulama bozulmaz. **[—]**
+- [ ] Koyu/açık temada uyarı (amber) ve hata (kırmızı) kontrastı; 640 px genişlikte yatay taşma yok; uzun günlük satırı kaydırılır. **[—]**
+- [ ] Gizlilik: günlük/önizleme/yol/ad `console` ve `localStorage`'a yazılmaz (geliştirici araçlarında kontrol). **[—]**
+
 ## Görsel EXPLAIN arayüzü (Plan 28)
 
 Sözleşme: `docs/superpowers/specs/2026-10-18-visual-explain-design.md` §1. Plan sekmesi ve menü tembel QueryTab parçasındadır.

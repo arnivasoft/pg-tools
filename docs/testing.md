@@ -470,6 +470,22 @@ Elle kontrol: `docs/smoke-test.md` "Bakım işlemleri arayüzü (Plan 25)".
 
 Elle kontrol: `docs/smoke-test.md` "Yedekleme arka ucu (Plan 26)".
 
+## Yedekleme ön yüzü testleri (Plan 27)
+
+vitest ortamı `node`'dur; mantık saf modelde ve denetleyicide tutulur, GUI elle sınanır.
+
+| Dosya | Kapsam |
+|---|---|
+| `src/features/backup/backup-model.test.ts` | Saf model: kapsam (`backupScopeOf`), önerilen dosya adı ve uzantı değişimi (`suggestFileName`, `swapExtension`), alan yolu ayrıştırma (`splitFieldErrors`), seçenek dışlamaları, kapılar (`canStart`, `restoreGate`, `confirmFlags`), olay uygulama (`applyEvent`: 2000 satır sınırı, uzun satır), `progressView`, `resultView`/ipuçları, `toolAdvice` |
+| `src/features/backup/backup-controller.test.ts` | Yedek/geri yükleme denetleyicileri: bağlantı ve `not_connected` yeniden denemesi, plan yenileme ve bayat yanıt, format değişince yol uyarlanması, onayın sıfırlanması, çalışırken kapatma/iptal yarışları, kapalı diyaloğa gelen olay, sonuç sonrası yeniden başlatma, Explorer yenileme |
+| `src/features/explorer/actions.test.ts` | `backup`/`restore` menü görünürlüğü ve devre dışılığı (beş tür; sistem, bölüm, bağlı olmayan sunucu, kilit) |
+| `src-tauri/src/backup.rs` (`reveal_arg`) | `backup_reveal` argümanı: boşluk/virgül/Türkçe karakter korunur; çift tırnak ve denetim karakteri reddedilir (`cargo test -p pg-tools reveal`) |
+
+- **Paket tavanları:** `bun run bundle:check` ana paket 127,364 B ve açılış kümesi 155,037 B tavanlarıyla (sıfır pay) geçmelidir. Plan 27 aşımı yalnız taşımayla telafi edildi (spec §6 "Telafi kaydı"); tembel parça `BackupDialogs-*.js` ana modülleri içe aktarmaz (metin `strings-backup.ts`).
+- **Kapanış taramaları:** `rg "strings-backup" src` yalnız `src/features/backup/*`; `rg "console\." src/features/backup` boş; `rg "@kobalte|plugin-dialog" src/app src/features/explorer src/ipc` yeni sonuç vermemeli.
+
+Elle kontrol: `docs/smoke-test.md` "Yedekleme arayüzü (Plan 27)".
+
 ## Görsel EXPLAIN testleri (Plan 28)
 
 - **Birim** (Docker'sız, `cargo test -p pgt-query`): `explain.rs` — EXPLAIN'e uygunluk tablosu, tek ifade kapsamı (`;`/sondaki yorum temizliği, baştaki yorum/ipucu korunur, çok ifade reddi), seçenek sürüm kapıları ve üretilen metin (insta), geri alma koşul tablosu (Idle/InTransaction/Failed × Write/Select); `session.rs` — kapıların sarmalanmış metinde çalışması, bağlantıdan önce ret; `classify.rs` — `EXPLAIN ANALYZE EXECUTE` yazma.

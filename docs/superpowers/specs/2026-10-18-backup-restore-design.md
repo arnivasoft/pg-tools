@@ -1,7 +1,7 @@
 # pg-tools — Yedekleme / Geri Yükleme Tasarımı (pg_dump / pg_restore / psql)
 
 - **Tarih:** 2026-10-18
-- **Durum:** Plan 26 arka ucu tamam (branch feat/backup-backend; sözleşme §5); Plan 27 ön yüzü kalan
+- **Durum:** Plan 26 arka ucu tamam; Plan 27 ön yüzü uygulandı (feat/backup-ui); elle kontrol bekliyor (`docs/smoke-test.md` "Yedekleme arayüzü (Plan 27)")
 - **Kapsam:**
   - Explorer'dan veritabanı, şema ya da tablo yedeği almak (`pg_dump`).
   - Yedek dosyasını bir veritabanına geri yüklemek: custom/directory/tar için `pg_restore`, düz SQL için `psql`.
@@ -279,3 +279,18 @@ Plan notları (`JobPlan.notes`, ön yüz olduğu gibi gösterebilir): directory 
 - **(e) Kilitte bekleyen `pg_dump` iptali:** süreç sonlandırılır ama sunucu oturumu kilit bırakılana dek kalır (takip işi: `pg_cancel_backend` ile `PGAPPNAME` eşlemesi).
 - **(f) Geri yüklemeler birbirini engellemez;** yalnız aynı hedef yola yazan yedeklemeler (`busy`) engellenir. Aynı veritabanına eşzamanlı iki geri yükleme ön yüzce engellenmelidir.
 - Ek: `restore_start` arşiv özetini plan hazırlığında bir kez okur (`pg_restore -l`, 60 sn / 64 MiB sınırı) ve araç seçimi ile ilerleme toplamında yeniden kullanır; özet okunamazsa plan hatasıdır (`path`).
+
+## 6. Plan 27 uygulama notları
+
+- **Menü:** `backup` (veritabanı, şema, tablo, materialized view, sequence; sistem nesnesi ve bölüm altında yok; kilitli sunucuda açık) ve `restore` (veritabanı ve bağlı sunucu düğümü; kilitli sunucuda gerekçeyle devre dışı) eylemleri; grup 3.
+- **Tek diyalog / tek iş:** App'te tek `backupJob` sinyali; aynı anda tek diyalog ve dolayısıyla tek iş. Bilinen sınır (f) (aynı veritabanına eşzamanlı iki geri yükleme) ön yüzce böyle kapanır. Diyalog modaldir; çalışırken Esc/× "İş sürüyor; iptal edilsin mi?" sorar, arka planda sürdürme kapsam dışıdır.
+- **Araç ayarları diyalog içinde:** genel Ayarlar ekranı olmadığından spec §3 "Ayarlar" maddesi iki diyalogda ortak "Araç ayarları" bölümü (`ToolsPanel.tsx`) olarak uygulandı: bin klasörü seç/temizle/yeniden tara, bulunan küme tablosu, `problem` metni; araç yoksa açık başlar.
+- **Salt okunur yol:** hedef/kaynak yolu yalnız yerel diyalogla seçilir (kayıt diyaloğu üzerine yazma onayını verir); directory formatında kayıt diyaloğuyla yeni klasör adı seçilir. Format değişince önerilen uzantı uyarlanır, kullanıcının uzantısı korunur.
+- **Sürüm uyarıları** (sınır (a)): sunucu ana sürümü düğüm `detail`inden, araç sürümü seçili kümeden okunur; fark bilgi, `pg_restore` ≥ 17 + sunucu < 17 uyarı verir.
+- **Geri yükleme:** kaynak seçimi, ardından `restore_inspect`; hedef "mevcut veritabanı" ya da "arşivdeki adla oluştur" (`create` ayrı kutu değil, hedeften türetilir); riskli planda onay kutusu, veri kaybı + üretimde sunucu adını yazma; plan sürümü değişince onay sıfırlanır.
+- **Bağlantı/parola:** açılışta `connect` (gerekirse parola istemi); `not_connected` bir kez yeniden denenir; `password_required` için sabit yönlendirme ("Sunucu bağlantısını kesip yeniden bağlanın; parola istenir.").
+- **`backup_reveal(path)`** (Rust, küçük arka uç komutu): "Klasörü göster" için; `tauri-plugin-opener` eklenmedi. Yol mutlak ve var olmalı, çift tırnak ve denetim karakteri reddedilir; Windows'ta `%SystemRoot%\explorer.exe /select,` ile başlatılır, beklenmez; yol günlüğe yazılmaz.
+- **İş sonrası:** geri yükleme `success`/`completed_with_errors` ile bitince Explorer (mevcut hedefte veritabanı düğümü, oluşturmada sunucu düğümü) ve Inspector yenilenir; yedeklemeden sonra yenileme yok.
+- **Kapsam dışı:** arka planda iş sürdürme, eşzamanlı çok iş, günlük kopyalama/kaydetme, TOC seçimi, `pg_dumpall`, bölüm düğümünden yedek, bölümlenmiş tablonun alt bölümleriyle yedeği.
+- **Paket ölçümleri:** tembel parça `BackupDialogs-*.js` ≈ 60,98 kB (gzip ≈ 17,7 kB); Task 1–4 sonunda ana paket 129,913 B / açılış kümesi 157,586 B (tavanlar 128,466 / 156,139; +1,447 B). Telafi sonrası: ana paket 127,364 B, açılış kümesi 155,037 B; tavanlar bu değerlere indirildi (sıfır pay), yükseltilmedi.
+- **Telafi kaydı (yalnız taşıma, metinler birebir):** (1) `t.query.close` (title/message/failedMessage/busyNote/commit/rollback) ve `t.query.bulk` (title/commitAll/rollbackAll/failedNote/tx/busy) `src/features/query/strings-tx.ts`'e (yalnız `tx-dialogs.tsx`); (2) `t.query.hint.autocommit/rollback/sessionReset` `src/features/query/strings-hint.ts`'e (yalnız `errors.ts`; `hint.locked` ana pakette kaldı); (3) `server-form.ts`ten `emptyForm`/`formFromConfig`/`toConfig`/`SERVER_COLORS` ve form türleri `src/features/servers/server-form-model.ts`'e (yalnız `ServerDialog`; `groupsOf`/`isProductionLabel`/`suggestLock` ana pakette kaldı).
