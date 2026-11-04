@@ -6,7 +6,10 @@
 //! (READ ONLY transaction, katalog profili); betik uygulanmaz, yalnız metin üretilir.
 
 pub mod key;
+pub mod linediff;
 pub mod model;
+pub mod script;
 
 pub use key::{KeyClass, Listed, Pair, class_of, item_key, match_objects};
 pub use model::*;
+pub use linediff::{MAX_DIFF_LINES, ddl_text, line_diff};
