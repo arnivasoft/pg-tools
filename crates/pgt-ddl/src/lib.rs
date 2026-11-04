@@ -20,8 +20,8 @@ pub mod target;
 
 pub use build::{BuildCtx, ScanResult, scan_semicolons};
 pub use error_codes::{DDL_ERROR_CODES, DdlErrorCode, ROLE_NOT_FOUND_CODE, ROLE_SUBJECT, ddl_payload};
-pub use load::{INVALID_UTF8_REASON, ObjectRef, load, server_version};
-pub use load_acl::{load_acl, load_default_acl};
+pub use load::{INVALID_UTF8_REASON, ObjectRef, SERVER_SCOPED_MSG, load, load_in, server_version};
+pub use load_acl::{load_acl, load_acl_in, load_default_acl};
 pub use load_maintenance::load_maintenance_target;
 pub use lookup::{LookupItem, LookupRequest, lookup};
 pub use manager::{ApplyOptions, ApplyOutcome, CreateContext, DdlManager, PlanRequest, ServerMessage};

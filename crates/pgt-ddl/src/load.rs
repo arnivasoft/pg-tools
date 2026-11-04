@@ -27,7 +27,7 @@ use pgt_core::connection::{ConnectionManager, Target};
 use pgt_core::pgtext::{is_utf8, lossy, lossy_opt, lossy_vec};
 use pgt_core::{Error, Result};
 use serde::{Deserialize, Serialize};
-use tokio_postgres::Row;
+use tokio_postgres::{Client, Row};
 use tokio_postgres::types::ToSql;
 use ts_rs::TS;
 use uuid::Uuid;
@@ -120,13 +120,25 @@ pub async fn server_version(mgr: &ConnectionManager, server: Uuid) -> Result<u32
     mgr.info(server).map(|i| i.version_num).ok_or(Error::NotConnected)
 }
 
+/// Sunucu kapsamlı türlerin (Database/Role) istemci alan yoldan yüklenmesinde döndürülen ileti.
+pub const SERVER_SCOPED_MSG: &str = "Veritabanı ve rol bu yolla yüklenmez (bakım bağlantısı gerekir).";
+
+/// İstemci alan yolun kapsam denetimi: sunucu kapsamlı türler (Database/Role) bakım bağlantısı ister → `Invalid`.
+pub(crate) fn in_scope(kind: ObjectKind) -> Result<()> {
+    if kind.server_scoped() { Err(Error::Invalid(SERVER_SCOPED_MSG.to_string())) } else { Ok(()) }
+}
+
+type QueryResult<T> = std::result::Result<T, tokio_postgres::Error>;
+
 /// Sürüme uygun SQL'i `oid` parametresiyle çalıştırır.
-async fn fetch(mgr: &ConnectionManager, server: Uuid, db: u32, sql: &'static VersionedSql, oid: u32) -> Result<Vec<Row>> {
-    mgr.run(server, Target::Database(db), move |c| async move {
-        let params: [&(dyn ToSql + Sync); 1] = [&oid];
-        c.client.query(sql.pick(PgVersion(c.version_num())), &params).await
-    })
-    .await
+async fn query_oid(c: &Client, v: PgVersion, sql: &'static VersionedSql, oid: u32) -> QueryResult<Vec<Row>> {
+    let params: [&(dyn ToSql + Sync); 1] = [&oid];
+    c.query(sql.pick(v), &params).await
+}
+
+/// Tek-sorgu türlerinin (şema, sequence, eklenti, trigger) havuzlu okuması: yükleyici başına tek `mgr.run`.
+async fn run_oid(mgr: &ConnectionManager, server: Uuid, db: u32, sql: &'static VersionedSql, oid: u32) -> Result<Vec<Row>> {
+    mgr.run(server, Target::Database(db), move |c| async move { query_oid(&c.client, PgVersion(c.version_num()), sql, oid).await }).await
 }
 
 /// Satır kümelerinden birinde geçersiz UTF-8 metin varsa `INVALID_UTF8_REASON` (bir kez). Bu gerekçeyi taşıyan
@@ -158,6 +170,8 @@ pub(crate) fn target_for(kind: ObjectKind, database_oid: Option<u32>) -> Result<
 }
 
 /// Katalogdan tanım okur; yok ise `Error::NotFound`, sistem nesnesi ise `Error::Invalid`. Hedef `target_for` ile.
+/// İki giriş noktası: havuzlu `load` (bu; sunucu kapsamlı türler dahil) ve verilen istemcide okuyan `load_in`
+/// (yalnız şema kapsamlı türler; sorgular, sıra ve normalleştirme aynı).
 pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into<Option<u32>> + Send, obj: ObjectRef) -> Result<ObjectDef> {
     let database_oid = match target_for(obj.kind, database_oid.into())? {
         Target::Database(db) => db,
@@ -182,6 +196,30 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into
     }
 }
 
+/// Şema kapsamlı türleri (Schema, Sequence, Extension, Index, Table, View, MaterializedView, Function, Procedure,
+/// Trigger, Type, Domain) verilen istemcide yükler. Sorgular, sıra ve normalleştirme `load` ile aynıdır.
+/// Database/Role → `Error::Invalid(SERVER_SCOPED_MSG)`. Sorgu hatası `Error::from_query` ile eşlenir.
+pub async fn load_in(client: &Client, version_num: u32, obj: ObjectRef) -> Result<ObjectDef> {
+    in_scope(obj.kind)?;
+    let (v, oid) = (PgVersion(version_num), obj.oid);
+    let q = Error::from_query;
+    match obj.kind {
+        ObjectKind::Schema => parse_schema(fetch_schema(client, v, oid).await.map_err(q)?),
+        ObjectKind::Sequence => parse_sequence(fetch_sequence(client, v, oid).await.map_err(q)?),
+        ObjectKind::Extension => parse_extension(fetch_extension(client, v, oid).await.map_err(q)?),
+        ObjectKind::Index => parse_index(fetch_index(client, v, oid).await.map_err(q)?),
+        ObjectKind::Table => parse_table(fetch_table(client, v, oid).await.map_err(q)?),
+        ObjectKind::View => parse_view(fetch_view(client, v, oid).await.map_err(q)?),
+        ObjectKind::MaterializedView => parse_matview(fetch_matview(client, v, oid).await.map_err(q)?),
+        ObjectKind::Function | ObjectKind::Procedure => parse_function(obj.kind, fetch_function(client, v, oid).await.map_err(q)?),
+        ObjectKind::Trigger => parse_trigger(fetch_trigger(client, v, oid).await.map_err(q)?),
+        ObjectKind::Type => parse_type(fetch_type(client, v, oid).await.map_err(q)?),
+        ObjectKind::Domain => parse_domain(fetch_domain(client, v, oid).await.map_err(q)?),
+        // `in_scope` bunları zaten eledi.
+        ObjectKind::Database | ObjectKind::Role => Err(Error::Invalid(SERVER_SCOPED_MSG.to_string())),
+    }
+}
+
 fn refuse_system(row: &Row) -> Result<()> {
     if row.get::<_, bool>("is_system") {
         return Err(Error::Invalid(SYSTEM_ERROR.to_string()));
@@ -189,8 +227,15 @@ fn refuse_system(row: &Row) -> Result<()> {
     Ok(())
 }
 
+async fn fetch_schema(c: &Client, v: PgVersion, oid: u32) -> QueryResult<Vec<Row>> {
+    query_oid(c, v, &SCHEMA_SQL, oid).await
+}
+
 async fn load_schema(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
-    let rows = fetch(mgr, server, db, &SCHEMA_SQL, oid).await?;
+    parse_schema(run_oid(mgr, server, db, &SCHEMA_SQL, oid).await?)
+}
+
+fn parse_schema(rows: Vec<Row>) -> Result<ObjectDef> {
     let r = rows.first().ok_or_else(|| not_found("şema"))?;
     refuse_system(r)?;
     Ok(ObjectDef::Schema(SchemaDef { name: r.get("name"), owner: r.get("owner"), comment: r.get("comment") }))
@@ -211,8 +256,15 @@ fn default_bounds(t: SeqType, increment: i64) -> (i64, i64) {
     if increment > 0 { (1, hi) } else { (lo, -1) }
 }
 
+async fn fetch_sequence(c: &Client, v: PgVersion, oid: u32) -> QueryResult<Vec<Row>> {
+    query_oid(c, v, &SEQUENCE_SQL, oid).await
+}
+
 async fn load_sequence(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
-    let rows = fetch(mgr, server, db, &SEQUENCE_SQL, oid).await?;
+    parse_sequence(run_oid(mgr, server, db, &SEQUENCE_SQL, oid).await?)
+}
+
+fn parse_sequence(rows: Vec<Row>) -> Result<ObjectDef> {
     let r = rows.first().ok_or_else(|| not_found("sequence"))?;
     refuse_system(r)?;
     if r.get::<_, bool>("is_identity") {
@@ -251,8 +303,15 @@ async fn load_sequence(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32)
     }))
 }
 
+async fn fetch_extension(c: &Client, v: PgVersion, oid: u32) -> QueryResult<Vec<Row>> {
+    query_oid(c, v, &EXTENSION_SQL, oid).await
+}
+
 async fn load_extension(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
-    let rows = fetch(mgr, server, db, &EXTENSION_SQL, oid).await?;
+    parse_extension(run_oid(mgr, server, db, &EXTENSION_SQL, oid).await?)
+}
+
+fn parse_extension(rows: Vec<Row>) -> Result<ObjectDef> {
     let r = rows.first().ok_or_else(|| not_found("eklenti"))?;
     refuse_system(r)?;
     Ok(ObjectDef::Extension(ExtensionDef {
@@ -304,15 +363,23 @@ fn strip_outer_parens(s: &str) -> String {
     cur.to_string()
 }
 
+type IndexRows = (Vec<Row>, Vec<Row>);
+
+async fn fetch_index(c: &Client, v: PgVersion, oid: u32) -> QueryResult<IndexRows> {
+    let params: [&(dyn ToSql + Sync); 1] = [&oid];
+    let head = c.query(INDEX_SQL.pick(v), &params).await?;
+    let cols = if head.is_empty() { Vec::new() } else { c.query(INDEX_COLUMNS_SQL, &params).await? };
+    Ok((head, cols))
+}
+
 async fn load_index(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
-    let (head, cols) = mgr
-        .run(server, Target::Database(db), move |c| async move {
-            let params: [&(dyn ToSql + Sync); 1] = [&oid];
-            let head = c.client.query(INDEX_SQL.pick(PgVersion(c.version_num())), &params).await?;
-            let cols = if head.is_empty() { Vec::new() } else { c.client.query(INDEX_COLUMNS_SQL, &params).await? };
-            Ok((head, cols))
-        })
+    let rows = mgr
+        .run(server, Target::Database(db), move |c| async move { fetch_index(&c.client, PgVersion(c.version_num()), oid).await })
         .await?;
+    parse_index(rows)
+}
+
+fn parse_index((head, cols): IndexRows) -> Result<ObjectDef> {
     let h = head.first().ok_or_else(|| not_found("indeks"))?;
     refuse_system(h)?;
     refuse_invalid_utf8(&[&head, &cols])?;
@@ -499,6 +566,19 @@ fn column_from_row(r: &Row) -> ColumnDef {
     }
 }
 
+type TableRows = (Vec<Row>, Vec<Row>, Vec<Row>);
+
+async fn fetch_table(c: &Client, v: PgVersion, oid: u32) -> QueryResult<TableRows> {
+    let params: [&(dyn ToSql + Sync); 1] = [&oid];
+    let head = c.query(TABLE_SQL.pick(v), &params).await?;
+    if head.is_empty() {
+        return Ok((head, vec![], vec![]));
+    }
+    let cols = c.query(TABLE_COLUMNS_SQL.pick(v), &params).await?;
+    let cons = c.query(TABLE_CONSTRAINTS_SQL.pick(v), &params).await?;
+    Ok((head, cols, cons))
+}
+
 /// Tablo yükleyicisi. Normalleştirme (üreticiyle gidiş-dönüşün dayanağı):
 /// - Sahip `Some(rol)`; tablespace varsayılan (`0`/`pg_default`) ise `None`; boş yorum `None`.
 /// - Kolonlar attnum sırasıyla, `attnum` dolu; `data_type` = `format_type` (değiştiricili, görünmeyen şema nitelikli);
@@ -508,19 +588,13 @@ fn column_from_row(r: &Row) -> ColumnDef {
 /// - `unsupported`: EXCLUDE, kısıt tetikleyicileri, düz olmayan PG 18 NOT NULL kısıtları, modellenmeyen özellikli
 ///   kısıtlar, varsayılan dışı kimlik dizisi seçenekleri, fillfactor dışı depolama seçenekleri, `OF tip` tablolar.
 async fn load_table(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
-    let (head, cols, cons) = mgr
-        .run(server, Target::Database(db), move |c| async move {
-            let params: [&(dyn ToSql + Sync); 1] = [&oid];
-            let v = PgVersion(c.version_num());
-            let head = c.client.query(TABLE_SQL.pick(v), &params).await?;
-            if head.is_empty() {
-                return Ok((head, vec![], vec![]));
-            }
-            let cols = c.client.query(TABLE_COLUMNS_SQL.pick(v), &params).await?;
-            let cons = c.client.query(TABLE_CONSTRAINTS_SQL.pick(v), &params).await?;
-            Ok((head, cols, cons))
-        })
+    let rows = mgr
+        .run(server, Target::Database(db), move |c| async move { fetch_table(&c.client, PgVersion(c.version_num()), oid).await })
         .await?;
+    parse_table(rows)
+}
+
+fn parse_table((head, cols, cons): TableRows) -> Result<ObjectDef> {
     let h = head.first().ok_or_else(|| not_found("tablo"))?;
     refuse_system(h)?;
     let persistence = match h.get::<_, String>("persistence").as_str() {
@@ -618,20 +692,16 @@ fn relation_columns(rows: &[Row]) -> (Vec<ViewColumn>, Vec<String>, Vec<String>)
 }
 
 /// Başlık + kolon satırları (başlık yoksa kolon sorgusu çalışmaz).
-async fn fetch_relation(
-    mgr: &ConnectionManager,
-    server: Uuid,
-    db: u32,
-    sql: &'static VersionedSql,
-    oid: u32,
-) -> Result<(Vec<Row>, Vec<Row>)> {
-    mgr.run(server, Target::Database(db), move |c| async move {
-        let params: [&(dyn ToSql + Sync); 1] = [&oid];
-        let head = c.client.query(sql.pick(PgVersion(c.version_num())), &params).await?;
-        let cols = if head.is_empty() { Vec::new() } else { c.client.query(RELATION_COLUMNS_SQL, &params).await? };
-        Ok((head, cols))
-    })
-    .await
+async fn fetch_relation(c: &Client, v: PgVersion, sql: &'static VersionedSql, oid: u32) -> QueryResult<(Vec<Row>, Vec<Row>)> {
+    let params: [&(dyn ToSql + Sync); 1] = [&oid];
+    let head = c.query(sql.pick(v), &params).await?;
+    let cols = if head.is_empty() { Vec::new() } else { c.query(RELATION_COLUMNS_SQL, &params).await? };
+    Ok((head, cols))
+}
+
+/// `fetch_relation`'ın havuzlu hali: yükleyici başına tek `mgr.run`.
+async fn run_relation(mgr: &ConnectionManager, server: Uuid, db: u32, sql: &'static VersionedSql, oid: u32) -> Result<(Vec<Row>, Vec<Row>)> {
+    mgr.run(server, Target::Database(db), move |c| async move { fetch_relation(&c.client, PgVersion(c.version_num()), sql, oid).await }).await
 }
 
 /// Görünüm/MV ortak kapıları: geçici → `Invalid` (geçici şema `pg_temp_N` sistem sayılmadan önce), sistem → `Invalid`.
@@ -642,11 +712,18 @@ fn refuse_temp_or_system(r: &Row) -> Result<()> {
     refuse_system(r)
 }
 
+async fn fetch_view(c: &Client, v: PgVersion, oid: u32) -> QueryResult<(Vec<Row>, Vec<Row>)> {
+    fetch_relation(c, v, &VIEW_SQL, oid).await
+}
+
 /// View yükleyicisi. Normalleştirme: sahip `Some`; boş yorum `None`; `query` = `view_query(pg_get_viewdef(oid, true))`;
 /// seçenekler reloptions'tan (`security_*` yalnızca doğru değerlerde `true`); `recreate = false`; `columns` attnum
 /// sırasıyla; `unsupported` = `TRIGGER t`, `RULE r`, `DEFAULT c`, `COMMENT c` (her grup ad sırasıyla).
 async fn load_view(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
-    let (head, cols) = fetch_relation(mgr, server, db, &VIEW_SQL, oid).await?;
+    parse_view(run_relation(mgr, server, db, &VIEW_SQL, oid).await?)
+}
+
+fn parse_view((head, cols): (Vec<Row>, Vec<Row>)) -> Result<ObjectDef> {
     let h = head.first().ok_or_else(|| not_found("görünüm"))?;
     refuse_temp_or_system(h)?;
     let (check_option, security_barrier, security_invoker, other) = view_options(&lossy_vec(h, "options"));
@@ -673,12 +750,19 @@ async fn load_view(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> 
     }))
 }
 
+async fn fetch_matview(c: &Client, v: PgVersion, oid: u32) -> QueryResult<(Vec<Row>, Vec<Row>)> {
+    fetch_relation(c, v, &MATVIEW_SQL, oid).await
+}
+
 /// MatView yükleyicisi. Normalleştirme: sahip `Some`; boş yorum `None`; tablespace yalnızca `reltablespace = 0`
 /// (veritabanı varsayılanı) ise `None`, aksi halde ad (varsayılanı başka olan veritabanında açık `pg_default` dahil); `query` View
 /// gibi; `with_data = relispopulated`; `refresh = None`; `unsupported` = `WITH (k=v)` (fillfactor dışı seçenekler),
 /// `INDEX ad`, `COMMENT c` (her grup ad sırasıyla). Üretici yeniden kurmada `INDEX ` önekini arar.
 async fn load_matview(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
-    let (head, cols) = fetch_relation(mgr, server, db, &MATVIEW_SQL, oid).await?;
+    parse_matview(run_relation(mgr, server, db, &MATVIEW_SQL, oid).await?)
+}
+
+fn parse_matview((head, cols): (Vec<Row>, Vec<Row>)) -> Result<ObjectDef> {
     let h = head.first().ok_or_else(|| not_found("materialized view"))?;
     refuse_temp_or_system(h)?;
     let (columns, _defaults, comments) = relation_columns(&cols);
@@ -952,6 +1036,13 @@ fn unsplittable_settings(settings: &[ConfigSetting]) -> Vec<String> {
         .collect()
 }
 
+async fn fetch_function(c: &Client, v: PgVersion, oid: u32) -> QueryResult<(Vec<Row>, Vec<Row>)> {
+    let params: [&(dyn ToSql + Sync); 1] = [&oid];
+    let head = c.query(FUNCTION_SQL.pick(v), &params).await?;
+    let args = if head.is_empty() { Vec::new() } else { c.query(FUNCTION_ARGS_SQL, &params).await? };
+    Ok((head, args))
+}
+
 /// Function/Procedure yükleyicisi. Normalleştirme (üreticiyle gidiş-dönüşün ve `alter(yüklü, yüklü)` boş planının dayanağı):
 /// - Sahip `Some`; boş yorum `None`; `recreate = false`; dil `pg_language` adı (küçük harf).
 /// - Argümanlar konum sırasıyla; tip `format_type(oid, NULL)` (görünmeyen şema nitelikli, değiştiricisiz); adsız →
@@ -971,14 +1062,13 @@ fn unsplittable_settings(settings: &[ConfigSetting]) -> Vec<String> {
 ///   kurmanın sessizce düşüreceği özelliklerdir.
 /// - Tür uyuşmazlığı (Function istenip `prokind = 'p'` ya da tersi) → `Invalid`.
 async fn load_function(mgr: &ConnectionManager, server: Uuid, db: u32, kind: ObjectKind, oid: u32) -> Result<ObjectDef> {
-    let (head, arg_rows) = mgr
-        .run(server, Target::Database(db), move |c| async move {
-            let params: [&(dyn ToSql + Sync); 1] = [&oid];
-            let head = c.client.query(FUNCTION_SQL.pick(PgVersion(c.version_num())), &params).await?;
-            let args = if head.is_empty() { Vec::new() } else { c.client.query(FUNCTION_ARGS_SQL, &params).await? };
-            Ok((head, args))
-        })
+    let rows = mgr
+        .run(server, Target::Database(db), move |c| async move { fetch_function(&c.client, PgVersion(c.version_num()), oid).await })
         .await?;
+    parse_function(kind, rows)
+}
+
+fn parse_function(kind: ObjectKind, (head, arg_rows): (Vec<Row>, Vec<Row>)) -> Result<ObjectDef> {
     let procedure = kind == ObjectKind::Procedure;
     let h = head.first().ok_or_else(|| not_found(if procedure { "procedure" } else { "fonksiyon" }))?;
     let prokind: String = h.get("kind");
@@ -1204,6 +1294,10 @@ fn trigger_enabled(c: &str) -> Option<TriggerEnabled> {
     }
 }
 
+async fn fetch_trigger(c: &Client, v: PgVersion, oid: u32) -> QueryResult<Vec<Row>> {
+    query_oid(c, v, &TRIGGER_SQL, oid).await
+}
+
 /// Trigger yükleyicisi. Normalleştirme (üreticiyle gidiş-dönüşün ve `alter(yüklü, yüklü)` boş planının dayanağı):
 /// - `tgtype` bitleri → zamanlama/düzey/olaylar; `update_columns` `tgattr` saklandığı sırayla.
 /// - `when`: `pg_get_triggerdef(oid, true)`'deki `WHEN (…)` gövdesi (`trigger_when`); argümanlar `tgargs` baytları.
@@ -1214,7 +1308,10 @@ fn trigger_enabled(c: &str) -> Option<TriggerEnabled> {
 ///   constraint trigger (`tgconstrrelid`; modellenmez), görünüm/yabancı tablo trigger'ı (üretici yalnız tablo trigger'ı
 ///   kurar), sistem şeması, ayrıştırılamayan WHEN, çözülemeyen argümanlar, bilinmeyen `tgenabled`.
 async fn load_trigger(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
-    let rows = fetch(mgr, server, db, &TRIGGER_SQL, oid).await?;
+    parse_trigger(run_oid(mgr, server, db, &TRIGGER_SQL, oid).await?)
+}
+
+fn parse_trigger(rows: Vec<Row>) -> Result<ObjectDef> {
     let r = rows.first().ok_or_else(|| not_found("trigger"))?;
     let mut unsupported = vec![];
     // Klon önce: PG 13–14 klonu `tgisinternal` de taşır; gösterilen ilk gerekçe asıl neden olsun.
@@ -1336,6 +1433,23 @@ fn composite_attrs(rows: &[Row], unsupported: &mut Vec<String>) -> Vec<Composite
         .collect()
 }
 
+type TypeRows = (Vec<Row>, Vec<Row>, Vec<Row>, Vec<Row>);
+
+async fn fetch_type(c: &Client, v: PgVersion, oid: u32) -> QueryResult<TypeRows> {
+    let params: [&(dyn ToSql + Sync); 1] = [&oid];
+    let head = c.query(TYPE_SQL, &params).await?;
+    let (mut values, mut attrs, mut range) = (vec![], vec![], vec![]);
+    if let Some(h) = head.first() {
+        match h.get::<_, String>("typtype").as_str() {
+            "e" => values = c.query(ENUM_VALUES_SQL, &params).await?,
+            "c" => attrs = c.query(COMPOSITE_ATTRS_SQL, &params).await?,
+            "r" => range = c.query(RANGE_SQL.pick(v), &params).await?,
+            _ => {}
+        }
+    }
+    Ok((head, values, attrs, range))
+}
+
 /// Type yükleyicisi. Normalleştirme:
 /// - Sahip `Some`; boş yorum `None`.
 /// - Enum: etiketler `enumsortorder` sırasıyla, `original = Some(etiket)`.
@@ -1348,22 +1462,13 @@ fn composite_attrs(rows: &[Row], unsupported: &mut Vec<String>) -> Vec<Composite
 ///   composite gövdeyle döner), tablo/görünüm satır tipi (öznitelikleriyle), `EXTENSION e`, `sistem şeması`, üretici
 ///   dilbilgisinden geçmeyen tip ya da fonksiyon adı.
 async fn load_type(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
-    let (head, values, attrs, range) = mgr
-        .run(server, Target::Database(db), move |c| async move {
-            let params: [&(dyn ToSql + Sync); 1] = [&oid];
-            let head = c.client.query(TYPE_SQL, &params).await?;
-            let (mut values, mut attrs, mut range) = (vec![], vec![], vec![]);
-            if let Some(h) = head.first() {
-                match h.get::<_, String>("typtype").as_str() {
-                    "e" => values = c.client.query(ENUM_VALUES_SQL, &params).await?,
-                    "c" => attrs = c.client.query(COMPOSITE_ATTRS_SQL, &params).await?,
-                    "r" => range = c.client.query(RANGE_SQL.pick(PgVersion(c.version_num())), &params).await?,
-                    _ => {}
-                }
-            }
-            Ok((head, values, attrs, range))
-        })
+    let rows = mgr
+        .run(server, Target::Database(db), move |c| async move { fetch_type(&c.client, PgVersion(c.version_num()), oid).await })
         .await?;
+    parse_type(rows)
+}
+
+fn parse_type((head, values, attrs, range): TypeRows) -> Result<ObjectDef> {
     let h = head.first().ok_or_else(|| not_found("tip"))?;
     let mut unsupported = vec![];
     note_invalid_utf8(&[&head, &values, &attrs, &range], &mut unsupported);
@@ -1475,6 +1580,13 @@ fn domain_check_expr(def: &str) -> Option<String> {
     Some(d.strip_prefix("CHECK (")?.strip_suffix(')')?.to_string())
 }
 
+async fn fetch_domain(c: &Client, _v: PgVersion, oid: u32) -> QueryResult<(Vec<Row>, Vec<Row>)> {
+    let params: [&(dyn ToSql + Sync); 1] = [&oid];
+    let head = c.query(DOMAIN_SQL, &params).await?;
+    let cons = if head.is_empty() { vec![] } else { c.query(DOMAIN_CHECKS_SQL, &params).await? };
+    Ok((head, cons))
+}
+
 /// Domain yükleyicisi. Normalleştirme:
 /// - Sahip `Some`; boş yorum `None`; temel tip `format_type` (değiştiricili); collation yalnız temel tipin
 ///   varsayılanından farklıysa; varsayılan `pg_get_expr(typdefaultbin, 0, true)` (tamamını saran dış parantez soyulur);
@@ -1485,14 +1597,13 @@ fn domain_check_expr(def: &str) -> Option<String> {
 /// - Domain olmayan tip oid'i → `Invalid`.
 /// - `unsupported` (R5): `EXTENSION e`, `sistem şeması`, dilbilgisinden geçmeyen temel tip, ayrıştırılamayan kısıt.
 async fn load_domain(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
-    let (head, cons) = mgr
-        .run(server, Target::Database(db), move |c| async move {
-            let params: [&(dyn ToSql + Sync); 1] = [&oid];
-            let head = c.client.query(DOMAIN_SQL, &params).await?;
-            let cons = if head.is_empty() { vec![] } else { c.client.query(DOMAIN_CHECKS_SQL, &params).await? };
-            Ok((head, cons))
-        })
+    let rows = mgr
+        .run(server, Target::Database(db), move |c| async move { fetch_domain(&c.client, PgVersion(c.version_num()), oid).await })
         .await?;
+    parse_domain(rows)
+}
+
+fn parse_domain((head, cons): (Vec<Row>, Vec<Row>)) -> Result<ObjectDef> {
     let h = head.first().ok_or_else(|| not_found("domain"))?;
     if h.get::<_, String>("typtype") != "d" {
         return Err(Error::Invalid("nesne bir domain değil".to_string()));
@@ -1552,6 +1663,30 @@ async fn load_domain(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_scope_rejects_only_server_scoped_kinds() {
+        for k in [ObjectKind::Database, ObjectKind::Role] {
+            assert!(matches!(in_scope(k), Err(Error::Invalid(m)) if m == SERVER_SCOPED_MSG), "{k:?}");
+        }
+        let scoped = [
+            ObjectKind::Schema,
+            ObjectKind::Sequence,
+            ObjectKind::Extension,
+            ObjectKind::Index,
+            ObjectKind::Table,
+            ObjectKind::View,
+            ObjectKind::MaterializedView,
+            ObjectKind::Function,
+            ObjectKind::Procedure,
+            ObjectKind::Trigger,
+            ObjectKind::Type,
+            ObjectKind::Domain,
+        ];
+        for k in scoped {
+            assert!(in_scope(k).is_ok(), "{k:?}");
+        }
+    }
 
     #[test]
     fn config_settings_split_lowercase_and_sort() {

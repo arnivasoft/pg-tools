@@ -23,6 +23,7 @@ use pgt_catalog::version::{PgVersion, VersionedSql};
 use pgt_core::connection::ConnectionManager;
 use pgt_core::pgtext::{lossy, lossy_opt};
 use pgt_core::{Error, Result};
+use tokio_postgres::Row;
 use tokio_postgres::types::ToSql;
 use uuid::Uuid;
 
@@ -167,33 +168,64 @@ fn routine_reason(subkind: &str) -> Option<&'static str> {
     (subkind == "a").then_some(AGGREGATE_REASON)
 }
 
-/// Nesnenin etkin ACL'sini okur. Yetkisi olmayan tür → `Invalid`; yok ya da tür uyuşmazlığı → `NotFound`;
-/// veritabanı gerektiren türde `database_oid` yok → `Invalid(NEEDS_DATABASE)` (`target_for`).
-pub async fn load_acl(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into<Option<u32>> + Send, obj: ObjectRef) -> Result<AclDef> {
-    let kind = obj.kind;
-    if !acl_supported(kind) {
-        return Err(Error::Invalid(UNSUPPORTED_KIND_MSG.to_string()));
-    }
-    let target = target_for(kind, database_oid.into())?;
-    let sql: &'static VersionedSql = match kind {
+/// Yetkisi olmayan türü eler; hem `load_acl` hem `load_acl_in` ilk bunu çağırır.
+fn check_kind(kind: ObjectKind) -> Result<()> {
+    if acl_supported(kind) { Ok(()) } else { Err(Error::Invalid(UNSUPPORTED_KIND_MSG.to_string())) }
+}
+
+fn acl_sql(kind: ObjectKind) -> &'static VersionedSql {
+    match kind {
         ObjectKind::Function | ObjectKind::Procedure => &PROC_SQL,
         ObjectKind::Schema => &NAMESPACE_SQL,
         ObjectKind::Database => &DATABASE_SQL,
         ObjectKind::Type | ObjectKind::Domain => &TYPE_SQL,
         _ => &RELATION_SQL,
-    };
+    }
+}
+
+/// Başlık + (yalnız Table/View/MV ve tür eşleştiyse) kolon yetkisi satırları; tek istemcide, sorgu sırası sabit.
+async fn fetch_acl(
+    c: &tokio_postgres::Client,
+    v: PgVersion,
+    kind: ObjectKind,
+    oid: u32,
+) -> std::result::Result<(Vec<Row>, Vec<Row>), tokio_postgres::Error> {
     let with_columns = matches!(kind, ObjectKind::Table | ObjectKind::View | ObjectKind::MaterializedView);
+    let params: [&(dyn ToSql + Sync); 1] = [&oid];
+    let head = c.query(acl_sql(kind).pick(v), &params).await?;
+    // Kolon yetkileri yalnız Table/View/MV ve tür eşleştiyse (uyuşmazlık NotFound döner; boşuna sorgu yok).
+    let matched = head.first().is_some_and(|h| kind_matches(kind, &h.get::<_, String>("subkind")));
+    let cols = if with_columns && matched { c.query(COLUMNS_SQL, &params).await? } else { Vec::new() };
+    Ok((head, cols))
+}
+
+/// Nesnenin etkin ACL'sini okur. Yetkisi olmayan tür → `Invalid`; yok ya da tür uyuşmazlığı → `NotFound`;
+/// veritabanı gerektiren türde `database_oid` yok → `Invalid(NEEDS_DATABASE)` (`target_for`).
+/// İki giriş noktası: havuzlu `load_acl` (bu) ve verilen istemcide okuyan `load_acl_in`.
+pub async fn load_acl(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into<Option<u32>> + Send, obj: ObjectRef) -> Result<AclDef> {
+    let kind = obj.kind;
+    check_kind(kind)?;
+    let target = target_for(kind, database_oid.into())?;
     let oid = obj.oid;
-    let (head, cols, version_num) = mgr
+    let ((head, cols), version_num) = mgr
         .run(server, target, move |c| async move {
-            let params: [&(dyn ToSql + Sync); 1] = [&oid];
-            let head = c.client.query(sql.pick(PgVersion(c.version_num())), &params).await?;
-            // Kolon yetkileri yalnız Table/View/MV ve tür eşleştiyse (uyuşmazlık NotFound döner; boşuna sorgu yok).
-            let matched = head.first().is_some_and(|h| kind_matches(kind, &h.get::<_, String>("subkind")));
-            let cols = if with_columns && matched { c.client.query(COLUMNS_SQL, &params).await? } else { Vec::new() };
-            Ok((head, cols, c.version_num()))
+            let r = fetch_acl(&c.client, PgVersion(c.version_num()), kind, oid).await?;
+            Ok((r, c.version_num()))
         })
         .await?;
+    parse_acl(kind, head, cols, version_num)
+}
+
+/// `load_acl` ile aynı sonuç, verilen istemcide (ör. tek anlık görüntü transaction'ı). Database → `Invalid(SERVER_SCOPED_MSG)`;
+/// yetkisiz tür → `Invalid(UNSUPPORTED_KIND_MSG)`.
+pub async fn load_acl_in(client: &tokio_postgres::Client, version_num: u32, obj: ObjectRef) -> Result<AclDef> {
+    check_kind(obj.kind)?;
+    crate::load::in_scope(obj.kind)?;
+    let (head, cols) = fetch_acl(client, PgVersion(version_num), obj.kind, obj.oid).await.map_err(Error::from_query)?;
+    parse_acl(obj.kind, head, cols, version_num)
+}
+
+fn parse_acl(kind: ObjectKind, head: Vec<Row>, cols: Vec<Row>, version_num: u32) -> Result<AclDef> {
     let h = head.first().ok_or_else(not_found)?;
     let subkind: String = h.get("subkind");
     if !kind_matches(kind, &subkind) {
