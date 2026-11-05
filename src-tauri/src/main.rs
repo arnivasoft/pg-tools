@@ -7,6 +7,7 @@ mod data;
 mod ddl;
 mod logging;
 mod query;
+mod schema_diff;
 mod state;
 mod store_cmds;
 mod window;
@@ -39,6 +40,8 @@ fn main() {
                 state.data.cancel_all();
                 // Yedekleme/geri yükleme işlerinin sahibi gitti: çocuk süreçler sonlandırılır, geçici çıktı silinir.
                 state.backup.cancel_all();
+                // Karşılaştırma kimlikleri de arayüzle birlikte kaybolur: çalışanlar iptal edilir, sonuçlar bırakılır.
+                state.diff.clear();
                 tauri::async_runtime::spawn(async move { query::close_all_on_reload(&query).await });
             }
         })
@@ -136,6 +139,13 @@ fn main() {
             backup::restore_inspect,
             backup::restore_plan,
             backup::restore_start,
+            schema_diff::schema_diff_databases,
+            schema_diff::schema_diff_start,
+            schema_diff::schema_diff_cancel,
+            schema_diff::schema_diff_detail,
+            schema_diff::schema_diff_script,
+            schema_diff::schema_diff_save,
+            schema_diff::schema_diff_close,
         ])
         .build(tauri::generate_context!())
         .expect("pg-tools başlatılamadı")
@@ -149,6 +159,8 @@ fn main() {
                 let ddl_cancels = state.ddl.cancel_all() + state.data.cancel_all();
                 // Yedekleme işleri iptal edilir: yürütücü çocuğu sonlandırır ve geçici çıktıyı siler (kısa bekleme).
                 let backup_cancels = state.backup.cancel_all();
+                // Karşılaştırmalar: çalışanlar iptal edilir (ayrılmış bağlantılar süreçle birlikte düşer).
+                state.diff.clear();
                 // Zaman aşımı geleceği çalışma zamanı İÇİNDE kurulmalı: dışarıda `tokio::time::timeout` "no reactor running" ile panikler.
                 tauri::async_runtime::block_on(async move {
                     if ddl_cancels > 0 || backup_cancels > 0 {

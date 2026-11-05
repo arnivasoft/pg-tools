@@ -2570,6 +2570,7 @@ dependencies = [
  "pgt-core",
  "pgt-dash",
  "pgt-ddl",
+ "pgt-diff",
  "pgt-query",
  "serde",
  "tauri",

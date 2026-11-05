@@ -12,6 +12,8 @@ pub mod linediff;
 pub mod list;
 pub mod model;
 pub mod normalize;
+pub mod registry;
+pub mod run;
 pub mod script;
 pub mod snapshot;
 
@@ -26,3 +28,5 @@ pub use normalize::{
 };
 pub use list::{SchemaCheck, list_objects, schema_check};
 pub use snapshot::{LOAD_PIPELINE, LoadErrorClass, Loaded, PROGRESS_EVERY, SideSnapshot, SnapshotError, classify_load_error, load_side};
+pub use registry::{DiffRegistry, MAX_READY, RegisterError, RunGuard};
+pub use run::{DiffData, DiffSink, HeaderInfo, ItemEntry, RunError, ScriptError, run_diff, same_side};
