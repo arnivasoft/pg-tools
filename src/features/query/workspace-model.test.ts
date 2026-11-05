@@ -6,10 +6,12 @@ import type { TreeNode } from "../../ipc/bindings/TreeNode";
 import { ROOT, emptyTree, type TreeState } from "../explorer/tree-model";
 import { initialRun, type RunState } from "./run-model";
 import {
-  applyEnvChoice, bulkPolicy, canCommitAny, canOpenQueryTool, choicePolicy, closePlan, createDebouncer, defaultOptions,
-  envLockDefault, formatElapsed, initialSql, needsEnvPrompt, newQueryNode, nextTxSince, openContext, pendingTransactions,
-  restoreDraft, routeError, sameScope, saveClosesSessions, swapEditorState, toDraft, serverLineColor, type SavedView, type Timers,
+  applyEnvChoice, bulkPolicy, canOpenQueryTool, choicePolicy, closePlan, createDebouncer, defaultOptions,
+  initialSql, needsEnvPrompt, newQueryNode, nextTxSince, openContext, pendingTransactions,
+  restoreDraft, routeError, saveClosesSessions, toDraft, serverLineColor, type Timers,
 } from "./workspace-model";
+import { canCommitAny, envLockDefault } from "./env-model";
+import { formatElapsed, sameScope, swapEditorState, type SavedView } from "./querytab-model";
 
 const flags = { connected: true, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false, locked: false };
 

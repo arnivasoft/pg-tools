@@ -2,11 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { QueryEvent } from "../../ipc/bindings/QueryEvent";
 import type { TxState } from "../../ipc/bindings/TxState";
 import { USER_CANCEL_MESSAGE } from "./result-model";
+import { canCancel, canCommit, canLoadMoreRows, canRollback } from "./querytab-model";
 import {
-  canCancel,
-  canCommit,
-  canLoadMoreRows,
-  canRollback,
   closeChoices,
   closeNeedsConfirm,
   initialRun,

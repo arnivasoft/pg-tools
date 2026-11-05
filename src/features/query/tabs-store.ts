@@ -117,6 +117,15 @@ const taken = (state: TabsState, id: string) =>
   state.data.some((x) => x.id === id) ||
   state.diffs.some((x) => x.id === id);
 
+/** `p` önekli ilk boş kimlik ve ondan sonraki sayaç değeri. */
+const freeId = (state: TabsState, p: string): [string, number] => {
+  let n = state.nextId;
+  let id: string;
+  do id = p + n++;
+  while (taken(state, id));
+  return [id, n];
+};
+
 /** Kimlik bir sorgu sekmesine mi ait (dashboard ya da "Nesne" değil)? */
 export function isQueryTabId(state: TabsState, id: string): boolean {
   return state.tabs.some((x) => x.id === id);
@@ -138,10 +147,7 @@ export const isDiffTabId = (id: string): boolean => id[0] === "s";
 
 /** Her çağrı yeni sekme ekler ve etkinleştirir (tekilleştirme yok). */
 export function openSchemaDiff(state: TabsState, input: { title: string }): { state: TabsState; id: string } {
-  let nextId = state.nextId;
-  let id: string;
-  do id = `s${nextId++}`;
-  while (taken(state, id));
+  const [id, nextId] = freeId(state, "s");
   return { id, state: { ...state, diffs: [...state.diffs, { id, title: input.title }], activeId: id, nextId } };
 }
 
@@ -149,10 +155,7 @@ export function openSchemaDiff(state: TabsState, input: { title: string }): { st
 export function openData(state: TabsState, input: Omit<DataTab, "id">): { state: TabsState; id: string; created: boolean } {
   const same = state.data.find((d) => d.key === input.key);
   if (same) return { state: activateTab(state, same.id), id: same.id, created: false };
-  let nextId = state.nextId;
-  let id: string;
-  do id = `g${nextId++}`;
-  while (taken(state, id));
+  const [id, nextId] = freeId(state, "g");
   return { id, created: true, state: { ...state, data: [...state.data, { ...input, id }], activeId: id, nextId } };
 }
 
@@ -160,10 +163,7 @@ export function openData(state: TabsState, input: Omit<DataTab, "id">): { state:
 export function openDashboard(state: TabsState, input: OpenDashInput): { state: TabsState; id: string; created: boolean } {
   const same = state.dashboards.find((d) => d.serverId === input.serverId && d.databaseOid === input.databaseOid);
   if (same) return { state: activateTab(state, same.id), id: same.id, created: false };
-  let nextId = state.nextId;
-  let id: string;
-  do id = `d${nextId++}`;
-  while (taken(state, id));
+  const [id, nextId] = freeId(state, "d");
   const tab: DashTab = { id, serverId: input.serverId, databaseOid: input.databaseOid, title: input.title };
   return { id, created: true, state: { ...state, dashboards: [...state.dashboards, tab], activeId: id, nextId } };
 }
@@ -176,10 +176,7 @@ export function openDesigner(state: TabsState, input: OpenDesignerInput): { stat
   const { key } = input;
   const same = state.designers.find((d) => d.key === key);
   if (same) return { state: activateTab(state, same.id), id: same.id, created: false };
-  let nextId = state.nextId;
-  let id: string;
-  do id = `e${nextId++}`;
-  while (taken(state, id));
+  const [id, nextId] = freeId(state, "e");
   const tab: DesignerTab = {
     id, serverId: input.serverId, databaseOid: input.databaseOid, title: input.title, key, where: input.where ?? null,
   };
@@ -192,10 +189,7 @@ export function openTab(state: TabsState, input: OpenTabInput): { state: TabsSta
   const n = state.seq[key] ?? 1;
   let nextId = state.nextId;
   let id = input.id;
-  if (!id || taken(state, id)) {
-    do id = `q${nextId++}`;
-    while (taken(state, id));
-  }
+  if (!id || taken(state, id)) [id, nextId] = freeId(state, "q");
   const title = input.title?.trim() || `${key} #${n}`;
   const tab: QueryTab = { id, serverId: input.serverId, database: input.database, title };
   return {
@@ -273,37 +267,33 @@ export function moveTab(state: TabsState, id: string, to: number): TabsState {
 export function createTabsStore(initial: TabsState = initialTabs()) {
   const [state, setState] = createStore<TabsState>(initial);
   const apply = (f: (s: TabsState) => TabsState) => setState((s) => f(s));
+  /** Saf açma işlevini uygular; kimliği döner. */
+  const opener =
+    <I>(f: (s: TabsState, input: I) => { state: TabsState; id: string }) =>
+    (input: I): string => {
+      const r = f(state, input);
+      setState(r.state);
+      return r.id;
+    };
+  /** Tekilleştiren açma işlevini uygular; kimliği ve yeni sekme açılıp açılmadığını döner. */
+  const reopener =
+    <I>(f: (s: TabsState, input: I) => { state: TabsState; id: string; created: boolean }) =>
+    (input: I): { id: string; created: boolean } => {
+      const r = f(state, input);
+      setState(r.state);
+      return { id: r.id, created: r.created };
+    };
   return {
     state,
-    open(input: OpenTabInput): string {
-      const r = openTab(state, input);
-      setState(r.state);
-      return r.id;
-    },
+    open: opener(openTab),
     /** Dashboard sekmesi ekler ya da (aynı sunucu + veritabanı) var olanı etkinleştirir. */
-    openDashboard(input: OpenDashInput): { id: string; created: boolean } {
-      const r = openDashboard(state, input);
-      setState(r.state);
-      return { id: r.id, created: r.created };
-    },
+    openDashboard: reopener(openDashboard),
     /** Designer sekmesi ekler ya da (alter, aynı `key`) var olanı etkinleştirir. */
-    openDesigner(input: OpenDesignerInput): { id: string; created: boolean } {
-      const r = openDesigner(state, input);
-      setState(r.state);
-      return { id: r.id, created: r.created };
-    },
+    openDesigner: reopener(openDesigner),
     /** Veri sekmesi ekler ya da (aynı `key`) var olanı etkinleştirir. */
-    openData(input: Omit<DataTab, "id">): { id: string; created: boolean } {
-      const r = openData(state, input);
-      setState(r.state);
-      return { id: r.id, created: r.created };
-    },
+    openData: reopener(openData),
     /** Şema karşılaştırma sekmesi ekler (her çağrı yeni sekme). */
-    openSchemaDiff(input: { title: string }): string {
-      const r = openSchemaDiff(state, input);
-      setState(r.state);
-      return r.id;
-    },
+    openSchemaDiff: opener(openSchemaDiff),
     close: (id: string) => apply((s) => closeTab(s, id)),
     rename: (id: string, title: string) => apply((s) => renameTab(s, id, title)),
     activate: (id: string) => apply((s) => activateTab(s, id)),

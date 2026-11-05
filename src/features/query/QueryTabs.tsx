@@ -90,11 +90,6 @@ export function QueryTabs(props: {
     props.data?.()?.close(id);
     ctl.tabs.close(id);
   };
-  /** Şema karşılaştırma sekmesi: önce denetleyici girdisi, sonra sekme. */
-  const closeDiff = (id: string) => {
-    props.diff?.()?.close(id);
-    ctl.tabs.close(id);
-  };
   // Kirli designer/veri sekmesi kapatılmadan önce onay ister (odak Vazgeç'te; metin tembel parçada); temiz sekme doğrudan
   // kapanır. Tür başına ayrı sinyal (ortak `{ kind, id }` sinyalinden ana pakette birkaç bayt daha küçük; Plan 17 Task 1).
   const [designerClosing, setDesignerClosing] = createSignal<string | null>(null);
@@ -117,8 +112,11 @@ export function QueryTabs(props: {
     } else if (isDataTabId(id)) {
       if (props.data?.()?.isDirty(id)) setDataClosing(id);
       else closeData(id);
-    } else if (isDiffTabId(id)) closeDiff(id);
-    else void ctl.requestClose(id);
+    } else if (isDiffTabId(id)) {
+      // Şema karşılaştırma sekmesi: önce denetleyici girdisi, sonra sekme (ayrı işlev ana pakette 14 B daha büyüktü).
+      props.diff?.()?.close(id);
+      ctl.tabs.close(id);
+    } else void ctl.requestClose(id);
   };
 
   // WebView yeniden yüklemesi (F5, Ctrl+R, Ctrl+Shift+R) oturumları kaybettirir: her zaman engellenir.

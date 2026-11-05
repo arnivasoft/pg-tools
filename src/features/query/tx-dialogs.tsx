@@ -6,7 +6,8 @@ import { tenv } from "./strings-env";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import type { QueryController } from "./query-controller";
-import { ENV_CHOICES, canCommitAny, envLabel, envLockDefault, type EnvChoice } from "./workspace-model";
+import { ENV_CHOICES, canCommitAny, envLockDefault } from "./env-model";
+import { envLabel, type EnvChoice } from "./workspace-model";
 import { dialogStrings } from "../../ui/dialog-strings";
 
 export function CloseTxDialog(props: { ctl: QueryController }) {

@@ -823,3 +823,33 @@ Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2 ve §6
 
 - [ ] Performans hedefi (spec §4): gerçek (ağ üzerinden) bir sunucuda, taraf başına ~500 tablo / ~2.000 nesnelik iki şemayı karşılaştırın (`cargo test -p pgt-diff --test diff_roundtrip -- --ignored --nocapture` yerel ölçüm verir; ağlı sunucuda aynı fikstürü elle kurun) ve yükleme + karşılaştırmanın 10 saniyenin altında bittiğini kaydedin. Aşılırsa liste sorgularının toplu yüklemeye çevrilmesi sonraki iştir. **[—]**
 - [ ] Explorer akıcılığı: büyük bir karşılaştırma sürerken Explorer ağacını açıp kapatın, sağ tık menüsü açın ve Query Tool'da sorgu çalıştırın; arayüz takılmamalı, havuz sorguları gecikmemeli (karşılaştırma ayrılmış bağlantıda koşar). **[—]**
+
+## Şema karşılaştırma (Plan 30)
+
+Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2.8, §6 ve §7. Sekme tembel parçadadır (`DiffTabs-*.js`, `SchemaDiffView-*.js`, `ScriptDialog-*.js`); ilk açılışta iner.
+
+Ön koşul: yayın exe (`tauri build`); Docker PG 13, 16 ve 18 sunucuları; zengin iki şema (Plan 29 `diff_roundtrip` fikstürü elle kurulabilir), Türkçe adlı şema/tablo (`Şube`, `İLÇE`), bölümlü tablo ve 2.000 nesneli büyük bir şema; "Üretim" etiketli ve salt okunur kilitli bir hedef sunucu kaydı.
+
+- [ ] Menü görünürlüğü: "Şema karşılaştır…" şema ve veritabanı düğümünde var; sistem şemasında, tabloda ve sunucuda yok; kilitli sunucuda açık (devre dışı değil). **[—]**
+- [ ] Şema düğümünden açılışta kaynak (sunucu, veritabanı, şema) dolu, hedef aynı sunucu ve veritabanında şeması boş; veritabanı düğümünden açılışta kaynak şeması boş. **[—]**
+- [ ] Bağlı olmayan sunucu seçilince parola istemi çıkar; vazgeçilince seçici hata/gerekçe gösterir, sekme açık kalır. **[—]**
+- [ ] Sunucu değişince veritabanı ve şema seçicileri, veritabanı değişince şema seçicisi sıfırlanır. **[—]**
+- [ ] "↔" kaynak ile hedefi yer değiştirir. **[—]**
+- [ ] Kaynak ve hedef aynı şemayken "Karşılaştır" kapalıdır ve gerekçe görünür. **[—]**
+- [ ] Büyük şemada taraf başına ilerleme çubukları ilerler; "İptal" → "İptal edildi.", kısmi sonuç yok; karşılaştırma sürerken Explorer akıcı. **[—]**
+- [ ] Sonuç sayıları (toplamı öğe sayısı) ve kategori filtreleri; "Aynı" varsayılan olarak gizli. **[—]**
+- [ ] Arama: `ilçe` yazınca `İLÇE` bulunur. **[—]**
+- [ ] Seçim: varsayılan kural (yalnız hedefte olanlar seçili değil); "Tümü" ve "Görünenler" üç durumlu kutuları; seçilemeyen öğede kutu devre dışı ve gerekçe; özet "N seçili (M görünmüyor)"; gizlenen seçili öğeler betiğe girer. **[—]**
+- [ ] Sonuç varken seçici ya da seçenek değişince "Seçimler değişti; yeniden karşılaştırın." şeridi görünür ve "Betik oluştur" kapanır; liste görünür kalır. **[—]**
+- [ ] Ayrıntı: renkli satır farkı ve `+`/`−` işaret sütunu; hızlı ↑/↓ sonrası doğru öğenin farkı görünür; notlar ("kolon sırası farklı", "yeniden kurulacak", "gövdede kaynak şema adı"); hata iletileri (çapraz sürüm 16 → 13 "üretilemedi"); 20.000 satır üstü farkta yan yana düz görünüm ve bilgi satırı. **[—]**
+- [ ] Betik önizleme: risk rozeti, ifade sayısı, transaction metni, uyarılar; CodeMirror'da kaydırma. **[—]**
+- [ ] Üretim etiketli hedefte "Hedef üretim sunucusu: ‹ad›" bandı, kilitli hedefte kilit bandı (ikisi birden olabilir); kaynak üretimken bant yok. **[—]**
+- [ ] "Query Tool'da aç": hedef sunucu/veritabanında yeni sekme açılır, metin çalıştırılmamıştır; çalıştırınca mevcut risk/kilit kapıları devreye girer. **[—]**
+- [ ] "Kopyala": pano betik metnini içerir, bildirim "Kopyalandı.". **[—]**
+- [ ] "Kaydet…": önerilen ad; Türkçe ve ASCII dışı karakterli yol; vazgeçme (kayıt yok); var olan dosyanın üzerine yazma sorusu (Windows); bildirim "Betik kaydedildi." (yol yazılmaz). **[—]**
+- [ ] Betik Query Tool'da çalıştırılıp yeniden karşılaştırılınca yalnız "Aynı" (ve seçilmeyen/elle yapılacak öğeler) kalır. **[—]**
+- [ ] Karşılaştırma sürerken sekmeyi kapatma: hata ya da bildirim yok, arka uç işi iptal edilir. **[—]**
+- [ ] Dokuzdan fazla karşılaştırmadan sonra eski sekmede ayrıntı/betik istenince "Sonuç artık yok …" şeridi görünür. **[—]**
+- [ ] Sayfa yenileme sonrası durum: fark sekmeleri geri gelmez (kalıcı değildir). **[—]**
+- [ ] Klavye (↑/↓, Boşluk, Home/End, Esc) ve ekran okuyucu (ilerleme, şeritler, satır etiketleri). **[—]**
+- [ ] Parola, adres ve betik metni hiçbir bildirimde ya da konsolda (DevTools ve uygulama günlüğü) görünmez. **[—]**
