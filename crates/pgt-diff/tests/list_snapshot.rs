@@ -140,10 +140,35 @@ async fn list_test(ts: TestServer) {
     assert_eq!(rows_of(&listed), want);
 
     // Sıra: kind, table_name, name (C).
-    let order: Vec<(String, Option<String>, String)> = listed
-        .iter()
-        .map(|x| (format!("{:?}", x.kind), x.table.clone(), x.name.clone()))
-        .collect();
+    let sql_kind = |k: ObjectKind| match k {
+        Table => "table",
+        View => "view",
+        MaterializedView => "materialized_view",
+        Sequence => "sequence",
+        Index => "index",
+        Trigger => "trigger",
+        Function => "function",
+        Procedure => "procedure",
+        Type => "type",
+        Domain => "domain",
+        other => panic!("beklenmeyen tür: {other:?}"),
+    };
+    // Bayt sırası ("C"); boş tablo adı (NULL) sona.
+    let order_key = |x: &Listed| {
+        (
+            sql_kind(x.kind),
+            x.table.is_none(),
+            x.table.clone(),
+            x.name.clone(),
+        )
+    };
+    let order: Vec<_> = listed.iter().map(order_key).collect();
+    let mut sorted = order.clone();
+    sorted.sort();
+    assert_eq!(
+        order, sorted,
+        "liste kind, table_name, name sırasında olmalı"
+    );
     assert_eq!(order.len(), want.len());
 
     // Bölüm bayrağı.
@@ -342,6 +367,19 @@ async fn side_test(ts: TestServer) {
     assert!(job.await.unwrap().is_ok());
     assert_eq!(pool_search_path(&env).await, "pg_catalog");
     assert_no_idle_in_tx(&env).await;
+
+    // Boş şema: tam bir (0, 0) bildirimi.
+    env.sql("CREATE SCHEMA empty_s").await;
+    let calls: Mutex<Vec<(u32, u32)>> = Mutex::new(vec![]);
+    let report = |done, total| {
+        calls.lock().unwrap().push((done, total));
+        true
+    };
+    let snap = load_side(&env.mgr, &side(&env, "empty_s"), false, &report, &never)
+        .await
+        .unwrap();
+    assert!(snap.objects.is_empty());
+    assert_eq!(*calls.lock().unwrap(), vec![(0, 0)]);
 
     item_error_path(&env).await;
 }

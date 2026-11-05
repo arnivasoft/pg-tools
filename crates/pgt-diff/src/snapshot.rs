@@ -137,7 +137,8 @@ pub async fn load_objects(
             }
         }
     }
-    if reported != total && !report(total, total) {
+    // Boş şemada (total == 0) da son bildirim yapılır: (0, 0) ve iptal fırsatı.
+    if (reported != total || total == 0) && !report(total, total) {
         return Err(SnapshotError::Cancelled);
     }
     Ok(out)
@@ -202,6 +203,10 @@ pub async fn load_side(
     cancel: &CancelToken,
 ) -> Result<SideSnapshot, SnapshotError> {
     let started = Instant::now();
+    // NUL içeren ad hiçbir şemaya karşılık gelmez (ve tırnaklama panik eder): bağlanmadan "yok" sayılır.
+    if side.schema.contains('\0') {
+        return Err(SnapshotError::Schema(SchemaCheck::Missing));
+    }
     if cancel.is_cancelled() {
         return Err(SnapshotError::Cancelled);
     }
@@ -272,6 +277,22 @@ mod tests {
         assert_eq!(
             classify_load_error(&Error::PasswordRequired),
             LoadErrorClass::Fatal
+        );
+    }
+
+    #[tokio::test]
+    async fn nul_in_schema_name_is_missing_without_connecting() {
+        // Oturumsuz yönetici: bağlanmaya kalkarsa `Core` döner; NUL denetimi bundan önce olmalı.
+        let mgr = ConnectionManager::new();
+        let side = DiffSide {
+            server_id: uuid::Uuid::nil(),
+            database_oid: 1,
+            schema: "a\0b".into(),
+        };
+        let r = load_side(&mgr, &side, false, &|_, _| true, &CancelToken::new()).await;
+        assert!(
+            matches!(r, Err(SnapshotError::Schema(SchemaCheck::Missing))),
+            "{r:?}"
         );
     }
 
