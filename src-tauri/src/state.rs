@@ -105,7 +105,7 @@ impl AppState {
             backup: JobRegistry::new(),
             diff: pgt_diff::DiffRegistry::new(),
             backup_tools: tokio::sync::Mutex::new(None),
-            ai: crate::ai::AiState::default(),
+            ai: crate::ai::AiState::load(config_dir),
             credentials: Credentials::new(store),
             registry,
             manager,

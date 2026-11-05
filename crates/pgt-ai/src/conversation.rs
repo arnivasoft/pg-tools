@@ -34,6 +34,8 @@ struct Conversation {
     busy: bool,
     /// Son kullanım sırası (eşit zaman damgası sorunu olmasın diye sayaç).
     last_used: u64,
+    /// Geçmişi üreten sağlayıcı + model (`Profile::conversation_tag`); ilk başarılı turda bağlanır.
+    tag: Option<String>,
 }
 
 /// Gönderilmeye hazır tur: tam mesaj dizisi ve başarıda geçmişe eklenecek kullanıcı mesajı.
@@ -53,8 +55,9 @@ pub struct Conversations {
 
 impl Conversations {
     /// Yeni turu hazırlar ve sohbeti meşgul işaretler. `turns`: arayüzün bildiği tamamlanmış tur sayısı;
-    /// arka uçtaki geçmişle uyuşmazsa (sohbet bellekten düştü) `ai_stale`.
-    pub fn begin(&self, id: Uuid, turns: u32, req: &AiRequest) -> Result<Pending, ErrorPayload> {
+    /// arka uçtaki geçmişle uyuşmazsa (sohbet bellekten düştü) `ai_stale`. `tag`: sağlayıcı + model; geçmiş başka
+    /// bir sağlayıcı/modelde üretildiyse `ai_stale` (thinking blokları ve araç geçmişi başka modele taşınmaz).
+    pub fn begin(&self, id: Uuid, turns: u32, tag: &str, req: &AiRequest) -> Result<Pending, ErrorPayload> {
         let mut map = self.map.lock().unwrap();
         if !map.contains_key(&id) {
             if turns > 0 {
@@ -70,6 +73,10 @@ impl Conversations {
         if have != turns {
             return Err(err("ai_stale", "Sohbet geçmişi arayüzle uyuşmuyor; yeni sohbet başlatın."));
         }
+        if have > 0 && conv.tag.as_deref() != Some(tag) {
+            return Err(err("ai_stale", "Sağlayıcı ya da model değişti; bu sohbet önceki modelle sürdü. Yeni sohbet başlatın."));
+        }
+        conv.tag = Some(tag.to_string());
         if have >= MAX_TURNS {
             return Err(err("ai_long", "Sohbet çok uzadı; yeni sohbet başlatın."));
         }
@@ -173,12 +180,12 @@ mod tests {
     fn tool_rounds_count_as_one_turn() {
         let c = Conversations::default();
         let id = Uuid::new_v4();
-        let p = c.begin(id, 0, &ask("e-posta nerede?", "")).unwrap();
+        let p = c.begin(id, 0, "t", &ask("e-posta nerede?", "")).unwrap();
         let tool_use = json!({"role":"assistant","content":[{"type":"tool_use","id":"a","name":"search_columns","input":{"name_contains":"email"}}]});
         let result = json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"public\tusers\temail\ttext","is_error":false}]});
         let final_answer = json!({"role":"assistant","content": blocks("users.email")});
         c.finish(p, Some(vec![tool_use.clone(), result.clone(), final_answer.clone()]));
-        let p = c.begin(id, 1, &ask("peki telefon?", "")).unwrap();
+        let p = c.begin(id, 1, "t", &ask("peki telefon?", "")).unwrap();
         assert_eq!(p.messages.len(), 5);
         assert_eq!(p.messages[1], tool_use);
         assert_eq!(p.messages[2], result);
@@ -189,20 +196,20 @@ mod tests {
     fn history_is_append_only_and_schema_is_sent_once() {
         let c = Conversations::default();
         let id = Uuid::new_v4();
-        let p1 = c.begin(id, 0, &ask("ilk", "public.t(id)")).unwrap();
+        let p1 = c.begin(id, 0, "t", &ask("ilk", "public.t(id)")).unwrap();
         assert_eq!(p1.messages.len(), 1);
         assert!(p1.messages[0]["content"].as_str().unwrap().contains("<schema>"));
         let first_user = p1.messages[0].clone();
         c.finish(p1, Some(answer("A1")));
 
-        let p2 = c.begin(id, 1, &ask("ikinci", "public.t(id)")).unwrap();
+        let p2 = c.begin(id, 1, "t", &ask("ikinci", "public.t(id)")).unwrap();
         assert_eq!(p2.messages.len(), 3);
         assert_eq!(p2.messages[0], first_user, "önceki mesaj değişmeden gönderilir");
         assert_eq!(p2.messages[1]["content"], blocks("A1"), "thinking imzası korunur");
         assert!(!p2.messages[2]["content"].as_str().unwrap().contains("<schema>"));
         c.finish(p2, Some(answer("A2")));
 
-        let p3 = c.begin(id, 2, &ask("üçüncü", "public.t(id, ad)")).unwrap();
+        let p3 = c.begin(id, 2, "t", &ask("üçüncü", "public.t(id, ad)")).unwrap();
         assert!(p3.messages[4]["content"].as_str().unwrap().contains("<schema>"), "şema değişince yeniden gönderilir");
     }
 
@@ -210,27 +217,44 @@ mod tests {
     fn failed_or_cancelled_turn_is_not_recorded() {
         let c = Conversations::default();
         let id = Uuid::new_v4();
-        let p = c.begin(id, 0, &ask("x", "")).unwrap();
+        let p = c.begin(id, 0, "t", &ask("x", "")).unwrap();
         c.finish(p, None);
-        let p = c.begin(id, 0, &ask("z", "")).unwrap();
+        let p = c.begin(id, 0, "t", &ask("z", "")).unwrap();
         // Görünür metni olmayan yanıt (yalnız thinking ya da boşluk) da girmez: arayüzün `isCommitted` kuralı.
         c.finish(p, Some(answer("  ")));
-        let p = c.begin(id, 0, &ask("y", "")).unwrap();
+        let p = c.begin(id, 0, "t", &ask("y", "")).unwrap();
         assert_eq!(p.messages.len(), 1);
         assert!(p.messages[0]["content"].as_str().unwrap().contains("<request>\ny\n</request>"));
+    }
+
+    #[test]
+    fn switching_provider_or_model_requires_a_new_chat() {
+        let c = Conversations::default();
+        let id = Uuid::new_v4();
+        let p = c.begin(id, 0, "Anthropic|claude-opus-5-5", &ask("x", "")).unwrap();
+        c.finish(p, Some(answer("a")));
+        let e = c.begin(id, 1, "OpenRouter|openai/gpt-5.6", &ask("y", "")).err().unwrap();
+        assert_eq!(e.code, "ai_stale");
+        let p = c.begin(id, 1, "Anthropic|claude-opus-5-5", &ask("y", "")).unwrap();
+        c.finish(p, None);
+        // Boş sohbet (henüz tur yok) sağlayıcı değiştirebilir.
+        let fresh = Uuid::new_v4();
+        let p = c.begin(fresh, 0, "Anthropic|claude-opus-5-5", &ask("x", "")).unwrap();
+        c.finish(p, None);
+        assert!(c.begin(fresh, 0, "OpenRouter|openai/gpt-5.6", &ask("x", "")).is_ok());
     }
 
     #[test]
     fn busy_and_stale_conversations_are_rejected() {
         let c = Conversations::default();
         let id = Uuid::new_v4();
-        let p = c.begin(id, 0, &ask("x", "")).unwrap();
-        assert_eq!(c.begin(id, 0, &ask("y", "")).err().unwrap().code, "busy");
+        let p = c.begin(id, 0, "t", &ask("x", "")).unwrap();
+        assert_eq!(c.begin(id, 0, "t", &ask("y", "")).err().unwrap().code, "busy");
         c.finish(p, Some(answer("a")));
-        assert_eq!(c.begin(id, 0, &ask("y", "")).err().unwrap().code, "ai_stale");
-        assert_eq!(c.begin(Uuid::new_v4(), 3, &ask("y", "")).err().unwrap().code, "ai_stale");
+        assert_eq!(c.begin(id, 0, "t", &ask("y", "")).err().unwrap().code, "ai_stale");
+        assert_eq!(c.begin(Uuid::new_v4(), 3, "t", &ask("y", "")).err().unwrap().code, "ai_stale");
         c.forget(id);
-        assert_eq!(c.begin(id, 1, &ask("y", "")).err().unwrap().code, "ai_stale");
+        assert_eq!(c.begin(id, 1, "t", &ask("y", "")).err().unwrap().code, "ai_stale");
     }
 
     #[test]
@@ -238,12 +262,12 @@ mod tests {
         let c = Conversations::default();
         let ids: Vec<Uuid> = (0..MAX_CONVERSATIONS).map(|_| Uuid::new_v4()).collect();
         for id in &ids {
-            let p = c.begin(*id, 0, &ask("x", "")).unwrap();
+            let p = c.begin(*id, 0, "t", &ask("x", "")).unwrap();
             c.finish(p, Some(answer("a")));
         }
-        let p = c.begin(Uuid::new_v4(), 0, &ask("x", "")).unwrap();
+        let p = c.begin(Uuid::new_v4(), 0, "t", &ask("x", "")).unwrap();
         c.finish(p, None);
-        assert_eq!(c.begin(ids[0], 1, &ask("y", "")).err().unwrap().code, "ai_stale");
-        assert!(c.begin(ids[1], 1, &ask("y", "")).is_ok());
+        assert_eq!(c.begin(ids[0], 1, "t", &ask("y", "")).err().unwrap().code, "ai_stale");
+        assert!(c.begin(ids[1], 1, "t", &ask("y", "")).is_ok());
     }
 }

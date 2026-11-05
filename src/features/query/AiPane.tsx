@@ -3,16 +3,17 @@
 // süren yanıt arka planda tamamlanır. Sayfa yenilenince (arka uç geçmişiyle birlikte) silinir.
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on } from "solid-js";
 import { createStore, type SetStoreFunction } from "solid-js/store";
-import { Search } from "lucide-solid";
+import { Search, Settings } from "lucide-solid";
 import { copyText } from "../../app/clipboard";
 import { toast } from "../../app/toast";
 import type { AiMode } from "../../ipc/bindings/AiMode";
 import type { AiRequest } from "../../ipc/bindings/AiRequest";
-import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
+import type { AiSettingsView } from "../../ipc/bindings/AiSettingsView";
 import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
 import { applyEvent, emptyChat, isCommitted, newAssistant, type AssistantTurn, type ChatState, type UserTurn } from "./ai-chat";
-import { aiIpc } from "./ai-ipc";
+import { activeHasKey, aiIpc } from "./ai-ipc";
+import { AiSettingsPanel } from "./AiSettingsPanel";
 import type { AiIntent } from "./ai-intent";
 import { splitBlocks } from "./ai-model";
 import { tai } from "./strings-ai";
@@ -29,9 +30,15 @@ function chatFor(tabId: string): Chat {
   return c;
 }
 
-/** Anahtar durumu bir kez sorulur (tüm sekmeler için ortak). */
-const [hasKey, setHasKey] = createSignal<boolean | null>(null);
-let keyAsked = false;
+/** Asistan ayarları ve anahtar durumu: bir kez sorulur, tüm sekmeler için ortak. */
+const [settingsView, setSettingsView] = createSignal<AiSettingsView | null>(null);
+const [settingsError, setSettingsError] = createSignal<string | null>(null);
+let settingsAsked = false;
+/** `true`: etkin sağlayıcının anahtarı kayıtlı; `null`: henüz bilinmiyor. */
+const hasKey = (): boolean | null => {
+  const v = settingsView();
+  return v ? activeHasKey(v) : null;
+};
 
 function userLabel(t: UserTurn): string {
   const head = t.label ?? (t.mode === "explain" ? tai.explain : t.mode === "fix" ? tai.fix : null);
@@ -56,8 +63,8 @@ export default function AiPane(props: {
 }) {
   // `tabId` bileşen ömrü boyunca sabittir (QueryTab sekme başına yeniden oluşturur).
   const [chat, setChat] = chatFor(props.tabId);
-  const [keyDraft, setKeyDraft] = createSignal("");
-  const [keyError, setKeyError] = createSignal<ErrorPayload | null>(null);
+  /** Ayar paneli açık (anahtar yokken her zaman açık). */
+  const [showSettings, setShowSettings] = createSignal(false);
   const [draft, setDraftSignal] = createSignal(drafts.get(props.tabId) ?? "");
   const setDraft = (v: string) => {
     drafts.set(props.tabId, v);
@@ -69,12 +76,11 @@ export default function AiPane(props: {
   const busy = () => chat.status !== "idle";
   let scroller: HTMLDivElement | undefined;
 
-  if (!keyAsked) {
-    keyAsked = true;
-    aiIpc.keyStatus().then(setHasKey, (e) => {
-      keyAsked = false;
-      setKeyError(toPayload(e));
-      setHasKey(false);
+  if (!settingsAsked) {
+    settingsAsked = true;
+    aiIpc.settingsGet().then(setSettingsView, (e) => {
+      settingsAsked = false;
+      setSettingsError(toPayload(e).message);
     });
   }
 
@@ -90,25 +96,17 @@ export default function AiPane(props: {
     }),
   );
 
-  const saveKey = async () => {
-    try {
-      await aiIpc.keySet(keyDraft());
-      setKeyDraft("");
-      setHasKey(true);
-      setKeyError(null);
-      toast.show(tai.key.saved, "success");
-    } catch (e) {
-      setKeyError(toPayload(e));
-    }
-  };
-  const clearKey = async () => {
-    try {
-      await aiIpc.keyClear();
-      setHasKey(false);
-      toast.show(tai.key.cleared, "info");
-    } catch (e) {
-      setKeyError(toPayload(e));
-    }
+  /** Sohbetin üstündeki özet: sağlayıcı · model · effort. */
+  const summary = () => {
+    const v = settingsView();
+    if (!v) return "";
+    const st = v.settings;
+    const s = tai.settings;
+    return s.summary(
+      s.providers[st.provider],
+      st.provider === "anthropic" ? st.anthropicModel : st.openrouterModel,
+      `${s.effort}: ${s.efforts[st.effort ?? ""]}`,
+    );
   };
 
   /** `intent` verilirse istek başka bir ekrandan gelmiştir: taslak kullanılmaz ve silinmez. */
@@ -143,7 +141,8 @@ export default function AiPane(props: {
       await aiIpc.ask(id, chat.conversation, chat.committed, request, props.target, (ev) => patch((t) => applyEvent(t, ev)));
     } catch (e) {
       const p = toPayload(e);
-      if (p.code === "ai_no_key") setHasKey(false);
+      // Anahtar başka yerden silinmiş olabilir: güncel durumu al (anahtar yoksa ayar paneli açılır).
+      if (p.code === "ai_no_key") void aiIpc.settingsGet().then(setSettingsView, () => {});
       patch((t) => ({ ...t, error: p }));
     } finally {
       if (isCommitted(chat.turns[idx] as AssistantTurn)) {
@@ -252,36 +251,22 @@ export default function AiPane(props: {
   return (
     <section aria-label={tai.ariaLabel} class="flex h-full min-h-0 flex-col text-[13px]">
       <Switch>
-        <Match when={hasKey() === false}>
-          <div class="max-w-xl space-y-2 p-3">
-            <h3 class="font-semibold">{tai.key.title}</h3>
-            <p class="text-muted">{tai.key.intro}</p>
-            <form
-              class="flex gap-2"
-              onSubmit={(e) => {
-                e.preventDefault();
-                void saveKey();
-              }}
-            >
-              <input
-                type="password"
-                autocomplete="off"
-                spellcheck={false}
-                aria-label={tai.key.title}
-                placeholder={tai.key.placeholder}
-                class="h-7 min-w-0 flex-1 rounded border border-border bg-bg px-2"
-                value={keyDraft()}
-                onInput={(e) => setKeyDraft(e.currentTarget.value)}
-              />
-              <Button type="submit" variant="primary" disabled={keyDraft().trim() === ""}>
-                {tai.key.save}
-              </Button>
-            </form>
-            <p class="text-[12px] text-muted">{tai.privacy}</p>
-            <Show when={keyError()}>{(e) => <p class="text-danger">{e().message}</p>}</Show>
+        <Match when={settingsError()}>{(e) => <p role="alert" class="p-3 text-danger">{e()}</p>}</Match>
+        <Match when={settingsView() && (hasKey() === false || showSettings())}>
+          <div class="min-h-0 flex-1 overflow-auto">
+            <AiSettingsPanel view={settingsView()!} onChange={setSettingsView} onClose={() => setShowSettings(false)} />
           </div>
         </Match>
         <Match when={hasKey() === true}>
+          <div class="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1 text-[12px] text-muted">
+            <span class="truncate font-mono" title={summary()}>
+              {summary()}
+            </span>
+            <div class="flex-1" />
+            <Button variant="ghost" class="h-6 text-[12px]" title={tai.settings.title} onClick={() => setShowSettings(true)}>
+              <Settings size={13} /> {tai.settings.open}
+            </Button>
+          </div>
           <div ref={scroller} class="min-h-0 flex-1 overflow-auto p-3" aria-live="polite" aria-busy={busy()}>
             <Show when={chat.turns.length === 0}>
               <p class="max-w-xl text-muted">{tai.empty}</p>
@@ -349,9 +334,6 @@ export default function AiPane(props: {
               <div class="flex-1" />
               <Button variant="ghost" class="h-6 text-[12px]" disabled={busy() || chat.turns.length === 0} onClick={newChat}>
                 {tai.newChat}
-              </Button>
-              <Button variant="ghost" class="h-6 text-[12px] text-muted" disabled={busy()} onClick={() => void clearKey()}>
-                {tai.key.clear}
               </Button>
             </div>
           </div>

@@ -9,10 +9,12 @@ pub mod conversation;
 pub mod model;
 pub mod prompt;
 pub mod session_tools;
+pub mod settings;
 pub mod sse;
 pub mod tools;
 
 pub use agent::{Claude, Model, ToolExec, run_turn};
-pub use client::{AiClient, Cancel};
+pub use client::{AiClient, Cancel, Profile};
+pub use settings::{AiEffort, AiProvider, AiSettings, AiSettingsView};
 pub use conversation::{Conversations, Pending};
 pub use model::{AiEvent, AiMode, AiRequest};
