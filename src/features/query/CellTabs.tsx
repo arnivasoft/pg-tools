@@ -41,10 +41,11 @@ export function CellTabs(props: {
               aria-disabled={a().enabled ? undefined : "true"}
               tabindex={props.value === f ? 0 : -1}
               title={a().reason ?? undefined}
-              class="shrink-0 rounded px-2 py-0.5 hover:bg-bg focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+              class="shrink-0 rounded px-2 py-0.5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
               classList={{
                 "bg-bg font-semibold": props.value === f,
                 "opacity-50 cursor-not-allowed": !a().enabled,
+                "hover:bg-bg": a().enabled,
               }}
               onClick={() => select(f)}
               onKeyDown={(e) => onKeyDown(e, f)}

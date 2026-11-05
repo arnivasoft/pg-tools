@@ -32,10 +32,10 @@ async function load(lang: CodeLang): Promise<LoadedLanguage> {
 }
 
 /** Aynı dil için tek Promise; reddedilirse önbellek temizlenir (yeniden denenebilir). */
-export function loadLanguage(lang: CodeLang): Promise<LoadedLanguage> {
+export function loadLanguage(lang: CodeLang, loader: (lang: CodeLang) => Promise<LoadedLanguage> = load): Promise<LoadedLanguage> {
   const hit = cache.get(lang);
   if (hit) return hit;
-  const p = load(lang);
+  const p = loader(lang);
   cache.set(lang, p);
   p.catch(() => {
     if (cache.get(lang) === p) cache.delete(lang);

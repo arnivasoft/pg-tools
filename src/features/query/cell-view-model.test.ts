@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CELL_FORMATS, LIMITS, MiB, availability, autoFormat, byteaLength, cellFacts, columnKey, createFormatMemory, decodePrefix,
   fileActionAllowed, formatMb, isByteaHex, isPdf, looksLikeJson, looksLikeMarkup, nextTab, pickFormat, previewAllowed, sizeVerdict,
-  sniffImage, sniffSvg, type CellFacts,
+  sniffImage, sniffSvg, type CellFacts, type CellFormat,
 } from "./cell-view-model";
 import { tcell } from "./strings-cell";
 
@@ -89,10 +89,11 @@ describe("cellFacts", () => {
   it("escape çıktılı bytea metin sayılır", () => {
     expect(f("abc", "bytea")).toMatchObject({ bytea: false, badHex: false });
   });
-  it("UTF-8 uzunluğu", () => {
-    expect(f("ş", "text")).toMatchObject({ byteLength: 2, charLength: 1 });
-    expect(f("😀", "text")).toMatchObject({ byteLength: 4, charLength: 2 });
-    expect(f("a€", "text").byteLength).toBe(4);
+  it("metinde byteLength = charLength (O(1); tam UTF-8 toplamı gösterildiği yerde hesaplanır)", () => {
+    expect(f("ş", "text")).toMatchObject({ byteLength: 1, charLength: 1 });
+    expect(f("😀", "text")).toMatchObject({ byteLength: 2, charLength: 2 });
+    expect(f("a€", "text").byteLength).toBe(2);
+    expect(f("x".repeat(1000), "text").byteLength).toBe(1000);
   });
   it("JSON", () => {
     expect(f("[1,2]", "jsonb")).toMatchObject({ jsonType: true, json: true });
@@ -166,6 +167,22 @@ describe("autoFormat / pickFormat", () => {
     expect(autoFormat(f('{"a":1}', "text"))).toBe("text");
     expect(autoFormat(f("<p>", "text"))).toBe("text");
     expect(autoFormat(f(null, "jsonb"))).toBe("text");
+  });
+  it("boş dize her türde metin sekmesine düşer", () => {
+    for (const type of ["text", "xml", "jsonb", "json", "bytea"]) expect(autoFormat(f("", type))).toBe("text");
+    expect(autoFormat(f("\\x", "bytea"))).toBe("text");
+  });
+  it("seçim işlevleri hafızaya yazmaz", () => {
+    const set = vi.fn();
+    const get = vi.fn((_key: string): CellFormat | undefined => undefined);
+    const mem = { get, set };
+    const col = { name: "c", typeOid: 17 };
+    for (const [v, type] of [["[1]", "jsonb"], ["", "xml"], [hex(PNG), "bytea"], [null, "text"]] as const) {
+      const facts = f(v, type);
+      autoFormat(facts);
+      pickFormat(facts, mem.get(columnKey(col)));
+    }
+    expect(set).not.toHaveBeenCalled();
   });
   it("hatırlanan", () => {
     expect(pickFormat(f("\\x0102", "bytea"), "hex")).toBe("hex");

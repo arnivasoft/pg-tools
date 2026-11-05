@@ -54,5 +54,4 @@ export const tcell = {
   loadFailed: "Görünüm yüklenemedi.",
   retry: "Yeniden dene",
   widen: "Paneli genişlet",
-  narrow: "Paneli daralt",
 } as const;

@@ -1,4 +1,4 @@
-import { Show, createEffect, createMemo, createSignal } from "solid-js";
+import { Show, createEffect, createMemo, createSignal, on } from "solid-js";
 import { copyText } from "../../app/clipboard";
 import { Button } from "../../ui/Button";
 import type { ActiveCell } from "./ResultGrid";
@@ -40,9 +40,10 @@ export function CellPanel(props: { cell: ActiveCell | null; wide: boolean; onTog
     formatMemory.set(columnKey(props.cell.column), f);
     setMemTick((n) => n + 1);
   };
+  // Hücre değişince önceki yükleme hatası sıfırlanır; aşağıdaki etki yeniden dener.
+  createEffect(on(() => props.cell, () => setViewersFailed(false), { defer: true }));
   createEffect(() => {
-    if (format() === "text" || viewers()) return;
-    setViewersFailed(false);
+    if (format() === "text" || viewers() || viewersFailed()) return;
     const p = (viewersP ??= import("./CellViewers"));
     p.then((m) => setViewers(() => m.default)).catch(() => {
       if (viewersP === p) viewersP = undefined;
@@ -79,7 +80,7 @@ export function CellPanel(props: { cell: ActiveCell | null; wide: boolean; onTog
           aria-pressed={props.wide}
           onClick={props.onToggleWide}
         >
-          {props.wide ? tcell.narrow : tcell.widen}
+          {tcell.widen}
         </Button>
       </div>
       <Show when={props.cell && props.cell.value !== null && avail()}>
@@ -91,6 +92,7 @@ export function CellPanel(props: { cell: ActiveCell | null; wide: boolean; onTog
       <div
         class="min-h-0 flex-1 overflow-auto p-3"
         id={`${idBase}-panel`}
+        tabindex={props.cell && props.cell.value !== null ? "0" : undefined}
         role={props.cell && props.cell.value !== null ? "tabpanel" : undefined}
         aria-labelledby={props.cell && props.cell.value !== null ? `${idBase}-tab-${format()}` : undefined}
       >

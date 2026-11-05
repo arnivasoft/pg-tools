@@ -1,7 +1,7 @@
 // Hücre görüntüleyicinin saf biçimleyicileri: bytea çözme, onaltılık satırlar,
 // görsel data URL'i, PDF sürümü, HTML/XML biçimleyici ve korumalı önizleme belgesi.
 // DOM API'si kullanılmaz; çıktı yalnız metindir.
-import type { ImageKind } from "./cell-view-model";
+import { LIMITS, utf8Length, type CellFacts, type ImageKind } from "./cell-view-model";
 import { tcell } from "./strings-cell";
 
 // ---------------------------------------------------------------------------
@@ -45,6 +45,12 @@ export function utf8Bytes(text: string, maxBytes = Infinity): Uint8Array {
   }
   const all = new TextEncoder().encode(src);
   return all.length > maxBytes ? all.subarray(0, Math.max(0, maxBytes)) : all;
+}
+
+/** Onaltılık görünüm toplamı: bytea için ham uzunluktan, metin için tam UTF-8 uzunluğundan; `truncated` `LIMITS.hexBytes`'ı aşınca. */
+export function hexTotal(value: string, isBytea: boolean, facts: Pick<CellFacts, "byteLength">): { total: number; truncated: boolean } {
+  const total = isBytea ? facts.byteLength : utf8Length(value);
+  return { total, truncated: total > LIMITS.hexBytes };
 }
 
 export const HEX_ROW = 16;

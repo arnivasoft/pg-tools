@@ -10,7 +10,6 @@ import { Button } from "../../ui/Button";
 import { reindentJson } from "./grid-model";
 import {
   LIMITS,
-  utf8Length,
   decodePrefix,
   fileActionAllowed,
   formatMb,
@@ -26,6 +25,7 @@ import {
   formatXml,
   hexRow,
   hexRowCount,
+  hexTotal,
   pdfVersion,
   previewDoc,
   saveCell,
@@ -84,12 +84,16 @@ function SaveButton(props: ViewProps) {
 }
 
 function SizeNotice(props: ViewProps & { size: number; limit: number }) {
+  // "Kaydet…" yalnız dosya işlemi izinliyse önerilir ve gösterilir.
+  const canSave = () => props.facts.bytea && fileActionAllowed(props.facts).enabled;
   return (
     <div class="flex flex-col items-start gap-2">
       <p class={note} role="status">
-        {(props.facts.bytea ? tcell.tooLarge : tcell.tooLargeText)(formatMb(props.size), formatMb(props.limit))}
+        {(canSave() ? tcell.tooLarge : tcell.tooLargeText)(formatMb(props.size), formatMb(props.limit))}
       </p>
-      <SaveButton {...props} />
+      <Show when={canSave()}>
+        <SaveButton {...props} />
+      </Show>
     </div>
   );
 }
@@ -118,12 +122,10 @@ function HexView(props: ViewProps) {
   const bytes = createMemo(() =>
     props.facts.bytea ? decodeByteaHex(props.value, LIMITS.hexBytes) : utf8Bytes(props.value, LIMITS.hexBytes),
   );
-  // Toplam: bytea için ham uzunluktan; metin için kesilme olasıysa ayırmasız sayımla, değilse kodlanan uzunluktan.
-  const total = createMemo(() => {
-    if (props.facts.bytea) return props.facts.byteLength;
-    return props.value.length * 3 > LIMITS.hexBytes ? utf8Length(props.value) : (bytes()?.length ?? 0);
-  });
-  const truncated = () => total() > LIMITS.hexBytes;
+  // Toplam: görünüm açıkken bir kez (bytea: ham uzunluktan; metin: tam UTF-8 uzunluğu).
+  const summary = createMemo(() => hexTotal(props.value, props.facts.bytea, props.facts));
+  const total = () => summary().total;
+  const truncated = () => summary().truncated;
   let scrollEl!: HTMLDivElement;
   const rows = createVirtualizer({
     get count() {
@@ -171,7 +173,8 @@ const CHECKER = "repeating-conic-gradient(var(--border) 0% 25%, transparent 0% 5
 function ImageView(props: ViewProps) {
   const bytes = createMemo(() => {
     if (!props.facts.image) return null;
-    return props.facts.bytea ? decodeByteaHex(props.value) : utf8Bytes(props.value);
+    // Metin yolu (SVG) yalnız boyut korumasından geçince çalışır; yine de sınırlıdır.
+    return props.facts.bytea ? decodeByteaHex(props.value) : utf8Bytes(props.value, LIMITS.imageBytes + 1);
   });
   const url = createMemo(() => {
     const kind = props.facts.image;
@@ -380,10 +383,10 @@ function PdfView(props: ViewProps) {
     <div class="flex flex-col items-start gap-2">
       <p class={note}>{tcell.pdf.info(version(), tcell.hex.total(props.facts.byteLength))}</p>
       <div class="flex items-center gap-2">
-        <Button class="h-6 text-[12px]" disabled={!allowed().enabled || opening()} title={allowed().reason ?? undefined} onClick={() => void open()}>
+        <Button class="h-6 text-[12px]" disabled={!allowed().enabled || opening()} aria-disabled={!allowed().enabled} title={allowed().reason ?? undefined} onClick={() => void open()}>
           {opening() ? tcell.pdf.opening : tcell.pdf.open}
         </Button>
-        <Button class="h-6 text-[12px]" disabled={!allowed().enabled || saver.saving()} title={allowed().reason ?? undefined} onClick={() => void saver.run()}>
+        <Button class="h-6 text-[12px]" disabled={!allowed().enabled || saver.saving()} aria-disabled={!allowed().enabled} title={allowed().reason ?? undefined} onClick={() => void saver.run()}>
           {saver.saving() ? tcell.saving : tcell.save}
         </Button>
       </div>
@@ -444,9 +447,8 @@ export default function CellViewers(props: {
           </Guard>
         </Match>
         <Match when={props.format === "pdf"}>
-          <Guard {...vp} format="pdf">
-            <PdfView {...vp} />
-          </Guard>
+          {/* PDF 16 baytlık önekten fazlasını çözmez: boyut korumasından (Guard) geçmez; sınırı düğmeler uygular. */}
+          <PdfView {...vp} />
         </Match>
       </Switch>
     </div>

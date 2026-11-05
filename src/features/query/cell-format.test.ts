@@ -9,6 +9,7 @@ import {
   formatXml,
   hexRow,
   hexRowCount,
+  hexTotal,
   imageMime,
   pdfVersion,
   previewDoc,
@@ -318,5 +319,24 @@ describe("saveCell", () => {
     });
     await saveCell(d, V, "foto", f);
     expect(d.onError).toHaveBeenCalledOnce();
+  });
+});
+
+describe("hexTotal", () => {
+  const MiB16 = 16 * 1024 * 1024;
+  it("bytea: ham uzunluktan, sınırda kesilmez", () => {
+    expect(hexTotal("\\x", true, { byteLength: MiB16 })).toEqual({ total: MiB16, truncated: false });
+    expect(hexTotal("\\x", true, { byteLength: MiB16 + 1 })).toEqual({ total: MiB16 + 1, truncated: true });
+  });
+  it("metin: tam 16 MiB kesilmez, +1 kesilir", () => {
+    expect(hexTotal("a".repeat(MiB16), false, { byteLength: 0 })).toEqual({ total: MiB16, truncated: false });
+    expect(hexTotal("a".repeat(MiB16 + 1), false, { byteLength: 0 })).toEqual({ total: MiB16 + 1, truncated: true });
+  });
+  it("metin: çok baytlı karakterlerle sınır yakınında", () => {
+    // 'ş' 2 bayt: 8 MiB karakter = tam 16 MiB.
+    expect(hexTotal("ş".repeat(MiB16 / 2), false, { byteLength: 0 })).toEqual({ total: MiB16, truncated: false });
+    expect(hexTotal("ş".repeat(MiB16 / 2) + "a", false, { byteLength: 0 })).toEqual({ total: MiB16 + 1, truncated: true });
+    // Karakter sayısı sınırın altında, bayt sayısı üstünde.
+    expect(hexTotal("😀".repeat(MiB16 / 4 + 1), false, { byteLength: 0 }).truncated).toBe(true);
   });
 });

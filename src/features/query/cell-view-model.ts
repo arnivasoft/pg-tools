@@ -149,6 +149,9 @@ export interface CellFacts {
   bytea: boolean;
   jsonType: boolean;
   xmlType: boolean;
+  /** bytea: çözülmüş bayt sayısı (ham uzunluktan). Metin: `charLength` ile aynı (O(1)); yalnız SVG görsel boyut korumasında kullanılır
+   *  (UTF-16 birimi ≤ bayt; sınır kararları tutarlı biçimde `charLength`'e göre verilir). Metin için bayt toplamı gösterilecekse
+   *  gösterildiği yerde tam hesaplanır (HexView, ImageView). */
   byteLength: number;
   charLength: number;
   image: ImageKind | null;
@@ -186,7 +189,7 @@ export function cellFacts(value: string | null, column: Pick<Column, "typeName">
     bytea,
     jsonType,
     xmlType,
-    byteLength: utf8Length(value),
+    byteLength: value.length,
     charLength: value.length,
     image: sniffSvg(value.slice(0, LIMITS.prefixBytes)) ? "svg" : null,
     pdf: false,
@@ -217,9 +220,9 @@ export function availability(f: CellFacts): Record<CellFormat, Availability> {
   };
 }
 
-/** Kendiliğinden seçim (hatırlanan yokken): json/jsonb → xml → bytea görsel → bytea PDF → metin. */
+/** Kendiliğinden seçim (hatırlanan yokken): boş dize → metin; json/jsonb → xml → bytea görsel → bytea PDF → metin. Hafızaya yazmaz. */
 export function autoFormat(f: CellFacts): CellFormat {
-  if (f.isNull) return "text";
+  if (f.isNull || f.charLength === 0) return "text";
   if (f.jsonType) return "json";
   if (f.xmlType) return "xml";
   if (f.bytea && f.image) return "image";
@@ -227,7 +230,7 @@ export function autoFormat(f: CellFacts): CellFormat {
   return "text";
 }
 
-/** Hatırlanan seçim uygulanabiliyorsa o; değilse kendiliğinden kural (hatırlanan silinmez). */
+/** Hatırlanan seçim uygulanabiliyorsa o; değilse kendiliğinden kural (hatırlanan silinmez; hafızaya yazılmaz). */
 export function pickFormat(f: CellFacts, remembered: CellFormat | undefined): CellFormat {
   if (remembered && availability(f)[remembered].enabled) return remembered;
   return autoFormat(f);
