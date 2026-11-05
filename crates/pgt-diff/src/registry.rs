@@ -61,6 +61,24 @@ impl Drop for RunGuard {
     }
 }
 
+impl RunGuard {
+    /// Kayıt hâlâ bu koşunun "çalışıyor" kaydıysa hazıra geçer; kapatılmış ya da yeniden kaydedilmişse
+    /// veri düşer. En eski hazır kayıtlar `MAX_READY`'ye kırpılır.
+    pub fn complete(&self, data: DiffData) {
+        let mut g = self.registry.lock();
+        if !matches!(g.slots.get(&self.id), Some(Slot::Running { seq, .. }) if *seq == self.seq) {
+            return;
+        }
+        g.slots.insert(self.id, Slot::Ready(Arc::new(data)));
+        g.ready_order.push_back(self.id);
+        while g.ready_order.len() > MAX_READY {
+            if let Some(old) = g.ready_order.pop_front() {
+                g.slots.remove(&old);
+            }
+        }
+    }
+}
+
 impl DiffRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -94,21 +112,6 @@ impl DiffRegistry {
                 seq,
             },
         ))
-    }
-
-    /// Kayıt hâlâ "çalışıyor"sa hazıra geçer; kapatılmışsa veri düşer. En eski hazır kayıtlar kırpılır.
-    pub fn complete(&self, id: Uuid, data: DiffData) {
-        let mut g = self.lock();
-        if !matches!(g.slots.get(&id), Some(Slot::Running { .. })) {
-            return;
-        }
-        g.slots.insert(id, Slot::Ready(Arc::new(data)));
-        g.ready_order.push_back(id);
-        while g.ready_order.len() > MAX_READY {
-            if let Some(old) = g.ready_order.pop_front() {
-                g.slots.remove(&old);
-            }
-        }
     }
 
     pub fn get(&self, id: Uuid) -> Option<Arc<DiffData>> {
@@ -167,10 +170,10 @@ mod tests {
     fn complete_after_close_drops_data() {
         let r = DiffRegistry::new();
         let id = Uuid::new_v4();
-        let (tok, _g) = r.register(id).unwrap();
+        let (tok, g) = r.register(id).unwrap();
         r.close(id);
         assert!(tok.is_cancelled());
-        r.complete(id, data());
+        g.complete(data());
         assert!(r.get(id).is_none());
     }
 
@@ -180,7 +183,7 @@ mod tests {
         let id = Uuid::new_v4();
         let (_t, g) = r.register(id).unwrap();
         assert!(r.get(id).is_none(), "çalışan kayıt hazır değil");
-        r.complete(id, data());
+        g.complete(data());
         drop(g);
         assert!(r.get(id).is_some());
         assert_eq!(r.register(id).err(), Some(RegisterError::DuplicateId));
@@ -194,7 +197,7 @@ mod tests {
         let ids: Vec<Uuid> = (0..MAX_READY + 1).map(|_| Uuid::new_v4()).collect();
         for id in &ids {
             let (_t, g) = r.register(*id).unwrap();
-            r.complete(*id, data());
+            g.complete(data());
             drop(g);
         }
         assert!(r.get(ids[0]).is_none());
@@ -213,7 +216,7 @@ mod tests {
         let (b, g2) = r.register(Uuid::new_v4()).unwrap();
         let done = Uuid::new_v4();
         let (_t, g3) = r.register(done).unwrap();
-        r.complete(done, data());
+        g3.complete(data());
         assert_eq!(r.clear(), 3);
         assert!(a.is_cancelled() && b.is_cancelled());
         assert!(r.get(done).is_none());
@@ -239,6 +242,22 @@ mod tests {
         let (_t2, _new) = r.register(id).unwrap();
         drop(old);
         assert_eq!(r.register(id).err(), Some(RegisterError::DuplicateId));
+    }
+
+    #[test]
+    fn stale_complete_does_not_promote_new_registration() {
+        let r = DiffRegistry::new();
+        let id = Uuid::new_v4();
+        let (_ta, a) = r.register(id).unwrap();
+        r.close(id);
+        let (tb, b) = r.register(id).unwrap();
+        a.complete(data());
+        assert!(r.get(id).is_none(), "eski koşunun verisi düşmeli");
+        assert!(!tb.is_cancelled());
+        r.cancel(id);
+        assert!(tb.is_cancelled(), "yeni kaydın belirteci korunmuş olmalı");
+        b.complete(data());
+        assert!(r.get(id).is_some());
     }
 
     #[test]

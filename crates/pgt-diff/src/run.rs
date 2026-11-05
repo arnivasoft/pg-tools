@@ -693,6 +693,139 @@ mod tests {
         assert_eq!(det.target_text, "");
     }
 
+    fn listed(kind: ObjectKind, oid: u32, name: &str, deps: Vec<u32>) -> Listed {
+        Listed {
+            kind,
+            oid,
+            name: name.into(),
+            table: None,
+            signature: None,
+            is_partition: false,
+            deps,
+        }
+    }
+
+    #[test]
+    fn view_deps_map_oids_to_view_and_mv_keys_per_side() {
+        let side_a = [
+            listed(ObjectKind::View, 10, "v1", vec![]),
+            listed(ObjectKind::MaterializedView, 11, "m1", vec![10]),
+            listed(ObjectKind::Table, 12, "t", vec![]),
+            listed(ObjectKind::View, 13, "v2", vec![10, 11, 12, 99]),
+        ];
+        // Öbür tarafta aynı adlar başka oid'lerle: oid -> anahtar çözümü tarafa özgüdür.
+        let side_b = [
+            listed(ObjectKind::View, 20, "v1", vec![]),
+            listed(ObjectKind::View, 21, "v2", vec![20, 10]),
+        ];
+        let (a, b) = (DepIndex::new(&side_a), DepIndex::new(&side_b));
+        let key = |l: &Listed| crate::key::item_key(l);
+        assert_eq!(
+            a.view_deps(&side_a[3]),
+            [key(&side_a[0]), key(&side_a[1])],
+            "tablo ve bilinmeyen oid atlanır"
+        );
+        assert_eq!(a.view_deps(&side_a[1]), [key(&side_a[0])]);
+        assert_eq!(b.view_deps(&side_b[1]), [key(&side_b[0])], "10 bu tarafta yok");
+        assert!(a.view_deps(&side_a[2]).is_empty(), "görünüm olmayan öğenin bağımlılığı yok");
+    }
+
+    fn type_def(name: &str, attr_types: &[&str]) -> ObjectDef {
+        ObjectDef::Type(pgt_ddl::TypeDef {
+            schema: "s".into(),
+            name: name.into(),
+            owner: None,
+            comment: None,
+            body: pgt_ddl::TypeBody::Composite {
+                attributes: attr_types
+                    .iter()
+                    .map(|t| pgt_ddl::CompositeAttr {
+                        name: "x".into(),
+                        type_name: (*t).into(),
+                        collation: None,
+                        original: None,
+                    })
+                    .collect(),
+            },
+            editable: true,
+            unsupported: vec![],
+        })
+    }
+
+    #[test]
+    fn type_deps_strip_known_schema_prefix_and_quotes() {
+        let l = [
+            listed(ObjectKind::Type, 1, "b", vec![]),
+            listed(ObjectKind::Domain, 2, "Dom X", vec![]),
+            listed(ObjectKind::Table, 3, "tab", vec![]),
+        ];
+        let idx = DepIndex::new(&l);
+        let schemas = ["s", "t"];
+        let def = type_def("a", &["b", "s.b", "t.\"Dom X\"", "other.b", "tab", "b(10)[]", "int4"]);
+        let kb = crate::key::item_key(&l[0]);
+        let kd = crate::key::item_key(&l[1]);
+        assert_eq!(
+            idx.type_deps(Some(&def), &schemas),
+            [kb.clone(), kb.clone(), kd, kb],
+            "bilinmeyen şema, tablo ve yerleşik tipler atlanır"
+        );
+        assert!(idx.type_deps(None, &schemas).is_empty());
+    }
+
+    fn fk_con(ref_schema: &str, ref_table: &str) -> pgt_ddl::ConstraintDef {
+        pgt_ddl::ConstraintDef {
+            oid: None,
+            name: Some("fk".into()),
+            kind: ConstraintKind::ForeignKey {
+                columns: vec!["c".into()],
+                ref_schema: ref_schema.into(),
+                ref_table: ref_table.into(),
+                ref_columns: vec!["id".into()],
+                match_type: pgt_ddl::FkMatch::Simple,
+                on_update: pgt_ddl::FkAction::NoAction,
+                on_delete: pgt_ddl::FkAction::NoAction,
+            },
+            deferrable: false,
+            initially_deferred: false,
+            not_valid: false,
+        }
+    }
+
+    #[test]
+    fn fk_deps_only_for_target_schema_references() {
+        let l = [
+            listed(ObjectKind::Table, 1, "p", vec![]),
+            listed(ObjectKind::View, 2, "pv", vec![]),
+        ];
+        let idx = DepIndex::new(&l);
+        let table = ObjectDef::Table(pgt_ddl::TableDef {
+            schema: "tgt".into(),
+            name: "c".into(),
+            owner: None,
+            tablespace: None,
+            persistence: pgt_ddl::Persistence::Permanent,
+            columns: vec![],
+            constraints: vec![
+                fk_con("tgt", "p"),
+                fk_con("baska", "p"),
+                fk_con("tgt", "yok"),
+                fk_con("tgt", "p"),
+            ],
+            partition_by: None,
+            fillfactor: None,
+            comment: None,
+            partition_text: None,
+            is_partition: false,
+            inherits: false,
+            unsupported: vec![],
+        });
+        let kp = crate::key::item_key(&l[0]);
+        assert_eq!(idx.fk_deps(Some(&table), "tgt"), [kp.clone(), kp]);
+        assert!(idx.fk_deps(Some(&table), "baska2").is_empty());
+        assert!(idx.fk_deps(None, "tgt").is_empty());
+        assert!(idx.fk_deps(Some(&type_def("a", &[])), "tgt").is_empty());
+    }
+
     #[test]
     fn major_version() {
         assert_eq!(major(100000), 10);

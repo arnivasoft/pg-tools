@@ -113,13 +113,13 @@ pub async fn schema_diff_start(
     options: DiffOptions,
     on_event: Channel<DiffEvent>,
 ) -> CmdResult<DiffResult> {
-    let (token, _guard) = state.diff.register(diff_id).map_err(register_payload)?;
+    let (token, guard) = state.diff.register(diff_id).map_err(register_payload)?;
     let mut sink = ChannelSink(on_event);
     let data = Box::pin(run_diff(&state.manager, &source, &target, options, &mut sink, &token))
         .await
         .map_err(|e| run_error_payload(&e))?;
     let result = data.result().clone();
-    state.diff.complete(diff_id, data);
+    guard.complete(data);
     Ok(result)
 }
 
@@ -180,10 +180,10 @@ pub fn write_script(path: &Path, text: &str) -> std::io::Result<()> {
 #[tauri::command]
 pub async fn schema_diff_save(state: State<'_, AppState>, diff_id: Uuid, path: String) -> CmdResult<()> {
     let data = data_of(&state, diff_id)?;
+    save_path_check(&path).map_err(|m| payload("invalid_path", m, None))?;
     let sql = data
         .last_script()
         .ok_or_else(|| payload("no_script", "Önce betik üretilmeli.", None))?;
-    save_path_check(&path).map_err(|m| payload("invalid_path", m, None))?;
     let written = tauri::async_runtime::spawn_blocking(move || write_script(Path::new(&path), &sql)).await;
     match written {
         Ok(Ok(())) => Ok(()),
