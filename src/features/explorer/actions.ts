@@ -25,7 +25,7 @@ function ownedByTable(s: TreeState, id: string): boolean {
 export type ActionId =
   | "refresh" | "connect" | "disconnect" | "editServer" | "deleteServer"
   | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool" | "openDashboard" | "openData"
-  | "createObject" | "editObject" | "renameObject" | "privilegesObject" | "defaultPrivilegesObject" | "maintenance" | "backup" | "restore" | "dropObject";
+  | "createObject" | "editObject" | "renameObject" | "privilegesObject" | "defaultPrivilegesObject" | "maintenance" | "backup" | "restore" | "schemaDiff" | "dropObject";
 
 /**
  * Nesne diyaloğu (designer) eylemleri: adı `Object` ile biten eylemler (ana paket bütçesi için liste yerine sonek);
@@ -53,6 +53,8 @@ export interface ActionDeps {
   openMaintenance?(id: string): void;
   /** "Yedekle…" / "Geri yükle…" diyaloğu (Plan 27; tembel, tek örnek). */
   openBackup?(id: string, mode: "backup" | "restore"): void;
+  /** "Şema karşılaştır…" (Plan 30; tembel sekme, kilitli sunucuda da açılır — salt okunur). */
+  openSchemaDiff?(id: string): void;
   /** Düğümün sunucusu salt okunur kilitli mi (designer eylemleri kapalı)? Verilmezse ağaçtaki sunucu düğümünün kilidi. */
   serverLocked?(nodeId: string): boolean;
   /** Sunucunun sorgu oturumlarını kapatacak işlemden (silme, bağlantı kesme) önce: açık transaction'lar için sorar. */
@@ -123,6 +125,8 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
     // Plan 27: yedekleme bakımın ardından; bölüm (partition) altında şema atadan okunamadığı için yok. Sistem nesnesi yok.
     if (BACKUP_KINDS.has(node.kind) && !node.flags.system && !underPartitions(s, node.id)) out.push("backup");
     if (node.kind === "database") out.push("restore");
+    // Plan 30: şema karşılaştırma (veritabanı ve sistem olmayan şema), silmeden önce.
+    if (node.kind === "database" || (node.kind === "schema" && !node.flags.system)) out.push("schemaDiff");
     out.push("dropObject");
   }
   else if (isTableRowKind(node.kind) && ownedByTable(s, node.id)) out.push("editObject");
@@ -136,7 +140,7 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
 /** Menüde ayırıcı yerleşimi için eylem grubu. */
 export function groupOf(a: ActionId): number {
   if (a === "openQueryTool" || a === "openDashboard" || a === "openData") return -1;
-  if (a.endsWith("Object") || a === "maintenance" || a === "backup" || a === "restore") return 3;
+  if (a.endsWith("Object") || a === "maintenance" || a === "backup" || a === "restore" || a === "schemaDiff") return 3;
   if (a === "refresh" || a === "connect" || a === "disconnect") return 0;
   if (a === "editServer" || a === "deleteServer") return 1;
   return 2;
@@ -190,6 +194,9 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
       case "restore":
         // Savunma: kilitli sunucuda menü restore'u zaten kapatır.
         if (!disabledReason(action, deps, id)) deps.openBackup?.(id, action);
+        return;
+      case "schemaDiff":
+        deps.openSchemaDiff?.(id);
         return;
       case "disconnect":
         if (node.serverId && deps.beforeServerChange && !(await deps.beforeServerChange(node.serverId, node.label))) return;

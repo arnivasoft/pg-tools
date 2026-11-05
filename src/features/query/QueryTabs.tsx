@@ -8,10 +8,11 @@ import { toast } from "../../app/toast";
 import { createLoader } from "../../ui/lazy-load";
 import type { DashController } from "../dashboard/dash-controller";
 import type { DataController } from "../data/data-open";
+import type { DiffController } from "../schema-diff/diff-open";
 import type { DesignerController } from "../designer/designer-controller";
 import { isProductionLabel } from "../servers/server-form";
 import type { QueryController } from "./query-controller";
-import { OBJECT_TAB_ID, isDashTabId, isDataTabId, isDesignerTabId, isQueryTabId } from "./tabs-store";
+import { OBJECT_TAB_ID, isDashTabId, isDataTabId, isDesignerTabId, isDiffTabId, isQueryTabId } from "./tabs-store";
 import { serverLineColor } from "./workspace-model";
 
 // İşlem kapatma / toplu işlem / ortam diyalogları (Kobalte Dialog çeker): ilk istek gelene dek inmeyen tek tembel parça.
@@ -34,6 +35,11 @@ const dataTabs = () => import("../data/DataTabs");
 const DataTabHeads = lazy(() => dataTabs().then((m) => ({ default: m.DataTabHeads })));
 const DataPanels = lazy(() => dataTabs().then((m) => ({ default: m.DataPanels })));
 
+// Şema karşılaştırma sekme başlıkları ve panelleri: fark denetleyicisi yüklendiğinde (ilk karşılaştırmada) inen tembel parça.
+const diffTabs = () => import("../schema-diff/DiffTabs");
+const DiffTabHeads = lazy(() => diffTabs().then((m) => ({ default: m.DiffTabHeads })));
+const DiffPanels = lazy(() => diffTabs().then((m) => ({ default: m.DiffPanels })));
+
 export function QueryTabs(props: {
   ctl: QueryController;
   inspector: JSX.Element;
@@ -47,6 +53,8 @@ export function QueryTabs(props: {
   onOpenScript?: (input: { serverId: string; databaseOid: number | null; text: string }) => void;
   /** Tembel veri denetleyicisi (ilk "Verileri Görüntüle/Düzenle"de yüklenir; o zamana kadar `null`). */
   data?: () => DataController | null;
+  /** Tembel şema karşılaştırma denetleyicisi (ilk "Şema karşılaştır…"da yüklenir; o zamana kadar `null`). */
+  diff?: () => DiffController | null;
 }) {
   const ctl = props.ctl;
   // Diyalog parçası ilk kapatma/toplu/ortam isteğinde yüklenir; yükleme hatasında bekleyen istekler iptal edilir.
@@ -82,6 +90,11 @@ export function QueryTabs(props: {
     props.data?.()?.close(id);
     ctl.tabs.close(id);
   };
+  /** Şema karşılaştırma sekmesi: önce denetleyici girdisi, sonra sekme. */
+  const closeDiff = (id: string) => {
+    props.diff?.()?.close(id);
+    ctl.tabs.close(id);
+  };
   // Kirli designer/veri sekmesi kapatılmadan önce onay ister (odak Vazgeç'te; metin tembel parçada); temiz sekme doğrudan
   // kapanır. Tür başına ayrı sinyal (ortak `{ kind, id }` sinyalinden ana pakette birkaç bayt daha küçük; Plan 17 Task 1).
   const [designerClosing, setDesignerClosing] = createSignal<string | null>(null);
@@ -104,7 +117,8 @@ export function QueryTabs(props: {
     } else if (isDataTabId(id)) {
       if (props.data?.()?.isDirty(id)) setDataClosing(id);
       else closeData(id);
-    } else void ctl.requestClose(id);
+    } else if (isDiffTabId(id)) closeDiff(id);
+    else void ctl.requestClose(id);
   };
 
   // WebView yeniden yüklemesi (F5, Ctrl+R, Ctrl+Shift+R) oturumları kaybettirir: her zaman engellenir.
@@ -287,6 +301,13 @@ export function QueryTabs(props: {
             </Suspense>
           )}
         </Show>
+        <Show when={props.diff?.()}>
+          {(diff) => (
+            <Suspense>
+              <DiffTabHeads diff={diff()} tabs={ctl.tabs.state.diffs} Head={TabHead} />
+            </Suspense>
+          )}
+        </Show>
       </div>
       {/* Gizli panel `invisible` ile saklanır (display:none kaydırma konumunu sıfırlar). */}
       <div class="relative min-h-0 flex-1">
@@ -333,6 +354,13 @@ export function QueryTabs(props: {
                 closing={dataClosing()}
                 onCloseAnswer={answerDataClose}
               />
+            </Suspense>
+          )}
+        </Show>
+        <Show when={props.diff?.()}>
+          {(diff) => (
+            <Suspense>
+              <DiffPanels diff={diff()} tabs={ctl.tabs.state.diffs} activeId={active()} />
             </Suspense>
           )}
         </Show>

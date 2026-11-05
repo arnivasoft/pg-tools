@@ -1,4 +1,4 @@
-// Sağ panel sekmeleri (sorgu + dashboard + designer + veri): saf işlevler + ince bir Solid store sarmalayıcısı.
+// Sağ panel sekmeleri (sorgu + dashboard + designer + veri + şema karşılaştırma): saf işlevler + ince bir Solid store sarmalayıcısı.
 import { createStore } from "solid-js/store";
 import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 
@@ -51,6 +51,12 @@ export interface DataTab {
   where: string;
 }
 
+/** Şema karşılaştırma sekmesi (durumu tembel fark denetleyicisinde; burada yalnızca sekme kaydı). */
+export interface DiffTab {
+  id: string;
+  title: string;
+}
+
 export interface TabsState {
   /** Sorgu sekmeleri, görünüm sırasıyla ("Nesne" sekmesi hariç). */
   tabs: QueryTab[];
@@ -60,6 +66,8 @@ export interface TabsState {
   designers: DesignerTab[];
   /** Veri sekmeleri; designer'lardan sonra çizilir. */
   data: DataTab[];
+  /** Şema karşılaştırma sekmeleri; veri sekmelerinden sonra çizilir. */
+  diffs: DiffTab[];
   /** Etkin sekme: `OBJECT_TAB_ID`, bir sorgu, dashboard, designer ya da veri sekmesinin kimliği. */
   activeId: string;
   /** Sekme kimliği sayacı. */
@@ -98,7 +106,7 @@ export interface OpenDesignerInput {
 }
 
 export function initialTabs(): TabsState {
-  return { tabs: [], dashboards: [], designers: [], data: [], activeId: OBJECT_TAB_ID, nextId: 1, seq: {} };
+  return { tabs: [], dashboards: [], designers: [], data: [], diffs: [], activeId: OBJECT_TAB_ID, nextId: 1, seq: {} };
 }
 
 const taken = (state: TabsState, id: string) =>
@@ -106,7 +114,8 @@ const taken = (state: TabsState, id: string) =>
   state.tabs.some((x) => x.id === id) ||
   state.dashboards.some((x) => x.id === id) ||
   state.designers.some((x) => x.id === id) ||
-  state.data.some((x) => x.id === id);
+  state.data.some((x) => x.id === id) ||
+  state.diffs.some((x) => x.id === id);
 
 /** Kimlik bir sorgu sekmesine mi ait (dashboard ya da "Nesne" değil)? */
 export function isQueryTabId(state: TabsState, id: string): boolean {
@@ -123,6 +132,18 @@ export function isDesignerTabId(state: TabsState, id: string): boolean {
 
 /** Veri sekmesi kimliği (`g` öneki; yalnızca `openData` üretir). */
 export const isDataTabId = (id: string): boolean => id[0] === "g";
+
+/** Şema karşılaştırma sekmesi kimliği (`s` öneki; yalnızca `openSchemaDiff` üretir). */
+export const isDiffTabId = (id: string): boolean => id[0] === "s";
+
+/** Her çağrı yeni sekme ekler ve etkinleştirir (tekilleştirme yok). */
+export function openSchemaDiff(state: TabsState, input: { title: string }): { state: TabsState; id: string } {
+  let nextId = state.nextId;
+  let id: string;
+  do id = `s${nextId++}`;
+  while (taken(state, id));
+  return { id, state: { ...state, diffs: [...state.diffs, { id, title: input.title }], activeId: id, nextId } };
+}
 
 /** Aynı `key` (nesne) zaten açıksa o sekme etkinleşir (`created = false`); değilse yenisi eklenir ve etkinleşir. */
 export function openData(state: TabsState, input: Omit<DataTab, "id">): { state: TabsState; id: string; created: boolean } {
@@ -191,10 +212,10 @@ export function openTab(state: TabsState, input: OpenTabInput): { state: TabsSta
 
 /**
  * Sekmeyi kapatır ("Nesne" kapatılamaz). Etkin sekme kapanırsa görünüm sırasında (sorgu sekmeleri → dashboard'lar →
- * designer'lar → veri) sağdaki, yoksa soldaki, yoksa "Nesne" etkinleşir.
+ * designer'lar → veri → fark) sağdaki, yoksa soldaki, yoksa "Nesne" etkinleşir.
  */
 export function closeTab(state: TabsState, id: string): TabsState {
-  const order = [state.tabs, state.dashboards, state.designers, state.data].flatMap((l) => l.map((x) => x.id));
+  const order = [state.tabs, state.dashboards, state.designers, state.data, state.diffs].flatMap((l) => l.map((x) => x.id));
   const i = order.indexOf(id);
   if (i < 0) return state;
   const rest = order.filter((x) => x !== id);
@@ -206,6 +227,7 @@ export function closeTab(state: TabsState, id: string): TabsState {
     dashboards: state.dashboards.filter((x) => x.id !== id),
     designers: state.designers.filter((x) => x.id !== id),
     data: state.data.filter((x) => x.id !== id),
+    diffs: state.diffs.filter((x) => x.id !== id),
     activeId,
   };
 }
@@ -225,7 +247,8 @@ export function renameTab(state: TabsState, id: string, title: string): TabsStat
   const dashboards = retitle(state.dashboards);
   const designers = retitle(state.designers);
   const data = retitle(state.data);
-  return changed ? { ...state, tabs, dashboards, designers, data } : state;
+  const diffs = retitle(state.diffs);
+  return changed ? { ...state, tabs, dashboards, designers, data, diffs } : state;
 }
 
 export function activateTab(state: TabsState, id: string): TabsState {
@@ -274,6 +297,12 @@ export function createTabsStore(initial: TabsState = initialTabs()) {
       const r = openData(state, input);
       setState(r.state);
       return { id: r.id, created: r.created };
+    },
+    /** Şema karşılaştırma sekmesi ekler (her çağrı yeni sekme). */
+    openSchemaDiff(input: { title: string }): string {
+      const r = openSchemaDiff(state, input);
+      setState(r.state);
+      return r.id;
     },
     close: (id: string) => apply((s) => closeTab(s, id)),
     rename: (id: string, title: string) => apply((s) => renameTab(s, id, title)),

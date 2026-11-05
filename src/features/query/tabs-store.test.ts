@@ -8,11 +8,13 @@ import {
   isDashTabId,
   isDataTabId,
   isDesignerTabId,
+  isDiffTabId,
   isQueryTabId,
   moveTab,
   openDashboard,
   openData,
   openDesigner,
+  openSchemaDiff,
   openTab,
   renameTab,
   type TabsState,
@@ -413,5 +415,36 @@ describe("createTabsStore", () => {
     store.close(id);
     expect(store.state.tabs).toHaveLength(0);
     expect(store.state.activeId).toBe(OBJECT_TAB_ID);
+  });
+});
+
+describe("tabs-store şema karşılaştırma sekmeleri", () => {
+  it("her çağrı yeni sekme (s1, s2); sonuncusu etkin; kimlikler sorgu sekmeleriyle çakışmaz", () => {
+    const q = openTab(initialTabs(), { serverId: "s1", serverName: "prod", database: "a" });
+    expect(q.id).toBe("q1");
+    const a = openSchemaDiff(q.state, { title: "Şema karşılaştırma" });
+    const b = openSchemaDiff(a.state, { title: "Şema karşılaştırma" });
+    expect([a.id, b.id]).toEqual(["s2", "s3"]);
+    expect(b.state.diffs).toHaveLength(2);
+    expect(b.state.activeId).toBe(b.id);
+    expect(openSchemaDiff(initialTabs(), { title: "x" }).id).toBe("s1");
+  });
+  it("isDiffTabId", () => {
+    expect(isDiffTabId("s3")).toBe(true);
+    expect(isDiffTabId("q1")).toBe(false);
+  });
+  it("etkin fark sekmesi kapanınca soldaki (veri) sekme etkinleşir", () => {
+    const d = openData(initialTabs(), { serverId: "s1", databaseOid: 5, object: { kind: "table", oid: 1 }, title: "v", key: "k", where: "w" });
+    const f = openSchemaDiff(d.state, { title: "f" });
+    expect(closeTab(f.state, f.id).activeId).toBe(d.id);
+    expect(closeTab(f.state, f.id).diffs).toEqual([]);
+  });
+  it("renameTab fark sekmesini yeniden adlandırır; başlangıçta diffs boş; store openSchemaDiff", () => {
+    const f = openSchemaDiff(initialTabs(), { title: "f" });
+    expect(renameTab(f.state, f.id, "Yeni").diffs[0].title).toBe("Yeni");
+    expect(initialTabs().diffs).toEqual([]);
+    const store = createTabsStore();
+    const id = store.openSchemaDiff({ title: "t" });
+    expect(store.state.diffs[0]).toEqual({ id, title: "t" });
   });
 });

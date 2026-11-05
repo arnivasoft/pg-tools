@@ -11,6 +11,7 @@ import { ROOT } from "../features/explorer/tree-model";
 import type { Dashboard } from "../features/dashboard/dash-open";
 import type { Designer } from "../features/designer/designer-open";
 import type { Data } from "../features/data/data-open";
+import type { SchemaDiff } from "../features/schema-diff/diff-open";
 import { createPasswordPrompt } from "../features/servers/PasswordPrompt";
 import { groupsOf } from "../features/servers/server-form";
 import { createQueryController } from "../features/query/query-controller";
@@ -88,6 +89,9 @@ export default function App() {
   // Veri düzenleyici de tembel: ilk "Verileri Görüntüle/Düzenle"de yüklenir.
   const [data, setData] = createSignal<Data | null>(null);
   const loadData = once(() => import("../features/data/data-open").then((m) => setData(m.createData(lazyDeps()))));
+  // Şema karşılaştırma da tembel: ilk "Şema karşılaştır…"da yüklenir.
+  const [diff, setDiff] = createSignal<SchemaDiff | null>(null);
+  const loadDiff = once(() => import("../features/schema-diff/diff-open").then((m) => setDiff(m.createSchemaDiff(lazyDeps()))));
   const loadFailed = (err: unknown) => toast.show(toPayload(err).message, "error");
   const query = createQueryController({
     api: commands,
@@ -147,6 +151,7 @@ export default function App() {
     openMaintenance: (id) => setMaintenanceId(id),
     openBackup: (id, mode) => setBackupJob({ mode, nodeId: id }),
     openData: (id) => void loadData().then((d) => d.open(id), loadFailed),
+    openSchemaDiff: (id) => void loadDiff().then((d) => d.open(id), loadFailed),
     beforeServerChange: query.confirmServerChange,
     afterServerChange: (serverId, gone) => {
       query.serverSessionsClosed(serverId, gone);
@@ -283,6 +288,7 @@ export default function App() {
             designer={() => designer()?.ctl ?? null}
             onOpenScript={(input) => designer()?.openScript(input)}
             data={() => data()?.ctl ?? null}
+            diff={() => diff()?.ctl ?? null}
           />
         }
       />
