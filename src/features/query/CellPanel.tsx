@@ -1,4 +1,4 @@
-import { ErrorBoundary, Show, Suspense, createMemo, createSignal, createUniqueId, lazy } from "solid-js";
+import { Show, createEffect, createMemo, createSignal } from "solid-js";
 import { copyText } from "../../app/clipboard";
 import { Button } from "../../ui/Button";
 import type { ActiveCell } from "./ResultGrid";
@@ -8,11 +8,16 @@ import { CellTabs } from "./CellTabs";
 import { availability, cellFacts, columnKey, formatMemory, pickFormat, type CellFormat } from "./cell-view-model";
 import { tcell } from "./strings-cell";
 
-const CellViewers = lazy(() => import("./CellViewers"));
+type ViewersModule = typeof import("./CellViewers");
+// Tembel parça tek kez yüklenir; hata olursa önbellek temizlenir, sonraki deneme yeniden dener.
+let viewersP: Promise<ViewersModule> | undefined;
+let seq = 0;
 
 export function CellPanel(props: { cell: ActiveCell | null; wide: boolean; onToggleWide: () => void }) {
   const [copied, setCopied] = createSignal(false);
-  const idBase = createUniqueId();
+  const idBase = `cell-${++seq}`;
+  const [viewers, setViewers] = createSignal<ViewersModule["default"] | null>(null);
+  const [viewersFailed, setViewersFailed] = createSignal(false);
   const body = createMemo(() => {
     const v = props.cell?.value;
     return v === null || v === undefined ? null : cellPanelText(v, props.cell!.column.typeName);
@@ -35,6 +40,15 @@ export function CellPanel(props: { cell: ActiveCell | null; wide: boolean; onTog
     formatMemory.set(columnKey(props.cell.column), f);
     setMemTick((n) => n + 1);
   };
+  createEffect(() => {
+    if (format() === "text" || viewers()) return;
+    setViewersFailed(false);
+    const p = (viewersP ??= import("./CellViewers"));
+    p.then((m) => setViewers(() => m.default)).catch(() => {
+      if (viewersP === p) viewersP = undefined;
+      setViewersFailed(true);
+    });
+  });
   let timer: number | undefined;
   const copy = () => {
     const v = props.cell?.value;
@@ -103,16 +117,30 @@ export function CellPanel(props: { cell: ActiveCell | null; wide: boolean; onTog
             }
           >
             {(fc) => (
-              <ErrorBoundary fallback={<p class="font-sans text-[13px] text-danger">{tcell.loadFailed}</p>}>
-                <Suspense fallback={<p class="font-sans text-[13px] text-muted">{tcell.loading}</p>}>
-                  <CellViewers
-                    format={format() as Exclude<CellFormat, "text">}
-                    value={props.cell!.value!}
-                    column={props.cell!.column}
-                    facts={fc()}
-                  />
-                </Suspense>
-              </ErrorBoundary>
+              <Show
+                when={!viewersFailed()}
+                fallback={<p class="font-sans text-[13px] text-danger">{tcell.loadFailed}</p>}
+              >
+                <Show when={viewers()} fallback={<p class="font-sans text-[13px] text-muted">{tcell.loading}</p>}>
+                  {(V) =>
+                    // Getter'lar: görüntüleyici özellikleri kendi izleme bağlamında okur (hücre/biçim değişince güncellenir).
+                    V()({
+                      get format() {
+                        return format() as Exclude<CellFormat, "text">;
+                      },
+                      get value() {
+                        return props.cell!.value!;
+                      },
+                      get column() {
+                        return props.cell!.column;
+                      },
+                      get facts() {
+                        return fc();
+                      },
+                    })
+                  }
+                </Show>
+              </Show>
             )}
           </Show>
         </Show>
