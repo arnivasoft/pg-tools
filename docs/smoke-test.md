@@ -894,3 +894,8 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 - [ ] OpenRouter + Claude dışı bir model (ör. bir `openai/…` modeli): yanıt gelir; araç ya da effort desteklenmezse hata ayrıntısı görünür, effort "Varsayılan" ile yeniden denenebilir. **[—]**
 - [ ] Effort "En yüksek" ve "Varsayılan" arasında geçiş sohbeti bozmaz; sağlayıcı ya da model değişince sürmekte olan sohbet "yeni sohbet başlatın" der, "Yeni sohbet" sonrası çalışır. **[—]**
 - [ ] Geçersiz model adı (ör. `claude-yok`) → "Model bulunamadı…" ya da sağlayıcının hata ayrıntısı; boşluklu model adı kaydedilmez. **[—]**
+
+## Kod editörü seçim renkleri
+
+- [ ] Koyu ve açık temada Sorgu Aracı editöründe metin seçilince seçili metin okunur; odak editörden çıkınca seçim daha soluk (gri) tonda kalır. Aynısı Inspector DDL görünümü ve fonksiyon gövdesi editöründe de geçerli. **[—]**
+- [ ] İmleç bir parantezin yanındayken eşleşen parantez seçimden ayrı bir tonda ve çerçeveli görünür; eşleşmeyen parantez kırmızımsı tondadır; seçimin içindeyken de ayırt edilir. **[—]**
