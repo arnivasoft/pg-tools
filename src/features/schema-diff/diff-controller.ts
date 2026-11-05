@@ -30,6 +30,7 @@ import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { SideTag } from "../../ipc/bindings/SideTag";
 import type { Api } from "../../ipc/commands";
 import { toPayload } from "../../ipc/errors";
+import type { OpenForAssistant } from "../query/ai-intent";
 import type { QueryController } from "../query/query-controller";
 import type { TabsStore } from "../query/tabs-store";
 import type { DiffApi } from "./diff-commands";
@@ -50,6 +51,10 @@ export interface DiffControllerDeps {
   connect: (serverId: string) => Promise<boolean>;
   tabs: Pick<TabsStore, "openSchemaDiff" | "rename">;
   openScript: QueryController["openScript"];
+  /** "Riskleri açıkla": betik yeni sekmede (çalıştırılmadan) açılır ve asistana inceleme isteği bırakılır. */
+  openForAssistant: OpenForAssistant;
+  /** İsteğin sohbetteki başlığı. */
+  reviewLabel: string;
   copy: (text: string) => Promise<void>;
   notify: (text: string, kind: ToastKind) => void;
   /** ScriptDialog parçasıyla tembel yüklenir. */
@@ -121,6 +126,7 @@ export interface DiffTabCtl {
   buildScript(tabId: string): Promise<void>;
   closeScript(tabId: string): void;
   openInQueryTool(tabId: string): Promise<void>;
+  reviewInAssistant(tabId: string): Promise<void>;
   copyScript(tabId: string): Promise<void>;
   saveScript(tabId: string): Promise<void>;
 }
@@ -590,6 +596,19 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     if (!s.e.closed && s.e.scriptGen === gen) closeScript(tabId);
   };
 
+  /** `openInQueryTool` gibi; ek olarak yeni sekmenin asistanına betiğin risk incelemesi bırakılır. */
+  const reviewInAssistant = async (tabId: string): Promise<void> => {
+    const s = scriptState(tabId);
+    if (!s) return;
+    const { target, names } = s.ran;
+    const gen = s.e.scriptGen;
+    await deps.openForAssistant(
+      { serverId: target.serverId, databaseOid: target.databaseOid, database: names.tgt.db, text: s.sql },
+      { mode: "review", label: deps.reviewLabel, sql: s.sql },
+    );
+    if (!s.e.closed && s.e.scriptGen === gen) closeScript(tabId);
+  };
+
   const copyScript = async (tabId: string): Promise<void> => {
     const s = scriptState(tabId);
     if (!s) return;
@@ -668,6 +687,7 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     buildScript,
     closeScript,
     openInQueryTool,
+    reviewInAssistant,
     copyScript,
     saveScript,
   };

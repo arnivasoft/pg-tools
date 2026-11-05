@@ -3,4 +3,4 @@
 /**
  * Asistan görevi.
  */
-export type AiMode = "generate" | "explain" | "fix";
+export type AiMode = "generate" | "explain" | "fix" | "plan" | "review" | "optimize";

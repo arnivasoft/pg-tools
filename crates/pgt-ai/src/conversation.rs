@@ -156,6 +156,7 @@ mod tests {
             error: String::new(),
             schema: schema.into(),
             server_version: String::new(),
+            extra: String::new(),
         }
     }
 

@@ -152,7 +152,24 @@ export default function StatementsView(props: SectionProps) {
                         <Show when={it().row.query != null}>
                           <button
                             type="button"
-                            class="ml-auto h-5 rounded border border-border bg-bg px-1.5 text-[11px] hover:bg-hover"
+                            class="ml-auto h-5 rounded border border-border bg-bg px-1.5 text-[11px] hover:bg-hover disabled:opacity-50"
+                            disabled={props.model.databaseOid === null}
+                            title={props.model.databaseOid === null ? s.optimizeNoDb : s.optimizeTitle}
+                            onClick={() => {
+                              const r = it().row;
+                              void props.dash.improveInAssistant(
+                                props.model.id,
+                                r,
+                                s.optimize,
+                                s.stats(r.calls, r.totalMs, r.meanMs, r.rows),
+                              );
+                            }}
+                          >
+                            {s.optimize}
+                          </button>
+                          <button
+                            type="button"
+                            class="h-5 rounded border border-border bg-bg px-1.5 text-[11px] hover:bg-hover"
                             onClick={() => copy(it().row.query ?? "")}
                           >
                             {s.copy}

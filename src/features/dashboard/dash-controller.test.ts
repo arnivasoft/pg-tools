@@ -34,7 +34,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function setup() {
+function setup(extra: Partial<Parameters<typeof createDashController>[0]> = {}) {
   let opened = 0;
   const api = {
     dashOpen: vi.fn(async (_serverId: string, _db: number | null) => info(++opened)),
@@ -53,6 +53,7 @@ function setup() {
     api: api as unknown as Api,
     notify,
     poller: { visible: () => true, onVisibility: () => () => {} },
+    ...extra,
   });
   return { ctl, api, notify };
 }
@@ -636,5 +637,33 @@ describe("dash-controller sinyal", () => {
     // yanıtsız answer no-op
     s.ctl.signalGate.answer(true);
     expect(s.api.dashSignal).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("dash-controller asistanla iyileştir", () => {
+  const row = { queryId: "1", query: "SELECT * FROM t WHERE a = $1", calls: 3, totalMs: 30, meanMs: 10, rows: 3, sharedBlksHit: 0, sharedBlksRead: 0 };
+
+  it("veritabanı panosunda sorguyu istatistiklerle yeni sekmeye ve asistana gönderir", async () => {
+    const openForAssistant = vi.fn(async () => {});
+    const s = setup({ openForAssistant });
+    const id = await s.ctl.open({ serverId: "S1", serverName: "srv", databaseOid: 7 });
+    await flush();
+    await s.ctl.improveInAssistant(id, row, "Asistanla iyileştir", "calls: 3");
+    expect(openForAssistant).toHaveBeenCalledWith(
+      { serverId: "S1", databaseOid: 7, database: null, text: row.query },
+      { mode: "optimize", label: "Asistanla iyileştir", sql: row.query, extra: "calls: 3" },
+    );
+  });
+
+  it("sunucu panosunda (veritabanı yok) ve metinsiz satırda hiçbir şey yapmaz", async () => {
+    const openForAssistant = vi.fn(async () => {});
+    const s = setup({ openForAssistant });
+    const id = await s.ctl.open({ serverId: "S1", serverName: "srv", databaseOid: null });
+    await flush();
+    await s.ctl.improveInAssistant(id, row, "x", "y");
+    const db = await s.ctl.open({ serverId: "S1", serverName: "srv", databaseOid: 7 });
+    await flush();
+    await s.ctl.improveInAssistant(db, { ...row, query: null }, "x", "y");
+    expect(openForAssistant).not.toHaveBeenCalled();
   });
 });

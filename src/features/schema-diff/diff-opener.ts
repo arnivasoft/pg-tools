@@ -2,6 +2,7 @@
 // burada gerçek modüllere bağlanır; `copyText` yalnız bu dosyada içe aktarılır. Kaydetme seçicisi ScriptDialog parçasıyla
 // tembel iner (`@tauri-apps/plugin-dialog` bu parçaya girmez).
 import { copyText } from "../../app/clipboard";
+import { tsd } from "../../app/strings-diff";
 import { diffApi } from "./diff-commands";
 import { createDiffController, type DiffTabCtl } from "./diff-controller";
 import type { DiffDeps } from "./diff-open";
@@ -14,6 +15,9 @@ export function startDiff(deps: DiffDeps): { ctl: DiffTabCtl; open: (nodeId: str
     connect: deps.connect,
     tabs: deps.tabs,
     openScript: deps.query.openScript,
+    // Tıklanınca yüklenir: statik içe aktarma ortak parça yaratıp ana paketin ön yükleme listesini büyütürdü.
+    openForAssistant: (input, intent) => import("../query/ai-intent").then((m) => m.openForAssistant(deps.query, input, intent)),
+    reviewLabel: tsd.review,
     copy: copyText,
     notify: deps.notify,
     pick: () => import("./ScriptDialog").then((m) => m.picker),

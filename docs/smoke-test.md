@@ -881,3 +881,8 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 - [ ] Araçlar kullanıcının açık transaction'ını etkilemez: `BEGIN; UPDATE …` çalıştırıp (commit etmeden) asistana tablo sorun; transaction durumu değişmez, sonra ROLLBACK edilebilir. **[—]**
 - [ ] Bağlantısı kopmuş sunucuda araç hatası modele iletilir; asistan araçsız yanıt verir (uygulama çökmez). **[—]**
 - [ ] Uygulama günlüğünde yalnız araç adı ve süre görünür; tablo adları ve araç sonuçları yazılmaz. **[—]**
+- [ ] Hatalı sorgu → İletiler panelinde "Asistanla düzelt" görünür; tıklanınca Asistan paneli açılır ve "Hatayı düzelt" turu kendiliğinden gönderilir. Hata yokken düğme görünmez. **[—]**
+- [ ] EXPLAIN (F7) → Plan panelinde "Planı açıkla": asistan darboğazı ve tahmin hatalarını anlatır, indeks önerisinden önce mevcut indekslere bakar. **[—]**
+- [ ] Şema karşılaştırma → Betik oluştur → "Riskleri açıkla": betik hedefte yeni sekmede açılır (çalıştırılmaz), diyalog kapanır, asistan kilit/yeniden yazım/veri kaybı risklerini sıralar. Etiketsiz sunucuda ortam isteminden vazgeçilince sekme ve istek oluşmaz. **[—]**
+- [ ] Veritabanı panosu → Sorgu istatistikleri → bir sorgu seç → "Asistanla iyileştir": sorgu yeni sekmede açılır, asistan istatistiklerle iyileştirme önerir. Sunucu panosunda düğme kapalıdır ve gerekçe ipucunda yazar. **[—]**
+- [ ] API anahtarı yokken bir girişe tıklanınca anahtar formu çıkar; anahtar kaydedilince bekleyen istek kendiliğinden gönderilir. **[—]**

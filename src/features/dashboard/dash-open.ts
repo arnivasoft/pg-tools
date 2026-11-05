@@ -7,6 +7,7 @@ import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { Api } from "../../ipc/commands";
 import { errorText, toPayload } from "../../ipc/errors";
 import type { TreeState } from "../explorer/tree-model";
+import type { QueryController } from "../query/query-controller";
 import type { TabsStore } from "../query/tabs-store";
 import { createDashController, type DashController, type DashControllerDeps } from "./dash-controller";
 
@@ -68,10 +69,20 @@ export function createDashOpener(deps: DashOpenDeps) {
 }
 
 /** Uygulamanın tuttuğu dashboard nesnesi: denetleyici + açma akışları. */
-export function createDashboard(deps: Omit<DashOpenDeps, "dash"> & Pick<DashControllerDeps, "api">) {
+export function createDashboard(
+  deps: Omit<DashOpenDeps, "dash"> & Pick<DashControllerDeps, "api"> & { query?: Pick<QueryController, "openScript" | "tabs" | "patch"> },
+) {
   // Sekme başlıkları/panelleri hemen ardından gerekecek: açılış istekleriyle paralel insin (ilk sekme gecikmeden görünsün).
   void import("./DashTabs").catch(() => {});
-  const ctl = createDashController({ api: deps.api, notify: deps.notify });
+  const query = deps.query;
+  const ctl = createDashController({
+    api: deps.api,
+    notify: deps.notify,
+    // Tıklanınca yüklenir: statik içe aktarma ortak parça yaratıp ana paketin ön yükleme listesini büyütürdü.
+    openForAssistant: query
+      ? (input, intent) => import("../query/ai-intent").then((m) => m.openForAssistant(query, input, intent))
+      : undefined,
+  });
   return { ctl, ...createDashOpener({ ...deps, dash: ctl }) };
 }
 

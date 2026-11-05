@@ -1,4 +1,5 @@
-// Asistan paneli metinleri. Yalnızca tembel AiPane parçası ve QueryTab içe aktarır; ana pakete girmez.
+// Asistan metinleri. Yalnız tembel AiPane ve QueryTab içe aktarır; ana pakete girmez. Şema farkı ve dashboard
+// girişlerinin metinleri kendi dosyalarındadır (bu dosya ortak parçaya bölünmesin).
 export const tai = {
   pane: "Asistan",
   ariaLabel: "Yapay zekâ asistanı",
@@ -36,6 +37,13 @@ export const tai = {
     search_columns: "Kolon arandı",
   } as Record<string, string>,
   toolsAria: "Asistanın baktığı katalog bilgileri",
+  /** Başka ekranlardaki "Asistana sor" girişleri. */
+  entry: {
+    fix: "Asistanla düzelt",
+    fixTitle: "Son hatayı ve hata veren ifadeyi asistana gönderir",
+    plan: "Planı açıkla",
+    planTitle: "Planı ve sorguyu asistana gönderir: darboğaz, tahmin hataları ve öneriler",
+  },
   maxTokens: "Yanıt uzunluk sınırında kesildi.",
   refused: "Asistan bu isteği yanıtlamadı.",
   noError: "Bu sekmede düzeltilecek bir hata yok: önce sorguyu çalıştırın.",

@@ -24,4 +24,8 @@ schema: string,
 /**
  * Sunucu sürümü ("16.4" gibi); bilinmiyorsa boş.
  */
-serverVersion: string, };
+serverVersion: string, 
+/**
+ * Kipe özgü ek bağlam: `Plan` için EXPLAIN çıktısı, `Optimize` için istatistikler; diğerlerinde boş.
+ */
+extra: string, };

@@ -100,6 +100,8 @@ function setup() {
     connect: vi.fn(async () => true),
     tabs: tabs as unknown as DiffControllerDeps["tabs"],
     openScript: vi.fn(async () => {}) as unknown as DiffControllerDeps["openScript"],
+    openForAssistant: vi.fn(async () => {}) as unknown as DiffControllerDeps["openForAssistant"],
+    reviewLabel: "Riskleri açıkla",
     copy: vi.fn(async () => {}),
     notify: vi.fn(),
     pick: vi.fn(async () => picker),
@@ -557,6 +559,25 @@ describe("diff-controller", () => {
       await s.ctl.buildScript("s1");
       await s.ctl.openInQueryTool("s1");
       expect(s.deps.openScript).toHaveBeenCalledWith({ serverId: "s1", databaseOid: 8, database: "arsiv", text: SQL });
+      expect(s.m().script).toBeNull();
+    });
+
+    it("reviewInAssistant betiği hedefte açar, asistana inceleme bırakır, diyalog kapanır", async () => {
+      const s = mk();
+      await s.ready();
+      await s.ctl.setDatabase("s1", "target", 8);
+      s.ctl.setSchema("s1", "target", "public");
+      void s.ctl.compare("s1");
+      await flush();
+      s.starts[0].d.resolve(RESULT);
+      await flush();
+      await s.ctl.buildScript("s1");
+      await s.ctl.reviewInAssistant("s1");
+      expect(s.deps.openForAssistant).toHaveBeenCalledWith(
+        { serverId: "s1", databaseOid: 8, database: "arsiv", text: SQL },
+        { mode: "review", label: "Riskleri açıkla", sql: SQL },
+      );
+      expect(s.deps.openScript).not.toHaveBeenCalled();
       expect(s.m().script).toBeNull();
     });
 
