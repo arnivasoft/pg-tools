@@ -21,6 +21,11 @@
   --syn-number: #b45309;
   --syn-comment: #6b7280;
   --syn-type: #1d4ed8;
+  /* Kod editörü (CodeMirror) vurguları: odaklı/odaksız seçim ve parantez eşleşmesi ayrı tonlarda. */
+  --editor-selection: #c5d6fa;
+  --editor-selection-inactive: #e1e5ec;
+  --editor-bracket: #b8e6de;
+  --editor-bracket-bad: #f9d0d0;
   --srv-red: #dc2626;
   --srv-orange: #ea580c;
   --srv-amber: #d97706;
@@ -50,6 +55,10 @@
   --syn-number: #fbbf24;
   --syn-comment: #8b93a1;
   --syn-type: #93c5fd;
+  --editor-selection: #2a4677;
+  --editor-selection-inactive: #2c313b;
+  --editor-bracket: #1d4f4a;
+  --editor-bracket-bad: #5a2328;
   --srv-red: #f87171;
   --srv-orange: #fb923c;
   --srv-amber: #fbbf24;

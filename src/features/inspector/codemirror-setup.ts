@@ -18,7 +18,29 @@ export const sharedTheme = EditorView.theme({
   ".cm-scroller": { fontFamily: '"Cascadia Mono", Consolas, monospace', lineHeight: "1.5" },
   ".cm-gutters": { backgroundColor: "var(--panel)", color: "var(--muted)", border: "none" },
   "&.cm-focused": { outline: "none" },
-  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { backgroundColor: "var(--selected)" },
+  // Seçim: `drawSelection` temel teması `&light.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground`
+  // (5 sınıf) ile sabit açık lavanta (#d7d4f0) basar; uygulama temayı CSS değişkenleriyle değiştirdiği için editör hep
+  // "light" sayılır. Kısa seçici bu kuralı yenemiyordu: koyu temada açık metin açık zeminde kalıyordu. `.cm-editor`
+  // eklenerek özgüllük temel temanın üstüne çıkarılır (odaklı 6, odaksız 5 sınıf).
+  "&.cm-editor > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
+    background: "var(--editor-selection-inactive)",
+  },
+  "&.cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground": {
+    background: "var(--editor-selection)",
+  },
+  // `drawSelection` olmayan görünümler (hücre görüntüleyici) yerel seçimi kullanır; varsa `drawSelection`'ın
+  // `!important` gizleme kuralı bunu ezer.
+  ".cm-content ::selection, .cm-content::selection": { backgroundColor: "var(--editor-selection)" },
+  // Parantez eşleşmesi: temel tema (`&.cm-focused .cm-matchingBracket`, 3 sınıf) yarı saydam sabit renk basar;
+  // seçimden ayırt edilsin diye ayrı ton + çerçeve.
+  "&.cm-editor.cm-focused .cm-matchingBracket": {
+    backgroundColor: "var(--editor-bracket)",
+    outline: "1px solid var(--syn-string)",
+  },
+  "&.cm-editor.cm-focused .cm-nonmatchingBracket": {
+    backgroundColor: "var(--editor-bracket-bad)",
+    outline: "1px solid var(--danger)",
+  },
 });
 
 /** SQL dili + vurgulama + tema: salt okunur DDL görünümü ile Sorgu Aracı editörünün ortak kaynağı. */
