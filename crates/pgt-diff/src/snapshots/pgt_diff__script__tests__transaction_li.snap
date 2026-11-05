@@ -1,0 +1,21 @@
+---
+source: crates/pgt-diff/src/script.rs
+expression: r.sql
+---
+-- pg-tools şema karşılaştırma betiği
+-- Kaynak: kaynak.public
+-- Hedef: hedef.Hedef Şema (PostgreSQL 16.4)
+-- Oluşturuldu: 2026-10-31 00:00:00 UTC
+-- Öğe: 2, ifade: 1, en yüksek risk: Veri kaybı olabilir
+-- Bağımlılıklar tamamlanmaz: seçilmeyen nesnelere bağlı öğeler hedefte hata verebilir.
+
+BEGIN;
+SET LOCAL check_function_bodies = off;
+SET LOCAL search_path TO pg_catalog, "Hedef Şema";
+
+-- ==== Silmeler ====
+-- Tablo t
+-- not: not?metni
+DROP TABLE t;
+
+COMMIT;

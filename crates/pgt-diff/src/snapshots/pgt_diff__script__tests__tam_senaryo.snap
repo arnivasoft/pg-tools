@@ -1,0 +1,56 @@
+---
+source: crates/pgt-diff/src/script.rs
+expression: "assemble(&H, &items).sql"
+---
+-- pg-tools şema karşılaştırma betiği
+-- Kaynak: kaynak.public
+-- Hedef: hedef.Hedef Şema (PostgreSQL 16.4)
+-- Oluşturuldu: 2026-10-31 00:00:00 UTC
+-- Öğe: 15, ifade: 18, en yüksek risk: Güvenli
+-- Bağımlılıklar tamamlanmaz: seçilmeyen nesnelere bağlı öğeler hedefte hata verebilir.
+
+BEGIN;
+SET LOCAL check_function_bodies = off;
+SET LOCAL search_path TO pg_catalog, "Hedef Şema";
+
+-- ==== Silmeler ====
+-- Trigger a.t1
+DROP TRIGGER t1 ON a;
+-- İndeks i1
+DROP INDEX i1;
+-- Görünüm v0
+DROP VIEW v0;
+-- Fonksiyon f0
+DROP FUNCTION f0();
+-- Tablo t0
+DROP TABLE t0;
+-- Sequence s0
+DROP SEQUENCE s0;
+-- Domain d0
+DROP DOMAIN d0;
+-- Tip y0
+DROP TYPE y0;
+
+-- ==== Oluşturma ve değişiklikler ====
+-- Tip y1
+CREATE TYPE y1 AS ENUM ();
+-- Sequence s1
+CREATE SEQUENCE s1;
+-- Fonksiyon f1
+CREATE FUNCTION f1() ...;
+-- Tablo t1
+CREATE TABLE t1 (id int);
+ALTER SEQUENCE s1 OWNED BY t1.id;
+ALTER TABLE t1 ADD CONSTRAINT fk ...;
+-- Görünüm v1
+CREATE VIEW v1 AS SELECT 1;
+-- İndeks t1.i2
+CREATE INDEX i2 ON t1 (id);
+-- Trigger t1.tg
+CREATE TRIGGER tg ...;
+
+-- ==== Yetkiler ====
+-- Tablo t1
+GRANT SELECT ON t1 TO r;
+
+COMMIT;
