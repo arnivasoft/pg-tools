@@ -543,10 +543,10 @@ Elle kontrol: `docs/smoke-test.md` "Şema karşılaştırma arka ucu (Plan 29)".
 
 | Dosya | Kapsam |
 |---|---|
-| `src/features/query/cell-view-model.test.ts` | Uygulanabilirlik (`availability`), kendiliğinden seçim önceliği (`pickFormat`), sütun başına oturum hatırlama, boyut kararları (`sizeVerdict`/`previewAllowed`/`fileActionAllowed`), devre dışı gerekçeleri, `nextTab` klavye gezinmesi |
-| `src/features/query/cell-format.test.ts` | `decodeByteaHex` (sınırlı), `formatHtml`/`formatXml`/`reindentJson` (girinti sınırı, `xml:space`, CDATA, DOCTYPE alt kümesi), `previewDoc` (CSP meta, HTML boşluk sınıfı), imza tanıma, `suggestSaveName`, `saveCell` |
-| `src/features/query/cell-code.test.ts` | JSON/XML/HTML dillerinin ayrıştırma sözleşmesi (hata düğümü yok), aynı dil için aynı Promise, `viewerHighlight` |
-| `src-tauri/src/cell.rs` (Rust birim) | PDF geçici dosya, 24 saatlik süpürme, boyut sınırı (`too_large`), PDF olmayan veri hatası, `cell_save_bytes` gidiş-dönüş; `cargo test -p pg-tools cell` |
+| `src/features/query/cell-view-model.test.ts` | Uygulanabilirlik (`availability`), kendiliğinden seçim önceliği (`pickFormat`), sütun başına oturum hatırlama, boyut kararları (`sizeVerdict`/`previewAllowed`/`fileActionAllowed`), boş dize -> Metin, seçim işlevlerinin hafızaya yazmaması, metinde `byteLength = charLength`, devre dışı gerekçeleri, `nextTab` klavye gezinmesi |
+| `src/features/query/cell-format.test.ts` | `decodeByteaHex` (sınırlı), `formatHtml`/`formatXml`/`reindentJson` (girinti sınırı, `xml:space`, CDATA, DOCTYPE alt kümesi), `previewDoc` (CSP meta, HTML boşluk sınıfı), imza tanıma, `hexTotal` (16 MiB sınırı, çok baytlı metin), `suggestSaveName`, `saveCell` |
+| `src/features/query/cell-code.test.ts` | JSON/XML/HTML dillerinin ayrıştırma sözleşmesi (hata düğümü yok), aynı dil için aynı Promise, reddedilen yüklemenin önbellekten çıkıp yeniden denenmesi, `viewerHighlight` |
+| `src-tauri/src/cell.rs` (Rust birim) | bytea onaltılık çözme, imza (`is_pdf`), yol bağımsız değişkeni, geçici ad, 24 saatlik süpürme (taşma güvenli), `CellTemp` silme, saf `check_size` (`too_large`), `decode_pdf` (PDF olmayan veri, boyut), `save_decoded` (gidiş-dönüş, geçersiz yol, var olmayan dizinde `io`); `cargo test -p pg-tools cell` |
 
 **Paket tavanları:** `scripts/bundle-budget.json` ana paket 127,333 B, açılış kümesi 155,006 B (sıfır pay); Plan 31 `call` dışa aktarımını `t.query.errorMark` taşıması ve ölü `t.query.tabs.close` anahtarının silinmesiyle telafi etti (spec §7). Kural ve denetim: "Ana paket bütçesi (Plan 21)".
 

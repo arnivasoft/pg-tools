@@ -170,6 +170,7 @@
 - HTML önizlemesi betik çalıştırmaz: betikle çizilen içerik boş görünür. Uzak görsel, stil ve yazı tipleri yüklenmez.
 - XML sekmesi iyi biçimliliği doğrulamaz, ad alanlarını ve varlıkları çözmez, şemaya (XSD/DTD) göre denetlemez; önizleme yoktur.
 - HTML biçimleyici tam bir HTML5 ayrıştırıcısı değildir (örtük kapanan `<p>`/`<li>` girintisi kayabilir); önizleme her zaman özgün metni kullanır.
+- HTML önizlemesinde `<link rel=preconnect|dns-prefetch>` Chromium'da CSP kapsamı dışında olabilir; sandbox'lı iframe'de DNS/TCP bağlantısı açıp açmadığı doğrulanmadı (smoke).
 - Panel genişliği iki adımlıdır (sürüklenerek boyutlandırma yok).
 - Metin sütununda JSON algılaması, seçim başına bir kez en çok 4 MiB'lık değeri `JSON.parse` ile dener; büyük değerlerde onlarca ms sürebilir (§4'teki 5 ms hedefi yalnız 1 KB önek algılaması için geçerlidir). Sonuç hücre başına önbelleğe alınır.
 
@@ -192,6 +193,14 @@
 | `@codemirror/lang-json` parçası | 2,397 | İlk JSON gösteriminde yüklenir |
 | `@codemirror/lang-xml` parçası | 14,350 | İlk XML gösteriminde yüklenir |
 | `@codemirror/lang-html` parçası | 139,208 | İlk HTML kaynağı gösteriminde yüklenir (CSS/JS alt dilleri dahil) |
+
+**Son tur sapmaları (nihai inceleme):**
+
+- `CellFacts.byteLength` metinde `charLength`'e eşittir (O(1)); tam UTF-8 toplamı gösterildiği yerde hesaplanır (Onaltılık: `hexTotal`; Görsel bilgi satırı: kodlanmış uzunluk). Metin görsel (SVG) boyut koruması UTF-16 birimiyle çalışır.
+- Boş dize (`""`) her türde kendiliğinden Metin sekmesine düşer (boş `xml` "(boş dize)" notunu gösterir).
+- Panel: "Paneli genişlet" etiketi sabit, durum `aria-pressed` ile; sekme paneli `tabindex=0`; devre dışı sekmede üzerine gelme arka planı yok; görüntüleyici yükleme hatası hücre değişince sıfırlanır (yeniden denenir).
+- PDF sekmesi 64 MiB üstünde de çizilir (yalnız 16 baytlık önek çözülür): bilgi satırı, gerekçeli devre dışı düğmeler ve uyarı; genel boyut bildirimi "Kaydet…" önermez. `SizeNotice` yalnız dosya işlemi izinliyse "Kaydet…" önerir.
+- Arka uç hata kodları `invalid`, `too_large`, `io`; çözme ve dosya yazma `spawn_blocking` içinde.
 
 **Telafi kaydı:** `commands.ts` `call` dışa aktarımı ve QueryTab dinamik içe aktarmasındaki `.then(e=>e.t)` ile ön yükleme haritası ana paketi ve açılış kümesini tavanın 20 B üstüne çıkardı (127,384 / 155,057). Tavan yükseltilmedi; telafi:
 

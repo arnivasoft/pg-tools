@@ -807,8 +807,11 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-cell-viewer-design.md`. Biçim se
 - [ ] HTML önizleme güvenliği, ağ: uzak `<img src="https://…">`, `<link rel=stylesheet href="https://…">` ve `@import` için Network'te **hiç istek yok**. **[—]**
 - [ ] HTML önizleme güvenliği, gezinme: `<a href="https://example.com">` ve `<a target="_top">` tıklaması uygulamayı ya da iframe'i uzak sayfaya götürmez; `<meta http-equiv="refresh" content="0;url=https://example.com">` yönlendirmez; `<form action=…>` gönderilmez. **[—]**
 - [ ] HTML önizleme güvenliği, WebView2: önizleme CSP ihlali olmadan çizilir (çizmezse durulur, sorulur). **[—]**
+- [ ] HTML önizleme güvenliği, ön bağlantı ipuçları: önizlemede `<link rel="preconnect" href="https://example.com">` ve `<link rel="dns-prefetch" href="//example.com">` varken Kaynak İzleyicisi / `netstat -n` (ya da DNS istemci günlüğü) bu ana makineye bağlantı ya da DNS sorgusu göstermez; gösterirse bilinen sınır olarak kaydedilir (spec §5). **[—]**
 - [ ] HTML önizleme güvenliği, boyut: 3 MB HTML'de önizleme anahtarı gerekçeyle devre dışı. **[—]**
 - [ ] PDF: "Varsayılan uygulamada aç" sistemin PDF uygulamasını açar; dosya `%LOCALAPPDATA%\com.pgtools.desktop\cell-view\cell-<uuid>.pdf` altındadır; uygulama kapatılınca dosya silinir (okuyucu kapalıyken); okuyucu açıkken kapatılırsa dosya kalır ve 24 saatten eski olunca sonraki açılışta silinir; "Kaydet…" ve iptal; 65 MB PDF'de düğmeler gerekçeyle devre dışı. **[—]**
+- [ ] Boş `''::xml` hücresi Metin sekmesinde "(boş dize)" notunu gösterir (XML sekmesine geçmez). **[—]**
+- [ ] 64 MB'ı aşan `bytea` PDF'i: PDF sekmesi bilgi satırı, devre dışı "Varsayılan uygulamada aç" ve "Kaydet…" düğmeleri (ipucu + görünür gerekçe) ve uyarı satırını gösterir; "Kaydet…" önerilmez. **[—]**
 - [ ] Panel genişlet/daralt; dar panelde görünümler taşmaz. **[—]**
 - [ ] Klavye: sekme çubuğunda Sol/Sağ/Home/End, Enter/Space seçimi, devre dışı sekme seçilmez; ekran okuyucu sekme adını ve gerekçeyi okur. **[—]**
 - [ ] Gizlilik: değer, yol ya da dosya adı uygulama günlüğünde (`%LOCALAPPDATA%\com.pgtools.desktop\logs`) ve bildirimlerde görünmez. **[—]**
