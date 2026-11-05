@@ -536,3 +536,18 @@ Matris: `powershell -File scripts/test-matrix.ps1 -Versions 10,11,12,13,14,15,16
 Bilinen sınırlar fikstürün dışında tutulur (spec §5, §6.7): yeniden kurulan nesnenin bağımlısı yoktur (görünüm farkı yaprak `v2`'de, dönüş tipi farkı bağımlısız `fmt`'te), kolon tipi farkı görünümün bağlı olmadığı tabloda, enum değeri ekleme PG 12+'ta.
 
 Elle kontrol: `docs/smoke-test.md` "Şema karşılaştırma arka ucu (Plan 29)".
+
+## Hücre görüntüleyici testleri (Plan 31)
+
+Ön yüz testleri `bun run test` (vitest, `environment: node`) altında koşar; Docker gerekmez. Bileşenler (`CellPanel.tsx`, `CellTabs.tsx`, `CellViewers.tsx`: DOM, iframe, CodeMirror görünümü, klavye) birim testli değildir; elle kontrol.
+
+| Dosya | Kapsam |
+|---|---|
+| `src/features/query/cell-view-model.test.ts` | Uygulanabilirlik (`availability`), kendiliğinden seçim önceliği (`pickFormat`), sütun başına oturum hatırlama, boyut kararları (`sizeVerdict`/`previewAllowed`/`fileActionAllowed`), devre dışı gerekçeleri, `nextTab` klavye gezinmesi |
+| `src/features/query/cell-format.test.ts` | `decodeByteaHex` (sınırlı), `formatHtml`/`formatXml`/`reindentJson` (girinti sınırı, `xml:space`, CDATA, DOCTYPE alt kümesi), `previewDoc` (CSP meta, HTML boşluk sınıfı), imza tanıma, `suggestSaveName`, `saveCell` |
+| `src/features/query/cell-code.test.ts` | JSON/XML/HTML dillerinin ayrıştırma sözleşmesi (hata düğümü yok), aynı dil için aynı Promise, `viewerHighlight` |
+| `src-tauri/src/cell.rs` (Rust birim) | PDF geçici dosya, 24 saatlik süpürme, boyut sınırı (`too_large`), PDF olmayan veri hatası, `cell_save_bytes` gidiş-dönüş; `cargo test -p pg-tools cell` |
+
+**Paket tavanları:** `scripts/bundle-budget.json` ana paket 127,333 B, açılış kümesi 155,006 B (sıfır pay); Plan 31 `call` dışa aktarımını `t.query.errorMark` taşıması ve ölü `t.query.tabs.close` anahtarının silinmesiyle telafi etti (spec §7). Kural ve denetim: "Ana paket bütçesi (Plan 21)".
+
+Elle kontrol: `docs/smoke-test.md` "Hücre görüntüleyici (Plan 31)".

@@ -28,7 +28,7 @@ import {
   type DecorationSet,
 } from "@codemirror/view";
 import type { Scope } from "../../ipc/bindings/Scope";
-import { t } from "../../app/strings";
+import { tedit } from "./strings-editor";
 import { sqlLookExtensions } from "../inspector/codemirror-setup";
 import { mapMarks, type CheckView, type LintMark } from "./check-model";
 import { formatTransaction } from "./format-edit";
@@ -134,7 +134,7 @@ class ErrorGutterMarker extends GutterMarker {
     return el;
   }
 }
-const errorMarker = new ErrorGutterMarker("error", t.query.errorMark);
+const errorMarker = new ErrorGutterMarker("error", tedit.errorMark);
 
 const errorGutter = gutter({
   class: "cm-error-gutter",
