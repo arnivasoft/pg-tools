@@ -430,6 +430,50 @@ pub struct Prepared {
     pub target: Option<ObjectDef>,
     pub source_acl: Option<AclDef>,
     pub target_acl: Option<AclDef>,
+    /// Sahiplik seçeneği kapalıyken normalizasyonun sildiği ham hedef sahibi. Yeniden kurmada (DROP + CREATE, tür
+    /// değişimi) nesne hedefteki sahibiyle geri kurulur; seçenek açıksa `None`.
+    pub target_owner: Option<String>,
+    /// Yorum seçeneği kapalıyken normalizasyonun sildiği ham hedef yorumu (yeniden kurmada geri verilir); açıksa `None`.
+    pub target_comment: Option<String>,
+}
+
+/// Ham tanımın sahibi ve yorumu (modelde alanı olmayan türlerde `None`).
+fn owner_comment(def: &ObjectDef) -> (Option<&String>, Option<&String>) {
+    match def {
+        ObjectDef::Table(t) => (t.owner.as_ref(), t.comment.as_ref()),
+        ObjectDef::View(v) => (v.owner.as_ref(), v.comment.as_ref()),
+        ObjectDef::MaterializedView(m) => (m.owner.as_ref(), m.comment.as_ref()),
+        ObjectDef::Function(f) | ObjectDef::Procedure(f) => (f.owner.as_ref(), f.comment.as_ref()),
+        ObjectDef::Sequence(s) => (s.owner.as_ref(), s.comment.as_ref()),
+        ObjectDef::Type(t) => (t.owner.as_ref(), t.comment.as_ref()),
+        ObjectDef::Domain(d) => (d.owner.as_ref(), d.comment.as_ref()),
+        ObjectDef::Index(i) => (None, i.comment.as_ref()),
+        ObjectDef::Trigger(t) => (None, t.comment.as_ref()),
+        _ => (None, None),
+    }
+}
+
+/// Yeniden kurulan tanıma, seçenek kapalıyken silinmiş hedef sahibini ve yorumunu geri koyar (nesne hedefteki
+/// gibi kalsın). Seçenek açıksa (`Prepared` alanları `None`) tanım değişmez.
+pub fn restore_target_meta(def: &mut ObjectDef, p: &Prepared) {
+    let (owner, comment) = match def {
+        ObjectDef::Table(t) => (Some(&mut t.owner), &mut t.comment),
+        ObjectDef::View(v) => (Some(&mut v.owner), &mut v.comment),
+        ObjectDef::MaterializedView(m) => (Some(&mut m.owner), &mut m.comment),
+        ObjectDef::Function(f) | ObjectDef::Procedure(f) => (Some(&mut f.owner), &mut f.comment),
+        ObjectDef::Sequence(s) => (Some(&mut s.owner), &mut s.comment),
+        ObjectDef::Type(t) => (Some(&mut t.owner), &mut t.comment),
+        ObjectDef::Domain(d) => (Some(&mut d.owner), &mut d.comment),
+        ObjectDef::Index(i) => (None, &mut i.comment),
+        ObjectDef::Trigger(t) => (None, &mut t.comment),
+        _ => return,
+    };
+    if let (Some(o), Some(t)) = (owner, &p.target_owner) {
+        *o = Some(t.clone());
+    }
+    if let Some(c) = &p.target_comment {
+        *comment = Some(c.clone());
+    }
 }
 
 fn side_parts(l: &Loaded, side: SideTag, cx: &NormCtx) -> Option<(ObjectDef, Option<AclDef>)> {
@@ -499,6 +543,8 @@ pub fn prepare(
         target: None,
         source_acl: None,
         target_acl: None,
+        target_owner: None,
+        target_comment: None,
     };
     // 1) Yükleme hatası.
     for (label, l) in [("Kaynak", source), ("Hedef", target)] {
@@ -519,6 +565,15 @@ pub fn prepare(
         p.status = existence;
         p.problem = Some(ItemProblem::LoadFailed);
         return p;
+    }
+    if let Some(raw) = target.and_then(|l| l.def.as_ref().ok()) {
+        let (owner, comment) = owner_comment(raw);
+        if !cx.options.ownership {
+            p.target_owner = owner.cloned();
+        }
+        if !cx.options.comments {
+            p.target_comment = comment.cloned();
+        }
     }
     let s = source.and_then(|l| side_parts(l, SideTag::Source, cx));
     let t = target.and_then(|l| side_parts(l, SideTag::Target, cx));
@@ -1659,6 +1714,48 @@ mod tests {
         };
         let p = prepare("k".into(), Some(&s), None, &c);
         assert!(p.notes.is_empty());
+    }
+
+    #[test]
+    fn prepare_kapali_secenekte_ham_hedef_sahibi_ve_yorumu_saklanir() {
+        let mut tv = view("tgt", "SELECT 1");
+        tv.owner = Some("app_owner".into());
+        tv.comment = Some("hedef".into());
+        let mut sv = view("src", "SELECT 2");
+        sv.owner = Some("postgres".into());
+        let (s, t) = (
+            loaded(ObjectDef::View(sv), None),
+            loaded(ObjectDef::View(tv), None),
+        );
+        // Sahiplik kapalı, yorum açık (varsayılan): yalnız sahip saklanır, normalize tanımda sahip yok.
+        let p = prep(Some(&s), Some(&t), DEF);
+        assert_eq!(p.target_owner.as_deref(), Some("app_owner"));
+        assert_eq!(p.target_comment, None);
+        let ObjectDef::View(n) = p.target.as_ref().unwrap() else { panic!() };
+        assert_eq!(n.owner, None);
+        // İkisi de kapalı.
+        let p = prep(Some(&s), Some(&t), opts(false, false, false));
+        assert_eq!(p.target_owner.as_deref(), Some("app_owner"));
+        assert_eq!(p.target_comment.as_deref(), Some("hedef"));
+        // İkisi de açık: saklanmaz (kaynak değerleri kullanılır).
+        let p = prep(Some(&s), Some(&t), opts(true, false, true));
+        assert_eq!((p.target_owner, p.target_comment), (None, None));
+        // Hedef yoksa saklanacak bir şey yok.
+        let p = prep(Some(&s), None, opts(false, false, false));
+        assert_eq!((p.target_owner, p.target_comment), (None, None));
+    }
+
+    #[test]
+    fn restore_target_meta_yalniz_dolu_alanlari_yazar() {
+        let mut p = prep(None, None, DEF);
+        let mut d = ObjectDef::View(view("tgt", "SELECT 1"));
+        restore_target_meta(&mut d, &p);
+        assert_eq!(d, ObjectDef::View(view("tgt", "SELECT 1")), "alanlar boşken değişmez");
+        p.target_owner = Some("o".into());
+        p.target_comment = Some("c".into());
+        restore_target_meta(&mut d, &p);
+        let ObjectDef::View(v) = d else { panic!() };
+        assert_eq!((v.owner.as_deref(), v.comment.as_deref()), (Some("o"), Some("c")));
     }
 
     #[test]

@@ -252,7 +252,7 @@ pub fn rt_fixture(s: &str, ver: u32, source: bool) -> String {
          COMMENT ON FUNCTION {s}.add_one(text) IS 'metin ekler';
          CREATE VIEW {s}.v1 AS SELECT id, email FROM {s}.customers;
          CREATE VIEW {s}.v2 AS SELECT {v2cols} FROM {s}.v1;
-         CREATE MATERIALIZED VIEW {s}.mv AS SELECT id, total FROM {s}.orders;
+         CREATE MATERIALIZED VIEW {s}.mv AS SELECT {mvcols} FROM {s}.orders;
          CREATE INDEX mv_id_idx ON {s}.mv (id);
          CREATE TABLE {s}.seq_owner (v int);
          CREATE SEQUENCE {s}.standalone_seq;
@@ -260,6 +260,7 @@ pub fn rt_fixture(s: &str, ver: u32, source: bool) -> String {
          CREATE TABLE {s}.ordered {ordered};",
         inc = if source { 1 } else { 2 },
         v2cols = if source { "id" } else { "id, email" },
+        mvcols = if source { "id, total" } else { "id, total, note" },
         ordered = if source {
             "(a int, b text, c int)"
         } else {
@@ -276,7 +277,11 @@ pub fn rt_fixture(s: &str, ver: u32, source: bool) -> String {
              CREATE TABLE {s}.audit_log (
                  id bigserial PRIMARY KEY,
                  order_id int REFERENCES {s}.orders (id),
-                 msg text);"
+                 msg text);
+             CREATE TABLE {s}.rt_items (id int, label text);
+             CREATE FUNCTION {s}.list_items() RETURNS SETOF {s}.rt_items LANGUAGE sql AS $$SELECT 1, 'x'::text$$;
+             CREATE VIEW {s}.rt_v AS SELECT id, label FROM {s}.rt_items;
+             CREATE FUNCTION {s}.v_label(r {s}.rt_v) RETURNS text LANGUAGE sql AS $$SELECT ($1).label$$;"
         ));
     } else {
         q.push_str(&format!(

@@ -12,15 +12,16 @@ use pgt_ddl::build::BuildCtx;
 use pgt_ddl::{ConstraintKind, ObjectDef, ObjectKind};
 
 use crate::cancel::CancelToken;
-use crate::generate::{GenFailure, Generated, generate};
-use crate::key::{KeyClass, Listed, class_of, match_objects};
+use crate::generate::{GenFailure, Generated, append_mv_indexes, generate};
+use crate::key::{KeyClass, Listed, Pair, class_of, match_objects};
 use crate::linediff::{ddl_text, line_diff};
 use crate::list::SchemaCheck;
 use crate::model::{
-    DiffDetail, DiffEvent, DiffItem, DiffOptions, DiffResult, DiffScript, DiffSide, ItemProblem, SideTag,
+    DiffDetail, DiffEvent, DiffItem, DiffOptions, DiffResult, DiffScript, DiffSide, ItemProblem, ItemStatus,
+    SideTag,
 };
 use crate::normalize::{NormCtx, Prepared, prepare};
-use crate::script::{ScriptHeader, ScriptItem, assemble, type_refs};
+use crate::script::{ScriptHeader, ScriptItem, assemble, routine_type_refs, type_refs};
 use crate::snapshot::{Loaded, SideSnapshot, SnapshotError, load_side};
 use pgt_ddl::Risk;
 
@@ -66,6 +67,8 @@ pub struct ItemEntry {
     pub source_deps: Vec<String>,
     /// Hedefte bağımlı olunan öğe anahtarları (görünüm/MV, tablo FK).
     pub target_deps: Vec<String>,
+    /// Rutin için: kaynak imzasında satır tipine başvurulan tablo/görünüm/MV anahtarları.
+    pub rowtype_deps: Vec<String>,
 }
 
 /// Betik başlığı için taraf bilgileri (sunucu adresi/kullanıcı yok).
@@ -182,6 +185,7 @@ impl DiffData {
                     generated,
                     source_deps: deps(&e.source_deps, &selected),
                     target_deps: deps(&e.target_deps, &selected),
+                    rowtype_deps: deps(&e.rowtype_deps, &selected),
                 })
             })
             .collect();
@@ -228,6 +232,8 @@ struct DepIndex {
     view_by_oid: HashMap<u32, String>,
     type_by_name: HashMap<String, String>,
     relation_by_name: HashMap<String, String>,
+    /// Satır tipi olan ilişkiler (tablo, görünüm, MV): ad -> anahtar.
+    rowtype_by_name: HashMap<String, String>,
 }
 
 impl DepIndex {
@@ -236,9 +242,16 @@ impl DepIndex {
             view_by_oid: HashMap::new(),
             type_by_name: HashMap::new(),
             relation_by_name: HashMap::new(),
+            rowtype_by_name: HashMap::new(),
         };
         for l in listed {
             let key = crate::key::item_key(l);
+            if matches!(
+                l.kind,
+                ObjectKind::Table | ObjectKind::View | ObjectKind::MaterializedView
+            ) {
+                d.rowtype_by_name.entry(l.name.clone()).or_insert(key.clone());
+            }
             match (l.kind, class_of(l.kind)) {
                 (ObjectKind::View | ObjectKind::MaterializedView, _) => {
                     d.view_by_oid.insert(l.oid, key.clone());
@@ -269,6 +282,20 @@ impl DepIndex {
             .iter()
             .filter_map(|n| self.type_by_name.get(unqualified(n, schemas)).cloned())
             .collect()
+    }
+
+    /// Rutin imzasındaki (yüklenen `format_type` adları) satır tipi başvuruları.
+    fn rowtype_deps(&self, def: Option<&ObjectDef>, schemas: &[&str]) -> Vec<String> {
+        let Some(def) = def else { return vec![] };
+        let mut out: Vec<String> = vec![];
+        for n in routine_type_refs(def) {
+            if let Some(k) = self.rowtype_by_name.get(unqualified(&n, schemas))
+                && !out.contains(k)
+            {
+                out.push(k.clone());
+            }
+        }
+        out
     }
 
     fn fk_deps(&self, def: Option<&ObjectDef>, schema: &str) -> Vec<String> {
@@ -389,6 +416,49 @@ fn lookup(objects: &[Loaded]) -> HashMap<(ObjectKind, u32), &Loaded> {
     objects.iter().map(|l| ((l.listed.kind, l.listed.oid), l)).collect()
 }
 
+type Staged = (Prepared, Result<Generated, GenFailure>);
+
+/// Kimlik: kaynak varsa kaynağın, yoksa hedefin listesi satırı.
+fn identity<'a>(pair: &Pair<'a>) -> &'a Listed {
+    pair.source.or(pair.target).expect("en az bir taraf dolu")
+}
+
+/// Yeniden kurulan (DROP + CREATE ya da tür değişimi) MV'lerin değişmeyen indekslerini MV öğesinin betiğine ekler:
+/// DROP MATERIALIZED VIEW indeksleri de düşürür, `Same` indeks öğeleri ise betiğe girmez.
+fn recreate_mv_indexes(pairs: &[Pair], staged: &mut [Staged], ctx: &BuildCtx) {
+    for i in 0..staged.len() {
+        let mv = identity(&pairs[i]);
+        let (p, g) = &staged[i];
+        let rebuilt = mv.kind == ObjectKind::MaterializedView
+            && p.status == ItemStatus::Different
+            && g.as_ref().is_ok_and(|g| g.rebuilt);
+        if !rebuilt {
+            continue;
+        }
+        let indexes: Vec<Prepared> = pairs
+            .iter()
+            .zip(staged.iter())
+            .filter(|(pair, (ip, _))| {
+                let l = identity(pair);
+                l.kind == ObjectKind::Index
+                    && l.table.as_deref() == Some(mv.name.as_str())
+                    && ip.status == ItemStatus::Same
+            })
+            .map(|(_, (ip, _))| ip.clone())
+            .collect();
+        if indexes.is_empty() {
+            continue;
+        }
+        let refs: Vec<&Prepared> = indexes.iter().collect();
+        let g = &mut staged[i].1;
+        if let Ok(gen_) = g
+            && let Err(f) = append_mv_indexes(gen_, &refs, ctx)
+        {
+            *g = Err(f);
+        }
+    }
+}
+
 fn build_data(
     source: &DiffSide,
     target: &DiffSide,
@@ -416,7 +486,9 @@ fn build_data(
     let schemas = [source.schema.as_str(), target.schema.as_str()];
     let mut items: Vec<DiffItem> = vec![];
     let mut entries: Vec<ItemEntry> = vec![];
-    for pair in match_objects(&src_listed, &tgt_listed) {
+    let pairs = match_objects(&src_listed, &tgt_listed);
+    let mut staged: Vec<Staged> = Vec::with_capacity(pairs.len());
+    for pair in &pairs {
         if cancel.is_cancelled() {
             return Err(RunError::Cancelled);
         }
@@ -424,8 +496,11 @@ fn build_data(
         let tl = pair.target.and_then(|l| tgt_by.get(&(l.kind, l.oid)).copied());
         let prepared = prepare(pair.key.clone(), sl, tl, &cx);
         let generated = generate(&prepared, &ctx, &tgt.viewer);
-        // Kimlik: kaynak varsa kaynağın, yoksa hedefin listesi satırı.
-        let id = pair.source.or(pair.target).expect("en az bir taraf dolu");
+        staged.push((prepared, generated));
+    }
+    recreate_mv_indexes(&pairs, &mut staged, &ctx);
+    for (pair, (prepared, generated)) in pairs.iter().zip(staged) {
+        let id = identity(pair);
         let target_kind = if prepared.kind_changed {
             pair.target.map(|l| l.kind)
         } else {
@@ -474,6 +549,7 @@ fn build_data(
         source_deps.extend(src_deps.type_deps(prepared.source.as_ref(), &schemas));
         let mut target_deps = pair.target.map(|l| tgt_deps.view_deps(l)).unwrap_or_default();
         target_deps.extend(tgt_deps.fk_deps(prepared.target.as_ref(), &target.schema));
+        let rowtype_deps = src_deps.rowtype_deps(prepared.source.as_ref(), &schemas);
         entries.push(ItemEntry {
             kind: item.kind,
             target_kind,
@@ -483,6 +559,7 @@ fn build_data(
             generated,
             source_deps,
             target_deps,
+            rowtype_deps,
         });
         items.push(item);
     }
@@ -560,6 +637,8 @@ mod tests {
             target: None,
             source_acl: None,
             target_acl: None,
+            target_owner: None,
+            target_comment: None,
         }
     }
 
@@ -581,6 +660,7 @@ mod tests {
             drops_table: false,
             dropped_columns: vec![],
             sequence_owner: None,
+            rebuilt: false,
         }
     }
 
@@ -594,6 +674,7 @@ mod tests {
             table: None,
             source_deps: vec![],
             target_deps: vec![],
+            rowtype_deps: vec![],
         }
     }
 
@@ -824,6 +905,193 @@ mod tests {
         assert!(idx.fk_deps(Some(&table), "baska2").is_empty());
         assert!(idx.fk_deps(None, "tgt").is_empty());
         assert!(idx.fk_deps(Some(&type_def("a", &[])), "tgt").is_empty());
+    }
+
+    // --- build_data: satır tipine bağlı rutinler ve yeniden kurulan MV'nin indeksleri ---
+
+    fn loaded(kind: ObjectKind, oid: u32, name: &str, table: Option<&str>, sig: Option<&str>, deps: Vec<u32>, def: ObjectDef) -> Loaded {
+        Loaded {
+            listed: Listed {
+                kind,
+                oid,
+                name: name.into(),
+                table: table.map(Into::into),
+                signature: sig.map(Into::into),
+                is_partition: false,
+                deps,
+            },
+            def: Ok(def),
+            acl: None,
+        }
+    }
+
+    fn snap(objects: Vec<Loaded>) -> SideSnapshot {
+        SideSnapshot {
+            version_num: 160004,
+            version: "16.4".into(),
+            database: "db".into(),
+            viewer: "app".into(),
+            objects,
+        }
+    }
+
+    fn rt_table(schema: &str) -> ObjectDef {
+        ObjectDef::Table(pgt_ddl::TableDef {
+            schema: schema.into(),
+            name: "rt".into(),
+            owner: Some("app".into()),
+            tablespace: None,
+            persistence: pgt_ddl::Persistence::Permanent,
+            columns: vec![pgt_ddl::ColumnDef {
+                attnum: Some(1),
+                name: "id".into(),
+                data_type: "integer".into(),
+                not_null: false,
+                default: None,
+                identity: None,
+                generated: None,
+                collation: None,
+                comment: None,
+                using: None,
+            }],
+            constraints: vec![],
+            partition_by: None,
+            fillfactor: None,
+            comment: None,
+            partition_text: None,
+            is_partition: false,
+            inherits: false,
+            unsupported: vec![],
+        })
+    }
+
+    fn rt_view(schema: &str) -> ObjectDef {
+        ObjectDef::View(pgt_ddl::ViewDef {
+            schema: schema.into(),
+            name: "rv".into(),
+            owner: Some("app".into()),
+            query: " SELECT rt.id FROM rt".into(),
+            check_option: None,
+            security_barrier: false,
+            security_invoker: false,
+            comment: None,
+            recreate: false,
+            columns: vec![],
+            unsupported: vec![],
+        })
+    }
+
+    fn rt_func(schema: &str, name: &str, args: &[&str], returns: pgt_ddl::FunctionReturn) -> ObjectDef {
+        ObjectDef::Function(pgt_ddl::FunctionDef {
+            schema: schema.into(),
+            name: name.into(),
+            owner: Some("app".into()),
+            comment: None,
+            language: "sql".into(),
+            args: args
+                .iter()
+                .map(|t| pgt_ddl::FunctionArg {
+                    mode: pgt_ddl::ArgMode::In,
+                    name: None,
+                    type_name: (*t).into(),
+                    default: None,
+                })
+                .collect(),
+            returns: Some(returns),
+            body: "SELECT 1".into(),
+            volatility: pgt_ddl::Volatility::Volatile,
+            strict: false,
+            security_definer: false,
+            leakproof: false,
+            parallel: pgt_ddl::Parallel::Unsafe,
+            cost: None,
+            rows: None,
+            settings: vec![],
+            recreate: false,
+            editable: true,
+            unsupported: vec![],
+        })
+    }
+
+    fn rt_mv(schema: &str, query: &str, owner: &str) -> ObjectDef {
+        ObjectDef::MaterializedView(pgt_ddl::MatViewDef {
+            schema: schema.into(),
+            name: "mv".into(),
+            owner: Some(owner.into()),
+            query: query.into(),
+            tablespace: None,
+            fillfactor: None,
+            with_data: true,
+            comment: None,
+            refresh: None,
+            columns: vec![],
+            unsupported: vec!["INDEX mv_i".into()],
+        })
+    }
+
+    fn rt_mv_index(schema: &str) -> ObjectDef {
+        ObjectDef::Index(pgt_ddl::IndexDef {
+            schema: schema.into(),
+            table: "mv".into(),
+            name: "mv_i".into(),
+            method: "btree".into(),
+            unique: false,
+            columns: vec![pgt_ddl::IndexColumn {
+                key: pgt_ddl::IndexKey::Column { name: "a".into() },
+                opclass: None,
+                collation: None,
+                descending: false,
+                nulls_first: None,
+            }],
+            include: vec![],
+            where_clause: None,
+            tablespace: None,
+            fillfactor: None,
+            comment: None,
+            constraint: None,
+            valid: true,
+        })
+    }
+
+    #[test]
+    fn build_data_satir_tipi_rutin_sirasi_ve_mv_indeksleri() {
+        use ObjectKind::*;
+        use pgt_ddl::FunctionReturn;
+        let setof_rt = FunctionReturn::Type { type_name: "rt".into(), setof: true };
+        let text = FunctionReturn::Type { type_name: "text".into(), setof: false };
+        let src = snap(vec![
+            loaded(Table, 1, "rt", None, None, vec![], rt_table("a")),
+            loaded(View, 2, "rv", None, None, vec![1], rt_view("a")),
+            loaded(Function, 3, "list_rt", None, Some(""), vec![], rt_func("a", "list_rt", &[], setof_rt)),
+            loaded(Function, 4, "v_label", None, Some("rv"), vec![], rt_func("a", "v_label", &["a.rv"], text.clone())),
+            loaded(Function, 5, "plain", None, Some("integer"), vec![], rt_func("a", "plain", &["integer"], text)),
+            loaded(MaterializedView, 6, "mv", None, None, vec![], rt_mv("a", " SELECT 2 AS a", "app")),
+            loaded(Index, 7, "mv_i", Some("mv"), None, vec![], rt_mv_index("a")),
+        ]);
+        let tgt = snap(vec![
+            loaded(MaterializedView, 16, "mv", None, None, vec![], rt_mv("b", " SELECT 1 AS a", "mv_owner")),
+            loaded(Index, 17, "mv_i", Some("mv"), None, vec![], rt_mv_index("b")),
+        ]);
+        let mut sd = side("a");
+        sd.database_oid = 1;
+        let d = build_data(&sd, &side("b"), DiffOptions::default(), src, tgt, &CancelToken::new(), Instant::now())
+            .expect("veri kurulmalı");
+        let st = |n: &str| d.result().items.iter().find(|i| i.name == n).unwrap().clone();
+        assert_eq!(st("mv_i").status, ItemStatus::Same);
+        assert_eq!(st("mv").status, ItemStatus::Different);
+        let keys: Vec<String> = d.result().items.iter().filter(|i| i.selectable).map(|i| i.key.clone()).collect();
+        assert_eq!(keys.len(), 6, "{:?}", d.result().items);
+        let sql = d.script(&keys, "t").unwrap().sql;
+        let pos = |p: &str| sql.find(p).unwrap_or_else(|| panic!("yok: {p}\n{sql}"));
+        assert!(pos("FUNCTION b.plain") < pos("CREATE TABLE b.rt"), "{sql}");
+        assert!(pos("CREATE TABLE b.rt") < pos("FUNCTION b.list_rt"), "{sql}");
+        assert!(pos("FUNCTION b.list_rt") < pos("CREATE VIEW b.rv"), "{sql}");
+        assert!(pos("CREATE VIEW b.rv") < pos("FUNCTION b.v_label"), "{sql}");
+        // MV yeniden kurulur; indeksi (Same) MV'den sonra yeniden oluşturulur, hedef sahibi korunur.
+        assert!(pos("DROP MATERIALIZED VIEW b.mv") < pos("CREATE MATERIALIZED VIEW b.mv"), "{sql}");
+        assert!(pos("CREATE MATERIALIZED VIEW b.mv") < pos("CREATE INDEX mv_i ON b.mv"), "{sql}");
+        assert!(sql.contains("ALTER MATERIALIZED VIEW b.mv OWNER TO mv_owner"), "{sql}");
+        assert_eq!(sql.matches("CREATE INDEX").count(), 1, "{sql}");
     }
 
     #[test]

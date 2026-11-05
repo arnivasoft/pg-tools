@@ -142,7 +142,8 @@ pub async fn schema_diff_script(state: State<'_, AppState>, diff_id: Uuid, item_
     data.script(&item_keys, &utc_timestamp(SystemTime::now())).map_err(script_payload)
 }
 
-/// Yol doğrulaması (saf): boş olmamalı, denetim karakteri içermemeli, Windows'ta mutlak olmalı.
+/// Yol doğrulaması (saf): boş olmamalı, denetim karakteri içermemeli, Windows'ta mutlak olmalı, uzantısı `.sql`
+/// (büyük/küçük harf duyarsız) olmalı.
 pub fn save_path_check(path: &str) -> Result<(), &'static str> {
     if path.chars().any(char::is_control) {
         return Err("Yol geçersiz karakter içeriyor.");
@@ -153,6 +154,9 @@ pub fn save_path_check(path: &str) -> Result<(), &'static str> {
     #[cfg(windows)]
     if !Path::new(path).is_absolute() {
         return Err("Tam (mutlak) yol gerekir.");
+    }
+    if !Path::new(path).extension().is_some_and(|e| e.eq_ignore_ascii_case("sql")) {
+        return Err("Dosya uzantısı .sql olmalı.");
     }
     Ok(())
 }
@@ -237,6 +241,18 @@ mod tests {
         assert_eq!(save_path_check(p), Err("Yol geçersiz karakter içeriyor."));
         let p = if cfg!(windows) { "C:\\x\\a\0b.sql" } else { "/x/a\0b.sql" };
         assert_eq!(save_path_check(p), Err("Yol geçersiz karakter içeriyor."));
+    }
+
+    #[test]
+    fn save_path_requires_sql_extension() {
+        let root = if cfg!(windows) { "C:\\x\\" } else { "/x/" };
+        let p = |name: &str| format!("{root}{name}");
+        for bad in ["a.txt", "a", "a.sql.bak", ".sql", "a.sq"] {
+            assert_eq!(save_path_check(&p(bad)), Err("Dosya uzantısı .sql olmalı."), "{bad}");
+        }
+        for good in ["a.sql", "a.SQL", "fark.Sql", "a.b.sql"] {
+            assert_eq!(save_path_check(&p(good)), Ok(()), "{good}");
+        }
     }
 
     #[test]

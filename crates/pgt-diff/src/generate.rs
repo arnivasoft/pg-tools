@@ -10,7 +10,7 @@ use pgt_ddl::{
 };
 
 use crate::model::{ItemProblem, ItemStatus};
-use crate::normalize::{Prepared, canonical_grants};
+use crate::normalize::{Prepared, canonical_grants, restore_target_meta};
 
 /// Betik aşaması; sıralama da bu sırayla (spec §2.6 adım 3 ve 4.1-4.10).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -27,9 +27,13 @@ pub enum Phase {
     Sequences,
     Routines,
     Tables,
+    /// İmzası bu betikte oluşturulan bir tablonun satır tipine başvuran rutinler (betik birleştirmede taşınır).
+    RoutinesAfterTables,
     OwnedBy,
     ForeignKeys,
     Views,
+    /// İmzası bu betikte oluşturulan bir görünümün/MV'nin satır tipine başvuran rutinler.
+    RoutinesAfterViews,
     Indexes,
     Triggers,
     Privileges,
@@ -48,6 +52,8 @@ pub struct Generated {
     pub dropped_columns: Vec<String>,
     /// Yalnız hedefte dizi: `OWNED BY` (tablo, kolon).
     pub sequence_owner: Option<(String, String)>,
+    /// Nesne bu öğede baştan kuruluyor (oluşturma, tür değişimi ya da DROP + CREATE).
+    pub rebuilt: bool,
 }
 
 impl Generated {
@@ -60,6 +66,7 @@ impl Generated {
             drops_table: false,
             dropped_columns: vec![],
             sequence_owner: None,
+            rebuilt: false,
         }
     }
 }
@@ -81,6 +88,10 @@ const REGRANT_WARNINGS: [&str; 3] = [
 ];
 const KIND_CHANGED_NOTE: &str = "Tür değişti: hedefteki nesne silinip yeniden oluşturulur";
 const RECREATE_NOTE: &str = "Yeniden kurulacak (DROP + CREATE)";
+/// Görünüm yeniden kurulunca (DROP + CREATE) kaybolan, modellenmeyen ekler (`unsupported` önekleri).
+const VIEW_RECREATE_LOSSES: [&str; 3] = ["TRIGGER ", "RULE ", "DEFAULT "];
+const VIEW_RECREATE_MANUAL: &str =
+    "Sorgu değişti; görünüm yeniden kurulursa (DROP + CREATE) hedefteki şu ekler kaybolur, elle uygulayın";
 
 fn push_unique(v: &mut Vec<String>, s: &str) {
     if !v.iter().any(|x| x == s) {
@@ -264,11 +275,13 @@ impl Acc {
         Ok(())
     }
 
-    /// Aynı türde fark; nesne DROP + CREATE ile yeniden kuruluyorsa `true` döner.
+    /// Aynı türde fark; nesne DROP + CREATE ile yeniden kuruluyorsa `true` döner. Yeniden kurulan nesne, kapalı
+    /// seçeneklerin sildiği hedef sahibini ve yorumunu `p`'den geri alır.
     fn alter_same_kind(
         &mut self,
         s: &ObjectDef,
         t: &ObjectDef,
+        p: &Prepared,
         ctx: &BuildCtx,
     ) -> Result<bool, GenFailure> {
         match (s, t) {
@@ -330,15 +343,32 @@ impl Acc {
                 let mut d = d.clone();
                 d.recreate = d.query != old.query;
                 let rebuilt = d.recreate;
+                let mut new = ObjectDef::View(d);
                 if rebuilt {
+                    // DROP VIEW hedefteki INSTEAD OF trigger'larını, kuralları ve kolon varsayılanlarını düşürür.
+                    let lost: Vec<&str> = old
+                        .unsupported
+                        .iter()
+                        .filter(|u| VIEW_RECREATE_LOSSES.iter().any(|pre| u.starts_with(pre)))
+                        .map(String::as_str)
+                        .collect();
+                    if !lost.is_empty() {
+                        return Err(manual(&format!("{VIEW_RECREATE_MANUAL}: {}", lost.join(", "))));
+                    }
                     push_unique(&mut self.notes, RECREATE_NOTE);
+                    restore_target_meta(&mut new, p);
                 }
-                self.plan(Phase::Views, build::alter(t, &ObjectDef::View(d), ctx));
+                self.plan(Phase::Views, build::alter(t, &new, ctx));
                 Ok(rebuilt)
             }
             (ObjectDef::MaterializedView(d), ObjectDef::MaterializedView(old)) => {
-                self.plan(Phase::Views, build::alter(t, s, ctx));
-                Ok(d.query != old.query)
+                let rebuilt = d.query != old.query;
+                let mut new = s.clone();
+                if rebuilt {
+                    restore_target_meta(&mut new, p);
+                }
+                self.plan(Phase::Views, build::alter(t, &new, ctx));
+                Ok(rebuilt)
             }
             (ObjectDef::Function(d), ObjectDef::Function(old))
             | (ObjectDef::Procedure(d), ObjectDef::Procedure(old)) => {
@@ -349,11 +379,14 @@ impl Acc {
                     push_unique(&mut self.notes, RECREATE_NOTE);
                     self.floor = self.floor.max(Risk::Destructive);
                 }
-                let new = if matches!(s, ObjectDef::Function(_)) {
+                let mut new = if matches!(s, ObjectDef::Function(_)) {
                     ObjectDef::Function(d)
                 } else {
                     ObjectDef::Procedure(d)
                 };
+                if rebuilt {
+                    restore_target_meta(&mut new, p);
+                }
                 self.plan(Phase::Routines, build::alter(t, &new, ctx));
                 Ok(rebuilt)
             }
@@ -402,6 +435,7 @@ impl Acc {
             drops_table: self.drops_table,
             dropped_columns: self.dropped_columns,
             sequence_owner: self.sequence_owner,
+            rebuilt: false,
         })
     }
 }
@@ -454,11 +488,13 @@ pub fn generate(
         }
         (ItemStatus::Different, Some(s), Some(t)) if p.kind_changed => {
             a.drop_target(t, ctx)?;
-            a.create_source(s, ctx)?;
+            let mut s = s.clone();
+            restore_target_meta(&mut s, p);
+            a.create_source(&s, ctx)?;
             push_unique(&mut a.notes, KIND_CHANGED_NOTE);
             true
         }
-        (ItemStatus::Different, Some(s), Some(t)) => a.alter_same_kind(s, t, ctx)?,
+        (ItemStatus::Different, Some(s), Some(t)) => a.alter_same_kind(s, t, p, ctx)?,
         _ => return Err(manual(MANUAL_MSG)),
     };
     // Yetkiler: sahiplik seçeneği açıksa kaynak ACL yüklüdür.
@@ -490,7 +526,38 @@ pub fn generate(
             }
         }
     }
-    a.finish()
+    let mut g = a.finish()?;
+    g.rebuilt = recreated;
+    Ok(g)
+}
+
+/// Yeniden kurulan MV'nin (DROP MATERIALIZED VIEW indekslerini de düşürür) değişmeyen (`Same`) indekslerini kaynak
+/// tanımlarıyla, MV öğesinin `Indexes` aşamasında yeniden oluşturur. Yorum seçeneği kapalıysa hedefteki yorum
+/// geri verilir. Üretilemeyen indeks varsa öğe `BuildFailed` olur.
+pub fn append_mv_indexes(
+    g: &mut Generated,
+    indexes: &[&Prepared],
+    ctx: &BuildCtx,
+) -> Result<(), GenFailure> {
+    let mut a = Acc::new();
+    for p in indexes {
+        let Some(mut def) = p.source.clone() else {
+            continue;
+        };
+        restore_target_meta(&mut def, p);
+        a.plan(Phase::Indexes, build::create(&def, ctx));
+    }
+    if a.parts.is_empty() && a.errors.is_empty() {
+        return Ok(());
+    }
+    let extra = a.finish()?;
+    for w in &extra.warnings {
+        push_unique(&mut g.warnings, w);
+    }
+    g.risk = g.risk.max(extra.risk);
+    g.parts.extend(extra.parts);
+    g.parts.sort_by_key(|(ph, _)| *ph);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -498,8 +565,8 @@ mod tests {
     use super::*;
     use pgt_ddl::{
         ArgMode, ColumnDef, ColumnRef, EnumValue, FkAction, FkMatch, FunctionArg, FunctionDef,
-        FunctionReturn, MatViewDef, Parallel, Persistence, SeqType, SequenceDef, TypeBody, TypeDef,
-        ViewColumn, ViewDef, Volatility,
+        FunctionReturn, IndexColumn, IndexDef, IndexKey, MatViewDef, Parallel, Persistence, SeqType,
+        SequenceDef, TypeBody, TypeDef, ViewColumn, ViewDef, Volatility,
     };
 
     fn ctx(v: u32) -> BuildCtx {
@@ -521,6 +588,8 @@ mod tests {
             target: t,
             source_acl: None,
             target_acl: None,
+            target_owner: None,
+            target_comment: None,
         }
     }
 
@@ -1300,6 +1369,214 @@ mod tests {
             generate(&p, &ctx(160000), "app").unwrap_err().problem,
             ItemProblem::Manual
         );
+    }
+
+    /// Seçenekler kapalıyken (`prepare` öyle doldurur) hedefin sahibi ve yorumu.
+    fn with_target_meta(mut p: Prepared) -> Prepared {
+        p.target_owner = Some("app_owner".into());
+        p.target_comment = Some("hedef yorumu".into());
+        p
+    }
+
+    fn assert_meta_restored(g: &Generated, ph: Phase, owner_sql: &str, comment_sql: &str) {
+        let all = sql_of(g, ph);
+        assert!(all.iter().any(|s| s == owner_sql), "{owner_sql} yok: {all:?}");
+        assert!(all.iter().any(|s| s == comment_sql), "{comment_sql} yok: {all:?}");
+        // İkisi de nesneyi oluşturan ifadeden sonra (sıra üreticinin kuralı).
+        let at = |x: &str| all.iter().position(|s| s == x).unwrap();
+        let created = all.iter().position(|s| s.starts_with("CREATE")).expect("CREATE yok");
+        assert!(created < at(comment_sql) && created < at(owner_sql), "{all:?}");
+    }
+
+    #[test]
+    fn yeniden_kurulan_gorunum_hedef_sahibi_ve_yorumuyla_kurulur() {
+        let p = with_target_meta(prep(
+            ItemStatus::Different,
+            Some(ObjectDef::View(view("SELECT 2 AS a"))),
+            Some(ObjectDef::View(view("SELECT 1 AS a"))),
+        ));
+        let g = gen_ok(&p, 160000);
+        assert!(g.rebuilt);
+        assert_meta_restored(
+            &g,
+            Phase::Views,
+            "ALTER VIEW s.v OWNER TO app_owner",
+            "COMMENT ON VIEW s.v IS 'hedef yorumu'",
+        );
+    }
+
+    #[test]
+    fn yeniden_kurulan_fonksiyon_hedef_sahibi_ve_yorumuyla_kurulur() {
+        let mut src = func("text", "SELECT 1");
+        src.security_definer = true;
+        let mut tgt = func("integer", "SELECT 1");
+        tgt.security_definer = true;
+        let p = with_target_meta(prep(
+            ItemStatus::Different,
+            Some(ObjectDef::Function(src)),
+            Some(ObjectDef::Function(tgt)),
+        ));
+        let g = gen_ok(&p, 160000);
+        assert!(g.rebuilt);
+        assert_meta_restored(
+            &g,
+            Phase::Routines,
+            "ALTER FUNCTION s.f(integer) OWNER TO app_owner",
+            "COMMENT ON FUNCTION s.f(integer) IS 'hedef yorumu'",
+        );
+    }
+
+    #[test]
+    fn yeniden_kurulan_mv_hedef_sahibi_ve_yorumuyla_kurulur() {
+        let p = with_target_meta(prep(
+            ItemStatus::Different,
+            Some(matview("SELECT 2")),
+            Some(matview("SELECT 1")),
+        ));
+        let g = gen_ok(&p, 160000);
+        assert!(g.rebuilt);
+        assert_meta_restored(
+            &g,
+            Phase::Views,
+            "ALTER MATERIALIZED VIEW s.mv OWNER TO app_owner",
+            "COMMENT ON MATERIALIZED VIEW s.mv IS 'hedef yorumu'",
+        );
+    }
+
+    #[test]
+    fn tur_degisiminde_hedef_sahibi_ve_yorumu_korunur() {
+        let mut p = with_target_meta(prep(
+            ItemStatus::Different,
+            Some(ObjectDef::View(view("SELECT 1 AS a"))),
+            Some(t("v", vec![col("a", "integer", Some(1))], vec![])),
+        ));
+        p.kind_changed = true;
+        let g = gen_ok(&p, 160000);
+        assert!(g.rebuilt);
+        assert_meta_restored(
+            &g,
+            Phase::Views,
+            "ALTER VIEW s.v OWNER TO app_owner",
+            "COMMENT ON VIEW s.v IS 'hedef yorumu'",
+        );
+    }
+
+    #[test]
+    fn yeniden_kurulmayan_nesnede_hedef_sahibi_yazilmaz() {
+        // Yerinde değişiklik (CREATE OR REPLACE) sahibi/yorumu zaten korur: ek ifade yok.
+        let p = with_target_meta(prep(
+            ItemStatus::Different,
+            Some(ObjectDef::Function(func("integer", "SELECT 2"))),
+            Some(ObjectDef::Function(func("integer", "SELECT 1"))),
+        ));
+        let g = gen_ok(&p, 160000);
+        assert!(!g.rebuilt);
+        assert_eq!(sql_of(&g, Phase::Routines).len(), 1);
+        // Seçenek açıkken (alanlar boş) yeniden kurma eski davranışta: sahip/yorum ifadesi yok.
+        let p = prep(
+            ItemStatus::Different,
+            Some(ObjectDef::View(view("SELECT 2 AS a"))),
+            Some(ObjectDef::View(view("SELECT 1 AS a"))),
+        );
+        let all = sql_of(&gen_ok(&p, 160000), Phase::Views);
+        assert!(
+            all.iter()
+                .all(|s| !s.contains("OWNER TO") && !s.starts_with("COMMENT")),
+            "{all:?}"
+        );
+    }
+
+    #[test]
+    fn trigger_kural_varsayilanli_gorunum_yeniden_kurulmaz_manual() {
+        let mut tgt = view("SELECT 1 AS a");
+        tgt.unsupported = vec![
+            "TRIGGER v_ins".into(),
+            "RULE v_r".into(),
+            "DEFAULT a".into(),
+            "COMMENT a".into(),
+        ];
+        let mut src = view("SELECT 2 AS a");
+        src.unsupported = tgt.unsupported.clone();
+        let p = prep(
+            ItemStatus::Different,
+            Some(ObjectDef::View(src.clone())),
+            Some(ObjectDef::View(tgt.clone())),
+        );
+        let e = generate(&p, &ctx(160000), "app").unwrap_err();
+        assert_eq!(e.problem, ItemProblem::Manual);
+        assert_eq!(
+            e.messages,
+            [format!(
+                "{VIEW_RECREATE_MANUAL}: TRIGGER v_ins, RULE v_r, DEFAULT a"
+            )]
+        );
+        // Yalnız yorum farkı (yeniden kurma yok): üretilir.
+        src.query = tgt.query.clone();
+        src.comment = Some("c".into());
+        let p = prep(
+            ItemStatus::Different,
+            Some(ObjectDef::View(src)),
+            Some(ObjectDef::View(tgt.clone())),
+        );
+        assert!(generate(&p, &ctx(160000), "app").is_ok());
+        // Kaybolacak tek ek kolon yorumuysa yeniden kurma sürer.
+        tgt.unsupported = vec!["COMMENT a".into()];
+        let mut src = view("SELECT 2 AS a");
+        src.unsupported = tgt.unsupported.clone();
+        let p = prep(
+            ItemStatus::Different,
+            Some(ObjectDef::View(src)),
+            Some(ObjectDef::View(tgt)),
+        );
+        assert!(gen_ok(&p, 160000).rebuilt);
+    }
+
+    fn mv_index() -> ObjectDef {
+        ObjectDef::Index(IndexDef {
+            schema: "s".into(),
+            table: "mv".into(),
+            name: "mv_a_idx".into(),
+            method: "btree".into(),
+            unique: false,
+            columns: vec![IndexColumn {
+                key: IndexKey::Column { name: "a".into() },
+                opclass: None,
+                collation: None,
+                descending: false,
+                nulls_first: None,
+            }],
+            include: vec![],
+            where_clause: None,
+            tablespace: None,
+            fillfactor: None,
+            comment: None,
+            constraint: None,
+            valid: true,
+        })
+    }
+
+    #[test]
+    fn yeniden_kurulan_mv_indeksleri_indeks_asamasinda_eklenir() {
+        let p = prep(
+            ItemStatus::Different,
+            Some(matview("SELECT 2")),
+            Some(matview("SELECT 1")),
+        );
+        let mut g = gen_ok(&p, 160000);
+        let mut ip = prep(ItemStatus::Same, Some(mv_index()), Some(mv_index()));
+        // Yorum seçeneği kapalı: hedefteki indeks yorumu geri verilir.
+        ip.target_comment = Some("indeks yorumu".into());
+        append_mv_indexes(&mut g, &[&ip], &ctx(160000)).unwrap();
+        let phases: Vec<Phase> = g.parts.iter().map(|(p, _)| *p).collect();
+        assert_eq!(phases, [Phase::Views, Phase::Indexes]);
+        let idx = sql_of(&g, Phase::Indexes);
+        assert_eq!(idx.len(), 2, "{idx:?}");
+        assert!(idx[0].starts_with("CREATE INDEX mv_a_idx ON s.mv"), "{idx:?}");
+        assert_eq!(idx[1], "COMMENT ON INDEX s.mv_a_idx IS 'indeks yorumu'");
+        // İndeks yoksa öğe değişmez.
+        let before = g.parts.len();
+        append_mv_indexes(&mut g, &[], &ctx(160000)).unwrap();
+        assert_eq!(g.parts.len(), before);
     }
 
     #[test]

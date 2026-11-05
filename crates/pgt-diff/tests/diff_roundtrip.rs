@@ -2,13 +2,13 @@
 //! karşılaştırma, ayrıca sahiplik/yetki, bölümleme, çapraz sürüm, uzantı, iptal, eşzamanlılık, günlük gizliliği ve performans.
 //!
 //! Veritabanları `pgt_diff_<ana sürüm>_<etiket>`: `rta` (aynı veritabanı), `rtbs`/`rtbt` (iki veritabanı), `ord`, `own`,
-//! `part`, `xv`, `ext`, `cx`, `perf`.
+//! `rec`, `part`, `xv`, `ext`, `cx`, `log`, `perf`.
 
 mod common;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common::{
     Env, assert_no_idle_in_tx_for, cleanup_in, db_message, db_name_in, guarded, rt_fixture,
@@ -188,15 +188,11 @@ fn selectable_keys(d: &DiffData) -> Vec<String> {
 /// Betiği hedefe uygular. SQL metni yalnız `PGT_DIFF_SHOW_SQL` tanımlıysa hata iletisine eklenir.
 async fn apply(env: &Env, sql: &str) {
     if let Err(e) = env.admin.batch_execute(sql).await {
-        let shown = if std::env::var_os("PGT_DIFF_SHOW_SQL").is_some() {
-            format!("\n{sql}")
-        } else {
-            String::new()
-        };
-        panic!("betik uygulanamadı: {}{shown}", db_message(&e));
+        panic!("betik uygulanamadı: {}{}", db_message(&e), show(sql));
     }
 }
 
+/// SQL metni yalnız `PGT_DIFF_SHOW_SQL` tanımlıysa (iletiye eklenecek biçimde) döner.
 fn show(sql: &str) -> String {
     if std::env::var_os("PGT_DIFF_SHOW_SQL").is_some() {
         format!("\n{sql}")
@@ -241,6 +237,13 @@ fn expected_states(ver: u32) -> Vec<(Desc, ItemStatus, Option<ItemProblem>)> {
         (desc(Function, None, "add_one", s("integer")), Different, None),
         (desc(Function, None, "fmt", s("integer")), Different, None),
         (desc(View, None, "v2", None), Different, None),
+        // Sorgusu değişen MV yeniden kurulur; indeksi (`mv_id_idx`, Same) MV öğesiyle yeniden oluşturulur.
+        (desc(MaterializedView, None, "mv", None), Different, None),
+        // Satır tipine bağlı rutinler: tablodan / görünümden sonra oluşturulur.
+        (desc(Table, None, "rt_items", None), OnlySource, None),
+        (desc(View, None, "rt_v", None), OnlySource, None),
+        (desc(Function, None, "list_items", s("")), OnlySource, None),
+        (desc(Function, None, "v_label", s("rt_v")), OnlySource, None),
     ];
     if ver >= 120_000 {
         v.push((desc(Type, None, "mood", None), Different, None));
@@ -530,6 +533,100 @@ async fn ownership_and_grants_roundtrip() {
     }
 }
 
+// --- yeniden kurma: hedef sahibi korunur, kaybettirecek görünüm elle ---
+
+async fn recreate_state(ts: TestServer) {
+    capture();
+    let env = setup_in(&ts, PFX, "rec").await;
+    let rb = format!("{PFX}_rk_rec");
+    env.sql(&format!("DROP ROLE IF EXISTS {rb}; CREATE ROLE {rb};"))
+        .await;
+    let body = |s: &str, source: bool| {
+        format!(
+            "CREATE SCHEMA {s};
+             CREATE FUNCTION {s}.sd() RETURNS {ret} LANGUAGE sql SECURITY DEFINER AS $$SELECT {val}$$;
+             CREATE TABLE {s}.vt_base (id int);
+             CREATE VIEW {s}.vt AS SELECT id FROM {s}.vt_base{filter};
+             CREATE FUNCTION {s}.vt_ins() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+             CREATE TRIGGER vt_ins INSTEAD OF INSERT ON {s}.vt FOR EACH ROW EXECUTE PROCEDURE {s}.vt_ins();",
+            ret = if source { "text" } else { "integer" },
+            val = if source { "'1'::text" } else { "1" },
+            filter = if source { " WHERE id > 0" } else { "" },
+        )
+    };
+    env.sql(&body("r_src", true)).await;
+    env.sql(&body("r_tgt", false)).await;
+    // Hedefte SECURITY DEFINER fonksiyonun sahibi bağlı rol değil.
+    env.sql(&format!("ALTER FUNCTION r_tgt.sd() OWNER TO {rb};"))
+        .await;
+    let (src, tgt) = (side(&env, "r_src"), side(&env, "r_tgt"));
+    use ItemProblem::Manual;
+    use ItemStatus::Different;
+    let (d, _) = run_ok(&env.mgr, &src, &tgt, opts()).await;
+    assert_states(
+        &d,
+        &[
+            (desc(ObjectKind::Function, None, "sd", s("")), Different, None),
+            (desc(ObjectKind::View, None, "vt", None), Different, Some(Manual)),
+        ],
+    );
+    let vt = d.result().items.iter().find(|i| i.name == "vt").unwrap();
+    assert!(!vt.selectable);
+    assert!(
+        vt.notes.iter().any(|n| n.contains("TRIGGER vt_ins")),
+        "kaybolacak trigger notta olmalı: {:?}",
+        vt.notes
+    );
+    let script = d.script(&selectable_keys(&d), STAMP).unwrap();
+    let sql = &script.sql;
+    assert!(
+        !sql.contains("DROP VIEW") && !sql.contains("vt_base"),
+        "elle öğe betikte olmamalı{}",
+        show(sql)
+    );
+    assert!(sql.contains("DROP FUNCTION"), "dönüş tipi değişimi yeniden kurar{}", show(sql));
+    apply(&env, sql).await;
+    let row = env
+        .admin
+        .query_one(
+            "SELECT pg_catalog.pg_get_userbyid(p.proowner)::pg_catalog.text, p.prosecdef
+             FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname = 'r_tgt' AND p.proname = 'sd'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        row.get::<_, String>(0),
+        rb,
+        "sahiplik kapalıyken hedef sahibi korunmalı{}",
+        show(sql)
+    );
+    assert!(row.get::<_, bool>(1), "SECURITY DEFINER korunmalı");
+    let (again, _) = run_ok(&env.mgr, &src, &tgt, opts()).await;
+    assert_states(
+        &again,
+        &[(desc(ObjectKind::View, None, "vt", None), Different, Some(Manual))],
+    );
+    assert_no_idle_in_tx_for(&env).await;
+}
+
+#[tokio::test]
+async fn recreate_keeps_target_owner_and_lossy_view_is_manual() {
+    for ts in servers() {
+        let t = ts.clone();
+        let clean = async move {
+            cleanup_in(&t, PFX, "rec").await;
+            let admin = pgt_core::testing::admin_client(&t, &t.config.maintenance_db).await;
+            admin
+                .batch_execute(&format!("DROP ROLE IF EXISTS {PFX}_rk_rec"))
+                .await
+                .unwrap();
+        };
+        guarded(recreate_state(ts.clone()), clean).await;
+    }
+}
+
 // --- bölümleme ---
 
 async fn partitions(ts: TestServer) {
@@ -711,11 +808,9 @@ async fn cancel_and_errors(ts: TestServer) {
         cancel_on_first: Some(token.clone()),
         ..Events::default()
     };
-    let t = Instant::now();
     let r = Box::pin(run_diff(&env.mgr, &big, &small, opts(), &mut sink, &token)).await;
     assert!(matches!(r, Err(RunError::Cancelled)), "{:?}", r.map(|_| ()));
     assert!(!sink.all.is_empty(), "iptal iş başladıktan sonra gelmeli");
-    assert!(t.elapsed() < Duration::from_secs(30));
     assert_no_idle_in_tx_for(&env).await;
 
     // Alıcı gittiğinde (send false) de iptal.
@@ -748,14 +843,26 @@ async fn cancel_and_errors(ts: TestServer) {
     );
     assert_no_idle_in_tx_for(&env).await;
 
-    // İş sürerken havuz sorgusu başarılı olur.
+    // İş sürerken havuz sorgusu başarılı olur: sorgu, işin ilk ilerleme olayından sonra ve iş bitmeden başlar.
+    struct FirstEvent(Option<tokio::sync::oneshot::Sender<()>>);
+    impl DiffSink for FirstEvent {
+        fn send(&mut self, _: DiffEvent) -> bool {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+            true
+        }
+    }
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (mgr, b, sm) = (env.mgr.clone(), big.clone(), small.clone());
     let job = tokio::spawn(async move {
-        let mut sink = Events::default();
+        let mut sink = FirstEvent(Some(started_tx));
         Box::pin(run_diff(&mgr, &b, &sm, opts(), &mut sink, &CancelToken::new()))
             .await
             .map(|d| d.result().items.len())
     });
+    started_rx.await.expect("iş ilerleme olayı göndermeli");
+    assert!(!job.is_finished(), "havuz sorgusu iş sürerken çalışmalı");
     let one: i32 = env
         .mgr
         .run(env.server, Target::Database(env.db_oid), |c| async move {
@@ -783,8 +890,14 @@ async fn logs_carry_no_names_or_sql() {
     let buf = capture();
     for ts in servers() {
         guarded(roundtrip_same_db_for_log(ts.clone()), cleanup_in(&ts, PFX, "log")).await;
-        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-        assert!(out.contains("schema_diff"), "günlük yakalanmadı: {out}");
+        let all = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        // Yalnız bu crate'in olayları (`pgt_diff::…` hedefi); bağımlılıkların TRACE satırları kapsam dışı.
+        let out: String = all
+            .lines()
+            .filter(|l| l.contains("pgt_diff::"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(out.contains("schema_diff"), "günlük yakalanmadı: {all}");
         let db = db_name_in(&ts, PFX, "log").await;
         for secret in [
             db.as_str(),

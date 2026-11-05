@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::SystemTime;
 
-use pgt_ddl::{ObjectDef, ObjectKind, Risk, TypeBody, quote_ident};
+use pgt_ddl::{FunctionReturn, ObjectDef, ObjectKind, Risk, TypeBody, quote_ident};
 
 use crate::generate::{Generated, Phase};
 use crate::model::DiffScript;
@@ -37,6 +37,8 @@ pub struct ScriptItem<'a> {
     pub source_deps: Vec<&'a str>,
     /// Silme için: hedefte bağımlı olunan seçili öğe anahtarları (görünüm/MV, tablo FK).
     pub target_deps: Vec<&'a str>,
+    /// Rutin için: imzası (argüman ya da dönüş tipi) satır tipine başvurulan seçili tablo/görünüm/MV anahtarları.
+    pub rowtype_deps: Vec<&'a str>,
 }
 
 /// Başlık alanları; yalnız bunlar betik başlığına girer (sunucu kaydı, adres, kullanıcı yok).
@@ -177,6 +179,22 @@ pub fn type_refs(def: &ObjectDef) -> Vec<String> {
     }
 }
 
+/// Rutin imzasının başvurduğu tipler: argüman tipleri (tüm kipler) ve dönüş tipi (`SETOF` dahil, `TABLE` kolonları).
+pub fn routine_type_refs(def: &ObjectDef) -> Vec<String> {
+    let (ObjectDef::Function(f) | ObjectDef::Procedure(f)) = def else {
+        return vec![];
+    };
+    let mut v: Vec<String> = f.args.iter().map(|a| base_type_name(&a.type_name)).collect();
+    match &f.returns {
+        Some(FunctionReturn::Type { type_name, .. }) => v.push(base_type_name(type_name)),
+        Some(FunctionReturn::Table { columns }) => {
+            v.extend(columns.iter().map(|c| base_type_name(&c.type_name)));
+        }
+        _ => {}
+    }
+    v
+}
+
 fn kind_label(k: ObjectKind) -> &'static str {
     match k {
         ObjectKind::Table => "Tablo",
@@ -224,7 +242,7 @@ fn risk_label(r: Risk) -> &'static str {
     }
 }
 
-const ALL_PHASES: [Phase; 18] = [
+const ALL_PHASES: [Phase; 20] = [
     Phase::DropTrigger,
     Phase::DropIndex,
     Phase::DropView,
@@ -237,9 +255,11 @@ const ALL_PHASES: [Phase; 18] = [
     Phase::Sequences,
     Phase::Routines,
     Phase::Tables,
+    Phase::RoutinesAfterTables,
     Phase::OwnedBy,
     Phase::ForeignKeys,
     Phase::Views,
+    Phase::RoutinesAfterViews,
     Phase::Indexes,
     Phase::Triggers,
     Phase::Privileges,
@@ -278,6 +298,23 @@ fn auto_dropped(it: &ScriptItem, items: &[ScriptItem]) -> bool {
             && o.name == t
             && (o.generated.drops_table || o.generated.dropped_columns.iter().any(|d| d == c))
     })
+}
+
+/// Rutin öğesinin `Routines` parçalarının yazılacağı aşama: imzasındaki satır tiplerinden biri bu betikte
+/// oluşturulan (ya da yeniden kurulan) bir tabloya aitse tablolardan, görünüme/MV'ye aitse görünümlerden sonra;
+/// aksi halde `Routines`.
+fn routine_phase(it: &ScriptItem, items: &[ScriptItem], by_key: &HashMap<&str, usize>) -> Phase {
+    it.rowtype_deps
+        .iter()
+        .filter_map(|k| by_key.get(k).map(|&j| &items[j]))
+        .filter(|d| d.generated.rebuilt)
+        .map(|d| match d.kind {
+            ObjectKind::Table => Phase::RoutinesAfterTables,
+            ObjectKind::View | ObjectKind::MaterializedView => Phase::RoutinesAfterViews,
+            _ => Phase::Routines,
+        })
+        .max()
+        .unwrap_or(Phase::Routines)
 }
 
 /// Aşamada yer alan öğelerin yazım sırası (öğe indisleri).
@@ -323,6 +360,10 @@ pub fn assemble(h: &ScriptHeader, items: &[ScriptItem]) -> DiffScript {
     // Otomatik düşen diziler DROP SEQUENCE yerine açıklama satırı alır.
     let skipped: Vec<bool> = items.iter().map(|it| auto_dropped(it, items)).collect();
     let is_skipped = |i: usize, p: Phase| p == Phase::DropSequence && skipped[i];
+    // Satır tipine bağlı rutinler kendi aşamasından sonraya taşınır.
+    let by_key: HashMap<&str, usize> = items.iter().enumerate().map(|(i, it)| (it.key, i)).collect();
+    let moved: Vec<Phase> = items.iter().map(|it| routine_phase(it, items, &by_key)).collect();
+    let phase_of = |i: usize, p: Phase| if p == Phase::Routines { moved[i] } else { p };
 
     let mut by_phase: HashMap<Phase, Vec<usize>> = HashMap::new();
     let mut statements = 0u32;
@@ -332,7 +373,7 @@ pub fn assemble(h: &ScriptHeader, items: &[ScriptItem]) -> DiffScript {
             if stmts.is_empty() {
                 continue;
             }
-            let v = by_phase.entry(*p).or_default();
+            let v = by_phase.entry(phase_of(i, *p)).or_default();
             if !v.contains(&i) {
                 v.push(i);
             }
@@ -435,7 +476,7 @@ pub fn assemble(h: &ScriptHeader, items: &[ScriptItem]) -> DiffScript {
                     comment_safe(&format!("{qual}{}", it.name))
                 ));
             }
-            for (_, stmts) in it.generated.parts.iter().filter(|(p, _)| *p == phase) {
+            for (_, stmts) in it.generated.parts.iter().filter(|(p, _)| phase_of(i, *p) == phase) {
                 if is_skipped(i, phase) {
                     if !stmts.is_empty() {
                         out.push(format!(
@@ -494,6 +535,7 @@ mod tests {
             drops_table: false,
             dropped_columns: vec![],
             sequence_owner: None,
+            rebuilt: false,
         }
     }
 
@@ -507,6 +549,7 @@ mod tests {
             generated: g,
             source_deps: vec![],
             target_deps: vec![],
+            rowtype_deps: vec![],
         }
     }
 
@@ -891,6 +934,100 @@ mod tests {
         }
         assert!(sql.contains("-- Sequence s?DROP SCHEMA y; --"));
         assert!(sql.contains("-- s?DROP SCHEMA y; --: bağlı olduğu kolonla birlikte silinir"));
+    }
+
+    #[test]
+    fn satir_tipine_bagli_rutin_iliskisinden_sonra() {
+        let rebuilt = |p: Phase, sql: &str| Generated { rebuilt: true, ..gen_parts(vec![(p, vec![st(sql)])]) };
+        let g_tab = rebuilt(Phase::Tables, "CREATE TABLE t (id int)");
+        let g_view = rebuilt(Phase::Views, "CREATE VIEW v AS SELECT 1");
+        let g_idx = gen_parts(vec![(Phase::Indexes, vec![st("CREATE INDEX i ON t (id)")])]);
+        let g_f = gen_parts(vec![
+            (Phase::Routines, vec![st("CREATE FUNCTION f() RETURNS SETOF t")]),
+            (Phase::Privileges, vec![st("GRANT EXECUTE ON FUNCTION f() TO r")]),
+        ]);
+        let g_g = gen_parts(vec![(Phase::Routines, vec![st("CREATE FUNCTION g(r v)")])]);
+        let g_h = gen_parts(vec![(Phase::Routines, vec![st("CREATE FUNCTION h(a t, b v)")])]);
+        let g_plain = gen_parts(vec![(Phase::Routines, vec![st("CREATE FUNCTION plain()")])]);
+        let mut f = item("kf", ObjectKind::Function, "a_f", &g_f);
+        f.rowtype_deps = vec!["kt"];
+        let mut g = item("kg", ObjectKind::Function, "a_g", &g_g);
+        g.rowtype_deps = vec!["kv"];
+        let mut h = item("kh", ObjectKind::Function, "a_h", &g_h);
+        h.rowtype_deps = vec!["kt", "kv"];
+        let items = [
+            h,
+            g,
+            f,
+            item("kp", ObjectKind::Function, "z_plain", &g_plain),
+            item("ki", ObjectKind::Index, "i", &g_idx),
+            item("kv", ObjectKind::View, "v", &g_view),
+            item("kt", ObjectKind::Table, "t", &g_tab),
+        ];
+        let s = assemble(&H, &items).sql;
+        let pos = |p: &str| s.find(p).unwrap_or_else(|| panic!("yok: {p}"));
+        assert!(pos("CREATE FUNCTION plain") < pos("CREATE TABLE t"), "bağımsız rutin yerinde");
+        assert!(pos("CREATE TABLE t") < pos("CREATE FUNCTION f()"));
+        assert!(pos("CREATE FUNCTION f()") < pos("CREATE VIEW v"), "tablo satır tipi: görünümlerden önce");
+        assert!(pos("CREATE VIEW v") < pos("CREATE FUNCTION g("));
+        assert!(pos("CREATE VIEW v") < pos("CREATE FUNCTION h("), "en geç ilişkiden sonra");
+        assert!(pos("CREATE FUNCTION g(") < pos("CREATE INDEX i"), "indekslerden önce");
+        assert!(pos("CREATE INDEX i") < pos("GRANT EXECUTE"), "yetkiler yerinde");
+        assert_eq!(lines_before(&s, "CREATE FUNCTION f()"), "-- Fonksiyon a_f");
+        insta::assert_snapshot!("satir_tipi_rutin", s);
+    }
+
+    fn lines_before<'a>(s: &'a str, needle: &str) -> &'a str {
+        let lines: Vec<&str> = s.lines().collect();
+        let at = lines.iter().position(|l| l.starts_with(needle)).unwrap();
+        lines[at - 1]
+    }
+
+    #[test]
+    fn satir_tipi_iliskisi_yeniden_kurulmuyorsa_rutin_yerinde() {
+        // Tablo yalnız değişiyor (ALTER): rutin kendi aşamasında, tablolardan önce kalır.
+        let g_tab = gen_parts(vec![(Phase::Tables, vec![st("ALTER TABLE t ADD COLUMN x int")])]);
+        let g_f = gen_parts(vec![(Phase::Routines, vec![st("CREATE FUNCTION f() RETURNS SETOF t")])]);
+        let mut f = item("kf", ObjectKind::Function, "f", &g_f);
+        f.rowtype_deps = vec!["kt", "secilmemis"];
+        let s = assemble(&H, &[item("kt", ObjectKind::Table, "t", &g_tab), f]).sql;
+        assert!(s.find("CREATE FUNCTION f()").unwrap() < s.find("ALTER TABLE t").unwrap());
+    }
+
+    #[test]
+    fn routine_type_refs_arguman_ve_donus() {
+        use pgt_ddl::{ArgMode, FunctionArg, FunctionDef, Parallel, ReturnColumn, Volatility};
+        let arg = |t: &str, mode: ArgMode| FunctionArg { mode, name: None, type_name: t.into(), default: None };
+        let mut f = FunctionDef {
+            schema: "s".into(),
+            name: "f".into(),
+            owner: None,
+            comment: None,
+            language: "sql".into(),
+            args: vec![arg("\"Row T\"", ArgMode::In), arg("s.v[]", ArgMode::Inout), arg("integer", ArgMode::Out)],
+            returns: Some(FunctionReturn::Type { type_name: "t".into(), setof: true }),
+            body: "SELECT 1".into(),
+            volatility: Volatility::Volatile,
+            strict: false,
+            security_definer: false,
+            leakproof: false,
+            parallel: Parallel::Unsafe,
+            cost: None,
+            rows: None,
+            settings: vec![],
+            recreate: false,
+            editable: true,
+            unsupported: vec![],
+        };
+        assert_eq!(routine_type_refs(&ObjectDef::Function(f.clone())), ["Row T", "s.v", "integer", "t"]);
+        f.returns = Some(FunctionReturn::Table {
+            columns: vec![ReturnColumn { name: "a".into(), type_name: "u".into() }],
+        });
+        f.args.clear();
+        assert_eq!(routine_type_refs(&ObjectDef::Function(f.clone())), ["u"]);
+        f.returns = None;
+        assert!(routine_type_refs(&ObjectDef::Procedure(f)).is_empty());
+        assert!(routine_type_refs(&type_item("e", TypeBody::Enum { values: vec![] })).is_empty());
     }
 
     #[test]
