@@ -127,7 +127,7 @@ export function looksLikeMarkup(value: string): boolean {
 }
 
 /** UTF-8 bayt uzunluğu (kod birimi döngüsü; kopya üretmez). Eşleşmeyen vekil 3 bayt (U+FFFD) sayılır. */
-function utf8Length(s: string): number {
+export function utf8Length(s: string): number {
   let n = 0;
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);

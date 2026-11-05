@@ -270,3 +270,10 @@ describe("panel akışı", () => {
     expect(mem.get(columnKey(col))).toBe("json");
   });
 });
+
+describe("tcell.image.info", () => {
+  it("boyut yüklenince eklenir, önce atlanır", () => {
+    expect(tcell.image.info("PNG", "640 × 480", "12.345 bayt")).toBe("PNG · 640 × 480 · 12.345 bayt");
+    expect(tcell.image.info("SVG", null, "12.345 bayt")).toBe("SVG · 12.345 bayt");
+  });
+});

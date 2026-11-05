@@ -10,6 +10,7 @@ import { Button } from "../../ui/Button";
 import { reindentJson } from "./grid-model";
 import {
   LIMITS,
+  utf8Length,
   decodePrefix,
   fileActionAllowed,
   formatMb,
@@ -117,13 +118,12 @@ function HexView(props: ViewProps) {
   const bytes = createMemo(() =>
     props.facts.bytea ? decodeByteaHex(props.value, LIMITS.hexBytes) : utf8Bytes(props.value, LIMITS.hexBytes),
   );
-  // Toplam: bytea için ham uzunluktan; metin için çözülen dizi uzunluğundan (kesildiyse yalnız bildirimde facts).
-  const truncated = createMemo(() => {
-    const b = bytes();
-    if (!b) return false;
-    return props.facts.bytea ? props.facts.byteLength > LIMITS.hexBytes : b.length >= LIMITS.hexBytes;
+  // Toplam: bytea için ham uzunluktan; metin için kesilme olasıysa ayırmasız sayımla, değilse kodlanan uzunluktan.
+  const total = createMemo(() => {
+    if (props.facts.bytea) return props.facts.byteLength;
+    return props.value.length * 3 > LIMITS.hexBytes ? utf8Length(props.value) : (bytes()?.length ?? 0);
   });
-  const total = () => (props.facts.bytea || truncated() ? props.facts.byteLength : (bytes()?.length ?? 0));
+  const truncated = () => total() > LIMITS.hexBytes;
   let scrollEl!: HTMLDivElement;
   const rows = createVirtualizer({
     get count() {
@@ -138,7 +138,7 @@ function HexView(props: ViewProps) {
   return (
     <Show when={bytes()} fallback={<p class={note}>{tcell.reason.badHex}</p>}>
       {(b) => (
-        <div class="flex h-full min-h-0 flex-col gap-1" aria-label={tcell.hex.ariaLabel} role="group">
+        <div class="flex h-full min-h-0 flex-col gap-1">
           <p class={note}>
             {tcell.hex.total(total())}
             <Show when={truncated()}>
@@ -146,7 +146,7 @@ function HexView(props: ViewProps) {
               {tcell.hex.partial(formatMb(b().length), formatMb(total()))}
             </Show>
           </p>
-          <div ref={scrollEl} class="min-h-0 flex-1 overflow-auto" tabindex="0">
+          <div ref={scrollEl} class="min-h-0 flex-1 overflow-auto" tabindex="0" role="region" aria-label={tcell.hex.ariaLabel}>
             <div class="relative" style={{ height: `${rows.getTotalSize()}px`, width: "max-content", "min-width": "100%" }}>
               <For each={rows.getVirtualItems()}>
                 {(r) => (
@@ -169,11 +169,14 @@ function HexView(props: ViewProps) {
 const CHECKER = "repeating-conic-gradient(var(--border) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px";
 
 function ImageView(props: ViewProps) {
+  const bytes = createMemo(() => {
+    if (!props.facts.image) return null;
+    return props.facts.bytea ? decodeByteaHex(props.value) : utf8Bytes(props.value);
+  });
   const url = createMemo(() => {
     const kind = props.facts.image;
-    if (!kind) return null;
-    const bytes = props.facts.bytea ? decodeByteaHex(props.value) : utf8Bytes(props.value);
-    return bytes ? dataUrl(kind, bytes) : null;
+    const b = bytes();
+    return kind && b ? dataUrl(kind, b) : null;
   });
   const [fit, setFit] = createSignal(true);
   const [dims, setDims] = createSignal<{ w: number; h: number } | null>(null);
@@ -184,8 +187,9 @@ function ImageView(props: ViewProps) {
       setBroken(false);
     }),
   );
+  const kind = () => (props.facts.image ?? "").toUpperCase();
   const alt = () => {
-    const k = props.facts.image ?? "";
+    const k = kind();
     const d = dims();
     return d ? tcell.image.alt(k, d.w, d.h) : k;
   };
@@ -202,6 +206,9 @@ function ImageView(props: ViewProps) {
             </Button>
             <SaveButton {...props} />
           </div>
+          <p class={note}>
+            {tcell.image.info(kind(), dims() ? `${dims()!.w} × ${dims()!.h}` : null, tcell.hex.total(bytes()?.length ?? 0))}
+          </p>
           <Show when={!broken()} fallback={<p class="font-sans text-[13px] text-danger">{tcell.image.broken}</p>}>
             <div
               class={`min-h-0 flex-1 rounded border border-border ${fit() ? "flex items-center justify-center overflow-hidden" : "overflow-auto"}`}
@@ -228,20 +235,19 @@ function CodeView(props: { lang: CodeLang; text: string }) {
   let view: EditorView | undefined;
   const [loaded, setLoaded] = createSignal<LoadedLanguage | null>(null);
   const [failed, setFailed] = createSignal(false);
-  createEffect(
-    on(
-      () => props.lang,
-      (lang) => {
-        setLoaded(null);
-        setFailed(false);
-        loadLanguage(lang)
-          .then((m) => {
-            if (props.lang === lang) setLoaded(m);
-          })
-          .catch(() => setFailed(true));
-      },
-    ),
-  );
+  let disposed = false;
+  const load = (lang: CodeLang) => {
+    setLoaded(null);
+    setFailed(false);
+    loadLanguage(lang)
+      .then((m) => {
+        if (!disposed && props.lang === lang) setLoaded(m);
+      })
+      .catch(() => {
+        if (!disposed && props.lang === lang) setFailed(true);
+      });
+  };
+  createEffect(on(() => props.lang, load));
   createEffect(() => {
     const m = loaded();
     const text = props.text;
@@ -252,13 +258,19 @@ function CodeView(props: { lang: CodeLang; text: string }) {
     });
   });
   onCleanup(() => {
+    disposed = true;
     view?.destroy();
     view = undefined;
   });
   return (
     <div class="flex h-full min-h-0 flex-col">
       <Show when={failed()}>
-        <p class="font-sans text-[13px] text-danger">{tcell.loadFailed}</p>
+        <div class="flex items-center gap-2">
+          <p class="font-sans text-[13px] text-danger">{tcell.loadFailed}</p>
+          <Button class="h-6 text-[12px]" onClick={() => load(props.lang)}>
+            {tcell.retry}
+          </Button>
+        </div>
       </Show>
       <div ref={host} class="min-h-0 flex-1 overflow-hidden [&_.cm-editor]:h-full" />
     </div>

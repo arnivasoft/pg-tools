@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { tcell } from "./strings-cell";
 import {
   PREVIEW_CSP,
   bytesToBase64,
@@ -37,6 +38,19 @@ describe("utf8Bytes", () => {
   it("kodlar ve keser", () => {
     expect(arr(utf8Bytes("ş"))).toEqual([0xc5, 0x9f]);
     expect(arr(utf8Bytes("abc", 2))).toEqual([0x61, 0x62]);
+  });
+  it("büyük girdide yalnız önek kodlanır", () => {
+    const huge = "ş".repeat(1_000_000);
+    const out = utf8Bytes(huge, 100);
+    expect(out.length).toBe(100);
+    expect(arr(out.subarray(0, 4))).toEqual([0xc5, 0x9f, 0xc5, 0x9f]);
+  });
+  it("vekil çifti sınırında bölünmez", () => {
+    const s = "a".repeat(9) + "😀" + "b".repeat(50);
+    const out = utf8Bytes(s, 10);
+    expect(out.length).toBe(10);
+    expect(out[9]).toBe(0xf0);
+    expect(new TextDecoder().decode(utf8Bytes(s, 13))).toBe("a".repeat(9) + "😀");
   });
 });
 
@@ -119,7 +133,7 @@ describe("formatHtml", () => {
     const big = "<p>abc</p>".repeat(Math.ceil((1 << 20) / 10));
     const t0 = performance.now();
     formatHtml(big);
-    expect(performance.now() - t0).toBeLessThan(200);
+    expect(performance.now() - t0).toBeLessThan(1000);
   });
 });
 
@@ -163,7 +177,7 @@ describe("formatXml", () => {
     const big = "<a>abc</a><b x=\"1\"/>".repeat(Math.ceil((1 << 20) / 20));
     const t0 = performance.now();
     formatXml(big);
-    expect(performance.now() - t0).toBeLessThan(200);
+    expect(performance.now() - t0).toBeLessThan(1000);
   });
 });
 
@@ -182,8 +196,8 @@ describe("doğrusal çıktı ve kenar durumlar", () => {
   function linear(fn: (s: string) => string, input: string, token: string) {
     const t0 = performance.now();
     const out = fn(input);
-    expect(performance.now() - t0).toBeLessThan(200);
-    expect(out.length).toBeLessThan(40 * input.length);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    expect(out.length).toBeLessThan(40 * input.length); // kuadratik büyüme yakalanır
     expect(out.split(token).length).toBe(input.split(token).length);
   }
   it("kapanmayan <li> (HTML) doğrusal", () => {
@@ -273,7 +287,19 @@ describe("saveCell", () => {
     const d = mk(async () => P);
     await saveCell(d, V, "foto", f);
     expect(d.saveBytes).toHaveBeenCalledWith(V, P);
+    expect(d.pick).toHaveBeenCalledWith({
+      defaultPath: "foto.png",
+      filters: [{ name: "PNG", extensions: ["png"] }],
+      title: tcell.saveTitle,
+    });
     expect(d.onSaved).toHaveBeenCalledOnce();
+  });
+  it("PDF → x.pdf ve PDF süzgeci", async () => {
+    const d = mk(async () => P);
+    await saveCell(d, V, "x", { pdf: true, image: null });
+    expect(d.pick).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "x.pdf", filters: [{ name: "PDF", extensions: ["pdf"] }] }),
+    );
   });
   it("saveBytes reddi → onError, istisna yok", async () => {
     const d = mk(

@@ -35,7 +35,15 @@ function hexVal(c: number): number {
 
 /** Metni UTF-8 baytlarına çevirir; `maxBytes`'ta keser. */
 export function utf8Bytes(text: string, maxBytes = Infinity): Uint8Array {
-  const all = new TextEncoder().encode(text);
+  // Her kod birimi en az 1 bayt: ilk `maxBytes` kod birimi yeter; yarım vekil çifti tamamlanır. Tüm metin kodlanmaz.
+  let src = text;
+  if (Number.isFinite(maxBytes) && text.length > maxBytes) {
+    let end = Math.max(0, Math.floor(maxBytes));
+    const c = end > 0 ? text.charCodeAt(end - 1) : 0;
+    if (c >= 0xd800 && c <= 0xdbff) end++;
+    src = text.slice(0, end);
+  }
+  const all = new TextEncoder().encode(src);
   return all.length > maxBytes ? all.subarray(0, Math.max(0, maxBytes)) : all;
 }
 

@@ -27,6 +27,7 @@ export const tcell = {
     fit: "Sığdır",
     actual: "Gerçek boyut",
     alt: (kind: string, w: number, h: number) => `Hücre görseli (${kind}, ${w} × ${h})`,
+    info: (kind: string, size: string | null, bytes: string) => [kind, size, bytes].filter(Boolean).join(" · "),
     broken: "Görsel çözülemedi (bozuk ya da desteklenmeyen veri).",
   },
   html: {
@@ -51,6 +52,7 @@ export const tcell = {
   saveFailed: "Dosya kaydedilemedi.",
   loading: "Görünüm yükleniyor…",
   loadFailed: "Görünüm yüklenemedi.",
+  retry: "Yeniden dene",
   widen: "Paneli genişlet",
   narrow: "Paneli daralt",
 } as const;
