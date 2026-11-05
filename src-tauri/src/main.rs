@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
 mod backup;
 mod cell;
 mod commands;
@@ -43,6 +44,8 @@ fn main() {
                 state.backup.cancel_all();
                 // Karşılaştırma kimlikleri de arayüzle birlikte kaybolur: çalışanlar iptal edilir, sonuçlar bırakılır.
                 state.diff.clear();
+                // Asistan akışlarının alıcısı gitti: HTTP istekleri kesilir.
+                state.ai.cancel_all();
                 tauri::async_runtime::spawn(async move { query::close_all_on_reload(&query).await });
             }
         })
@@ -148,6 +151,11 @@ fn main() {
             schema_diff::schema_diff_script,
             schema_diff::schema_diff_save,
             schema_diff::schema_diff_close,
+            ai::ai_key_status,
+            ai::ai_key_set,
+            ai::ai_key_clear,
+            ai::ai_ask,
+            ai::ai_cancel,
             cell::cell_open_pdf,
             cell::cell_save_bytes,
         ])

@@ -36,6 +36,8 @@ pub struct AppState {
     pub diff: pgt_diff::DiffRegistry,
     /// Son araç taraması (`pgBinDir` ayarıyla birlikte); ayar değişince yeniden taranır.
     pub backup_tools: tokio::sync::Mutex<Option<(Option<String>, ToolDetection)>>,
+    /// Yapay zekâ asistanı: HTTP istemcisi (ilk istekte kurulur) ve uçuştaki istekler.
+    pub ai: crate::ai::AiState,
     pub startup_notice: Option<String>,
 }
 
@@ -103,6 +105,7 @@ impl AppState {
             backup: JobRegistry::new(),
             diff: pgt_diff::DiffRegistry::new(),
             backup_tools: tokio::sync::Mutex::new(None),
+            ai: crate::ai::AiState::default(),
             credentials: Credentials::new(store),
             registry,
             manager,

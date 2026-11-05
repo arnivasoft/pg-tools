@@ -1,0 +1,20 @@
+[package]
+name = "pgt-ai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pgt-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ts-rs.workspace = true
+tracing.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
+# HTTP/1.1 + rustls (ring sağlayıcısı uygulamanın geri kalanıyla ortak); `system-proxy`: kurumsal vekil sunucu.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
