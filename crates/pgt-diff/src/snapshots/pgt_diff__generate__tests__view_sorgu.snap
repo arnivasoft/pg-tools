@@ -1,0 +1,10 @@
+---
+source: crates/pgt-diff/src/generate.rs
+expression: render(&g)
+---
+Views [DataLoss] DROP VIEW s.v
+Views [Safe] CREATE VIEW s.v AS (SELECT 2 AS a
+)
+uyarı: Yeniden oluşturma: yetkiler (GRANT) yeniden verilmelidir
+not: Yeniden kurulacak (DROP + CREATE)
+risk: DataLoss

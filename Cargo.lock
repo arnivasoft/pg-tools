@@ -2570,6 +2570,7 @@ dependencies = [
  "pgt-core",
  "pgt-dash",
  "pgt-ddl",
+ "pgt-diff",
  "pgt-query",
  "serde",
  "tauri",
@@ -2662,6 +2663,26 @@ dependencies = [
  "pgt-catalog",
  "pgt-core",
  "postgres-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
+ "tracing-subscriber",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
+name = "pgt-diff"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "insta",
+ "pgt-catalog",
+ "pgt-core",
+ "pgt-ddl",
  "serde",
  "serde_json",
  "tempfile",

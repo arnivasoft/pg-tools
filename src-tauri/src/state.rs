@@ -32,6 +32,8 @@ pub struct AppState {
     pub data: Arc<DataManager>,
     /// Çalışan yedekleme/geri yükleme işleri (iptal ve aynı hedef reddi).
     pub backup: JobRegistry,
+    /// Şema karşılaştırma kayıtları (çalışan iptal belirteçleri ve hazır sonuçlar).
+    pub diff: pgt_diff::DiffRegistry,
     /// Son araç taraması (`pgBinDir` ayarıyla birlikte); ayar değişince yeniden taranır.
     pub backup_tools: tokio::sync::Mutex<Option<(Option<String>, ToolDetection)>>,
     pub startup_notice: Option<String>,
@@ -99,6 +101,7 @@ impl AppState {
             ddl: Arc::new(DdlManager::new(manager.clone(), registry.clone())),
             data: Arc::new(DataManager::new(manager.clone(), registry.clone())),
             backup: JobRegistry::new(),
+            diff: pgt_diff::DiffRegistry::new(),
             backup_tools: tokio::sync::Mutex::new(None),
             credentials: Credentials::new(store),
             registry,
@@ -159,6 +162,7 @@ mod tests {
         state.ddl.cancel_all(); // uçuşta uygulama yokken panik etmez
         state.data.cancel_all();
         assert_eq!(state.backup.cancel_all(), 0);
+        assert_eq!(state.diff.clear(), 0);
     }
 
     #[test]

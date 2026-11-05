@@ -1,0 +1,6 @@
+---
+source: crates/pgt-diff/src/linediff.rs
+expression: out
+---
+-- DDL üretilemedi:
+-- Bu nesne desteklenmeyen özellik içerdiği için salt okunurdur; değiştirilemez ve silinemez.

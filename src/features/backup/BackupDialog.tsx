@@ -223,7 +223,7 @@ export function BackupDialog(props: { ctl: BackupController }) {
                     aria-describedby={errors().byField.outputPath ? pathErrId : undefined}
                     aria-invalid={errors().byField.outputPath ? true : undefined}
                   />
-                  <Button disabled={!ready()} onClick={() => void ctl.chooseOutput()}>
+                  <Button class="shrink-0 whitespace-nowrap" disabled={!ready()} onClick={() => void ctl.chooseOutput()}>
                     {cur().outputPath === "" ? tb.choosePath : tb.changePath}
                   </Button>
                 </div>

@@ -194,8 +194,8 @@ export function RestoreDialog(props: { ctl: RestoreController; tree: () => { nod
                     aria-describedby={cur().sourceError || errors().byField.path ? srcErrId : undefined}
                     aria-invalid={cur().sourceError || errors().byField.path ? true : undefined}
                   />
-                  <Button disabled={!ready()} onClick={() => void ctl.chooseSource("file")}>{tb.chooseFile}</Button>
-                  <Button disabled={!ready()} onClick={() => void ctl.chooseSource("dir")}>{tb.chooseFolder}</Button>
+                  <Button class="shrink-0 whitespace-nowrap" disabled={!ready()} onClick={() => void ctl.chooseSource("file")}>{tb.chooseFile}</Button>
+                  <Button class="shrink-0 whitespace-nowrap" disabled={!ready()} onClick={() => void ctl.chooseSource("dir")}>{tb.chooseFolder}</Button>
                 </div>
                 <Show when={cur().inspecting}>
                   <p class="text-[12px] text-muted">{tb.inspecting}</p>

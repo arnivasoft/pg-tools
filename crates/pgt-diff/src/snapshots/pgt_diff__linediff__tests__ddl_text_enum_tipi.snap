@@ -1,0 +1,5 @@
+---
+source: crates/pgt-diff/src/linediff.rs
+expression: "ddl_text(&def, &ctx())"
+---
+CREATE TYPE public.mood AS ENUM ('sad', 'ok', 'happy');

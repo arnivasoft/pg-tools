@@ -1,0 +1,9 @@
+---
+source: crates/pgt-diff/src/linediff.rs
+expression: "ddl_text(&def, &ctx())"
+---
+CREATE TABLE public.orders (
+  id integer,
+  user_id integer,
+  CONSTRAINT orders_user_fk FOREIGN KEY (user_id) REFERENCES public.users (id) ON UPDATE NO ACTION ON DELETE CASCADE
+);

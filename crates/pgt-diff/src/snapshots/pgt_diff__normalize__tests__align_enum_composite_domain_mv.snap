@@ -1,0 +1,13 @@
+---
+source: crates/pgt-diff/src/normalize.rs
+expression: orig
+---
+[
+    Some(
+        "a",
+    ),
+    None,
+    Some(
+        "b",
+    ),
+]

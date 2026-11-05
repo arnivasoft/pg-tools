@@ -497,3 +497,42 @@ Elle kontrol: `docs/smoke-test.md` "Yedekleme arayüzü (Plan 27)".
 
 Elle kontrol: `docs/smoke-test.md` "Görsel EXPLAIN arayüzü (Plan 28)".
 
+## Şema karşılaştırma arka ucu testleri (Plan 29)
+
+Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2 ve §6. Karşılaştırma `pgt-diff` crate'indedir; Docker olmayan testler `cargo test -p pgt-diff` ile koşar.
+
+| Dosya | Kapsam |
+|---|---|
+| `crates/pgt-diff/src/key.rs` | Nesne anahtarı ve eşleştirme: ilişkiler tek ad alanı, fonksiyon/prosedür ad + kimlik imzası, indeks/trigger tablo + ad, tür sınıfları, sıralama |
+| `crates/pgt-diff/src/linediff.rs` | Myers satır farkı: eşit/eklenen/silinen satırlar, satır numaraları, 20.000 satır sınırında `None` |
+| `crates/pgt-diff/src/normalize.rs` | Normalizasyon ve durum kararı: şema adı çevirisi, yok sayılan alanlar, seçenekler (sahiplik/tablespace/yorum), kolon sırası notu, `Manual` / `LoadFailed` kararları, ACL eşitliği |
+| `crates/pgt-diff/src/generate.rs` | Öğe başına aşamalı DDL üretimi (insta snapshot): oluşturma, silme, değiştirme, yeniden kurma, tür değişimi, FK ayırma, yetkiler, `BuildFailed` / `Manual` |
+| `crates/pgt-diff/src/script.rs` | Betik birleştirme: aşama sırası, bağımlılık (topolojik) sıralaması, silme sırası, transaction kararı ve uyarısı, başlıkta gizli bilgi olmaması, zaman damgası |
+| `crates/pgt-diff/src/registry.rs` | Kayıt defteri: kopya kimlik, `MAX_READY = 8` kırpma, iptal/kapatma/temizleme, eski koruyucunun yeni kaydı silmemesi |
+| `crates/pgt-diff/src/run.rs` | `same_side`, bağımlılık çözümleyici, betik/ayrıntı hataları ve `last_script` (sunucusuz) |
+| `crates/pgt-diff/tests/list_snapshot.rs` | Docker: liste sorgusu (sürüme göre biçimler, hariç tutulanlar, sıra, bağımlılıklar), şema denetimi, ayrılmış bağlantı + `READ ONLY` transaction, `search_path`, ilerleme, iptal, nesne düzeyi hata |
+| `crates/pgt-diff/tests/diff_roundtrip.rs` | Docker: `run_diff` uçtan uca (aşağıda) |
+| `crates/pgt-ddl/tests/load_in.rs` | `pgt-ddl` istemci-alan iç yükleyicileri (`load_*_in`) `load` ile aynı sonucu verir; Designer/Inspector davranışı korunur |
+
+`diff_roundtrip.rs` (veritabanları `pgt_diff_<ana sürüm>_<etiket>`):
+
+- **Gidiş-dönüş** (iki biçim: aynı veritabanında `pgt_diff_src` -> `pgt_diff_tgt`; iki ayrı veritabanında aynı şema adı `app`): kaynak fikstür enum / composite / range / domain, `serial` PK + FK, CHECK / UNIQUE / ifade ve kısmi indeks, trigger, aşırı yüklü fonksiyonlar, procedure (PG 11+), `v1 <- v2` görünümleri, MV + indeks, `OWNED BY` dizi ve yorumları içerir; hedefte eksik tablo, kolon tipi / fazla / yeniden adlandırılmış kolon, eksik indeks ve trigger, farklı görünüm / fonksiyon gövdesi / dönüş tipi / domain CHECK'i, enum'da eksik değer (yalnız PG 12+), yalnız hedefte tablo (+ `serial` dizisi) ve yalnız sırası farklı tablo vardır. Beklenen durumlar tablo olarak sabittir; seçilebilen her öğe (yalnız-hedef dahil) seçilir, betik hedefe `batch_execute` ile uygulanır, yeniden karşılaştırma tümüyle `Same` olmalıdır. İlerleme olayları (her tarafta son olay `loaded == total`) ve havuz `search_path`'i de denetlenir.
+- **Sıralama** (`script_is_dependency_ordered`): anahtarlar ters sırada verilse de tip < tablo < FK < görünüm zinciri < indeks; silmede bağımlı görünüm önce; aynı şema `same_schema` ile reddedilir (olay yok).
+- **Sahiplik/yetki** (`ownership_and_grants_roundtrip`): seçenek kapalıyken fark yok; açıkken `OWNER TO` + GRANT/REVOKE betiği sonrası `Same`. İkinci rol `pgt_diff_rk_own`, test sonunda silinir.
+- **Bölümleme:** yalnız kaynaktaki bölümlü üst tablo ve bölüm çocuğu `Manual` (seçilemez, betikte yok, `NotSelectable`).
+- **Çapraz sürüm:** `PGT_TEST_URLS`'te ana sürüm 16 ve 13 birlikte varsa `UNIQUE NULLS NOT DISTINCT`'li tablo `BuildFailed` ("PG 15+ gerektirir"); sürümler yoksa `eprintln!` ile atlanır (ör. `-Versions 16` tek başına atlar; `-Versions 10,13,16,18` çalıştırır).
+- **Uzantı:** `citext` nesneleri listede yoktur (eklenti yoksa atlanır).
+- **İptal ve eşzamanlılık:** 400 tablolu kaynakta ilk ilerleme olayında iptal -> `Cancelled`, alıcının `false` dönmesi de iptal; ardından `idle in transaction` oturum yok. Eksik şema `Schema { Target, Missing }`. İş sürerken `mgr.run` havuz sorgusu başarılı.
+- **Günlük:** süreç geneli `tracing-subscriber` yazıcısı; gidiş-dönüş boyunca günlük satırları veritabanı / şema / tablo / sütun adlarını, parolayı ve `CREATE` / `ALTER` / `SELECT` sözcüklerini içermez.
+- **Performans** (`#[ignore]`, `diff_perf_500_tables`): taraf başına 500 tablo / 2.000 nesne; süre yazdırılır, ölçülmez (spec §4). Elle:
+
+      $env:PGT_TEST_URLS = "postgres://postgres:PAROLA@127.0.0.1:5432/postgres"
+      cargo test -p pgt-diff --test diff_roundtrip -- --ignored --nocapture
+
+- **Hata ayıklama:** uygulanamayan betiğin metni yalnız `PGT_DIFF_SHOW_SQL=1` ile hata iletisine eklenir (varsayılan: eklenmez).
+
+Matris: `powershell -File scripts/test-matrix.ps1 -Versions 10,11,12,13,14,15,16,17,18 -SkipPerf` (en az `-Versions 10,13,16,18`; çapraz sürüm testi 13 ve 16'yı birlikte ister).
+
+Bilinen sınırlar fikstürün dışında tutulur (spec §5, §6.7): yeniden kurulan nesnenin bağımlısı yoktur (görünüm farkı yaprak `v2`'de, dönüş tipi farkı bağımlısız `fmt`'te), kolon tipi farkı görünümün bağlı olmadığı tabloda, enum değeri ekleme PG 12+'ta.
+
+Elle kontrol: `docs/smoke-test.md` "Şema karşılaştırma arka ucu (Plan 29)".

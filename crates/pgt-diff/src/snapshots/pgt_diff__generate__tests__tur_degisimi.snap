@@ -1,0 +1,9 @@
+---
+source: crates/pgt-diff/src/generate.rs
+expression: render(&g)
+---
+DropTable [DataLoss] DROP TABLE s.v
+Views [Safe] CREATE VIEW s.v AS (SELECT 1 AS a
+)
+not: Tür değişti: hedefteki nesne silinip yeniden oluşturulur
+risk: DataLoss

@@ -1,7 +1,7 @@
 # pg-tools — Şema Karşılaştırma (Schema Diff) Tasarımı
 
 - **Tarih:** 2026-10-31
-- **Durum:** Tasarım; Plan 29 (arka uç) ve Plan 30 (ön yüz) yazılacak
+- **Durum:** Plan 29 arka ucu uygulandı; Plan 30 ön yüzü bekliyor
 - **Kapsam:**
   - İki şemanın yapısı karşılaştırılır: kaynak (sunucu → veritabanı → şema) ve hedef (sunucu → veritabanı → şema). Sunucular, veritabanları ve şema adları farklı olabilir.
   - Farklar nesne nesne listelenir ve her nesnenin iki taraftaki DDL'i satır satır gösterilir.
@@ -78,8 +78,10 @@
 | Aynı | — | Listede gizli (filtreyle görünür) |
 
 - **Yeniden kurma gerekirse:**
-  - Görünümde sorgu değişikliği `recreate` ile yapılır.
+  - Görünümde sorgu değişikliği `recreate` ile yapılır. **İstisna (Plan 29 son inceleme):** hedef görünümün `unsupported` listesinde `TRIGGER …` (INSTEAD OF trigger), `RULE …` ya da `DEFAULT …` (kolon varsayılanı) varsa DROP VIEW bunları sessizce düşüreceği için öğe yeniden kurulmaz, "elle gerekiyor" olur. Not kaybolacakları adlarıyla sayar: "Sorgu değişti; görünüm yeniden kurulursa (DROP + CREATE) hedefteki şu ekler kaybolur, elle uygulayın: TRIGGER t, RULE r". Yalnız kolon yorumu (`COMMENT …`) kaybolacaksa yeniden kurma sürer (üreticinin "Kaybolacaklar" uyarısıyla).
   - Fonksiyonda dönüş tipi ya da argüman adı değişikliği, `needs_recreate` doluysa DROP + CREATE olur. Risk en az `Destructive`'dir ve öğede "yeniden kurulacak" notu yer alır.
+  - MV'de sorgu değişikliği DROP + CREATE'tir (üretici kuralı). DROP MATERIALIZED VIEW indeksleri de düşürdüğü için, MV yeniden kurulduğunda (sorgu farkı ya da tür değişimi) o MV'nin **değişmeyen** (`same`) indeksleri kaynak tanımlarıyla MV öğesinin indeks aşamasında (§2.6 4.8) yeniden oluşturulur; yeniden karşılaştırma temiz çıkar.
+  - **Hedef sahibi ve yorumu korunur:** sahiplik ya da yorum seçeneği kapalıyken normalizasyon bu alanları boşaltır; nesne baştan kuruluyorsa (görünüm / fonksiyon / MV DROP + CREATE, tür değişimi) yeni nesneye **hedefteki** sahip (`OWNER TO`) ve yorum (`COMMENT ON`) geri verilir. Böylece ör. `app_owner`'a ait bir SECURITY DEFINER fonksiyon, betiği çalıştıran rolün sahipliğine geçmez. Seçenek açıksa kaynak değerleri kullanılır (değişiklik yok). Yerinde değişiklikler (`CREATE OR REPLACE`, `ALTER`) sahibi ve yorumu zaten korur.
 - **Tablolar yeniden kurulmaz.** `alter` bir tablo farkını ifade edemiyorsa (bölümleme anahtarı, persistence vb.), öğe "elle gerekiyor" olarak işaretlenir. Bu öğeler betiğe girmez; gerekçe öğede gösterilir. Yalnız kaynakta olan bölümlenmiş üst tablo da "elle gerekiyor"dur (`create` bölümsüz tablo üretirdi).
 - **Fark kaynağı:** "farklı" kararı normalize edilmiş modellerin eşitliğiyle verilir. Modeller aynı olsa bile iki taraftaki `unsupported` listeleri farklıysa öğe "modelin dışında fark var" uyarısıyla **farklı** listelenir. Böyle bir öğe için betik üretilmez ve öğe "elle gerekiyor" olur.
 - **Satır farkı:** her öğenin iki tarafı için normalize modelden `build::create` metni üretilir. Bu metinler, sabit şema adıyla iki tarafta da aynı biçimde çıkar. Sonra iki metin satır satır karşılaştırılır.
@@ -104,10 +106,12 @@ Sıralama, seçili öğeler üzerinde yapılır. Her öğenin ifadeleri kendi ü
    2. sequence (OWNED BY hariç)
    3. fonksiyon ve prosedür
    4. tablo oluşturma (FK kısıtları **hariç**) ve tablo değişiklikleri (FK ekleme hariç)
+      - ardından, imzası (argüman tipleri ya da `SETOF` / `TABLE` kolonları dahil dönüş tipi) **bu betikte oluşturulan ya da yeniden kurulan** bir tablonun satır tipine başvuran fonksiyon/prosedürler. Başvuru, yüklenen tip adlarından (`format_type`; şema niteleyicisi kaynak/hedef şemaysa atılır) seçili tablo/görünüm/MV öğeleriyle eşlenerek bulunur; gövde metnine bakılmaz.
    5. sequence `OWNED BY`
    6. FK kısıtları: yeni tablolarınki ve değişen tablolarda eklenenler. Bu ifadeler, FK'sız model eski, tam model yeni alınarak `table_alter::alter` ile üretilir.
    7. görünüm ve MV (kaynaktaki `pg_depend` sırasıyla)
-   8. indeks
+      - ardından, imzası bu betikte oluşturulan ya da yeniden kurulan bir görünümün / MV'nin satır tipine başvuran fonksiyon/prosedürler (hem tabloya hem görünüme başvuran rutin en geç olanın, yani bu adımın arkasına düşer). Diğer rutinler 4.3'te kalır; aşama içi sıra deterministiktir (tür, ad).
+   8. indeks (yeniden kurulan MV'nin yeniden oluşturulan indeksleri dahil)
    9. trigger
    10. yetkiler: GRANT/REVOKE (seçenek açıksa). Sahiplik (`OWNER TO`) ve yorumlar üreticinin kendi planında, nesnenin ifadeleriyle birlikte kalır.
 5. **Transaction:**
@@ -189,3 +193,97 @@ Yerel ağda taraf başına 500 tablo ve 2.000 nesne için yükleme ve karşıla�
 - Değişen bir kolon tipine bağımlı görünüm varsa `ALTER COLUMN TYPE` hedefte hata verir. Betik bağımlı görünümü kendiliğinden düşürüp yeniden kurmaz.
 - Gövdelerde kaynak şemayı açıkça niteleyen adlar çevrilmez (§2.3).
 - Veritabanı düzeyi nesneler (uzantı, rol, tablespace) kapsam dışıdır.
+
+## 6. Plan 29 sözleşme notları (Plan 30 için)
+
+Plan 30'un tükettiği yüzey yalnız bu bölümdeki komutlar ve `src/ipc/bindings/Diff*.ts` türleridir (alanlar camelCase, enum değerleri snake_case). Arka uç `crates/pgt-diff`, komutlar `src-tauri/src/schema_diff.rs`.
+
+### 6.1 Komutlar
+
+Tauri'de bağımsız değişkenler camelCase yazılır (`diffId`, `serverId`, `itemKey`, `itemKeys`, `onEvent`). `diffId` istemcinin ürettiği UUID'dir.
+
+| Komut | Bağımsız değişkenler | Dönüş |
+|---|---|---|
+| `schema_diff_databases` | `serverId` | `DiffDatabase[]` (`{ oid, name }`; bağlanılabilir, şablon olmayan, ada göre C sırası) |
+| `schema_diff_start` | `diffId`, `source: DiffSide`, `target: DiffSide`, `options: DiffOptions`, `onEvent: Channel<DiffEvent>` | `DiffResult` (iş bitince; sonuç kayıt defterine konur) |
+| `schema_diff_cancel` | `diffId` | `void` (çalışan işi iptal eder; hazır kayda ya da bilinmeyen kimliğe dokunmaz, hata vermez) |
+| `schema_diff_detail` | `diffId`, `itemKey` | `DiffDetail` |
+| `schema_diff_script` | `diffId`, `itemKeys: string[]` | `DiffScript` |
+| `schema_diff_save` | `diffId`, `path` | `void` (son üretilen betiği yazar) |
+| `schema_diff_close` | `diffId` | `void` (iptal + kayıttan sil; bilinmeyen kimlik hata değildir) |
+
+- `DiffSide = { serverId, databaseOid, schema }`; `DiffOptions = { ownership, tablespace, comments }` (varsayılan: `false`, `false`, `true`).
+- `schema_diff_start` iş bitene kadar döner; ilerleme `onEvent` üzerinden akar. İptal edilen iş `cancelled` hatasıyla döner (kısmi sonuç yok).
+- Bağlantı: iki taraf da bağlı sunucu kayıtlarını kullanır; bağlı olmayan sunucu `not_connected` döner (parola isteme akışı Plan 30'da mevcut desenle).
+
+### 6.2 Hata kodları
+
+Hata yükü `ErrorPayload { code, message, detail?, hint? }`; iletiler ad, SQL ya da yol içermez.
+
+| `code` | Ne zaman | `detail` |
+|---|---|---|
+| `same_schema` | Sunucu, veritabanı oid'i ve şema adı (bayt düzeyinde, büyük/küçük harf duyarlı) aynı; iş başlamaz, olay yok | - |
+| `schema_not_found` | Şema yok | `source` veya `target` |
+| `system_schema` | `information_schema` ya da adı `pg_` ile başlayan şema (`pg_catalog`, `pg_toast`, geçici şemalar) | `source` veya `target` |
+| `cancelled` | `schema_diff_cancel` / `close` / sayfa yenileme ya da kanalın kapanması | - |
+| `busy` | Aynı `diffId` ile çalışan ya da hazır kayıt var | - |
+| `diff_not_found` | `detail` / `script` / `save` için kayıt yok (çalışıyor, kapatılmış, `MAX_READY` ile düşmüş ya da sayfa yenilenmiş) | - |
+| `item_not_found` | `itemKey`/`itemKeys` sonuçta yok (`detail`, `script`) | - |
+| `not_selectable` | Seçilen öğelerden biri betiğe alınamaz (`selectable == false`) | - |
+| `empty_selection` | `itemKeys` boş | - |
+| `no_script` | `save`: önce başarılı bir `script` gerekir | - |
+| `invalid_path` | `save`: yol boş / denetim karakteri içeriyor / Windows'ta mutlak değil / uzantısı `.sql` değil (büyük/küçük harf duyarsız; "Dosya uzantısı .sql olmalı.") | - |
+| `write_failed` | `save`: dosya yazılamadı (yol iletiye yazılmaz) | - |
+| `not_connected`, `connection_lost`, ... | Bağlantı hataları `pgt-core` eşlemesiyle | - |
+
+### 6.3 `DiffEvent`
+
+Tek varyant: `{ "event": "progress", "side": "source" | "target", "loaded": n, "total": m }`.
+
+- Yükleme taraf başına bağımsızdır; iki taraf eşzamanlı yüklenir, olaylar iç içe gelir.
+- Olay her `PROGRESS_EVERY = 25` nesnede ve sonda gelir; her tarafta sayaçlar azalmaz ve son olayda `loaded == total`. Boş şema tek `(0, 0)` olayı verir.
+- Toplam, o tarafın liste sorgusu bittikten sonra bilinir; ilk olaydan önce çubuk belirsiz (indeterminate) gösterilmelidir.
+- Kanal gönderimi başarısız olursa (pencere gitti) iş iptal edilir.
+
+### 6.4 `DiffItem` alanları
+
+- `key`: opak; yalnız eşitlik ve komutlara geri gönderme için. Biçimine güvenilmez.
+- `kind` (`ObjectKind`): kaynakta varsa kaynağın, yoksa hedefin türü. `targetKind`: yalnız tür değiştiyse (ilişki türü ya da tip gövdesi: ör. kaynakta tablo, hedefte görünüm) hedefteki tür, aksi halde `null`.
+- `name`: şema-içi ad (şema niteleyicisi yok). `table`: indeks ve trigger için bağlı tablo adı. `signature`: fonksiyon / prosedür için yalnız giriş tipleri (`oidvectortypes`), diğerlerinde `null`.
+- `status`: `only_source` (hedefte oluşturulur), `only_target` (hedeften silinir), `different` (hedef değiştirilir), `same` (varsayılan olarak gizlenir; filtreyle görünür).
+- `problem`: `null` ya da `manual` (üreticiyle ifade edilemiyor), `load_failed` (nesne yüklenemedi), `build_failed` (hedef sürümde üretilemedi).
+- `risk`: `safe` < `destructive` < `data_loss`; `same` öğede her zaman `safe`.
+- `notes`: bilgi / uyarı iletileri; `errors`: yalnız `load_failed` ve `build_failed` için hata iletileri.
+- `selectable = problem == null && status != same`. `defaultSelected = selectable && status ∈ {only_source, different}`; yani yalnız hedefte olan (DROP) öğeler seçilebilir ama varsayılan seçili değildir.
+
+### 6.5 `problem` ve `warnings` iletileri
+
+- `manual` (`notes`): "Fark üreticiyle ifade edilemiyor."; "Bölüm alt tablosu (ATTACH modellenmez)"; "Kalıtım çocuğu (INHERITS modellenmez)"; "Bölümlenmiş tablo oluşturma modellenmez"; "Bölümleme anahtarı farklı"; "Modelin dışında özellikler var: …" (yalnız kaynak ya da tür değişimi); "Modelin dışında fark var: …" (iki tarafta `unsupported` listeleri farklı); "Gizli değer içeren ifade betiğe alınamaz."; "Sorgu değişti; görünüm yeniden kurulursa (DROP + CREATE) hedefteki şu ekler kaybolur, elle uygulayın: …" (hedef görünümde INSTEAD OF trigger / kural / kolon varsayılanı, §2.4).
+- `load_failed` (`errors`): "Kaynak: <ileti>" / "Hedef: <ileti>" (`pgt-core` hata eşlemesi; yalnız nesne düzeyi retleri, ör. sistem nesnesi). Durum, öğenin varlığına göre `only_source` / `only_target` / `different` kalır.
+- `build_failed` (`errors`): üretici alan iletileri, ör. "… PG 15+ gerektirir." (kaynak PG 16, hedef PG 13 ve `UNIQUE NULLS NOT DISTINCT`).
+- `notes` ayrıca şunları taşır: "Tür değişti: hedefteki nesne silinip yeniden oluşturulur", "Yeniden kurulacak (DROP + CREATE)", "Kolon sırası farklı (ALTER ile değiştirilemez; yeni kolonlar sona eklenir).", "Gövdede kaynak şema adı açıkça geçiyor; gözden geçirin." ve üreticilerin uyarıları (ör. yetkilerin yeniden verilmesi).
+- `DiffResult.warnings`: şema adları farklıysa "Gövdelerdeki nitelikli adları gözden geçirin: …"; ana sürümler farklıysa "Kaynak PostgreSQL X, hedef Y: ifadeler hedef sürüme göre üretilir.". `DiffScript.warnings` ayrıca transaction'sız betik uyarısını ve üretici uyarılarını taşır.
+
+### 6.6 Kayıt defteri, ayrıntı ve betik
+
+- `MAX_READY = 8`: bellekte en çok 8 hazır karşılaştırma tutulur; en eskisi düşer ve ona yapılan istekler `diff_not_found` döner. Plan 30 sekme kapanınca ve yeni karşılaştırma başlayınca `schema_diff_close` çağırmalıdır.
+- Sayfa yenilenince (ve uygulama kapanırken) kayıt defteri temizlenir, çalışan işler iptal edilir; yenileme sonrası eski `diffId`'ler `diff_not_found` verir.
+- `DiffDetail.lines`: iki metnin satır toplamı `MAX_DIFF_LINES = 20_000`'i aşarsa `null`; arayüz `sourceText` ve `targetText`'i yan yana düz göstermelidir. Metinler hedef sürüm bağlamıyla üretilir ve iki yanda aynı biçimdedir.
+- `DiffScript`: `sql`, `transactional`, `warnings`, `risk` (en yüksek), `statements`. Betik yalnız seçime göre üretilir; seçim sırası önemsizdir, sıra §2.6'ya göre belirlenir (gidiş-dönüş testi anahtarları ters sırada verir). Başlıkta yalnız `veritabanı.şema` adları, hedef sürümü ve UTC zaman damgası vardır. `schema_diff_save` son başarıyla üretilen betiği yazar.
+- Karşılaştırma salt okunurdur; betik uygulanmaz. Uygulama Query Tool'un mevcut kapılarından geçer.
+
+### 6.7 Bilinen sınırlar (§5'e ek)
+
+- §5'teki sınırlar geçerlidir (bağımlılık tamamlama yok, yeniden adlandırma yok, bölüm / kalıtım çocuğu elle, `ALTER COLUMN TYPE` + bağımlı görünüm, gövdelerde açık şema adı, vb.).
+- **Yeniden kurma DROP'ları kendi oluşturma aşamasında kalır** (bağımlılık tamamlama yok, §2.6). Bu yüzden bağımlısı olan bir nesnenin yeniden kurulması uygulanırken hata verebilir: ör. dönüş tipi değişen bir fonksiyona bağlı görünüm, ya da bir FK'nın kaldırıldığı durumda o FK'nın başvurduğu yalnız-hedefteki tablonun silinmesi. Docker gidiş-dönüş fikstürü bu birleşimlerden kaçınır (yaprak görünüm farkı, bağımlısız dönüş tipi farkı).
+- **PG 12 öncesinde transaction'sız betik** (`ALTER TYPE … ADD VALUE`) tek çok-ifadeli basit sorgu olarak gönderilemez (sunucu örtük transaction bloğu açar ve "cannot run inside a transaction block" der). Gidiş-dönüş testi bu yüzden enum değeri farkını yalnız PG 12+'ta kurar.
+- **PG 12+'ta yeni enum değeri aynı betikte kullanılamaz.** `ALTER TYPE … ADD VALUE` transaction'lı betikte (`BEGIN; … COMMIT;`) çalışır, ama eklenen değer COMMIT'ten önce kullanılırsa (ör. aynı betikteki bir kolon varsayılanı, CHECK ya da görünüm sorgusu bu değeri anıyorsa) sunucu "unsafe use of new value" hatası verir. Betik bu kullanımları ayırmaz; böyle bir betik iki parçada (önce enum değişikliği) uygulanmalıdır.
+- **Silme aşaması yalnız görünüm/MV ve tablo bağımlılıklarını sıralar** (`DropView` hedefteki `pg_depend` sırasının tersiyle, `DropTable` FK'larla). Tip/domain arası bağımlılıklar (ör. bir domain'in temel aldığı tipin silinmesi) ve rutin ile tablo varsayılanı arasındaki bağımlılıklar (varsayılanı silinen fonksiyonu çağıran tablo) silmelerde sıralanmaz; silmeler varsayılan olarak seçili olmadığı için bu, kullanıcının bilerek seçtiği birleşimlerde hataya yol açabilir.
+- **Satır tipine bağlı rutinin taşınması tek yönlüdür** (§2.6 4.4 / 4.7). Taşınan rutini kullanan bir tablo varsayılanı ya da CHECK ifadesi (aynı betikte oluşturulan başka bir tabloda) tablolar aşamasında rutin henüz yokken çalışır ve hata verir; bu döngüsel birleşim elle sıralanmalıdır.
+- **Yeniden kurulan MV'nin yalnız değişmeyen indeksleri yeniden oluşturulur.** Aynı MV'nin farklı (`different`) indeks öğesi kendi üreticisiyle (`DROP INDEX` + `CREATE INDEX`, `ALTER INDEX` ya da `COMMENT`) değiştirilmeye çalışılır; DROP MATERIALIZED VIEW indeksi zaten düşürdüğü için bu öğe seçiliyse betik uygulanırken hata verir ve işlem geri alınır (takip işi: farklı MV indekslerini de kaynaktan yeniden oluşturmak). Yalnız kaynakta olan (`only_source`) indeks kendi öğesiyle MV'den sonra oluşturulur.
+
+### 6.8 Plan 30 için sözleşme notu: Query Tool'a aktarım
+
+`DiffScript.transactional == false` olduğunda (PG < 12 hedefte `ALTER TYPE … ADD VALUE` ya da başka transaction'sız ifade) betik tek çok-ifadeli sorgu olarak gönderilmemelidir: Query Tool bu ifadeleri **ayrı ayrı** (ifade başına) çalıştırmalıdır; betik başlığındaki uyarı ("Betik transaction'sız; hata olursa kısmen uygulanmış kalır.") önizlemede görünür tutulur. Transaction'lı betik (`BEGIN; … COMMIT;`) olduğu gibi çalıştırılabilir. Betik metni sekmeye çalıştırılmadan, taslak olarak konur.
+
+**İptal sırası:** `schema_diff_start` işi kayıt defterine ilk `await`'ten önce kaydeder ve iş bitene kadar dönmez; kayıttan **önce** gelen `schema_diff_cancel` (henüz bilinmeyen kimlik) hiçbir şey yapmaz ve sonra kaydolan iş iptal edilmeden sürer. İlk `onEvent` (ilerleme) bildirimi kaydın tamamlandığını kanıtlar. Plan 30 bu yüzden: ilk bildirim geldikten sonra iptali doğrudan `schema_diff_cancel` ile gönderir; ilk bildirimden önce istenen iptali bekletir ve ilk bildirim gelir gelmez gönderir; hiç bildirim gelmeden `start` dönerse (ör. `same_schema`, bağlantı hatası) sonucu yok sayar. `start` dönmeden kapatılan sekmede istemci aynı kuralla iptal eder, dönen sonucu yok sayıp `schema_diff_close` çağırır.

@@ -1,0 +1,6 @@
+---
+source: crates/pgt-diff/src/generate.rs
+expression: render(&g)
+---
+OwnedBy [Safe] ALTER SEQUENCE s.q OWNED BY s.t.id
+risk: Safe
