@@ -8,7 +8,8 @@ import {
   isNumericType, moveFocus, selRect, selectAll, selectCell, selectColumn, selectRow, selectionToTsv,
   type NavKey, type Selection, type TextMeasure,
 } from "./grid-model";
-import { LOAD_MORE_CHUNK, type StmtResult } from "./result-model";
+import { LOAD_MORE_CHUNK } from "./querytab-model";
+import type { StmtResult } from "./result-model";
 import { tgrid } from "./strings-grid";
 
 /** İki satırlı başlık: ad (12 px, satır 16) + tür (11 px, satır 14) + dikey boşluk. Satırlar 24 px kalır. */

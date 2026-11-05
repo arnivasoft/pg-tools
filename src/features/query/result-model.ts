@@ -12,9 +12,6 @@ export const USER_CANCEL_MESSAGE = "Sorgu kullanıcı tarafından iptal edildi."
 /** Bir sekmede bellekte tutulan en çok satır; aşılınca en eski ifadelerin satırları boşaltılır. */
 export const MAX_TAB_ROWS = 50_000;
 
-/** "Daha fazla yükle" parça boyutu (arka uç `qt_more` ile aynı). */
-export const LOAD_MORE_CHUNK = 1000;
-
 export type StmtStatus = "running" | "ok" | "failed" | "cancelled";
 
 /** `position`: ifade metnine göre 1 tabanlı karakter konumu; `charOffset`: ifadenin betikteki karakter ofseti. */
@@ -170,15 +167,3 @@ export function closeMore(state: ResultState): ResultState {
   return state.moreClosed ? state : { ...state, moreClosed: true };
 }
 
-/**
- * Arka uç her ifadeden önce önceki ızgara imlecini kapatır; açık kalabilecek tek imleç çalıştırmanın **son**
- * ifadesinindir. "Daha fazla" yalnızca: çalıştırma bitti (`scriptDone`), imleç kapatılmadı (`closeMore`), ifade
- * son ifade, `ok`, `more`, satırları atılmadı ve kendi satırları sınırın altında. Yeni çalıştırma yeni bir
- * `ResultState` (`emptyResult`) başlattığından eski ızgaralar için kendiliğinden false.
- */
-export function canLoadMore(state: ResultState, stmtIndex: number): boolean {
-  if (!state.done || state.moreClosed) return false;
-  const last = state.stmts[state.stmts.length - 1];
-  if (!last || last.index !== stmtIndex || last.status !== "ok") return false;
-  return last.more && !last.dropped && last.rows.length < MAX_TAB_ROWS;
-}

@@ -6,9 +6,9 @@ import type { TxMode } from "../../ipc/bindings/TxMode";
 import { Button } from "../../ui/Button";
 import { isProductionLabel } from "../servers/server-form";
 import type { TabModel } from "./query-controller";
-import { canCancel, canCommit, canRollback } from "./run-model";
 import { tqt } from "./strings-querytab";
-import { TIMEOUT_CHOICES, formatElapsed, serverLineColor } from "./workspace-model";
+import { TIMEOUT_CHOICES, canCancel, canCommit, canRollback, formatElapsed } from "./querytab-model";
+import { serverLineColor } from "./workspace-model";
 
 const selectClass =
   "h-7 rounded border border-border bg-bg px-1.5 text-[12px] outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:opacity-50";

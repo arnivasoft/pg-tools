@@ -86,7 +86,7 @@ describe("qualifiedParts / actionsFor", () => {
   it("Dashboard: bağlı sunucuda ve veritabanında var, bağlı olmayan sunucuda ve diğer düğümlerde yok", () => {
     expect(actionsFor(s, node(s, "srv-up"))).toContain("openDashboard");
     expect(actionsFor(s, node(s, "db-app"))).toEqual([
-      "openQueryTool", "openDashboard", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "restore", "dropObject",
+      "openQueryTool", "openDashboard", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "restore", "schemaDiff", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
     expect(actionsFor(s, node(s, "srv-down"))).not.toContain("openDashboard");
@@ -251,7 +251,7 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
   });
   it("nesnelerde editObject/renameObject/dropObject, Query Tool eylemlerinden sonra", () => {
     expect(actionsFor(s, node(s, "sch-app"))).toEqual([
-      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "dropObject",
+      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "schemaDiff", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
     expect(actionsFor(s, node(s, "idx-1"))).toEqual(["editObject", "renameObject", "maintenance", "dropObject", "copyName", "copyQualifiedName", "copyDdl"]);
@@ -449,7 +449,7 @@ describe("yetki eylemleri (Yetkiler… / Varsayılan yetkiler…)", () => {
       expect(des(id)).toEqual(["editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject"]);
     }
     expect(actionsFor(s, node(s, "sch-app"))).toEqual([
-      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "dropObject",
+      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "schemaDiff", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
   });
@@ -608,5 +608,48 @@ describe("Yedekle… / Geri yükle… (Plan 27)", () => {
   it("menü metinleri ana t.menu'de", () => {
     expect(t.menu.backup).toBe("Yedekle…");
     expect(t.menu.restore).toBe("Geri yükle…");
+  });
+});
+
+describe("schemaDiff (Plan 30)", () => {
+  const s = (() => {
+    const tree = sampleTree();
+    const add = (id: string, parent: string, kind: NodeKind, label: string, extra: Partial<TreeNode> = {}) => {
+      tree.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, color: null, tag: null, ...extra });
+      tree.parent.set(id, parent);
+      tree.children.set(parent, [...(tree.children.get(parent) ?? []), id]);
+    };
+    add("sch-sys", "db-app", "schema", "pg_catalog", { flags: { ...flags, system: true } });
+    return tree;
+  })();
+  const all = (id: string) => actionsFor(s, node(s, id));
+
+  it("şema ve veritabanı düğümünde var", () => {
+    expect(all("db-app")).toContain("schemaDiff");
+    expect(all("sch-app")).toContain("schemaDiff");
+  });
+  it("sistem şemasında, tabloda, sunucuda ve koleksiyonda yok", () => {
+    for (const id of ["sch-sys", "tbl-orders", "srv-up", "srv-down", "coll-tables"]) expect(all(id), id).not.toContain("schemaDiff");
+  });
+  it("sıra: backup, restore, schemaDiff, dropObject (veritabanı); backup, schemaDiff, dropObject (şema)", () => {
+    const pick = (id: string) => all(id).filter((x) => ["backup", "restore", "schemaDiff", "dropObject"].includes(x));
+    expect(pick("db-app")).toEqual(["backup", "restore", "schemaDiff", "dropObject"]);
+    expect(pick("sch-app")).toEqual(["backup", "schemaDiff", "dropObject"]);
+  });
+  it("grup 3; kilitli sunucuda açık", () => {
+    expect(groupOf("schemaDiff")).toBe(3);
+    const locked = sampleTree();
+    const srv = locked.nodes.get("srv-up")!;
+    locked.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
+    expect(disabledReason("schemaDiff", { state: () => locked } as unknown as ActionDeps, "db-app")).toBeNull();
+    expect(disabledReason("schemaDiff", { serverLocked: () => true } as unknown as ActionDeps, "db-app")).toBeNull();
+  });
+  it("executeAction openSchemaDiff(id) çağırır", async () => {
+    const d = { ...deps(s), openSchemaDiff: vi.fn() };
+    await executeAction(d as unknown as ActionDeps, "schemaDiff", "sch-app");
+    expect(d.openSchemaDiff.mock.calls).toEqual([["sch-app"]]);
+  });
+  it("menü metni", () => {
+    expect(t.menu.schemaDiff).toBe("Şema karşılaştır…");
   });
 });

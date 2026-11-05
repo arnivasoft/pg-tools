@@ -62,6 +62,7 @@ export const t = {
     maintenance: "Bakım…",
     backup: "Yedekle…",
     restore: "Geri yükle…",
+    schemaDiff: "Şema karşılaştır…",
     dropObject: "Sil…",
     gone: "Bu öğe artık yok.",
     disconnected: "Bağlantı kesildi.",

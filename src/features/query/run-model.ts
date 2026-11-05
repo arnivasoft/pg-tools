@@ -3,7 +3,7 @@
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { QueryEvent } from "../../ipc/bindings/QueryEvent";
 import type { TxState } from "../../ipc/bindings/TxState";
-import { applyEvent, canLoadMore, closeMore, emptyResult, type ResultState } from "./result-model";
+import { applyEvent, closeMore, emptyResult, type ResultState } from "./result-model";
 
 /**
  * - `noSession`: oturum yok (henüz açılmadı ya da açılamadı)
@@ -80,25 +80,6 @@ export function runReduce(state: RunState, ev: RunEvent): RunState {
     case "optionsChanged":
       return state.result ? { ...state, result: closeMore(state.result) } : state;
   }
-}
-
-/** İptal her basışta yeniden gönderilir (PG arada geleni yok sayabilir); `cancelling`'de de basılabilir. */
-export function canCancel(s: RunState): boolean {
-  return isRunning(s.status);
-}
-
-/** `Failed` transaction'da COMMIT reddedilir (`tx_failed`). */
-export function canCommit(s: RunState): boolean {
-  return s.status === "idle" && s.tx === "inTransaction";
-}
-
-export function canRollback(s: RunState): boolean {
-  return s.status === "idle" && (s.tx === "inTransaction" || s.tx === "failed");
-}
-
-/** "Daha fazla" düğmesi: oturum boşta ve ifade son çalıştırmada `canLoadMore` koşullarını sağlıyor. */
-export function canLoadMoreRows(s: RunState, stmtIndex: number): boolean {
-  return s.status === "idle" && !!s.result && s.result.runId === s.runId && canLoadMore(s.result, stmtIndex);
 }
 
 /** Açık ya da hatalı transaction varken sekme kapanışı onay ister. */

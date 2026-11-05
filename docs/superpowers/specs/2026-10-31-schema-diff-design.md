@@ -1,7 +1,7 @@
 # pg-tools — Şema Karşılaştırma (Schema Diff) Tasarımı
 
 - **Tarih:** 2026-10-31
-- **Durum:** Plan 29 arka ucu uygulandı; Plan 30 ön yüzü bekliyor
+- **Durum:** Plan 29 arka ucu tamam; Plan 30 ön yüzü uygulandı (feat/schema-diff-ui); elle kontrol bekliyor (`docs/smoke-test.md` "Şema karşılaştırma (Plan 30)")
 - **Kapsam:**
   - İki şemanın yapısı karşılaştırılır: kaynak (sunucu → veritabanı → şema) ve hedef (sunucu → veritabanı → şema). Sunucular, veritabanları ve şema adları farklı olabilir.
   - Farklar nesne nesne listelenir ve her nesnenin iki taraftaki DDL'i satır satır gösterilir.
@@ -287,3 +287,73 @@ Tek varyant: `{ "event": "progress", "side": "source" | "target", "loaded": n, "
 `DiffScript.transactional == false` olduğunda (PG < 12 hedefte `ALTER TYPE … ADD VALUE` ya da başka transaction'sız ifade) betik tek çok-ifadeli sorgu olarak gönderilmemelidir: Query Tool bu ifadeleri **ayrı ayrı** (ifade başına) çalıştırmalıdır; betik başlığındaki uyarı ("Betik transaction'sız; hata olursa kısmen uygulanmış kalır.") önizlemede görünür tutulur. Transaction'lı betik (`BEGIN; … COMMIT;`) olduğu gibi çalıştırılabilir. Betik metni sekmeye çalıştırılmadan, taslak olarak konur.
 
 **İptal sırası:** `schema_diff_start` işi kayıt defterine ilk `await`'ten önce kaydeder ve iş bitene kadar dönmez; kayıttan **önce** gelen `schema_diff_cancel` (henüz bilinmeyen kimlik) hiçbir şey yapmaz ve sonra kaydolan iş iptal edilmeden sürer. İlk `onEvent` (ilerleme) bildirimi kaydın tamamlandığını kanıtlar. Plan 30 bu yüzden: ilk bildirim geldikten sonra iptali doğrudan `schema_diff_cancel` ile gönderir; ilk bildirimden önce istenen iptali bekletir ve ilk bildirim gelir gelmez gönderir; hiç bildirim gelmeden `start` dönerse (ör. `same_schema`, bağlantı hatası) sonucu yok sayar. `start` dönmeden kapatılan sekmede istemci aynı kuralla iptal eder, dönen sonucu yok sayıp `schema_diff_close` çağırır.
+
+---
+
+## 7. Plan 30 uygulama notları
+
+Plan: `docs/superpowers/plans/2026-10-31-schema-diff-p30-on-yuz.md` (dal `feat/schema-diff-ui`). Elle kontrol: `docs/smoke-test.md` "Şema karşılaştırma (Plan 30)"; testler: `docs/testing.md` "Şema karşılaştırma ön yüzü testleri (Plan 30)".
+
+### 7.1 Kararların özeti
+
+1. **Menü:** "Şema karşılaştır…" (`schemaDiff`, grup 3) sistem dışı şema ve veritabanı düğümlerinde görünür; karşılaştırma salt okunur olduğundan kilitli sunucuda da açıktır. Sıra: `…, backup, restore, schemaDiff, dropObject`.
+2. **Sekme:** her menü çağrısı yeni sekme açar (`s` önekli kimlik, kayıt `DiffTab { id, title }`). Başlık tembel parçada üretilir ve karşılaştırma bitince "‹kaynakDb›.‹kaynakŞema› ↔ ‹hedefDb›.‹hedefŞema›" olur. Sekmeler kalıcı değildir.
+3. **Tembel üç kat:** ana pakette yalnız menü eylemi, sekme kaydı ve `diff-open` yükleyicisi (`once(() => import(…))`, boşta ısıtma listesinde değil) vardır. `DiffTabs` (sekme başlıkları + denetleyici + açıcı; `solid-js`, `solid-js/store`, `strings-diff`, fark modülleri ve yalnız ana pakette zaten bulunan `server-form`, `ipc/errors`, `app/clipboard` (pano, `diff-opener.ts`) ve `@tauri-apps/api/core` (`Channel`)) → `SchemaDiffView` (`lazy`; `ui/*`, `RiskBadge`, `lucide-solid`, sanallaştırma) → `ScriptDialog` (`lazy`; `Dialog`, CodeMirror, `plugin-dialog`). Böylece `QueryTabs`'taki `import()`'ın `__vite__mapDeps` listesi yalnız `DiffTabs` ile rolldown çalışma zamanı kadar büyür.
+4. **Seçiciler ve giriş noktası:** sunucu listesi denetleyicinin `servers()` erişimcisidir (görünümler yalnız fark denetleyicisini alır). Sunucu seçimi gerekirse parola ister; seçici yanıtları kuşak sayacıyla korunur; üst seçici değişince alttakiler sıfırlanır. Şema düğümünden açılışta kaynak dolu, hedef aynı veritabanında şemasız; veritabanı düğümünden açılışta kaynak şeması boştur.
+5. **Aynı şema:** sunucu, veritabanı ve şema eşitse "Karşılaştır" kapalıdır; arka ucun `same_schema` kodu aynı metne eşlenir.
+6. **Bayat sonuç:** sonuç varken (ya da karşılaştırma sürerken) seçici veya seçenek değişirse sonuç bayattır (`stale = true`; çalışırken değişiklik de sonucu bayat getirir, çünkü sonuç artık seçimlerle eşleşmez). Liste görünür kalır, "Seçimler değişti; yeniden karşılaştırın." şeridi görünür, "Betik oluştur" kapanır.
+7. **Çalıştırma ve iptal:** `diffId = crypto.randomUUID()`; önceki `diffId` önce kapatılır. `start`'tan önce iki tarafın sunucusuna bağlanılır (7.4). İptal ve kapatma §6.8 iptal sırasına uyar: ilk `onEvent`'ten önce istenen iptal hemen bir kez gönderilir, ayrıca bekletilir ve ilk olayda yeniden gönderilir (en çok iki çağrı); olaydan sonra doğrudan gönderilir; olay gelmeden `start` dönerse bekleyen iptal düşer. Çalışırken kapatılan sekmede `start` dönünce `schemaDiffClose` çağrılır. Kısmi sonuç yoktur.
+8. **Liste:** her öğe tek kategoridedir ("Sorunlu" durumdan baskın); varsayılan filtre "Aynı" dışındakilerdir; arama `tr-TR` katlamasıyla tür etiketi, tablo, ad ve imzada arar; sıra arka ucun sırasıdır.
+9. **Seçim:** ilk seçim `defaultSelected`'dır; "Tümü" ve "Görünenler" üç durumlu kutulardır. **Gizlenen seçili öğeler betiğe girer**; özet "N seçili (M görünmüyor)" olarak bunu gösterir.
+10. **Ayrıntı:** odaklanan öğe 120 ms gecikmeyle istenir ve `diffId` başına önbelleğe alınır; birleşik satır farkında renk tek başına bilgi değildir (`+`/`−` işaret sütunu); 20.000 satır üstünde iki sütunlu düz görünüm.
+11. **Betik önizleme:** risk rozeti, ifade sayısı, transaction bilgisi, uyarılar ve salt okunur CodeMirror. Üretim ve kilit hedef bantları yalnız bilgidir; sekme ek kapı koymaz, çalıştırma Query Tool'un risk/kilit kapılarından geçer. "Query Tool'da aç" betiği hedefte yeni sekmeye çalıştırmadan koyar.
+12. **Kayıttan düşmüş sonuç:** ayrıntı, betik ya da kaydetme `diff_not_found` alırsa sonuç temizlenir ve "Sonuç artık yok (en fazla 8 karşılaştırma tutulur ya da sayfa yenilendi); yeniden karşılaştırın." şeridi görünür.
+13. **Kapsam dışı:** betiğin sekmeden uygulanması, sekme kalıcılığı, sonucun dışa aktarılması, öğe başına "yalnız bunu betikle" kısayolu, F5 ile yeniden karşılaştırma.
+
+### 7.2 Uygulama sırasında verilen kararlar
+
+- **İptal sırası:** plan metni yalnız `schemaDiffCancel` diyordu; denetleyici bağlayıcı §6.8 iptal sırasını uygular (7.1 madde 7).
+- **Çalışırken değişiklik:** karşılaştırma sürerken seçim ya da seçenek değişirse dönen sonuç `stale = true` gelir (plan özeti `false` diyordu).
+- **`servers()`:** `DiffTabCtl`'e `servers(): ServerConfig[]` erişimcisi eklendi; görünümler yalnız fark denetleyicisini alır (tembel parçada, ana pakete maliyeti yok).
+- **`riskTone` kaldırıldı:** plan arayüzünde vardı ama kullanılmıyordu (ölü kod).
+- **`createStore` kaldı:** sekme başına store hataya daha az açıktır; yeni dışa aktarma adının ana paketteki ~8 B'lık bedeli 7.3'te telafi edildi.
+- **Transaction'sız betik (§6.8):** Query Tool ifadeleri zaten birer birer çalıştırır (`crates/pgt-query/src/exec.rs` başlığı); `transactional == false` betik için ek iş gerekmedi, betik başlığındaki uyarı önizlemede görünür.
+
+### 7.3 Paket ölçümleri ve telafi kaydı
+
+`bun run bundle:check` ile ölçüldü (bayt):
+
+| Ölçüm | Plan 30 öncesi tavan | Task 1–4 sonu | Telafi sonrası (yeni tavan) |
+|---|---|---|---|
+| Ana paket | 127,333 | 128,666 (+1,333) | 127,314 |
+| Açılış kümesi | 155,006 | 156,339 (+1,333) | 154,987 |
+| `__vite__mapDeps` girdisi | — | 39 | 39 |
+
+Artışın kaynağı: Task 1 +1,301 (menü eylemi, `tabs-store` fark listesi / `openSchemaDiff` / `isDiffTabId`, `QueryTabs` bağlantısı, `App` yükleyicisi, `t.menu.schemaDiff`); Task 3 +16 (`createStore` yeni dışa aktarma adı, `Channel` ve `diff-commands`'ın `DiffTabs` parçasına çekilmesi); Task 4 +16 (rolldown yükleyicisi `.then(e => e.t)` ve `__vite__mapDeps`'te `rolldown-runtime`, çünkü tembel `SchemaDiffView` `DiffTabs` parçasından içe aktarır).
+
+Tembel parçalar: `DiffTabs` 18,012 B, `SchemaDiffView` 22,536 B, `ScriptDialog` 3,572 B, `diff-open` 1,464 B.
+
+Telafi (yalnız tembel parçaların kullandığı kod ana paket modüllerinden o parçaya özel modüllere taşındı; davranış ve metinler aynı, testler yeni modüllerden içe aktarır):
+
+| Adım | Taşınan / değişen | Ana paket | Fark |
+|---|---|---|---|
+| 1 | `workspace-model.ts` → yeni `env-model.ts` (yalnız `tx-dialogs`): `ENV_CHOICES`, `envLockDefault`, `canCommitAny` (`envLabel` `applyEnvChoice`'ta kullanıldığı için kaldı) | 128,474 | −192 |
+| 2 | `workspace-model.ts` → yeni `querytab-model.ts` (yalnız QueryTab parçası): `TIMEOUT_CHOICES`, `formatElapsed`, `sameScope`, `swapEditorState`/`SavedView` | 128,007 | −467 |
+| 3 | `run-model.ts` `canCancel`, `canCommit`, `canRollback`, `canLoadMoreRows` ve `result-model.ts` `canLoadMore` (yalnız `canLoadMoreRows` kullanıyordu), `LOAD_MORE_CHUNK` → `querytab-model.ts` | 127,525 | −482 |
+| 4 | `tabs-store.ts`: beş açma işlevindeki kimlik döngüsü tek `freeId` yardımcısına toplandı | 127,457 | −68 |
+| 5 | `tabs-store.ts`: store sarmalayıcısındaki açma yöntemleri `opener`/`reopener` yardımcılarıyla kuruldu | 127,328 | −129 |
+| 6 | `QueryTabs.tsx`: `closeDiff` `requestClose` içine alındı | 127,314 | −14 |
+
+Taşınmayanlar: `isUserCancel` (`result-model.ts` içinde kullanılıyor), `MAX_TAB_ROWS` (dosya içinde kullanılıyor), `t.query.ctx` anahtarları (`openTx`, `failedTx`, `locked`, `running` `QueryTabs.tsx`'te, `noServer` `workspace-model.ts`'te kullanılıyor; taşınacak anahtar yok), `errorText` (son çare; gerek kalmadı). Tembel parçalar büyüdü: QueryTab 117,511 → 118,349 B, `tx-dialogs` 5,110 → 5,263 B. Tavanlar ölçülen değerlere indirildi (sıfır pay).
+
+### 7.4 Son inceleme düzeltme turu
+
+- **Karşılaştırmada bağlantı (§2.7):** `compare` `phase = "running"`'i yazıp (kapı çift tıklamayı engeller) `schemaDiffStart`'tan önce kaynak ve hedef sunucusu için `deps.connect`'i (sunucu başına bir kez, sırayla; gerekirse parola istemi) çağırır. `false` ya da hata → "Sunucuya bağlanılamadı.", `start` yok. Her `await` sonrası sekme kapandıysa `start` yok (iptal/kapatma IPC'si de yok); bağlanırken iptal istendiyse `start` yok ve "İptal edildi.". `not_connected`, `connection_lost`, `unknown_server` sabit Türkçe metinlere eşlenir.
+- **İptal:** `start` çağrıldıktan sonra, ilk olaydan önce istenen iptal hemen de bir kez gönderilir (bilinmeyen kimlikte etkisiz); bekleyen iptal ilk olayda yine gönderilir (en çok iki çağrı).
+- **Karşılaştırılan hedef:** modelde `comparedTarget` (başlarken alınan anlık görüntü); betik diyaloğunun üretim/kilit bandı seçiciyi değil bunu okur.
+- **"Query Tool'da aç":** `QueryController.openScript` `Promise<void>` döner ve başarıyı bildirmez; dönüş değeri eklemek ana pakete bayt eklerdi (sıfır pay). Ölü `catch` kaldırıldı, diyalog yine kapanır; sınır denetleyicide belgelendi ve elle kontrol listesinde izlenir.
+- **Silinmiş sunucu:** `compareBlocked` bir `known` yüklemi alır; `servers()`'ta olmayan sunucuyu tutan taraf eksik sayılır (görünüm ve denetleyici aynı kapıyı kullanır).
+- **Erişilebilirlik:** Karşılaştır/İptal tek düğmedir (etiket değişir, odak kaybolmaz; İptal `aria-disabled`, çift tıklamanın ikinci tıklaması iptal etmez); ayrıntı başlığındaki hata bloğu rolsüz, ayrıntı yükleme hatası `role="status"`.
+- **Parça yükleme hatası:** `diff-open` ham tarayıcı iletisi yerine `t.app.chunkLoadFailed` gösterir.
+- **Dosya adı:** `suggestScriptName` kesimden sonra sondaki boşluk ve noktaları atar.
+- **Paket:** ana paket 127,314 B, açılış kümesi 154,987 B, `__vite__mapDeps` 39 (değişmedi; tavanlar aynı).

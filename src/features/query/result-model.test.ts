@@ -6,13 +6,13 @@ import {
   MAX_TAB_ROWS,
   USER_CANCEL_MESSAGE,
   applyEvent,
-  canLoadMore,
   closeMore,
   emptyResult,
   isUserCancel,
   totalRows,
   type ResultState,
 } from "./result-model";
+import { canLoadMore } from "./querytab-model";
 
 const col = [{ name: "a", typeName: "int4", typeOid: 23, typeDisplay: "integer" }];
 const started = (i: number, kind: "select" | "write" = "select"): QueryEvent => ({

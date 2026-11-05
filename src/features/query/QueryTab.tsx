@@ -46,10 +46,10 @@ import { ResultStrip } from "./ResultStrip";
 import { looksLikePlanResult } from "./plan-model";
 import { PlanView } from "./PlanView";
 import { MAX_TAB_ROWS } from "./result-model";
-import { canCancel, canCommit, canLoadMoreRows, canRollback } from "./run-model";
 import { tplan } from "./strings-plan";
 import { isQueryTabId } from "./tabs-store";
-import { routeError, sameScope, swapEditorState, type SavedView } from "./workspace-model";
+import { canCancel, canCommit, canLoadMoreRows, canRollback, sameScope, swapEditorState, type SavedView } from "./querytab-model";
+import { routeError } from "./workspace-model";
 
 /** Arka uç geçmiş sınırı (`MAX_HISTORY`). */
 const HISTORY_MAX = 500;

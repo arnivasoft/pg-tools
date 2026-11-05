@@ -1,17 +1,17 @@
 // Sorgu çalışma alanı kararları (saf): açma bağlamı, ortam istemi, kapanış/çıkış diyalogları, hata yönlendirme,
-// taslak dönüşümü ve debounce, sekme ↔ editör durumu defteri. CodeMirror/ızgara içe aktarmaz (ana pakette kalır).
+// taslak dönüşümü ve debounce. CodeMirror/ızgara içe aktarmaz (ana pakette kalır). Yalnız tembel parçaların kullandığı
+// yardımcılar `env-model.ts` (tx-dialogs) ve `querytab-model.ts`'tedir (QueryTab; Plan 30 ana paket telafisi).
 import { t } from "../../app/strings";
 import type { ClosePolicy } from "../../ipc/bindings/ClosePolicy";
 import type { DraftTab } from "../../ipc/bindings/DraftTab";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { NodeKind } from "../../ipc/bindings/NodeKind";
-import type { Scope } from "../../ipc/bindings/Scope";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { SessionOptions } from "../../ipc/bindings/SessionOptions";
 import type { TxState } from "../../ipc/bindings/TxState";
 import { qualifiedParts } from "../explorer/actions";
 import { ancestorOfKind, serverOf, type TreeState } from "../explorer/tree-model";
-import { isProductionLabel, suggestLock } from "../servers/server-form";
+import { isProductionLabel } from "../servers/server-form";
 import { canOpenQueryTool } from "./open-kinds";
 import { closeChoices, type CloseChoice, type RunState } from "./run-model";
 
@@ -60,12 +60,9 @@ export function defaultOptions(label: string | null | undefined): SessionOptions
   return { mode: isProductionLabel(label) ? "manual" : "autocommit", statementTimeoutMs: 0 };
 }
 
-export const TIMEOUT_CHOICES = [30_000, 300_000, 0] as const;
-
 // ---------------------------------------------------------------- Ortam istemi
 
 export type EnvChoice = "production" | "test" | "development";
-export const ENV_CHOICES: readonly EnvChoice[] = ["production", "test", "development"];
 
 export function envLabel(choice: EnvChoice): string {
   const [prod, test, dev] = t.server.labelSuggestions;
@@ -75,11 +72,6 @@ export function envLabel(choice: EnvChoice): string {
 /** Etiketsiz sunucuda (ve daha önce "Atla" denmemişse) açılışta ortam sorulur. */
 export function needsEnvPrompt(config: Pick<ServerConfig, "id" | "label">, skipped: ReadonlySet<string>): boolean {
   return (config.label ?? "").trim() === "" && !skipped.has(config.id);
-}
-
-/** Seçime göre önerilen kilit (sunucu formundaki `suggestLock` ile aynı kural). */
-export function envLockDefault(config: Pick<ServerConfig, "label" | "readOnlyLock">, choice: EnvChoice): boolean {
-  return suggestLock(config.label ?? "", envLabel(choice), config.readOnlyLock, false);
 }
 
 export function applyEnvChoice(config: ServerConfig, choice: EnvChoice, lock: boolean): ServerConfig {
@@ -157,11 +149,6 @@ export function pendingTransactions(tabs: TabTxInfo[], serverId?: string): Pendi
     .map((x) => ({ id: x.id, title: x.title, tx: x.run.tx, busy: isRunning(x.run) }));
 }
 
-/** "Tümünü kaydet" yalnızca en az bir sekme COMMIT edilebiliyorsa sunulur. */
-export function canCommitAny(list: PendingTx[]): boolean {
-  return list.some((p) => p.tx === "inTransaction" && !p.busy);
-}
-
 /** Toplu seçimde sekme başına politika: hatalı ya da meşgul sekme her durumda geri alınır. */
 export function bulkPolicy(p: PendingTx, choice: "commit" | "rollback"): ClosePolicy {
   return choice === "commit" && p.tx === "inTransaction" && !p.busy ? "commit" : "rollback";
@@ -190,10 +177,6 @@ export function routeError(e: Pick<ErrorPayload, "code">): ErrorRoute {
     default:
       return "message";
   }
-}
-
-export function sameScope(a: Scope | null, b: Scope | null): boolean {
-  return a !== null && b !== null && JSON.stringify(a) === JSON.stringify(b);
 }
 
 // ---------------------------------------------------------------- Taslaklar
@@ -292,42 +275,6 @@ export function nextTxSince(prev: TxState, next: TxState, since: number | null, 
   if (next === "idle") return null;
   if (prev === "idle" || since === null) return now;
   return since;
-}
-
-export function formatElapsed(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  const p = (n: number) => String(n).padStart(2, "0");
-  return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
-}
-
-// ---------------------------------------------------------------- Sekme ↔ editör durumu
-
-export interface SavedView<S> {
-  state: S;
-  scrollTop: number;
-  scrollLeft: number;
-}
-
-/**
- * Tek editör, sekme başına bir durum. `from` sekmesinin anlık durumu kaydedilir; `to` için kayıtlı durum ya da
- * `create()` döner. Aynı sekmeye dönüşte yalnızca kaydırma geri yüklenir (durum değişmez).
- */
-export function swapEditorState<S>(
-  book: Map<string, SavedView<S>>,
-  from: string | null,
-  current: SavedView<S> | null,
-  to: string,
-  create: () => S,
-): SavedView<S> {
-  if (from !== null && current !== null) book.set(from, current);
-  const saved = book.get(to);
-  if (saved) return saved;
-  const fresh = { state: create(), scrollTop: 0, scrollLeft: 0 };
-  book.set(to, fresh);
-  return fresh;
 }
 
 /** Sekme/şerit üst çizgisinin rengi: sunucu rengi; renk yoksa üretimde tehlike rengi, değilse yok. */
