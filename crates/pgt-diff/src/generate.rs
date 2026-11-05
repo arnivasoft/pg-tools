@@ -73,6 +73,12 @@ pub struct GenFailure {
 
 const MANUAL_MSG: &str = "Fark üreticiyle ifade edilemiyor.";
 const REDACTED_MSG: &str = "Gizli değer içeren ifade betiğe alınamaz.";
+/// Üreticilerin "yetkiler yeniden verilmeli" uyarıları (görünüm, rutin, MV yeniden kurma).
+const REGRANT_WARNINGS: [&str; 3] = [
+    build::view::RECREATE_GRANT_WARNING,
+    build::routine::RECREATE_GRANT_WARNING,
+    build::matview::GRANT_WARNING,
+];
 const KIND_CHANGED_NOTE: &str = "Tür değişti: hedefteki nesne silinip yeniden oluşturulur";
 const RECREATE_NOTE: &str = "Yeniden kurulacak (DROP + CREATE)";
 
@@ -259,7 +265,12 @@ impl Acc {
     }
 
     /// Aynı türde fark; nesne DROP + CREATE ile yeniden kuruluyorsa `true` döner.
-    fn alter_same_kind(&mut self, s: &ObjectDef, t: &ObjectDef, ctx: &BuildCtx) -> bool {
+    fn alter_same_kind(
+        &mut self,
+        s: &ObjectDef,
+        t: &ObjectDef,
+        ctx: &BuildCtx,
+    ) -> Result<bool, GenFailure> {
         match (s, t) {
             (ObjectDef::Table(d), ObjectDef::Table(old)) => {
                 self.dropped_columns = old
@@ -300,7 +311,7 @@ impl Acc {
                 if !added.is_empty() {
                     self.plan(Phase::ForeignKeys, fk_add_plan(&no_fk, &added, ctx));
                 }
-                false
+                Ok(false)
             }
             (ObjectDef::Sequence(d), ObjectDef::Sequence(old)) => {
                 let mut mid = d.clone();
@@ -313,7 +324,7 @@ impl Acc {
                 if differs {
                     self.plan(Phase::OwnedBy, build::alter(&mid, s, ctx));
                 }
-                false
+                Ok(false)
             }
             (ObjectDef::View(d), ObjectDef::View(old)) => {
                 let mut d = d.clone();
@@ -323,11 +334,11 @@ impl Acc {
                     push_unique(&mut self.notes, RECREATE_NOTE);
                 }
                 self.plan(Phase::Views, build::alter(t, &ObjectDef::View(d), ctx));
-                rebuilt
+                Ok(rebuilt)
             }
             (ObjectDef::MaterializedView(d), ObjectDef::MaterializedView(old)) => {
                 self.plan(Phase::Views, build::alter(t, s, ctx));
-                d.query != old.query
+                Ok(d.query != old.query)
             }
             (ObjectDef::Function(d), ObjectDef::Function(old))
             | (ObjectDef::Procedure(d), ObjectDef::Procedure(old)) => {
@@ -344,17 +355,12 @@ impl Acc {
                     ObjectDef::Procedure(d)
                 };
                 self.plan(Phase::Routines, build::alter(t, &new, ctx));
-                rebuilt
+                Ok(rebuilt)
             }
             _ => {
-                match create_phase(s.kind()) {
-                    Some(phase) => self.plan(phase, build::alter(t, s, ctx)),
-                    None => self.errors.push(FieldError {
-                        path: "kind".into(),
-                        message: MANUAL_MSG.into(),
-                    }),
-                }
-                false
+                let phase = create_phase(s.kind()).ok_or_else(|| manual(MANUAL_MSG))?;
+                self.plan(phase, build::alter(t, s, ctx));
+                Ok(false)
             }
         }
     }
@@ -452,7 +458,7 @@ pub fn generate(
             push_unique(&mut a.notes, KIND_CHANGED_NOTE);
             true
         }
-        (ItemStatus::Different, Some(s), Some(t)) => a.alter_same_kind(s, t, ctx),
+        (ItemStatus::Different, Some(s), Some(t)) => a.alter_same_kind(s, t, ctx)?,
         _ => return Err(manual(MANUAL_MSG)),
     };
     // Yetkiler: sahiplik seçeneği açıksa kaynak ACL yüklüdür.
@@ -477,6 +483,11 @@ pub fn generate(
                 Phase::Privileges,
                 build::acl::privileges(ctx, &old, &new, false),
             );
+            // Yeniden kurulan nesnenin yetkileri Privileges aşamasında zaten veriliyor.
+            if recreated && a.parts.iter().any(|(ph, _)| *ph == Phase::Privileges) {
+                a.warnings
+                    .retain(|w| !REGRANT_WARNINGS.contains(&w.as_str()));
+            }
         }
     }
     a.finish()
@@ -1230,6 +1241,37 @@ mod tests {
         p.target_acl = Some(a);
         let g = gen_ok(&p, 160000);
         assert_eq!(sql_of(&g, Phase::Privileges).len(), 1);
+        // Yetkiler zaten Privileges aşamasında veriliyor: üreticinin uyarısı düşer.
+        assert!(
+            g.warnings.iter().all(|w| !w.contains("yetkiler (GRANT)")),
+            "{:?}",
+            g.warnings
+        );
+    }
+
+    #[test]
+    fn yeniden_kurulan_gorunumde_yetki_secenegi_kapaliysa_uyari_kalir() {
+        let p = prep(
+            ItemStatus::Different,
+            Some(ObjectDef::View(view("SELECT 2 AS a"))),
+            Some(ObjectDef::View(view("SELECT 1 AS a"))),
+        );
+        let g = gen_ok(&p, 160000);
+        assert!(g.warnings.iter().any(|w| w.contains("yetkiler (GRANT)")));
+    }
+
+    #[test]
+    fn bilinmeyen_tur_manual() {
+        let sch = || {
+            ObjectDef::Schema(pgt_ddl::SchemaDef {
+                name: "x".into(),
+                owner: None,
+                comment: None,
+            })
+        };
+        let p = prep(ItemStatus::Different, Some(sch()), Some(sch()));
+        let e = generate(&p, &ctx(160000), "app").unwrap_err();
+        assert_eq!(e.problem, ItemProblem::Manual);
     }
 
     #[test]
