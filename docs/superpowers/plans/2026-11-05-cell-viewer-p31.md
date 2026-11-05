@@ -2,28 +2,29 @@
 
 > **Ajan çalıştırıcılar için:** ZORUNLU ALT-BECERİ: superpowers:subagent-driven-development (önerilen) ya da superpowers:executing-plans ile görev görev uygulayın. Adımlar `- [ ]` ile izlenir.
 
-**Hedef:** Query Tool hücre paneline biçim sekmeleri: **Metin**, **Onaltılık**, **Görsel**, **JSON**, **HTML**, **PDF**. JSON ve HTML biçimlendirilir ve sözdizimi renklendirilir; HTML korumalı iframe'de önizlenebilir; PDF varsayılan uygulamada açılır ya da kaydedilir. Sekme sütun türü ve içerikten kendiliğinden seçilir, elle seçim sütun başına hatırlanır.
+**Hedef:** Query Tool hücre paneline biçim sekmeleri: **Metin**, **Onaltılık**, **Görsel**, **JSON**, **XML**, **HTML**, **PDF**. JSON, XML ve HTML biçimlendirilir ve sözdizimi renklendirilir; HTML korumalı iframe'de önizlenebilir; PDF varsayılan uygulamada açılır ya da kaydedilir. Sekme sütun türü ve içerikten kendiliğinden seçilir, elle seçim sütun başına hatırlanır.
 
 **Mimari:**
 - `CellPanel` zaten tembel QueryTab parçasındadır (`QueryTabs.tsx:23`). Sekme çubuğu, saf model (`cell-view-model.ts`) ve metinler (`strings-cell.ts`) o parçaya eklenir; ana pakete girmez.
-- Metin dışındaki görünümler yeni tembel parçadadır: `CellViewers.tsx` (Onaltılık, Görsel, JSON/HTML kabı, PDF) + `cell-format.ts` (saf çözme/biçimleme) + `cell-code.ts` (salt okunur CodeMirror) + `cell-ipc.ts`. `@codemirror/lang-json` ve `@codemirror/lang-html` yalnız `cell-code.ts`'teki dinamik `import()` ile, ayrı parçalarda yüklenir.
+- Metin dışındaki görünümler yeni tembel parçadadır: `CellViewers.tsx` (Onaltılık, Görsel, JSON/HTML kabı, PDF) + `cell-format.ts` (saf çözme/biçimleme) + `cell-code.ts` (salt okunur CodeMirror) + `cell-ipc.ts`. `@codemirror/lang-json`, `@codemirror/lang-xml` ve `@codemirror/lang-html` yalnız `cell-code.ts`'teki dinamik `import()` ile, ayrı parçalarda yüklenir.
 - Tek arka uç ekleme: `src-tauri/src/cell.rs` — `cell_open_pdf` (geçici dosya + varsayılan uygulama) ve `cell_save_bytes` (Kaydet…); geçici dosyaların açılış/kapanış temizliği.
 - Ana pakete tek ekleme: `commands.ts`'teki `call` yardımcısının dışa aktarılması (sarıcılar `commands`'a eklenmez). Bu bayt Task 7'de telafi edilir.
 
-**Teknoloji:** SolidJS, `@tanstack/solid-virtual` (mevcut), CodeMirror 6 (mevcut + iki yeni dil paketi), `@tauri-apps/plugin-dialog` (mevcut; `save`), vitest (`node` ortamı); Rust yalnız `src-tauri/src/cell.rs` + `main.rs`.
+**Teknoloji:** SolidJS, `@tanstack/solid-virtual` (mevcut), CodeMirror 6 (mevcut + üç yeni dil paketi), `@tauri-apps/plugin-dialog` (mevcut; `save`), vitest (`node` ortamı); Rust yalnız `src-tauri/src/cell.rs` + `main.rs`.
 
 **Spec:** `docs/superpowers/specs/2026-11-05-cell-viewer-design.md`. Bağlayıcı olanlar: §2.1 uygulanabilirlik tablosu ve seçim önceliği, §2.2 görünümler (iframe ve CSP meta kuralları), §2.3 biçimleyici kuralları ve bağımlılık sürümleri, §2.4 komutlar ve geçici dosya yaşam döngüsü, §2.5 sınır tablosu, §2.8 spec düzeltmeleri. Paket kuralları: `docs/testing.md` "Ana paket bütçesi". Emsal: Plan 27 (`docs/superpowers/plans/2026-10-31-backup-p27-on-yuz.md`; `backup_reveal`, `picker.ts`, telafi görevi).
 
 ## Kararlar
 
-1. **Sekmeler ve sıra:** `text`, `hex`, `image`, `json`, `html`, `pdf` (etiketler "Metin", "Onaltılık", "Görsel", "JSON", "HTML", "PDF"). Hepsi her zaman görünür; uygulanamayanlar `aria-disabled` + gerekçe (spec §2.1). Değer NULL ise yalnız sekme çubuğu devre dışı görünür, gövde bugünkü "NULL" metnidir.
+1. **Sekmeler ve sıra:** `text`, `hex`, `image`, `json`, `xml`, `html`, `pdf` (etiketler "Metin", "Onaltılık", "Görsel", "JSON", "XML", "HTML", "PDF"). Hepsi her zaman görünür; uygulanamayanlar `aria-disabled` + gerekçe (spec §2.1). Değer NULL ise yalnız sekme çubuğu devre dışı görünür, gövde bugünkü "NULL" metnidir.
 2. **Kendiliğinden seçim ve hatırlama:**
-   - Öncelik: hatırlanan (uygulanabiliyorsa) → `json`/`jsonb` → JSON; `bytea` + görsel imzası → Görsel; `bytea` + `%PDF-` → PDF → Metin.
+   - Öncelik: hatırlanan (uygulanabiliyorsa) → `json`/`jsonb` → JSON; `xml` → XML; `bytea` + görsel imzası → Görsel; `bytea` + `%PDF-` → PDF → Metin.
    - Anahtar `${typeOid}:${name}`; modül düzeyi `Map` (QueryTab parçası, uygulama oturumu boyunca). `localStorage` yok.
    - Elle seçim yalnız kullanıcı bir sekmeye tıkladığında ya da Enter/Space ile seçtiğinde yazılır; kendiliğinden seçim hafızaya yazılmaz.
-3. **Algılama yalnız önekle:** `bytea` değerinde ilk 1 KiB çözülür (`decodePrefix`). Tam çözme yalnız görünüm açıldığında tembel parçada yapılır. JSON uygunluğu: `json`/`jsonb` türünde her zaman; diğer türde kırpılmış değer `{`/`[` ile başlıyorsa ve uzunluk ≤ 4 MiB ise `JSON.parse` denenir; > 4 MiB ise yalnız ilk karakter yeter (görünüm sınır iletisini gösterir).
+3. **Algılama yalnız önekle:** `bytea` değerinde ilk 1 KiB çözülür (`decodePrefix`). Tam çözme yalnız görünüm açıldığında tembel parçada yapılır. JSON uygunluğu: `json`/`jsonb` türünde her zaman; diğer türde kırpılmış değer `{`/`[` ile başlıyorsa ve uzunluk ≤ 4 MiB ise `JSON.parse` denenir; > 4 MiB ise yalnız ilk karakter yeter (görünüm sınır iletisini gösterir). XML uygunluğu: `xml` türünde her zaman (NULL değilse); `bytea` dışı diğer türde `looksLikeMarkup` (HTML ile aynı koşul). İyi biçimlilik denetlenmez.
 4. **Sınırlar** (`LIMITS`; spec §2.5): `prefixBytes` 1 KiB, `hexBytes` 16 MiB, `imageBytes` 20 MiB, `codeChars` 4 MiB, `previewChars` 2 MiB, `fileBytes` 64 MiB. Sınır her zaman ham uzunluktan, çözmeden **önce** denetlenir.
 5. **JSON görünümü:** `reindentJson` (mevcut, kayıpsız) + salt okunur CodeMirror (`lang-json`, `foldGutter`). Ayrı ağaç bileşeni yok (spec düzeltmesi 3).
+   - **XML görünümü** (2026-11-05 eki): "Biçimlendir" onay kutusu (varsayılan açık) → `formatXml(value)`, kapalı → özgün; salt okunur CodeMirror (`lang-xml`, `foldGutter`, `lineNumbers`). Önizleme yok. Sınır `codeChars` (4 MiB).
 6. **HTML görünümü:** "Kaynak" (varsayılan; `formatHtml` + `lang-html` + katlama; "Biçimlendir" anahtarı varsayılan açık) ve "Önizleme" anahtarı. Önizleme: `<iframe sandbox="" referrerpolicy="no-referrer" title=… srcdoc={previewDoc(özgün)}>`, beyaz arka plan. `sandbox` özniteliği **boş dizgidir**; hiçbir `allow-*` eklenmez. CSP (`tauri.conf.json`) değişmez; WebView2 önizlemeyi engellerse uygulayıcı durur ve sorar.
 7. **Görsel:** `data:` URL ile `<img>`; sığdır/"Gerçek boyut"; boyut bilgisi `onLoad`'da; `onError` iletisi; "Kaydet…" (spec düzeltmesi 4). `blob:` URL kullanılmaz (CSP `img-src` izin vermez).
 8. **PDF:** bilgi satırı + "Varsayılan uygulamada aç" + "Kaydet…" + uyarı satırı. Düğmeler çalışırken devre dışıdır ("Açılıyor…" / "Kaydediliyor…"). Hata bildirimi sabit metindir (yol ve değer içermez).
@@ -46,9 +47,9 @@
 - **Paket:**
   - Ana paket ≤ `mainMaxBytes` (şu an 127,364 B), açılış kümesi ≤ `startupMaxBytes` (155,037 B). Preload tam `["solid","web"]`; açılış kümesinde yasak paket yok.
   - Tavan **asla yükseltilmez** (kullanıcı kararı). Task 1–6'da `bun run bundle:check` yalnız bu iki tavanın aşımı yüzünden düşebilir; aşım rapora yazılır. Başka her ihlal (preload, yasak paket, harita) görevi durdurur. Telafi Task 7'dedir.
-  - `@codemirror/lang-json`, `@codemirror/lang-html`, `@lezer/json`, `@lezer/html`, `@lezer/css`, `@lezer/javascript`, `@codemirror/lang-css`, `@codemirror/lang-javascript` ana pakete ve QueryTab parçasına girmez; yalnız `cell-code.ts`'in dinamik `import()`'larıyla yüklenir.
+  - `@codemirror/lang-json`, `@codemirror/lang-xml`, `@codemirror/lang-html`, `@lezer/json`, `@lezer/xml`, `@lezer/html`, `@lezer/css`, `@lezer/javascript`, `@codemirror/lang-css`, `@codemirror/lang-javascript` ana pakete ve QueryTab parçasına girmez; yalnız `cell-code.ts`'in dinamik `import()`'larıyla yüklenir.
   - `CellViewers.tsx` yalnız `CellPanel`'deki `lazy(() => import("./CellViewers"))` ile yüklenir; QueryTab parçası `cell-format.ts`, `cell-code.ts`, `cell-ipc.ts`'i statik içe aktarmaz.
-- **Bağımlılıklar:** `"@codemirror/lang-json": "6.0.2"`, `"@codemirror/lang-html": "6.4.12"` (tam sürüm, `^` yok). Başka yeni paket yok (HTML biçimleyici el yazımı; `hex`/`base64` crate'i yok).
+- **Bağımlılıklar:** `"@codemirror/lang-json": "6.0.2"`, `"@codemirror/lang-xml": "6.1.0"`, `"@codemirror/lang-html": "6.4.12"` (tam sürüm, `^` yok). Başka yeni paket yok (HTML biçimleyici el yazımı; `hex`/`base64` crate'i yok).
 - **Gizlilik:**
   - Hücre değeri, çözülen baytlar, biçimlenmiş metin, geçici yol ve kayıt yolu `console.*`'a, `localStorage`'a, bildirime ve `tracing`'e yazılmaz.
   - Geçici PDF yalnız `app_cache_dir()/cell-view` altında, benzersiz adla; kapanışta silinir.
@@ -70,8 +71,11 @@
 - **Yanlış sekme seçimi ve hafıza:** `jsonb` hücresi; PNG imzalı `bytea`; imzasız `bytea`; `{"a":1}` içeren `text`; aynı sütunda önce PNG sonra imzasız satır; kullanıcı PNG sütununda Onaltılık'ı seçip başka satıra geçer.
   - Beklenen: sırasıyla JSON, Görsel, Metin, Metin (JSON etkin); imzasız satırda Görsel devre dışı → kendiliğinden Metin ama hafıza `image` kalır; elle seçilen Onaltılık sonraki satırlarda korunur. Kendiliğinden seçim hafızaya yazılmaz.
   - Test: Task 2 `pickFormat`/`availability`/`createFormatMemory`.
-- **Büyük değerler:** 25 MB PNG, 70 MB `bytea`, 5 MB JSON, 3 MB HTML, 65 MB PDF.
-  - Beklenen: Görsel/JSON/HTML görünümlerinde sınır iletisi (çözme yapılmadan); Onaltılık ilk 16 MiB + not; HTML önizleme anahtarı devre dışı; PDF düğmeleri baştan devre dışı + gerekçe; arka uç da `too_large` döner. Hücre seçimi algılaması yalnız 1 KiB önek çözer.
+- **XML seçimi ve biçimleme:** `xml` sütununda belge (`<?xml …?>` + DOCTYPE iç alt kümesi), `xml` sütununda içerik parçası (`<a/>metin<b>x</b>`, kök öğesiz), `text` sütununda XML, `xml:space="preserve"`, CDATA içinde `<`, büyük/küçük harfli `<Ad>…</ad>`, yalnız metinli öğe, karma içerik, kapanmamış etiket.
+  - Beklenen: `xml` türünde kendiliğinden XML (HTML de etkin); `text` sütununda XML ve HTML etkin, kendiliğinden Metin; biçimleyici yalnız metin üretir, `xml:space="preserve"`/CDATA/yorum/PI içeriğini değiştirmez, `<ad>Ayşe</ad>` tek satırda kalır, hata vermez, girinti negatife düşmez.
+  - Test: Task 2 `cellFacts`/`availability`/`autoFormat`; Task 3 `formatXml`.
+- **Büyük değerler:** 25 MB PNG, 70 MB `bytea`, 5 MB JSON, 5 MB XML, 3 MB HTML, 65 MB PDF.
+  - Beklenen: Görsel/JSON/XML/HTML görünümlerinde sınır iletisi (çözme yapılmadan); Onaltılık ilk 16 MiB + not; HTML önizleme anahtarı devre dışı; PDF düğmeleri baştan devre dışı + gerekçe; arka uç da `too_large` döner. Hücre seçimi algılaması yalnız 1 KiB önek çözer.
   - Test: Task 2 `sizeVerdict`/`decodePrefix`, Task 3 `decodeByteaHex(…, max)`, Task 1 `too_large`.
 - **HTML güvenliği:** `<script>`, `<img src=x onerror=…>`, `<a target=_top>`, `<meta http-equiv=refresh>`, tırnaklı öznitelikte `>`, kapanmamış yorum, `<!DOCTYPE html>` ile başlayan ve başlamayan belge.
   - Beklenen: biçimleyici yalnız metin üretir, betik/stil içeriğini olduğu gibi korur, kapanmamış yapıda takılmaz; `previewDoc` CSP meta'yı doctype'tan sonra (yoksa başa) ekler; iframe `sandbox=""`. Yasak API taraması temiz.
@@ -157,8 +161,8 @@ export type CellIpc = typeof cellIpc;
 
 ```ts
 import type { Column } from "../../ipc/bindings/Column";
-export type CellFormat = "text" | "hex" | "image" | "json" | "html" | "pdf";
-export const CELL_FORMATS: readonly CellFormat[];          // ["text","hex","image","json","html","pdf"]
+export type CellFormat = "text" | "hex" | "image" | "json" | "xml" | "html" | "pdf";
+export const CELL_FORMATS: readonly CellFormat[];          // ["text","hex","image","json","xml","html","pdf"]
 export type ImageKind = "png" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "svg";
 export const MiB = 1024 * 1024;
 export const LIMITS: { readonly prefixBytes: 1024; readonly hexBytes: number; readonly imageBytes: number; readonly codeChars: number; readonly previewChars: number; readonly fileBytes: number };
@@ -172,7 +176,7 @@ export function isPdf(bytes: Uint8Array): boolean;
 export function looksLikeJson(value: string): boolean;                  // Kararlar 3
 export function looksLikeMarkup(value: string): boolean;               // kırpılmış: "<" ile başlar ve ">" içerir
 export interface CellFacts {
-  isNull: boolean; bytea: boolean; jsonType: boolean;
+  isNull: boolean; bytea: boolean; jsonType: boolean; xmlType: boolean;   // xmlType: typeName === "xml"
   byteLength: number;   // bytea: byteaLength; diğer: UTF-8 bayt uzunluğu (TextEncoder değil, hızlı sayım)
   charLength: number;
   image: ImageKind | null; pdf: boolean; json: boolean; markup: boolean; badHex: boolean;
@@ -195,15 +199,15 @@ export function formatMb(bytes: number): string;                          // 1.5
 ```
 
 - **`tcell` metinleri:**
-  - `tabs`: `{ text: "Metin", hex: "Onaltılık", image: "Görsel", json: "JSON", html: "HTML", pdf: "PDF" }`, `ariaLabel: "Hücre görünümü"`.
-  - `reason`: `isNull: "Değer NULL."`, `notImage: "Tanınan bir görsel biçimi değil (PNG, JPEG, GIF, WebP, BMP, ICO, SVG)."`, `notJson: "Geçerli JSON değil."`, `notMarkup: "HTML/XML işaretlemesi değil."`, `notPdf: "PDF değil (%PDF- ile başlamıyor)."`, `onlyBytea: "Yalnız bytea sütunlarında."`, `onlyText: "Yalnız metin sütunlarında."`, `badHex: "bytea değeri çözülemedi."`.
+  - `tabs`: `{ text: "Metin", hex: "Onaltılık", image: "Görsel", json: "JSON", xml: "XML", html: "HTML", pdf: "PDF" }`, `ariaLabel: "Hücre görünümü"`.
+  - `reason`: `isNull: "Değer NULL."`, `notImage: "Tanınan bir görsel biçimi değil (PNG, JPEG, GIF, WebP, BMP, ICO, SVG)."`, `notJson: "Geçerli JSON değil."`, `notXml: "XML işaretlemesi değil."`, `notMarkup: "HTML/XML işaretlemesi değil."`, `notPdf: "PDF değil (%PDF- ile başlamıyor)."`, `onlyBytea: "Yalnız bytea sütunlarında."`, `onlyText: "Yalnız metin sütunlarında."`, `badHex: "bytea değeri çözülemedi."`.
   - `tooLarge: (size: string, limit: string) => \`Değer bu görünüm için çok büyük (${size} MB; sınır ${limit} MB). Metin ya da Onaltılık sekmesini kullanın ya da Kaydet… ile dosyaya yazın.\``; `tooLargeText` (aynı, "ya da Kaydet…" bölümü yok; bytea dışı türler için).
   - `hex`: `ariaLabel: "Onaltılık görünüm"`, `total: (n: number) => \`${n.toLocaleString("tr-TR")} bayt\``, `partial: (shown: string, total: string) => \`Yalnız ilk ${shown} MB gösteriliyor (toplam ${total} MB).\``.
   - `image`: `fit: "Sığdır"`, `actual: "Gerçek boyut"`, `alt: (kind: string, w: number, h: number) => \`Hücre görseli (${kind}, ${w} × ${h})\``, `broken: "Görsel çözülemedi (bozuk ya da desteklenmeyen veri)."`.
   - `html`: `source: "Kaynak"`, `preview: "Önizleme"`, `format: "Biçimlendir"`, `frameTitle: "HTML önizlemesi (korumalı)"`, `previewNote: "Betikler çalışmaz; uzak görsel ve stiller yüklenmez."`, `previewTooLarge: (limit: string) => \`Önizleme için çok büyük (sınır ${limit} MB).\``.
   - `pdf`: `info: (version: string | null, bytes: string) => …` ("PDF 1.7 · 12.345 bayt"; sürüm yoksa "PDF · …"), `open: "Varsayılan uygulamada aç"`, `opening: "Açılıyor…"`, `warn: "PDF dışarıda açılır; güvenmediğiniz belgeleri açmayın."`.
   - `save: "Kaydet…"`, `saving: "Kaydediliyor…"`, `saved: "Kaydedildi."`, `saveTitle: "Hücre değerini kaydet"`, `openFailed: "PDF açılamadı."`, `saveFailed: "Dosya kaydedilemedi."`, `loading: "Görünüm yükleniyor…"`, `loadFailed: "Görünüm yüklenemedi."`, `widen: "Paneli genişlet"`, `narrow: "Paneli daralt"`.
-- **Gerekçe eşlemesi (`availability`):** NULL → tüm sekmeler `isNull`; `text`/`hex` her zaman etkin; `image` → `badHex` ise `badHex`, değilse `notImage`; `json` → `notJson`; `html` → bytea ise `onlyBytea` değil "Yalnız metin sütunlarında." (`tcell.reason.onlyText`), değilse `notMarkup`; `pdf` → bytea değilse `onlyBytea`, `badHex` ise `badHex`, değilse `notPdf`.
+- **Gerekçe eşlemesi (`availability`):** NULL → tüm sekmeler `isNull`; `text`/`hex` her zaman etkin; `image` → `badHex` ise `badHex`, değilse `notImage`; `json` → `notJson`; `xml` → etkin: `xmlType || (!bytea && markup)`; bytea ise `onlyText`, değilse `notXml`; `html` → bytea ise `onlyBytea` değil "Yalnız metin sütunlarında." (`tcell.reason.onlyText`), değilse `notMarkup`; `pdf` → bytea değilse `onlyBytea`, `badHex` ise `badHex`, değilse `notPdf`.
 
 - [ ] **Adım 1: Başarısız testler (`cell-view-model.test.ts`).**
   - `sniffImage`: PNG/JPEG/GIF87a/GIF89a/WebP/BMP/ICO imzalı baytlar doğru tür; `RIFF????WAVE` → null; 2 baytlık dizi → null (taşma yok).
@@ -216,16 +220,17 @@ export function formatMb(bytes: number): string;                          // 1.5
     - `text` `"ş"` → `byteLength: 2`, `charLength: 1`.
     - `jsonb` `"[1,2]"` → `jsonType: true, json: true`; `text` `" {\"a\":1}"` → `json: true`; `text` `"42"` → `json: false`; `text` `"{bozuk"` → `json: false`.
     - `text` `"<p>x</p>"` → `markup: true`; `text` `"<svg …></svg>"` → `markup: true` ve `image: "svg"`.
+    - `xml` `"<a>1</a>"` → `xmlType: true, markup: true`; `xml` `"metin"` (içerik parçası, işaretlemesiz) → `xmlType: true, markup: false`.
     - `null` → `isNull: true`.
-  - `availability`: yukarıdaki her durum için etkinlik ve gerekçe metni (ör. `text` sütununda PDF → `tcell.reason.onlyBytea`).
-  - `autoFormat`: `jsonb` → `json`; `bytea` PNG → `image`; `bytea` PDF → `pdf`; `bytea` imzasız → `text`; `text` `{"a":1}` → `text`; `text` `<p>` → `text`.
+  - `availability`: yukarıdaki her durum için etkinlik ve gerekçe metni (ör. `text` sütununda PDF → `tcell.reason.onlyBytea`). XML: `xml` `"metin"` → etkin; `text` `"<a/>"` → XML ve HTML etkin; `text` `"42"` → XML `notXml`; `bytea` → XML `onlyText`.
+  - `autoFormat`: `jsonb` → `json`; `xml` → `xml`; `text` `<a/>` → `text`; `bytea` PNG → `image`; `bytea` PDF → `pdf`; `bytea` imzasız → `text`; `text` `{"a":1}` → `text`; `text` `<p>` → `text`.
   - `pickFormat`: hatırlanan `hex` → `hex`; hatırlanan `image` + imzasız bytea → `text` (kendiliğinden); hatırlanan `undefined` → `autoFormat`.
   - `createFormatMemory`: `set`/`get`; iki bellek örneği bağımsız; `columnKey({ name: "foto", typeOid: 17 })` → `"17:foto"`.
-  - `sizeVerdict`: `image` 20 MiB → ok, 20 MiB + 1 → `{ ok: false, size, limit: 20 MiB }`; `json` 4 MiB + 1 karakter → reddedilir; `hex` her boyutta ok (kısmi gösterim görünümün işidir); `pdf` 64 MiB + 1 → reddedilir.
+  - `sizeVerdict`: `image` 20 MiB → ok, 20 MiB + 1 → `{ ok: false, size, limit: 20 MiB }`; `json` ve `xml` 4 MiB + 1 karakter → reddedilir; `hex` her boyutta ok (kısmi gösterim görünümün işidir); `pdf` 64 MiB + 1 → reddedilir.
   - `previewAllowed`/`fileActionAllowed` sınır ve gerekçeleri; `fileActionAllowed` `text` sütununda `onlyBytea`.
-  - `nextTab`: `text` + ArrowLeft → `pdf`; `pdf` + ArrowRight → `text`; Home → `text`; End → `pdf`.
+  - `nextTab`: `text` + ArrowLeft → `pdf`; `pdf` + ArrowRight → `text`; `json` + ArrowRight → `xml`; `xml` + ArrowRight → `html`; Home → `text`; End → `pdf`.
   - `formatMb(1.5 * MiB)` → `"1,5"`; `formatMb(20 * MiB)` → `"20"`.
-  - Metin sabitleri: `tcell.tabs.hex === "Onaltılık"`, `tcell.reason.notPdf` beklenen metin.
+  - Metin sabitleri: `tcell.tabs.hex === "Onaltılık"`, `tcell.tabs.xml === "XML"`, `tcell.reason.notPdf` ve `tcell.reason.notXml` beklenen metin.
 - [ ] **Adım 2: Çalıştır, düştüğünü gör.** `bun run test -- src/features/query/cell-view-model.test.ts` → FAIL (modül yok).
 - [ ] **Adım 3: Uygula.** Kararlar 2–4. `cellFacts` bytea için yalnız `decodePrefix(value, LIMITS.prefixBytes)` çağırır; JSON denemesi Kararlar 3'e uyar. UTF-8 bayt sayımı kod birimi döngüsüyle yapılır (kopya üretmez).
 - [ ] **Adım 4: Doğrula.** Dört ön yüz komutu. `rg "strings-cell|cell-view-model" src/app src/features/explorer src/ipc` → sonuç yok.
@@ -255,6 +260,7 @@ export function imageMime(kind: ImageKind): string;                             
 export function dataUrl(kind: ImageKind, bytes: Uint8Array): string;
 export function pdfVersion(bytes: Uint8Array): string | null;                          // "%PDF-1.7" → "1.7"
 export function formatHtml(text: string): string;                                      // spec §2.3
+export function formatXml(text: string): string;                                       // spec §2.3 "XML"; formatHtml ile ortak belirteçleyici
 export const PREVIEW_CSP: string;   // "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:"
 export function previewDoc(html: string): string;
 export function suggestSaveName(columnName: string, ext: string): string;              // Windows'ta geçersiz <>:"/\|?* ve denetim karakteri → "_"; boşsa "hucre"; 100 karaktere kırp
@@ -276,6 +282,15 @@ export function saveExt(f: { pdf: boolean; image: ImageKind | null }): string;  
     - Kapanmamış `<!-- açık` ve `<div class="a` → kalan metin olduğu gibi eklenir, istisna yok.
     - `"a < b"` metni bozulmaz; eşleşmeyen `</div>` girintiyi negatife düşürmez; `<br/>` girinti artırmaz.
     - 1 MiB'lık iç içe olmayan girdi < 200 ms (kaba süre denetimi; vitest zaman aşımıyla).
+  - `formatXml`:
+    - `'<?xml version="1.0"?><kisi><ad>Ayşe</ad><adres><il>İzmir</il></adres><bos/></kisi>'` → `'<?xml version="1.0"?>\n<kisi>\n  <ad>Ayşe</ad>\n  <adres>\n    <il>İzmir</il>\n  </adres>\n  <bos/>\n</kisi>'`.
+    - Karma içerik `<p>a<b>x</b> c</p>` → `<p>`, `a`, `<b>x</b>`, `c`, `</p>` ayrı satırlarda, iç içelik girintili.
+    - `<script>`, `<pre>`, `<br>` özel değildir: `<script><a>1</a></script>` iç öğesi girintilenir; `<br>` kapanmadığı için sonrakiler bir düzey içeride kalır (HTML boş öğe listesi uygulanmaz).
+    - `<t xml:space="preserve">  a <i>b</i>\n</t>` ve iç içe aynı adlı `<t xml:space="preserve"><t>x</t> </t>` içerikleri birebir korunur.
+    - `<![CDATA[a<b>c]]>`, `<!-- <x> -->`, `<?pi a>b?>` ve `<!DOCTYPE k [<!ENTITY e "v">]>` tek parça ve değişmeden; `&amp;`/`&e;` metinde değişmez.
+    - `<Ad>x</ad>` (harf duyarlı uyuşmazlık) ve kapanmamış `<a><b>` → istisna yok, girinti negatife düşmez, tüm metin çıktıda.
+    - Kök öğesiz içerik parçası (`metin<a/>son`) ve yalnız metin (`düz`) → değişmeden ya da satırlara ayrılmış, metin kaybı yok.
+    - 1 MiB'lık girdi < 200 ms.
   - `previewDoc`:
     - `"<p>x</p>"` → `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">` ile başlar.
     - `"  <!DOCTYPE html><html>…"` → meta doctype'tan hemen sonra gelir (doctype ilk kalır, baştaki boşluk korunur).
@@ -284,12 +299,12 @@ export function saveExt(f: { pdf: boolean; image: ImageKind | null }): string;  
   - `suggestSaveName("foto:1", "png")` → `"foto_1.png"`; `("", "pdf")` → `"hucre.pdf"`.
   - `saveExt({ pdf: true, image: null })` → `"pdf"`; `({ pdf: false, image: "jpeg" })` → `"jpg"`.
 - [ ] **Adım 2: Çalıştır, düştüğünü gör.** `bun run test -- src/features/query/cell-format.test.ts` → FAIL.
-- [ ] **Adım 3: Uygula.** `formatHtml` tek geçişli el yazımı belirteçleyicidir (spec §2.3); DOM API'si kullanılmaz. `decodeByteaHex` önceden boyutlu `Uint8Array`'e yazar (ara dizi yok).
+- [ ] **Adım 3: Uygula.** `formatHtml` ve `formatXml` aynı tek geçişli el yazımı belirteçleyiciyi paylaşır (kurallar parametreyle; kod kopyalanmaz; spec §2.3); DOM API'si kullanılmaz. `decodeByteaHex` önceden boyutlu `Uint8Array`'e yazar (ara dizi yok).
 - [ ] **Adım 4: Doğrula.** Dört ön yüz komutu. `rg "DOMParser|innerHTML|insertAdjacentHTML|document\.write|new Function|eval\(" src/features/query/cell-*` → sonuç yok.
 - [ ] **Adım 5: Commit.**
   ```bash
   git add src/features/query/cell-format.ts src/features/query/cell-format.test.ts
-  git commit -m "feat(cell): bytea çözme, onaltılık satırları, görsel data URL'i, HTML biçimleyici ve korumalı önizleme belgesi"
+  git commit -m "feat(cell): bytea çözme, onaltılık satırları, görsel data URL'i, HTML/XML biçimleyici ve korumalı önizleme belgesi"
   ```
 
 ### Task 4: Dil paketleri ve kod görüntüleyici (`cell-code.ts`)
@@ -302,9 +317,10 @@ export function saveExt(f: { pdf: boolean; image: ImageKind | null }): string;  
 import type { Extension } from "@codemirror/state";
 import type { Language } from "@codemirror/language";
 import type { EditorView } from "@codemirror/view";
-export type CodeLang = "json" | "html";
+export type CodeLang = "json" | "xml" | "html";
 export function loadLanguage(lang: CodeLang): Promise<{ extension: Extension; language: Language }>;
 //   json → import("@codemirror/lang-json") → { extension: json(), language: jsonLanguage }
+//   xml  → import("@codemirror/lang-xml")  → { extension: xml(), language: xmlLanguage }
 //   html → import("@codemirror/lang-html") → { extension: html({ autoCloseTags: false }), language: htmlLanguage }
 //   aynı dil için tek Promise (önbellek); reddedilirse önbellek temizlenir (yeniden denenebilir)
 export const viewerHighlight: import("@codemirror/language").HighlightStyle;
@@ -316,9 +332,10 @@ export function createCodeViewer(parent: HTMLElement, doc: string, language: Ext
 export function replaceCode(view: EditorView, doc: string, language: Extension): void;   // belge + dil (Compartment) değişimi
 ```
 
-- [ ] **Adım 1: Bağımlılıklar.** `package.json` `dependencies`'e `"@codemirror/lang-json": "6.0.2"` ve `"@codemirror/lang-html": "6.4.12"` eklenir; `~/.bun/bin/bun install`. `bun.lock`'ta `@codemirror/language`, `@codemirror/view`, `@codemirror/state` **tek** sürümde kalmalıdır (6.12.4 / 6.43.13 / 6.7.6); ikinci kopya çıkarsa durulur ve raporlanır.
+- [ ] **Adım 1: Bağımlılıklar.** `package.json` `dependencies`'e `"@codemirror/lang-json": "6.0.2"`, `"@codemirror/lang-xml": "6.1.0"` ve `"@codemirror/lang-html": "6.4.12"` eklenir; `~/.bun/bin/bun install`. `bun.lock`'ta `@codemirror/language`, `@codemirror/view`, `@codemirror/state` **tek** sürümde kalmalıdır (6.12.4 / 6.43.13 / 6.7.6); ikinci kopya çıkarsa durulur ve raporlanır.
 - [ ] **Adım 2: Başarısız testler (`cell-code.test.ts`).**
   - `loadLanguage("json")` çözülür; `language.parser.parse('{"a":[1,true,null]}').topNode.name === "JsonText"` ve ağaçta `⚠` (hata düğümü) yok.
+  - `loadLanguage("xml")` çözülür; `parse('<?xml version="1.0"?><a b="1"><![CDATA[x<y]]></a>')` ağacında `Element` düğümü var, `⚠` yok.
   - `loadLanguage("html")` çözülür; `parse('<div a="1"><p>x</p></div>')` ağacında `Element` düğümü var; `<script>let a=1</script>` için gömülü dil ayrıştırması istisnasızdır.
   - İki çağrı aynı Promise'i döndürür (önbellek).
   - `viewerHighlight` tanımlıdır ve `module` alanı vardır (`HighlightStyle` örneği).
@@ -326,11 +343,11 @@ export function replaceCode(view: EditorView, doc: string, language: Extension):
 - [ ] **Adım 4: Uygula.** `sharedTheme`/`sharedHighlight` `src/features/inspector/codemirror-setup.ts`'ten içe aktarılır (kopyalanmaz). `lang-json`/`lang-html` yalnız `loadLanguage` içindeki dinamik `import()`'tadır; statik `import` yok (tür içe aktarımı `import type` olabilir).
 - [ ] **Adım 5: Doğrula.**
   - Dört ön yüz komutu.
-  - `bun run build` çıktısında `lang-json` ve `lang-html` için ayrı parçalar görülür; ana giriş parçasında ve `QueryTab-*.js`'te `@lezer/json`/`@lezer/html` yoktur (`bundle:check` kaynak tablosu + `rg -l "lezer/html" dist/assets` ile parça adı). Parça adları ve boyutları rapora yazılır.
+  - `bun run build` çıktısında `lang-json`, `lang-xml` ve `lang-html` için ayrı parçalar görülür; ana giriş parçasında ve `QueryTab-*.js`'te `@lezer/json`/`@lezer/xml`/`@lezer/html` yoktur (`bundle:check` kaynak tablosu + `rg -l "lezer/html" dist/assets` ile parça adı). Parça adları ve boyutları rapora yazılır.
 - [ ] **Adım 6: Commit.**
   ```bash
   git add package.json bun.lock src/features/query/cell-code.ts src/features/query/cell-code.test.ts
-  git commit -m "feat(cell): JSON/HTML renklendirme için tembel CodeMirror dil paketleri ve salt okunur görüntüleyici"
+  git commit -m "feat(cell): JSON/XML/HTML renklendirme için tembel CodeMirror dil paketleri ve salt okunur görüntüleyici"
   ```
 
 ### Task 5: Sekme çubuğu, panel bağlantısı ve tembel parça iskeleti
@@ -385,14 +402,15 @@ export default function CellViewers(props: {
 
 ### Task 6: Görüntüleyiciler (`CellViewers.tsx`)
 
-**Dosyalar:** Değiştir `src/features/query/CellViewers.tsx` (iskeletin yerine gerçek). İsteğe bağlı alt bileşenler aynı dosyada (`HexView`, `ImageView`, `CodeView`, `HtmlView`, `PdfView`, `SizeNotice`).
+**Dosyalar:** Değiştir `src/features/query/CellViewers.tsx` (iskeletin yerine gerçek). İsteğe bağlı alt bileşenler aynı dosyada (`HexView`, `ImageView`, `CodeView`, `XmlView`, `HtmlView`, `PdfView`, `SizeNotice`).
 
-**Arayüzler — Tüketir:** Task 2 (`CellFacts`, `LIMITS`, `sizeVerdict`, `previewAllowed`, `fileActionAllowed`, `formatMb`, `tcell`), Task 3 (`decodeByteaHex`, `utf8Bytes`, `hexRow`, `hexRowCount`, `dataUrl`, `pdfVersion`, `formatHtml`, `previewDoc`, `suggestSaveName`, `saveExt`), Task 4 (`loadLanguage`, `createCodeViewer`, `replaceCode`), Task 1 (`cellIpc`), `reindentJson` (`grid-model.ts`), `save` (`@tauri-apps/plugin-dialog`), `toast` (`src/app/toast`), `createVirtualizer` (`@tanstack/solid-virtual`).
+**Arayüzler — Tüketir:** Task 2 (`CellFacts`, `LIMITS`, `sizeVerdict`, `previewAllowed`, `fileActionAllowed`, `formatMb`, `tcell`), Task 3 (`decodeByteaHex`, `utf8Bytes`, `hexRow`, `hexRowCount`, `dataUrl`, `pdfVersion`, `formatHtml`, `formatXml`, `previewDoc`, `suggestSaveName`, `saveExt`), Task 4 (`loadLanguage`, `createCodeViewer`, `replaceCode`), Task 1 (`cellIpc`), `reindentJson` (`grid-model.ts`), `save` (`@tauri-apps/plugin-dialog`), `toast` (`src/app/toast`), `createVirtualizer` (`@tanstack/solid-virtual`).
 
 - **`SizeNotice`:** `sizeVerdict` reddederse görünüm yerine `tcell.tooLarge(formatMb(size), formatMb(limit))` (bytea dışı türde `tooLargeText`); bytea ise altında "Kaydet…" düğmesi (`fileActionAllowed` etkinse).
 - **`HexView`:** baytlar bir kez `createMemo` ile: bytea → `decodeByteaHex(value, LIMITS.hexBytes)`, diğer → `utf8Bytes(value, LIMITS.hexBytes)`; null → `tcell.reason.badHex`. Sabit 18 px satır, `createVirtualizer({ count: hexRowCount(len), estimateSize: () => 18, overscan: 20 })`; satır metni `hexRow` ile yalnız görünür satırlar için üretilir. Üstte `tcell.hex.total(facts.byteLength)`; kesildiyse `tcell.hex.partial(…)`.
 - **`ImageView`:** `sizeVerdict("image")`; bytea → `decodeByteaHex(value)`, metin SVG → `utf8Bytes(value)`; `dataUrl(kind, bytes)` bir kez `createMemo`; `img` `alt` boyut yüklenene dek tür adıyla; `onLoad` → boyut; `onError` → `tcell.image.broken`. Sığdır: `max-w-full max-h-full object-contain`; Gerçek boyut: kap `overflow-auto`. Desen (dama) arka plan saydamlığı gösterir. "Kaydet…" (bytea).
-- **`CodeView` (JSON ve HTML kaynağı):** `onMount` → `loadLanguage(lang)` → `createCodeViewer(host, metin, extension)`; değer/biçim değişince `replaceCode`; `onCleanup` → `view.destroy()`. JSON metni `reindentJson(value) ?? value`; HTML metni `biçimlendir ? formatHtml(value) : value`. Yükleme hatası `tcell.loadFailed`.
+- **`CodeView` (JSON, XML ve HTML kaynağı):** `onMount` → `loadLanguage(lang)` → `createCodeViewer(host, metin, extension)`; değer/biçim değişince `replaceCode`; `onCleanup` → `view.destroy()`. JSON metni `reindentJson(value) ?? value`; XML metni `biçimlendir ? formatXml(value) : value`; HTML metni `biçimlendir ? formatHtml(value) : value`. Yükleme hatası `tcell.loadFailed`.
+- **`XmlView`:** `sizeVerdict("xml")`; "Biçimlendir" onay kutusu (varsayılan açık) + `CodeView` (`lang` `xml`). Önizleme ve Kaydet yok.
 - **`HtmlView`:** iki düğmeli kip seçici (Kaynak/Önizleme, `aria-pressed`) + "Biçimlendir" onay kutusu (yalnız Kaynak'ta). Önizleme: `previewAllowed` değilse düğme `aria-disabled` + gerekçe. `<iframe sandbox="" referrerpolicy="no-referrer" title={tcell.html.frameTitle} srcdoc={previewDoc(value)} class="h-full w-full bg-white" />` + altta `tcell.html.previewNote`. `srcdoc` dışında hiçbir HTML yolu yoktur.
 - **`PdfView`:** `decodePrefix(value, 16)` + `pdfVersion` ile bilgi satırı; "Varsayılan uygulamada aç" → `ipc.openPdf(value)`; "Kaydet…" → `save({ defaultPath: suggestSaveName(column.name, "pdf"), filters: [{ name: "PDF", extensions: ["pdf"] }], title: tcell.saveTitle })` → `ipc.saveBytes(value, yol)`. İkisi `fileActionAllowed` ile etkin; çalışırken devre dışı ve metin `opening`/`saving`. Hata → `toast` `tcell.openFailed`/`saveFailed` (ileti ayrıntısı eklenmez). Uyarı satırı `tcell.pdf.warn`.
 - **Ortak "Kaydet…"** yardımcısı `saveCell(value, column, facts, ipc)` (Görsel, PDF ve `SizeNotice` kullanır); `null` yol sessiz; başarı → `toast(tcell.saved)`.
@@ -409,7 +427,7 @@ export default function CellViewers(props: {
 - [ ] **Adım 5: Commit.**
   ```bash
   git add src/features/query/CellViewers.tsx src/features/query/cell-format.ts src/features/query/cell-format.test.ts
-  git commit -m "feat(cell): onaltılık, görsel, JSON, HTML (kaynak + korumalı önizleme) ve PDF görüntüleyicileri"
+  git commit -m "feat(cell): onaltılık, görsel, JSON, XML, HTML (kaynak + korumalı önizleme) ve PDF görüntüleyicileri"
   ```
 
 ### Task 7: Bütçe telafisi, smoke maddeleri ve belgeler
@@ -431,15 +449,16 @@ export default function CellViewers(props: {
 - [ ] **Adım 4: Smoke maddeleri.** `docs/smoke-test.md`'de "## Görsel EXPLAIN arayüzü (Plan 28)" bölümünden sonra **"## Hücre görüntüleyici (Plan 31)"** eklenir.
   - Ön koşul paragrafı:
     - Yayın exe (`tauri build`); Docker PG 10 ve 18.
-    - Örnek tablo: `bytea` sütununda PNG, JPEG, GIF (animasyonlu), WebP, BMP, ICO, SVG (içinde `<script>` olan), PDF, imzasız rastgele bayt, 25 MB PNG, 70 MB bayt; `jsonb` (iç içe, büyük tamsayılı `12345678901234567890`); `text` sütununda JSON, HTML e-posta gövdesi (uzak `<img>` izleme pikseli), `<script>` içeren HTML, XML, 3 MB HTML; `xml` sütunu; Türkçe adlı sütun.
+    - Örnek tablo: `bytea` sütununda PNG, JPEG, GIF (animasyonlu), WebP, BMP, ICO, SVG (içinde `<script>` olan), PDF, imzasız rastgele bayt, 25 MB PNG, 70 MB bayt; `jsonb` (iç içe, büyük tamsayılı `12345678901234567890`); `text` sütununda JSON, HTML e-posta gövdesi (uzak `<img>` izleme pikseli), `<script>` içeren HTML, XML, 3 MB HTML; `xml` sütunu (belge: `<?xml …?>` + DOCTYPE; içerik parçası; `xml:space="preserve"`; CDATA; 5 MB XML); Türkçe adlı sütun.
     - Örnek SQL (`decode('…', 'base64')`, `pg_read_binary_file` yerine istemciden yüklenmiş veriler) bölümde verilir.
   - `[—]` maddeleri:
-    - kendiliğinden seçim: `jsonb` → JSON, PNG → Görsel, PDF → PDF, imzasız → Metin; devre dışı sekmelerde ipucu gerekçesi;
+    - kendiliğinden seçim: `jsonb` → JSON, `xml` → XML, PNG → Görsel, PDF → PDF, imzasız → Metin; devre dışı sekmelerde ipucu gerekçesi;
     - sütun başına hatırlama: Onaltılık seçip satır değiştirme; başka sütun etkilenmez; yeni sorgu sekmesinde de geçerli (oturum boyu); uygulama yeniden açılınca sıfırlanır;
     - Metin sekmesi bugünkü gibi (1 MB kırpma uyarısı dahil) ve hiçbir yeni parça yüklemez (DevTools Network);
     - Onaltılık: ofset/16 bayt/ASCII hizası; 70 MB değerde ilk 16 MB notu ve akıcı kaydırma; `text` sütununda `ş` → `C5 9F`;
     - Görsel: yedi biçim çizilir; animasyonlu GIF oynar; SVG içindeki `<script>` çalışmaz (alert/IPC yok); sığdır/gerçek boyut; boyut bilgisi; 25 MB PNG'de sınır iletisi; bozuk PNG'de "çözülemedi"; "Kaydet…" dosyası özgünle aynı (`certutil -hashfile … SHA256` karşılaştırması);
     - JSON: renklendirme açık ve koyu temada okunur; katlama; büyük tamsayı kaybolmaz; 5 MB JSON'da sınır iletisi;
+    - XML: `xml` sütununda biçimlendirme ve renklendirme (açık/koyu tema), katlama; "Biçimlendir" kapalıyken özgün metin; `xml:space="preserve"` ve CDATA içeriği değişmez; `<ad>Ayşe</ad>` tek satırda; `text` sütunundaki XML'de XML ve HTML sekmeleri etkin ama Metin seçili; `text` sütununda `42` için XML gerekçeyle devre dışı; 5 MB XML'de sınır iletisi; DTD/dış varlık içeren değerde ağ isteği yok (Network);
     - HTML kaynak: biçimlendirme ve "Biçimlendir" kapalıyken özgün metin; `<script>`/`<style>` içerikleri renklenir;
     - **HTML önizleme güvenliği:**
       - `<script>alert(1)</script>`, `<img src=x onerror="alert(1)">`, `<script>window.__TAURI_INTERNALS__.invoke('list_servers')</script>` ve `<script>parent.postMessage('x','*')</script>` içeren değerde hiçbir uyarı çıkmaz; DevTools Console'da yalnız sandbox engel iletileri görünür; Tauri IPC'ye **erişilemez** (uygulama günlüğünde ve Network'te `ipc.localhost` isteği yok);
@@ -458,7 +477,7 @@ export default function CellViewers(props: {
   - `docs/testing.md`'ye "## Hücre görüntüleyici testleri (Plan 31)" eklenir: dosya → kapsam tablosu (`cell-view-model.test.ts`, `cell-format.test.ts`, `cell-code.test.ts`, Rust `cell.rs` testleri), paket tavanları ve elle kontrol bağlantısı.
 - [ ] **Adım 6: Kapanış taramaları ve doğrulama.**
   - `rg "strings-cell" src` → yalnız `src/features/query/*`.
-  - `rg "lang-json|lang-html" src` → yalnız `src/features/query/cell-code.ts`.
+  - `rg "lang-json|lang-xml|lang-html" src` → yalnız `src/features/query/cell-code.ts`.
   - `rg "cell-ipc" src` → yalnız `CellViewers.tsx`.
   - Task 6 Adım 4 güvenlik taraması yeniden.
   - `git status` → `graphify-out/` ve binding satır sonu gürültüsü sahnelenmemiş (`git checkout -- src/ipc/bindings`).
@@ -475,7 +494,7 @@ export default function CellViewers(props: {
 - **Spec kapsamı:**
   - §2.1 uygulanabilirlik, seçim önceliği, hatırlama → T2; sekme çubuğu ve devre dışı gerekçeleri → T5.
   - §2.2 görünümler → T6; HTML iframe ve CSP meta → T3 `previewDoc` + T6 `HtmlView`; panel genişliği → T5.
-  - §2.3 biçimleme → T3 `formatHtml`, `reindentJson` (mevcut); renklendirme ve bağımlılıklar → T4.
+  - §2.3 biçimleme → T3 `formatHtml`, `formatXml`, `reindentJson` (mevcut); renklendirme ve bağımlılıklar → T4.
   - §2.4 komutlar, geçici dosya, temizlik → T1; ön yüz kullanımı → T6.
   - §2.5 sınırlar → T2 `sizeVerdict`/`previewAllowed`/`fileActionAllowed` + T3 `decodeByteaHex(max)` + T6 `SizeNotice` + T1 `too_large`.
   - §2.6 paket → T4/T5 parça doğrulamaları, T7 telafi.
