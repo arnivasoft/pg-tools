@@ -20,6 +20,7 @@ export const picker: Picker = {
   },
 };
 
+// Metin bir kez okunur: diyalog kipli, açıkken betik yeniden üretilemez (`buildScript` arkada çalışamaz).
 function Editor(props: { sql: string }) {
   let host!: HTMLDivElement;
   onMount(() => {

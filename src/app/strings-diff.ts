@@ -76,6 +76,7 @@ export const tsd = {
     detail: "Ayrıntı",
     lines: "Satır farkı",
   },
+  pickerReason: { server: "Önce sunucu seçin.", database: "Önce veritabanı seçin.", noServers: "Kayıtlı sunucu yok." },
   production: "(Üretim)",
   locked: "(Kilitli)",
   optionsLegend: "Seçenekler",

@@ -2,14 +2,14 @@
 // içindedir (genişlik en uzun satırdan `ch` ile hesaplanır, mutlak konumlu satırlar içerik genişliği vermez). Renk tek
 // başına bilgi değildir: işaret sütunu `+`/`−` taşır. `lines === null` (çok büyük fark) iki sütunlu düz metin gösterir.
 import { createVirtualizer } from "@tanstack/solid-virtual";
-import { For, Match, Show, Switch, createMemo } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, on, untrack } from "solid-js";
 import { tsd } from "../../app/strings-diff";
 import type { DiffDetail } from "../../ipc/bindings/DiffDetail";
 import type { DiffLine } from "../../ipc/bindings/DiffLine";
 import { gutter } from "./diff-model";
 import { LINE_HEIGHT, lineClass } from "./diff-view-model";
 
-function Lines(props: { lines: DiffLine[] }) {
+function Lines(props: { itemKey: string | null; lines: DiffLine[] }) {
   let scrollEl!: HTMLDivElement;
   const v = createVirtualizer({
     get count() {
@@ -19,16 +19,32 @@ function Lines(props: { lines: DiffLine[] }) {
     estimateSize: () => LINE_HEIGHT,
     overscan: 20,
   });
+  // Satırlar denetleyici store'undadır: döngü `untrack` içinde, yalnız dizi kimliğine abone olunur (20.000 satır ×
+  // alan başına ince taneli abonelik doğmasın).
   const dims = createMemo(() => {
+    const lines = props.lines;
     let maxNo = 0;
     let maxLen = 0;
-    for (const l of props.lines) {
-      maxNo = Math.max(maxNo, l.sourceNo ?? 0, l.targetNo ?? 0);
-      maxLen = Math.max(maxLen, l.text.length);
-    }
+    untrack(() => {
+      for (const l of lines) {
+        maxNo = Math.max(maxNo, l.sourceNo ?? 0, l.targetNo ?? 0);
+        maxLen = Math.max(maxLen, l.text.length);
+      }
+    });
     const no = Math.max(3, String(maxNo).length) + 1;
     return { no, width: `calc(${no * 2 + 2 + maxLen}ch + 1rem)` };
   });
+  // Önbellekten gelen öğede bileşen yaşamaya devam eder: öğe değişince kaydırma başa alınır.
+  createEffect(
+    on(
+      () => props.itemKey,
+      () => {
+        scrollEl.scrollTop = 0;
+        scrollEl.scrollLeft = 0;
+      },
+      { defer: true },
+    ),
+  );
   return (
     <div
       ref={scrollEl}
@@ -94,17 +110,17 @@ function SideBySide(props: { detail: DiffDetail }) {
   );
 }
 
-/** `picked = false` → seçim yok; `detail = null` → yükleniyor. */
-export function LineDiffView(props: { picked: boolean; detail: DiffDetail | null }) {
+/** `itemKey = null` → seçim yok; `detail = null` → yükleniyor. */
+export function LineDiffView(props: { itemKey: string | null; detail: DiffDetail | null }) {
   return (
     <Switch>
-      <Match when={!props.picked}>
+      <Match when={props.itemKey === null}>
         <p class="p-3 text-muted">{tsd.detail.pick}</p>
       </Match>
       <Match when={props.detail === null}>
         <p class="p-3 text-muted">{tsd.loading}</p>
       </Match>
-      <Match when={props.detail?.lines}>{(lines) => <Lines lines={lines()} />}</Match>
+      <Match when={props.detail?.lines}>{(lines) => <Lines itemKey={props.itemKey} lines={lines()} />}</Match>
       <Match when={props.detail}>{(d) => <SideBySide detail={d()} />}</Match>
     </Switch>
   );

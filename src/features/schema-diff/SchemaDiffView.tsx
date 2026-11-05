@@ -11,9 +11,10 @@ import type { DiffModel } from "./diff-controller";
 import { DiffList } from "./DiffList";
 import {
   CATEGORIES, categoryOf, compareBlocked, counts, foldSearch, itemLabel, kindLabel, problemText, progressView,
-  scriptBlocked, selectAllState, selectedKeys, selectionSummary, visibleItems,
+  scriptBlocked, selectedKeys, selectionSummary, visibleItems,
 } from "./diff-model";
 import type { DiffController } from "./diff-open";
+import { bulkBox } from "./diff-view-model";
 import { LineDiffView } from "./LineDiffView";
 import { SidePicker } from "./SidePicker";
 
@@ -72,20 +73,26 @@ function Progress(props: { label: string; p: { loaded: number; total: number } |
   );
 }
 
-/** Üç durumlu toplu seçim kutusu (`indeterminate` DOM özelliği). */
-function TriBox(props: { label: string; state: "none" | "some" | "all"; disabled: boolean; onChange: (on: boolean) => void }) {
+/** Üç durumlu toplu seçim kutusu (`indeterminate` DOM özelliği; durum `bulkBox`'tan). */
+function TriBox(props: { label: string; box: ReturnType<typeof bulkBox>; onChange: (on: boolean) => void }) {
   let el!: HTMLInputElement;
   createEffect(() => {
-    el.indeterminate = props.state === "some";
+    el.indeterminate = props.box.indeterminate;
+    el.checked = props.box.checked;
   });
   return (
     <label class="inline-flex shrink-0 items-center gap-1 text-[12px]">
       <input
         ref={el}
         type="checkbox"
-        checked={props.state === "all"}
-        disabled={props.disabled}
-        onChange={() => props.onChange(props.state !== "all")}
+        checked={props.box.checked}
+        disabled={props.box.disabled}
+        onChange={() => {
+          props.onChange(props.box.next);
+          // Denetleyici durumu değiştirmediyse DOM işareti modelden geri yazılır.
+          el.checked = props.box.checked;
+          el.indeterminate = props.box.indeterminate;
+        }}
       />
       {props.label}
     </label>
@@ -147,7 +154,7 @@ function Body(props: { diff: DiffController; tabId: string; m: DiffModel }) {
           <SidePicker diff={d} tabId={id} side="source" title={tsd.source} />
           <button
             type="button"
-            class="rounded p-1.5 text-muted hover:bg-hover disabled:opacity-50"
+            class="rounded p-1.5 text-muted hover:bg-hover"
             aria-label={tsd.swap}
             title={tsd.swap}
             onClick={() => d.swap(id)}
@@ -248,14 +255,12 @@ function Body(props: { diff: DiffController; tabId: string; m: DiffModel }) {
             <div class="flex flex-wrap items-center gap-3">
               <TriBox
                 label={tsd.selectAll}
-                state={selectAllState(m().selected, items())}
-                disabled={m().result === null}
+                box={bulkBox(m().selected, items())}
                 onChange={(on) => d.selectAll(id, on)}
               />
               <TriBox
                 label={tsd.selectVisible}
-                state={selectAllState(m().selected, visible())}
-                disabled={m().result === null}
+                box={bulkBox(m().selected, visible())}
                 onChange={(on) => d.selectVisible(id, on)}
               />
               <span class="text-[12px] text-muted">{tsd.selection(sel().selected, sel().hidden)}</span>
@@ -305,7 +310,7 @@ function Body(props: { diff: DiffController; tabId: string; m: DiffModel }) {
           </Show>
           <Show
             when={m().detail?.error}
-            fallback={<LineDiffView picked={m().detail !== null} detail={m().detail?.data ?? null} />}
+            fallback={<LineDiffView itemKey={m().detail?.key ?? null} detail={m().detail?.data ?? null} />}
           >
             {(e) => (
               <p role="alert" class="p-3 text-[12px] text-danger">

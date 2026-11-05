@@ -1,10 +1,10 @@
 // Şema karşılaştırma görünümlerinin saf yardımcıları (Plan 30): satır erişilebilirlik metni, risk tonu, satır farkı
-// zemini ve not/hata rozeti. DOM ve Solid yok; yalnızca diff-model, strings-diff ve türler içe aktarılır.
+// zemini, not/hata rozeti, toplu seçim kutusu ve seçici liste durumları. DOM ve Solid yok; yalnızca diff-model, strings-diff ve türler içe aktarılır.
 import { tsd } from "../../app/strings-diff";
 import type { DiffItem } from "../../ipc/bindings/DiffItem";
 import type { LineKind } from "../../ipc/bindings/LineKind";
-import type { Risk } from "../../ipc/bindings/Risk";
-import { categoryOf, itemLabel, kindLabel, problemText } from "./diff-model";
+import type { SideState } from "./diff-controller";
+import { categoryOf, itemLabel, kindLabel, problemText, selectAllState } from "./diff-model";
 
 /** Fark listesi satır yüksekliği (piksel). */
 export const ROW_HEIGHT = 26;
@@ -24,10 +24,6 @@ export function rowAria(i: DiffItem, selected: boolean, focused: boolean): { lab
   return { label: parts.join(", "), selected: focused };
 }
 
-export function riskTone(r: Risk): "muted" | "warn" | "danger" {
-  return r === "data_loss" ? "danger" : r === "destructive" ? "warn" : "muted";
-}
-
 const LINE_CLASS: Record<LineKind, string> = {
   same: "",
   added: "bg-[color-mix(in_srgb,var(--srv-green)_14%,transparent)]",
@@ -45,4 +41,35 @@ export function noteBadge(i: DiffItem): { count: number; tone: "info" | "error";
   if (i.errors.length > 0) return { count: i.errors.length, tone: "error", title };
   if (i.notes.length > 0) return { count: i.notes.length, tone: "info", title };
   return null;
+}
+
+/**
+ * Üç durumlu toplu seçim kutusu ("Tümü"/"Görünenler"). Seçilebilir öğe yoksa devre dışı ve işaretsizdir; `next`,
+ * tıklamanın isteyeceği değerdir (tümü seçiliyse kaldır, değilse seç).
+ */
+export function bulkBox(
+  sel: ReadonlySet<string>,
+  items: readonly DiffItem[],
+): { checked: boolean; indeterminate: boolean; disabled: boolean; next: boolean } {
+  if (!items.some((i) => i.selectable)) return { checked: false, indeterminate: false, disabled: true, next: true };
+  const st = selectAllState(sel, items);
+  return { checked: st === "all", indeterminate: st === "some", disabled: false, next: st !== "all" };
+}
+
+type ListState = { loading: boolean; reason: string | null };
+
+/**
+ * Veritabanı ve şema seçicilerinin liste başına durumu. Denetleyicinin `loadingLists` bayrağı taraf başınadır; hangi
+ * listenin yüklendiği eksik listeden çıkarılır. `reason` devre dışılığın gerekçesidir (`aria-describedby`).
+ */
+export function pickerLists(s: SideState): { databases: ListState; schemas: ListState } {
+  const databases: ListState = {
+    loading: s.loadingLists && s.serverId !== null && s.databases === null,
+    reason: s.serverId === null ? tsd.pickerReason.server : null,
+  };
+  const schemas: ListState = {
+    loading: s.loadingLists && s.databaseOid !== null && s.schemas === null,
+    reason: s.databaseOid === null ? tsd.pickerReason.database : null,
+  };
+  return { databases, schemas };
 }

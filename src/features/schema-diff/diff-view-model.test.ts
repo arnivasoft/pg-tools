@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DiffItem } from "../../ipc/bindings/DiffItem";
-import { LINE_HEIGHT, ROW_HEIGHT, lineClass, noteBadge, riskTone, rowAria } from "./diff-view-model";
+import { LINE_HEIGHT, ROW_HEIGHT, bulkBox, lineClass, noteBadge, pickerLists, rowAria } from "./diff-view-model";
 
 function item(o: Partial<DiffItem> = {}): DiffItem {
   return {
@@ -35,14 +35,6 @@ describe("rowAria", () => {
   });
 });
 
-describe("riskTone", () => {
-  it("üç değer", () => {
-    expect(riskTone("safe")).toBe("muted");
-    expect(riskTone("destructive")).toBe("warn");
-    expect(riskTone("data_loss")).toBe("danger");
-  });
-});
-
 describe("lineClass", () => {
   it("same boş; added yeşil; removed kırmızı zemin", () => {
     expect(lineClass("same")).toBe("");
@@ -60,5 +52,48 @@ describe("noteBadge", () => {
   });
   it("ikisi de yok → null", () => {
     expect(noteBadge(item())).toBeNull();
+  });
+});
+
+describe("bulkBox", () => {
+  const a = item({ key: "a" });
+  const b = item({ key: "b" });
+  const x = item({ key: "x", selectable: false });
+  it("seçilebilir öğe yoksa devre dışı ve işaretsiz", () => {
+    expect(bulkBox(new Set(), [x])).toEqual({ checked: false, indeterminate: false, disabled: true, next: true });
+    expect(bulkBox(new Set(["x"]), [])).toEqual({ checked: false, indeterminate: false, disabled: true, next: true });
+  });
+  it("hiçbiri / bazısı / tümü", () => {
+    expect(bulkBox(new Set(), [a, b, x])).toEqual({ checked: false, indeterminate: false, disabled: false, next: true });
+    expect(bulkBox(new Set(["a"]), [a, b, x])).toEqual({ checked: false, indeterminate: true, disabled: false, next: true });
+    expect(bulkBox(new Set(["a", "b"]), [a, b, x])).toEqual({ checked: true, indeterminate: false, disabled: false, next: false });
+  });
+});
+
+describe("pickerLists", () => {
+  const base = {
+    serverId: "s", databaseOid: null, schema: null, databases: null, databasesError: null, schemas: null,
+    schemasError: null, loadingLists: false,
+  };
+  it("sunucu yok: iki liste de gerekçeli devre dışı, yükleniyor yok", () => {
+    const r = pickerLists({ ...base, serverId: null });
+    expect(r.databases).toEqual({ loading: false, reason: "Önce sunucu seçin." });
+    expect(r.schemas).toEqual({ loading: false, reason: "Önce veritabanı seçin." });
+  });
+  it("veritabanları yüklenirken yalnız veritabanı seçicisi yükleniyor", () => {
+    const r = pickerLists({ ...base, loadingLists: true });
+    expect(r.databases).toEqual({ loading: true, reason: null });
+    expect(r.schemas).toEqual({ loading: false, reason: "Önce veritabanı seçin." });
+  });
+  it("şemalar yüklenirken yalnız şema seçicisi yükleniyor; liste gelince gerekçe yok", () => {
+    const loading = pickerLists({ ...base, databases: [{ oid: 1, name: "d" }], databaseOid: 1, loadingLists: true });
+    expect(loading.databases).toEqual({ loading: false, reason: null });
+    expect(loading.schemas).toEqual({ loading: true, reason: null });
+    const done = pickerLists({ ...base, databases: [{ oid: 1, name: "d" }], databaseOid: 1, schemas: ["public"] });
+    expect(done.schemas).toEqual({ loading: false, reason: null });
+  });
+  it("sunucu seçili ama liste yok ve yüklenmiyor (hata): sunucu gerekçesi değil, boş gerekçe", () => {
+    const r = pickerLists({ ...base, databasesError: "e" });
+    expect(r.databases).toEqual({ loading: false, reason: null });
   });
 });

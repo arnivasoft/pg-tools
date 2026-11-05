@@ -105,6 +105,11 @@ export function DiffList(props: {
                     class="absolute left-0 right-0 flex cursor-default items-center gap-2 px-2 text-[12px] hover:bg-hover"
                     classList={{ "bg-selected": foc() }}
                     style={{ top: `${row.start}px`, height: `${ROW_HEIGHT}px` }}
+                    onMouseDown={(e) => {
+                      // DOM odağı listbox'ta kalır (satırlar sanal; odaklanan satır kaldırılınca odak body'ye düşerdi).
+                      e.preventDefault();
+                      scrollEl.focus({ preventScroll: true });
+                    }}
                     onClick={() => props.diff.focus(props.tabId, it().key)}
                   >
                     <input

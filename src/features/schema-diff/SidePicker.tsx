@@ -6,18 +6,24 @@ import type { SideTag } from "../../ipc/bindings/SideTag";
 import { inputClass } from "../../ui/Field";
 import type { DiffController } from "./diff-open";
 import { targetBanner } from "./diff-model";
+import { pickerLists } from "./diff-view-model";
 
 function Select(props: {
   label: string;
   value: string;
   disabled: boolean;
   loading: boolean;
+  /** Devre dışılık gerekçesi (yalnız devre dışıyken bağlanır). */
+  reason: string | null;
   error: string | null;
   onChange: (v: string) => void;
   children: JSX.Element;
 }) {
   const id = createUniqueId();
   const err = createUniqueId();
+  const why = createUniqueId();
+  const reason = () => (props.disabled && !props.loading ? props.reason : null);
+  const described = () => [reason() !== null ? why : "", props.error !== null ? err : ""].filter((x) => x).join(" ");
   return (
     <div class="flex min-w-0 flex-1 flex-col gap-0.5">
       <label for={id} class="text-[12px] text-muted">
@@ -30,14 +36,21 @@ function Select(props: {
         disabled={props.disabled}
         aria-busy={props.loading}
         aria-invalid={props.error !== null}
-        aria-describedby={props.error !== null ? err : undefined}
+        aria-describedby={described() || undefined}
         onChange={(e) => props.onChange(e.currentTarget.value)}
       >
-        <Show when={props.loading && props.disabled} fallback={<option value="">{tsd.choose}</option>}>
+        <Show when={props.loading} fallback={<option value="">{tsd.choose}</option>}>
           <option value="">{tsd.loading}</option>
         </Show>
         {props.children}
       </select>
+      <Show when={reason()}>
+        {(text) => (
+          <span id={why} class="sr-only">
+            {text()}
+          </span>
+        )}
+      </Show>
       <Show when={props.error}>
         {(text) => (
           <p id={err} role="alert" class="text-[12px] text-danger">
@@ -51,7 +64,10 @@ function Select(props: {
 
 export function SidePicker(props: { diff: DiffController; tabId: string; side: SideTag; title: string }) {
   const s = () => props.diff.model(props.tabId)?.[props.side];
-  const loading = () => s()?.loadingLists ?? false;
+  const lists = () => {
+    const x = s();
+    return x ? pickerLists(x) : null;
+  };
   return (
     <fieldset class="flex min-w-0 flex-1 flex-col gap-1.5 rounded border border-border p-2">
       <legend class="px-1 text-[12px] font-semibold">{props.title}</legend>
@@ -60,6 +76,7 @@ export function SidePicker(props: { diff: DiffController; tabId: string; side: S
         value={s()?.serverId ?? ""}
         disabled={props.diff.servers().length === 0}
         loading={false}
+        reason={tsd.pickerReason.noServers}
         error={null}
         onChange={(v) => void props.diff.setServer(props.tabId, props.side, v === "" ? null : v)}
       >
@@ -78,7 +95,8 @@ export function SidePicker(props: { diff: DiffController; tabId: string; side: S
         label={tsd.database}
         value={s()?.databaseOid == null ? "" : String(s()?.databaseOid)}
         disabled={!s()?.databases}
-        loading={loading()}
+        loading={lists()?.databases.loading ?? false}
+        reason={lists()?.databases.reason ?? null}
         error={s()?.databasesError ?? null}
         onChange={(v) => void props.diff.setDatabase(props.tabId, props.side, v === "" ? null : Number(v))}
       >
@@ -94,7 +112,8 @@ export function SidePicker(props: { diff: DiffController; tabId: string; side: S
         label={tsd.schema}
         value={s()?.schema ?? ""}
         disabled={!s()?.schemas}
-        loading={loading()}
+        loading={lists()?.schemas.loading ?? false}
+        reason={lists()?.schemas.reason ?? null}
         error={s()?.schemasError ?? null}
         onChange={(v) => props.diff.setSchema(props.tabId, props.side, v === "" ? null : v)}
       >
