@@ -6,7 +6,10 @@ import type { ImageKind } from "./cell-view-model";
 // ---------------------------------------------------------------------------
 // Bayt yardımcıları
 
-/** `\x…` bytea metnini çözer; en çok `maxBytes` bayt. Bozuk girdi → null. */
+/**
+ * `\x…` bytea metnini çözer; en çok `maxBytes` bayt. Bozuk girdi → null.
+ * `maxBytes` verilirse yalnız çözülen önek doğrulanır (hane sayısının çift olması dışında).
+ */
 export function decodeByteaHex(value: string, maxBytes = Infinity): Uint8Array | null {
   if (value.charCodeAt(0) !== 0x5c || value.charCodeAt(1) !== 0x78) return null;
   const digits = value.length - 2;
@@ -178,10 +181,16 @@ function nextToken(text: string, i: number, rules: Rules): Tok {
   const { name, next } = readName(text, i + 1, rules);
   let quote = 0;
   let prev = 0; // son boşluk olmayan karakter
+  let unquoted = false; // tırnaksız öznitelik değerinin içinde miyiz
   for (let j = next; j < len; j++) {
     const c = text.charCodeAt(j);
     if (quote) {
       if (c === quote) quote = 0;
+      continue;
+    }
+    if (unquoted) {
+      if (isWs(c)) unquoted = false;
+      else if (c === 0x3e) return { kind: "start", end: j + 1, name, selfClose: false };
       continue;
     }
     if ((c === 0x22 || c === 0x27) && prev === 0x3d) {
@@ -191,6 +200,11 @@ function nextToken(text: string, i: number, rules: Rules): Tok {
     }
     if (c === 0x3e) {
       return { kind: "start", end: j + 1, name, selfClose: prev === 0x2f };
+    }
+    if (prev === 0x3d && !isWs(c)) {
+      unquoted = true; // `href=/>`: `/` değerdir, etiketi kapatmaz
+      prev = c;
+      continue;
     }
     if (!isWs(c)) prev = c;
   }
@@ -211,6 +225,14 @@ function doctype(text: string, i: number): Tok {
     const c = text.charCodeAt(j);
     if (quote) {
       if (c === quote) quote = 0;
+    } else if (depth > 0 && c === 0x3c && text.startsWith("<!--", j)) {
+      const e = text.indexOf("-->", j + 4);
+      if (e < 0) break;
+      j = e + 2;
+    } else if (depth > 0 && c === 0x3c && text.startsWith("<?", j)) {
+      const e = text.indexOf("?>", j + 2);
+      if (e < 0) break;
+      j = e + 1;
     } else if (depth > 0 && (c === 0x22 || c === 0x27)) quote = c;
     else if (c === 0x5b) depth++;
     else if (c === 0x5d && depth > 0) depth--;
@@ -275,11 +297,16 @@ function findXmlElementEnd(text: string, from: number, name: string, rules: Rule
   return -1;
 }
 
+const MAX_INDENT = 32;
+
 function format(text: string, rules: Rules): string {
   const lines: string[] = [];
   let depth = 0;
   let i = 0;
-  const pad = () => "  ".repeat(depth);
+  // Görsel girinti MAX_INDENT ile sınırlıdır (çıktı boyutu O(n)); `depth` gerçek iç içeliği izler.
+  const pads: string[] = [""];
+  for (let k = 1; k <= MAX_INDENT; k++) pads.push(pads[k - 1] + "  ");
+  const pad = () => pads[Math.min(depth, MAX_INDENT)];
   while (i < text.length) {
     const t = nextToken(text, i, rules);
     const raw = text.slice(i, t.end);
@@ -368,15 +395,19 @@ export const PREVIEW_CSP = "default-src 'none'; img-src data:; style-src 'unsafe
 /** Başa CSP `<meta>` ekler; değer `<!DOCTYPE …>` ile başlıyorsa doctype'tan sonra. */
 export function previewDoc(html: string): string {
   const meta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
-  const m = /^\s*<!doctype[^>]*>/i.exec(html);
+  const m = /^[\t\n\f\r ]*<!doctype[^>]*>/i.exec(html);
   if (m) return html.slice(0, m[0].length) + meta + html.slice(m[0].length);
   return meta + html;
 }
 
 export function suggestSaveName(columnName: string, ext: string): string {
   // eslint-disable-next-line no-control-regex
-  const cleaned = columnName.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim().replace(/[. ]+$/, "");
-  const base = (cleaned === "" ? "hucre" : cleaned).slice(0, 100);
+  const cleaned = columnName.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").trim();
+  // 100 kod noktası (vekil çiftleri bölünmez); sonra sondaki nokta/boşluk kırpılır.
+  const cut = Array.from(cleaned === "" ? "hucre" : cleaned).slice(0, 100).join("").replace(/[. ]+$/, "");
+  let base = cut === "" ? "hucre" : cut;
+  // Windows ayrılmış aygıt adları (uzantı benzeri sonekle de): CON, CON.txt, com1 ...
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(base)) base = base.replace(/^([^.]*)/, "$1_");
   return `${base}.${ext}`;
 }
 

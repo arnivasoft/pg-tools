@@ -177,6 +177,64 @@ describe("previewDoc", () => {
   });
 });
 
+describe("doğrusal çıktı ve kenar durumlar", () => {
+  function linear(fn: (s: string) => string, input: string, token: string) {
+    const t0 = performance.now();
+    const out = fn(input);
+    expect(performance.now() - t0).toBeLessThan(200);
+    expect(out.length).toBeLessThan(40 * input.length);
+    expect(out.split(token).length).toBe(input.split(token).length);
+  }
+  it("kapanmayan <li> (HTML) doğrusal", () => {
+    linear(formatHtml, "<li>x".repeat(Math.ceil((1 << 20) / 5)), "x");
+  });
+  it("kapanmayan <x>t (XML) doğrusal", () => {
+    linear(formatXml, "<x>t".repeat(262144), "t");
+  });
+  it("derin iç içelik girintiyi sınırlar ve kapanışlar hizalı kalır", () => {
+    const out = formatXml("<a>".repeat(40) + "x" + "</a>".repeat(40));
+    const lines = out.split("\n");
+    expect(Math.max(...lines.map((l) => l.length - l.trimStart().length))).toBe(64);
+    expect(lines.at(-1)).toBe("</a>");
+  });
+  it("tırnaksız değer `/` etiketi kapatmaz", () => {
+    expect(formatHtml("<a href=/>t</a>")).toBe("<a href=/>\n  t\n</a>");
+    expect(formatHtml("<a href=x />t")).toBe("<a href=x />\nt");
+  });
+  it("DOCTYPE iç alt kümesinde yorum ve PI", () => {
+    expect(formatXml("<!DOCTYPE k [<!-- ] > -->]><k/>")).toBe("<!DOCTYPE k [<!-- ] > -->]>\n<k/>");
+    expect(formatXml("<!DOCTYPE k [<?p ] > ?>]><k/>")).toBe("<!DOCTYPE k [<?p ] > ?>]>\n<k/>");
+  });
+  it("decodeByteaHex yalnız çözülen öneki doğrular", () => {
+    expect(decodeByteaHex("\\x0001zz", 2)?.length).toBe(2);
+    expect(decodeByteaHex("\\x0001zz")).toBeNull();
+  });
+});
+
+describe("previewDoc HTML boşlukları", () => {
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
+  it("HTML boşluğu olmayanlar doctype sayılmaz", () => {
+    for (const v of [" <!DOCTYPE html><p>x", "﻿<!DOCTYPE html>x", "\v<!doctype html>x", " <!doctype html>x"]) {
+      const out = previewDoc(v);
+      if (v.startsWith(" ")) expect(out).toBe(" <!DOCTYPE html>" + meta + "<p>x");
+      else expect(out.indexOf(meta)).toBe(0);
+    }
+  });
+});
+
+describe("suggestSaveName ek", () => {
+  it("kod noktası kırpma, sondaki nokta, ayrılmış adlar", () => {
+    const name = suggestSaveName("😀".repeat(150), "bin");
+    expect(Array.from(name.slice(0, -4)).length).toBe(100);
+    expect(name.includes("�")).toBe(false);
+    expect(suggestSaveName("a".repeat(99) + ". .x", "txt")).toBe("a".repeat(99) + ".txt");
+    expect(suggestSaveName("CON", "txt")).toBe("CON_.txt");
+    expect(suggestSaveName("com1", "txt")).toBe("com1_.txt");
+    expect(suggestSaveName("nul.backup", "txt")).toBe("nul_.backup.txt");
+    expect(suggestSaveName("console", "txt")).toBe("console.txt");
+  });
+});
+
 describe("kaydetme adı", () => {
   it("temizler", () => {
     expect(suggestSaveName("foto:1", "png")).toBe("foto_1.png");
