@@ -197,3 +197,98 @@ impl Env {
             .is_empty()
     }
 }
+
+/// Bu veritabanında açık transaction'da bekleyen oturum kalmadı (bağlantı düşüşü asenkron: kısa süre beklenir).
+pub async fn assert_no_idle_in_tx_for(env: &Env) {
+    let sql = "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND state LIKE 'idle in transaction%'";
+    for _ in 0..30 {
+        let n: i64 = env.admin.query_one(sql, &[]).await.unwrap().get(0);
+        if n == 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("idle in transaction oturum kaldı");
+}
+
+/// Gidiş-dönüş fikstürü: şema `s` için kaynak (`source`) ya da hedef tarafın DDL'i. Ortak kısım iki tarafta aynıdır;
+/// farklar sabit bir tabloya karşılık gelir (bkz. `diff_roundtrip.rs` içindeki beklenen durumlar).
+///
+/// Bilinen sınırlara dokunulmaz: yeniden kurulan nesnenin bağımlısı yok (görünüm farkı yaprak `v2`'de; dönüş tipi farkı
+/// bağımlısız `fmt`'te), kolon tipi farkı görünüm/MV'nin bağlı olmadığı `products`'ta, enum'a değer ekleme yalnız PG 12+
+/// (eski sürümde betik transaction'sız olurdu ve tek çok-ifadeli sorgu olarak gönderilemezdi).
+pub fn rt_fixture(s: &str, ver: u32, source: bool) -> String {
+    let mood = if source || ver < 120_000 {
+        "'sad','ok','happy'"
+    } else {
+        "'sad','ok'"
+    };
+    let posint = if source { "VALUE > 0" } else { "VALUE >= 0" };
+    let mut q = format!(
+        "CREATE SCHEMA {s};
+         CREATE TYPE {s}.mood AS ENUM ({mood});
+         CREATE TYPE {s}.pair AS (m {s}.mood, n int);
+         CREATE TYPE {s}.span AS RANGE (subtype = int4);
+         CREATE DOMAIN {s}.posint AS int CHECK ({posint});
+         CREATE TABLE {s}.customers (
+             id serial PRIMARY KEY,
+             email text NOT NULL,
+             mood {s}.mood,
+             qty {s}.posint,
+             CONSTRAINT customers_email_key UNIQUE (email),
+             CONSTRAINT customers_qty_chk CHECK (qty < 1000));
+         COMMENT ON TABLE {s}.customers IS 'müşteri tablosu';
+         COMMENT ON COLUMN {s}.customers.email IS 'e-posta';
+         CREATE TABLE {s}.orders (
+             id serial PRIMARY KEY,
+             customer_id int NOT NULL REFERENCES {s}.customers (id),
+             note text,
+             total numeric(10,2),
+             pr {s}.pair);
+         CREATE INDEX orders_note_lower_idx ON {s}.orders (lower(note));
+         CREATE FUNCTION {s}.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+         CREATE FUNCTION {s}.add_one(a integer) RETURNS integer LANGUAGE sql AS $$SELECT a + {inc}$$;
+         CREATE FUNCTION {s}.add_one(a text) RETURNS text LANGUAGE sql AS $$SELECT a || '1'$$;
+         COMMENT ON FUNCTION {s}.add_one(text) IS 'metin ekler';
+         CREATE VIEW {s}.v1 AS SELECT id, email FROM {s}.customers;
+         CREATE VIEW {s}.v2 AS SELECT {v2cols} FROM {s}.v1;
+         CREATE MATERIALIZED VIEW {s}.mv AS SELECT id, total FROM {s}.orders;
+         CREATE INDEX mv_id_idx ON {s}.mv (id);
+         CREATE TABLE {s}.seq_owner (v int);
+         CREATE SEQUENCE {s}.standalone_seq;
+         ALTER SEQUENCE {s}.standalone_seq OWNED BY {s}.seq_owner.v;
+         CREATE TABLE {s}.ordered {ordered};",
+        inc = if source { 1 } else { 2 },
+        v2cols = if source { "id" } else { "id, email" },
+        ordered = if source {
+            "(a int, b text, c int)"
+        } else {
+            "(c int, a int, b text)"
+        },
+    );
+    if source {
+        q.push_str(&format!(
+            "COMMENT ON TABLE {s}.orders IS 'sipariş tablosu';
+             CREATE INDEX orders_total_partial_idx ON {s}.orders (total) WHERE total > 100;
+             CREATE TRIGGER orders_touch BEFORE INSERT ON {s}.orders FOR EACH ROW EXECUTE PROCEDURE {s}.touch();
+             CREATE FUNCTION {s}.fmt(a integer) RETURNS text LANGUAGE sql AS $$SELECT a::text$$;
+             CREATE TABLE {s}.products (id int PRIMARY KEY, name text, price numeric(10,2), sku text);
+             CREATE TABLE {s}.audit_log (
+                 id bigserial PRIMARY KEY,
+                 order_id int REFERENCES {s}.orders (id),
+                 msg text);"
+        ));
+    } else {
+        q.push_str(&format!(
+            "CREATE FUNCTION {s}.fmt(a integer) RETURNS integer LANGUAGE sql AS $$SELECT a$$;
+             CREATE TABLE {s}.products (id int PRIMARY KEY, title text, price numeric(12,4), legacy int);
+             CREATE TABLE {s}.legacy_stuff (id serial PRIMARY KEY, x int);"
+        ));
+    }
+    if ver >= 110_000 {
+        q.push_str(&format!(
+            "CREATE PROCEDURE {s}.noop() LANGUAGE sql AS '';"
+        ));
+    }
+    q
+}

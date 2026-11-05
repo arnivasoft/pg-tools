@@ -788,3 +788,10 @@ Sözleşme: `docs/superpowers/specs/2026-10-18-visual-explain-design.md` §1. Pl
 - [ ] Ayrıntı ve ham JSON: bir düğüm seçilince ayrıntı panelinde Filter/Index Cond/Hash Cond/Output/Sort Key/Rows Removed by Filter gibi tüm anahtarlar görünür; `COSTS OFF` planında maliyet "—" (0 değil); TIMING kapalı ANALYZE'da süreler "—". CTE içeren ANALYZE planında özet ve CTE Scan ayrıntısında CTE notu; paralel planda (Gather) Gather altındaki düğümde paralel notu. "Ham JSON" sekmesi salt okunur metni gösterir, "Kopyala" panoya alır ("Kopyalandı"). Geçmiş'te EXPLAIN metni görünür (geçmiş kapalıysa yazılmaz). **[—]**
 - [ ] Klavye ağacı ve ekran okuyucu: ağaca Tab ile girilir (tek sekme durağı); ↑/↓ satır, → aç / ilk çocuk, ← kapat / üst düğüm, Home/End ilk/son; Enter ayrıntı panelini açar ve odağı oraya taşır, Esc ağaca döndürür. Ekran okuyucu düğümü "ağaç öğesi, düzey N, açık/kapalı" olarak okur; sapma rozeti metin olarak ("12× az tahmin") ve süre/maliyet/satır değerleri etiketleriyle okunur, çubuklar okunmaz. IME bileşimi sırasında tuşlar ağacı gezdirmez. **[—]**
 - [ ] Tema: açık ve koyu temada çubuklar, seçili satır, uyarı (sarı çerçeve) ve kritik (kırmızı) sapma rozetleri, menü ve ham JSON okunaklı; seçili satır vurgusu odak halkasından ayırt edilir. **[—]**
+
+## Şema karşılaştırma arka ucu (Plan 29)
+
+Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2 ve §6. Arayüz Plan 30'dadır; bu bölümde GUI maddesi yoktur.
+
+- [ ] Performans hedefi (spec §4): gerçek (ağ üzerinden) bir sunucuda, taraf başına ~500 tablo / ~2.000 nesnelik iki şemayı karşılaştırın (`cargo test -p pgt-diff --test diff_roundtrip -- --ignored --nocapture` yerel ölçüm verir; ağlı sunucuda aynı fikstürü elle kurun) ve yükleme + karşılaştırmanın 10 saniyenin altında bittiğini kaydedin. Aşılırsa liste sorgularının toplu yüklemeye çevrilmesi sonraki iştir. **[—]**
+- [ ] Explorer akıcılığı: büyük bir karşılaştırma sürerken Explorer ağacını açıp kapatın, sağ tık menüsü açın ve Query Tool'da sorgu çalıştırın; arayüz takılmamalı, havuz sorguları gecikmemeli (karşılaştırma ayrılmış bağlantıda koşar). **[—]**
