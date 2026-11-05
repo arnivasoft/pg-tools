@@ -8,6 +8,7 @@ pub mod client;
 pub mod conversation;
 pub mod model;
 pub mod prompt;
+pub mod session_tools;
 pub mod sse;
 pub mod tools;
 

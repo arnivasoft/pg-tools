@@ -905,7 +905,11 @@ export default function QueryTab(props: { ctl: QueryController }) {
                       canInsert={canInsertAi()}
                       intent={() => ctl.model(tabId)?.aiIntent ?? null}
                       takeIntent={() => takeIntent(tabId)}
-                      target={{ serverId: model()?.serverId ?? null, databaseOid: model()?.databaseOid ?? null }}
+                      target={{
+                        serverId: model()?.serverId ?? null,
+                        databaseOid: model()?.databaseOid ?? null,
+                        session: model()?.session ?? null,
+                      }}
                     />
                   )}
                 </Show>

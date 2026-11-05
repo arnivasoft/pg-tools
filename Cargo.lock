@@ -2619,11 +2619,13 @@ name = "pgt-ai"
 version = "0.1.0"
 dependencies = [
  "pgt-core",
+ "pgt-query",
  "reqwest",
  "rustls",
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-postgres",
  "tracing",

@@ -2,11 +2,12 @@
 //! hiç gönderilmez; istem/yanıt metni günlüğe yazılmaz. Asistan yalnız metin üretir, SQL çalıştırmaz.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use pgt_ai::{AiClient, AiEvent, AiRequest, Cancel, Claude, Conversations, ToolExec, run_turn};
 use pgt_core::ErrorPayload;
 use pgt_core::connection::{ConnectionManager, Target};
+use pgt_query::session::QueryManager;
 use serde_json::Value;
 use tauri::State;
 use tauri::ipc::Channel;
@@ -78,6 +79,7 @@ pub fn ai_key_clear(state: State<'_, AppState>) -> CmdResult<()> {
 /// Sohbete yeni tur. `turns`: arayüzün bildiği tamamlanmış tur sayısı (uyuşmazsa `ai_stale`).
 /// Olaylar `on_event` ile gelir; söz akış bitince (ya da iptalde) çözülür. Başarılı tur geçmişe eklenir.
 /// `server_id`/`database_oid`: sekmenin veritabanı (katalog araçları için); yoksa araçlar hata döner.
+/// `session`: sekmenin sorgu oturumu (plan aracı için); yoksa plan aracı hata döner.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn ai_ask(
@@ -88,6 +90,7 @@ pub async fn ai_ask(
     request: AiRequest,
     server_id: Option<Uuid>,
     database_oid: Option<u32>,
+    session: Option<Uuid>,
     on_event: Channel<AiEvent>,
 ) -> CmdResult<()> {
     let key = state
@@ -107,7 +110,12 @@ pub async fn ai_ask(
     let pending = state.ai.conversations.begin(conversation, turns, &request)?;
     let mut emit = |e: AiEvent| on_event.send(e).is_ok();
     let model = Claude { client, api_key: &key };
-    let tools = CatalogTools { manager: &state.manager, target: server_id.zip(database_oid) };
+    let tools = CatalogTools {
+        manager: &state.manager,
+        target: server_id.zip(database_oid),
+        query: state.query.clone(),
+        session,
+    };
     let result = Box::pin(run_turn(&model, &pending.messages, &cancel, &mut emit, &tools)).await;
     let added = result.as_ref().ok().cloned().flatten();
     state.ai.conversations.finish(pending, added);
@@ -116,14 +124,24 @@ pub async fn ai_ask(
 
 /// Katalog araçları sekmenin veritabanında, uygulamanın katalog bağlantı havuzunda koşar (kullanıcının sorgu
 /// oturumu ve açık transaction'ı etkilenmez; bağlantı katmanının 35 sn sınırı geçerlidir).
+/// Plan aracı (`explain_query`) ise kullanıcının sorgu oturumunda koşar (bkz. `explain_in_session`).
 struct CatalogTools<'a> {
     manager: &'a ConnectionManager,
     target: Option<(Uuid, u32)>,
+    query: Arc<QueryManager>,
+    session: Option<Uuid>,
 }
 
 impl ToolExec for CatalogTools<'_> {
     fn call<'a>(&'a self, name: &'a str, input: &'a Value) -> pgt_ai::agent::BoxFut<'a, Result<String, String>> {
         Box::pin(async move {
+            if name == pgt_ai::tools::EXPLAIN_TOOL {
+                let started = std::time::Instant::now();
+                let sql = pgt_ai::tools::explain_sql(input).unwrap_or_default();
+                let r = pgt_ai::session_tools::explain_in_session(self.query.clone(), self.session, sql).await;
+                tracing::info!(tool = name, ms = started.elapsed().as_millis() as u64, ok = r.is_ok(), "asistan aracı");
+                return r;
+            }
             let Some((server, oid)) = self.target else {
                 return Err("This query tab has no database connection; answer without catalog lookups.".into());
             };

@@ -64,8 +64,48 @@ pub fn definitions() -> Value {
                 "required": ["name_contains"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": EXPLAIN_TOOL,
+            "description": "Get the estimated execution plan of ONE SQL statement with plain EXPLAIN (no ANALYZE: the statement is planned, never executed), in the user's query session so their search_path applies. Use it to check whether an index would be used or where the cost goes. Replace $1-style parameters with representative literal values. It fails if the user's session is busy, has an open transaction, or has not been opened yet; then answer without the plan.",
+            "strict": true,
+            "eager_input_streaming": true,
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "sql": { "type": "string", "description": "Exactly one SQL statement, without a leading EXPLAIN." }
+                },
+                "required": ["sql"],
+                "additionalProperties": false
+            }
         }
     ])
+}
+
+/// Kullanıcının sorgu oturumunda çalışan plan aracı (katalog havuzunda değil; çalıştırması uygulama tarafındadır).
+pub const EXPLAIN_TOOL: &str = "explain_query";
+
+/// Plan aracının JSON çıktısının kırpılma sınırı (karakter).
+pub const MAX_PLAN_TEXT: usize = 30_000;
+
+/// Plan çıktısını sınırlar; kırpıldığı açıkça yazılır.
+pub fn clip_plan(s: &str) -> String {
+    if s.chars().count() <= MAX_PLAN_TEXT {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(MAX_PLAN_TEXT).collect();
+    format!("{head}\n… (plan truncated at {MAX_PLAN_TEXT} characters)")
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExplainInput {
+    sql: String,
+}
+
+/// Plan aracı girdisinden SQL (doğrulanmış girdide).
+pub fn explain_sql(input: &Value) -> Option<String> {
+    serde_json::from_value::<ExplainInput>(input.clone()).ok().map(|i| i.sql)
 }
 
 #[derive(Deserialize)]
@@ -99,6 +139,10 @@ pub fn summary(name: &str, input: &Value) -> String {
             _ => String::new(),
         },
         "search_columns" => s("name_contains").unwrap_or_default(),
+        EXPLAIN_TOOL => {
+            let one_line = s("sql").unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ");
+            if one_line.chars().count() > 60 { format!("{}…", one_line.chars().take(60).collect::<String>()) } else { one_line }
+        }
         _ => String::new(),
     }
 }
@@ -125,6 +169,17 @@ pub fn validate(name: &str, input: &Value) -> Result<(), String> {
         "search_columns" => {
             let i = serde_json::from_value::<SearchInput>(input.clone()).map_err(bad)?;
             if i.name_contains.trim().is_empty() { Err("Invalid input for search_columns: name_contains is empty".into()) } else { Ok(()) }
+        }
+        EXPLAIN_TOOL => {
+            let i = serde_json::from_value::<ExplainInput>(input.clone()).map_err(bad)?;
+            let head = i.sql.trim_start().get(..7).unwrap_or("").to_ascii_lowercase();
+            if i.sql.trim().is_empty() {
+                Err("Invalid input for explain_query: sql is empty".into())
+            } else if head == "explain" {
+                Err("Invalid input for explain_query: send the statement without EXPLAIN; the tool adds it.".into())
+            } else {
+                Ok(())
+            }
         }
         _ => Err(format!("Unknown tool: {name}")),
     }
@@ -337,7 +392,7 @@ mod tests {
     fn definitions_are_strict_with_required_fields() {
         let defs = definitions();
         let defs = defs.as_array().unwrap();
-        assert_eq!(defs.len(), 3);
+        assert_eq!(defs.len(), 4);
         for d in defs {
             assert_eq!(d["strict"], true);
             assert_eq!(d["input_schema"]["additionalProperties"], false);
@@ -362,6 +417,19 @@ mod tests {
         assert_eq!(summary("describe_relation", &json!({"schema": "public", "name": "orders"})), "public.orders");
         assert_eq!(summary("list_relations", &json!({"schema": null, "name_contains": "ord"})), "*ord*");
         assert_eq!(summary("search_columns", &json!({"name_contains": "email"})), "email");
+        assert_eq!(summary(EXPLAIN_TOOL, &json!({"sql": "select *\n  from   orders"})), "select * from orders");
+        let long = format!("select {} from t", "a, ".repeat(40));
+        assert!(summary(EXPLAIN_TOOL, &json!({"sql": long})).ends_with('…'));
+    }
+
+    #[test]
+    fn explain_input_is_one_statement_text_without_explain() {
+        assert!(validate(EXPLAIN_TOOL, &json!({"sql": "select 1"})).is_ok());
+        assert!(validate(EXPLAIN_TOOL, &json!({"sql": "  "})).is_err());
+        assert!(validate(EXPLAIN_TOOL, &json!({"sql": "EXPLAIN ANALYZE delete from t"})).is_err());
+        assert!(validate(EXPLAIN_TOOL, &json!({})).is_err());
+        assert_eq!(explain_sql(&json!({"sql": "select 1"})).as_deref(), Some("select 1"));
+        assert!(clip_plan(&"x".repeat(MAX_PLAN_TEXT + 1)).ends_with("(plan truncated at 30000 characters)"));
     }
 
     #[test]
