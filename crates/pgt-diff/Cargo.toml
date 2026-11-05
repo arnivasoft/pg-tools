@@ -10,7 +10,7 @@ pgt-catalog.workspace = true
 pgt-ddl.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
-futures-util.workspace = true
+futures-util = { workspace = true, features = ["alloc"] }
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
