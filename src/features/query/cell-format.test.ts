@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   PREVIEW_CSP,
   bytesToBase64,
@@ -11,6 +11,7 @@ import {
   imageMime,
   pdfVersion,
   previewDoc,
+  saveCell,
   saveExt,
   suggestSaveName,
   utf8Bytes,
@@ -246,5 +247,50 @@ describe("kaydetme adı", () => {
     expect(saveExt({ pdf: false, image: "jpeg" })).toBe("jpg");
     expect(saveExt({ pdf: false, image: "png" })).toBe("png");
     expect(saveExt({ pdf: false, image: null })).toBe("bin");
+  });
+});
+
+describe("saveCell", () => {
+  const f = { pdf: false, image: "png" as const };
+  const BS = String.fromCharCode(92);
+  const V = BS + "x00";
+  const P = "C:" + BS + "x" + BS + "foto.png";
+  const mk = (pick: () => Promise<string | null>, saveBytes: () => Promise<unknown> = async () => null) => ({
+    pick: vi.fn(pick),
+    saveBytes: vi.fn(saveBytes),
+    onSaved: vi.fn(),
+    onError: vi.fn(),
+  });
+  it("seçim iptal → sessiz", async () => {
+    const d = mk(async () => null);
+    await saveCell(d, V, "foto", f);
+    expect(d.saveBytes).not.toHaveBeenCalled();
+    expect(d.onSaved).not.toHaveBeenCalled();
+    expect(d.onError).not.toHaveBeenCalled();
+    expect(d.pick).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: "foto.png" }));
+  });
+  it("yol seçildi → kaydeder", async () => {
+    const d = mk(async () => P);
+    await saveCell(d, V, "foto", f);
+    expect(d.saveBytes).toHaveBeenCalledWith(V, P);
+    expect(d.onSaved).toHaveBeenCalledOnce();
+  });
+  it("saveBytes reddi → onError, istisna yok", async () => {
+    const d = mk(
+      async () => P,
+      async () => {
+        throw new Error("x");
+      },
+    );
+    await expect(saveCell(d, V, "foto", f)).resolves.toBeUndefined();
+    expect(d.onError).toHaveBeenCalledOnce();
+    expect(d.onSaved).not.toHaveBeenCalled();
+  });
+  it("seçici reddi → onError", async () => {
+    const d = mk(async () => {
+      throw new Error("x");
+    });
+    await saveCell(d, V, "foto", f);
+    expect(d.onError).toHaveBeenCalledOnce();
   });
 });

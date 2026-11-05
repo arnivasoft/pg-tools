@@ -2,6 +2,7 @@
 // görsel data URL'i, PDF sürümü, HTML/XML biçimleyici ve korumalı önizleme belgesi.
 // DOM API'si kullanılmaz; çıktı yalnız metindir.
 import type { ImageKind } from "./cell-view-model";
+import { tcell } from "./strings-cell";
 
 // ---------------------------------------------------------------------------
 // Bayt yardımcıları
@@ -415,4 +416,34 @@ export function saveExt(f: { pdf: boolean; image: ImageKind | null }): string {
   if (f.pdf) return "pdf";
   if (f.image) return f.image === "jpeg" ? "jpg" : f.image;
   return "bin";
+}
+
+/**
+ * "Kaydet…" koordinatörü (saf; iletişim kutusu ve IPC enjekte edilir). İptal (`null` yol) sessizdir;
+ * hata ayrıntısı iletilmez (gizlilik) ve istisna yayılmaz.
+ */
+export async function saveCell(
+  d: {
+    pick(o: { defaultPath: string; filters: { name: string; extensions: string[] }[]; title: string }): Promise<string | null>;
+    saveBytes(data: string, path: string): Promise<unknown>;
+    onSaved(): void;
+    onError(): void;
+  },
+  value: string,
+  columnName: string,
+  f: { pdf: boolean; image: ImageKind | null },
+): Promise<void> {
+  try {
+    const ext = saveExt(f);
+    const path = await d.pick({
+      defaultPath: suggestSaveName(columnName, ext),
+      filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+      title: tcell.saveTitle,
+    });
+    if (path === null) return;
+    await d.saveBytes(value, path);
+    d.onSaved();
+  } catch {
+    d.onError();
+  }
 }
