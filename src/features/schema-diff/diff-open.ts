@@ -43,10 +43,31 @@ export function createSchemaDiff(deps: DiffDeps) {
   // Sekme başlıkları/panelleri ve denetleyici hemen ardından gerekecek: açılış isteğiyle paralel insin.
   void load().catch(() => {});
   const i = () => inner?.ctl;
+  const done = Promise.resolve();
   const ctl: DiffController = {
     model: (id) => i()?.model(id) ?? null,
     ids: () => i()?.ids() ?? [],
+    open: (nodeId) => i()?.open(nodeId) ?? done,
     close: (id) => i()?.close(id),
+    setServer: (id, side, serverId) => i()?.setServer(id, side, serverId) ?? done,
+    setDatabase: (id, side, oid) => i()?.setDatabase(id, side, oid) ?? done,
+    setSchema: (id, side, schema) => i()?.setSchema(id, side, schema),
+    swap: (id) => i()?.swap(id),
+    setOption: (id, key, value) => i()?.setOption(id, key, value),
+    compare: (id) => i()?.compare(id) ?? done,
+    cancel: (id) => i()?.cancel(id),
+    setFilter: (id, c, on) => i()?.setFilter(id, c, on),
+    setSearch: (id, q) => i()?.setSearch(id, q),
+    toggle: (id, key) => i()?.toggle(id, key),
+    selectAll: (id, on) => i()?.selectAll(id, on),
+    selectVisible: (id, on) => i()?.selectVisible(id, on),
+    focus: (id, key) => i()?.focus(id, key),
+    moveFocus: (id, delta) => i()?.moveFocus(id, delta),
+    buildScript: (id) => i()?.buildScript(id) ?? done,
+    closeScript: (id) => i()?.closeScript(id),
+    openInQueryTool: (id) => i()?.openInQueryTool(id) ?? done,
+    copyScript: (id) => i()?.copyScript(id) ?? done,
+    saveScript: (id) => i()?.saveScript(id) ?? done,
   };
   const open = (nodeId: string): Promise<void> =>
     load().then(
