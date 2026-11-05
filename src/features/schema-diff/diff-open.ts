@@ -47,6 +47,7 @@ export function createSchemaDiff(deps: DiffDeps) {
   const ctl: DiffController = {
     model: (id) => i()?.model(id) ?? null,
     ids: () => i()?.ids() ?? [],
+    servers: () => i()?.servers() ?? [],
     open: (nodeId) => i()?.open(nodeId) ?? done,
     close: (id) => i()?.close(id),
     setServer: (id, side, serverId) => i()?.setServer(id, side, serverId) ?? done,

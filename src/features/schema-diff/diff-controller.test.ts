@@ -296,23 +296,45 @@ describe("diff-controller", () => {
       expect(s.tabs.rename).toHaveBeenCalledWith("s1", "app.Şube ↔ app.public");
     });
 
-    it("ikinci compare önce eski diffId'yi kapatır; ilk işin geç olayı ve sonucu yazılmaz", async () => {
+    it("ikinci compare önce eski diffId'yi kapatır; ilk işin geç olayı yazılmaz", async () => {
       const s = mk();
       await s.compared();
       const first = s.starts[0];
       void s.ctl.compare("s1");
       await flush();
-      expect(s.api.schemaDiffClose).toHaveBeenCalledWith("d1");
+      expect(s.api.schemaDiffClose.mock.calls).toEqual([["d1"]]);
       expect(s.api.schemaDiffClose.mock.invocationCallOrder[0]).toBeLessThan(s.api.schemaDiffStart.mock.invocationCallOrder[1]);
       expect(s.m().diffId).toBe("d2");
       expect(s.m().result).toBeNull();
       expect(s.m().selected.size).toBe(0);
-      first.onEvent(ev("source", 1, 9));
-      first.d.resolve({ ...RESULT, items: [item({ key: "zz" })] });
+      // Kanal, yerleşmiş ilk işin olayını yeni karşılaştırma başladıktan sonra teslim ederse:
+      expect(() => first.onEvent(ev("source", 1, 9))).not.toThrow();
       await flush();
       expect(s.m().progress.source).toBeNull();
       expect(s.m().phase).toBe("running");
       expect(s.m().result).toBeNull();
+      expect(s.api.schemaDiffCancel).not.toHaveBeenCalled();
+      // İkinci iş biter; eski diffId bir daha kapatılmaz.
+      s.starts[1].d.resolve(RESULT);
+      await flush();
+      expect(s.m().phase).toBe("done");
+      s.ctl.close("s1");
+      expect(s.api.schemaDiffClose.mock.calls).toEqual([["d1"], ["d2"]]);
+    });
+
+    it("çalışırken ikinci compare engellenir; ilk işin sonucu ancak kendi kuşağına yazılır", async () => {
+      // Uçuştaki eski kuşak sonucu yalnız kapatma yoluyla oluşabilir (çalışırken compare engelli; bkz. kapatma testleri).
+      const s = mk();
+      await s.ready();
+      void s.ctl.compare("s1");
+      await flush();
+      await s.ctl.compare("s1");
+      expect(s.api.schemaDiffStart).toHaveBeenCalledTimes(1);
+      expect(s.api.schemaDiffClose).not.toHaveBeenCalled();
+      s.starts[0].d.resolve(RESULT);
+      await flush();
+      expect(s.m().phase).toBe("done");
+      expect(s.m().diffId).toBe("d1");
     });
 
     it("diğer hata → error, phase idle", async () => {
@@ -655,6 +677,115 @@ describe("diff-controller", () => {
       await flush();
       expect(s.ctl.model("s1")).toBeNull();
       expect(s.api.schemaDiffClose).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("düzeltme turu 1", () => {
+    it("servers() deps.servers()'ı döndürür", () => {
+      const s = mk();
+      const list = [{ id: "s1", name: "yerel" }] as unknown as ReturnType<DiffControllerDeps["servers"]>;
+      s.deps.servers = () => list;
+      expect(s.ctl.servers()).toBe(list);
+    });
+
+    it("ddlTargetOf yanıtından önce kapanırsa connect ve liste çağrısı yok", async () => {
+      const s = mk();
+      const late = deferred<DdlTarget>();
+      s.api.ddlTargetOf.mockReturnValueOnce(late.promise);
+      const p = s.ctl.open("sch");
+      s.ctl.close("s1");
+      late.resolve(schemaTarget);
+      await p;
+      await flush();
+      expect(s.deps.connect).not.toHaveBeenCalled();
+      expect(s.api.schemaDiffDatabases).not.toHaveBeenCalled();
+      expect(s.api.ddlLookup).not.toHaveBeenCalled();
+    });
+
+    it("connect yanıtından önce kapanırsa liste çağrısı yok", async () => {
+      const s = mk();
+      const conn = deferred<boolean>();
+      (s.deps.connect as ReturnType<typeof vi.fn>).mockReturnValueOnce(conn.promise);
+      const p = s.ctl.open("sch");
+      await flush();
+      expect(s.deps.connect).toHaveBeenCalledTimes(1);
+      s.ctl.close("s1");
+      conn.resolve(true);
+      await p;
+      await flush();
+      expect(s.api.schemaDiffDatabases).not.toHaveBeenCalled();
+      expect(s.api.ddlLookup).not.toHaveBeenCalled();
+    });
+
+    it("connect yanıtından önce sunucu değişirse eski sunucunun listesi istenmez", async () => {
+      const s = mk();
+      await s.ready();
+      s.api.schemaDiffDatabases.mockClear();
+      const conn = deferred<boolean>();
+      (s.deps.connect as ReturnType<typeof vi.fn>).mockReturnValueOnce(conn.promise);
+      const p1 = s.ctl.setServer("s1", "source", "s2");
+      await flush();
+      await s.ctl.setServer("s1", "source", "s3");
+      conn.resolve(true);
+      await p1;
+      await flush();
+      expect(s.api.schemaDiffDatabases.mock.calls).toEqual([["s3"]]);
+      expect(s.m().source.serverId).toBe("s3");
+      expect(s.m().source.loadingLists).toBe(false);
+    });
+
+    it("eski ayrıntı hatası (diff_not_found dahil) hiçbir şey yazmaz", async () => {
+      const s = mk();
+      await s.compared();
+      const db = deferred<DiffDetail>();
+      s.api.schemaDiffDetail.mockReturnValueOnce(db.promise);
+      s.ctl.focus("s1", "b");
+      await s.fire();
+      s.ctl.focus("s1", "d");
+      await s.fire();
+      db.reject(err("diff_not_found"));
+      await flush();
+      expect(s.m().banner).toBeNull();
+      expect(s.m().result).not.toBeNull();
+      expect(s.m().diffId).toBe("d1");
+      expect(s.m().detail).toEqual({ key: "d", data: detailOf("d"), error: null });
+    });
+
+    it("diff_not_found kaydetmede → banner gone, result null", async () => {
+      const s = mk();
+      await s.compared();
+      await s.ctl.buildScript("s1");
+      s.api.schemaDiffSave.mockRejectedValueOnce(err("diff_not_found"));
+      await s.ctl.saveScript("s1");
+      expect(s.m().banner).toBe(tsd.gone);
+      expect(s.m().result).toBeNull();
+      expect(s.m().diffId).toBeNull();
+      expect(s.m().script).toBeNull();
+      expect(s.deps.notify).not.toHaveBeenCalled();
+    });
+
+    it("seçici açıkken diyalog kapanır, betik yenilenir ya da sekme kapanırsa kayıt yapılmaz", async () => {
+      const s = mk();
+      await s.compared();
+      for (const interrupt of [
+        () => s.ctl.closeScript("s1"),
+        () => void s.ctl.buildScript("s1"),
+        () => s.ctl.close("s1"),
+      ]) {
+        await s.ctl.buildScript("s1");
+        const picked = deferred<string | null>();
+        (s.picker.save as ReturnType<typeof vi.fn>).mockReturnValueOnce(picked.promise);
+        const p = s.ctl.saveScript("s1");
+        await flush();
+        interrupt();
+        await flush();
+        picked.resolve(PATH);
+        await p;
+        await flush();
+      }
+      expect(s.picker.save).toHaveBeenCalledTimes(3);
+      expect(s.api.schemaDiffSave).not.toHaveBeenCalled();
+      expect(s.deps.notify).not.toHaveBeenCalled();
     });
   });
 });

@@ -94,6 +94,8 @@ export interface DiffModel {
 export interface DiffTabCtl {
   model(tabId: string): DiffModel | null;
   ids(): string[];
+  /** Tepkisel sunucu listesi (seçiciler ve hedef bandı; görünümler yalnızca denetleyiciyi alır). */
+  servers(): ServerConfig[];
   open(nodeId: string): Promise<void>;
   close(tabId: string): void;
   setServer(tabId: string, side: SideTag, serverId: string | null): Promise<void>;
@@ -130,6 +132,8 @@ interface Run {
   settled: boolean;
   /** Sekme çalışırken kapandı: yerleşince `schemaDiffClose`. */
   closeAfter: boolean;
+  /** `schemaDiffClose` gönderildi (diffId başına en çok bir kez; durum çalıştırma kaydında, küresel küme yok). */
+  closeSent: boolean;
 }
 
 interface Entry {
@@ -160,8 +164,6 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
   const { api } = deps;
   const entries = new Map<string, Entry>();
   const [order, setOrder] = createSignal<string[]>([]);
-  /** Kapatılmış diffId'ler: `schemaDiffClose` bir diffId için en çok bir kez. */
-  const closedIds = new Set<string>();
   let listSeq = 0;
 
   const get = (tabId: string): Entry | null => {
@@ -169,10 +171,14 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     return e && !e.closed ? e : null;
   };
 
-  const closeId = (diffId: string) => {
-    if (closedIds.has(diffId)) return;
-    closedIds.add(diffId);
-    api.schemaDiffClose(diffId).catch(() => {});
+  const closeRun = (run: Run) => {
+    if (run.closeSent) return;
+    run.closeSent = true;
+    api.schemaDiffClose(run.diffId).catch(() => {});
+  };
+  /** Ekrandaki diffId'yi kapatır: `state.diffId` yalnızca güncel çalıştırmanın kimliği olabilir. */
+  const closeCurrent = (e: Entry) => {
+    if (e.run !== null && e.state.diffId === e.run.diffId) closeRun(e.run);
   };
   const sendCancel = (run: Run) => {
     if (run.cancelSent) return;
@@ -224,6 +230,10 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
 
   /** Bağlan → veritabanı listesi → (veritabanı seçiliyse) şema listesi; verilen kuşaklara yazar. */
   const loadLists = async (e: Entry, gens: number[], serverId: string, databaseOid: number | null) => {
+    // Her adım öncesi: sekme kapandıysa ya da tarafların seçimi ilerlediyse bağlanma (parola istemi) ve liste çağrısı
+    // yapılmaz.
+    const live = () => gens.some((g) => sideOf(e, g) !== null);
+    if (!live()) return;
     writeLists(e, gens, { loadingLists: true });
     try {
       let ok: boolean;
@@ -237,13 +247,14 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
         writeLists(e, gens, { databasesError: tsd.errors.connectFailed, loadingLists: false });
         return;
       }
+      if (!live()) return;
       try {
         writeLists(e, gens, { databases: await api.schemaDiffDatabases(serverId), databasesError: null });
       } catch (err) {
         writeLists(e, gens, { databasesError: errorText(p(err)), loadingLists: false });
         return;
       }
-      if (databaseOid !== null) await loadSchemas(e, gens, serverId, databaseOid);
+      if (databaseOid !== null && live()) await loadSchemas(e, gens, serverId, databaseOid);
     } finally {
       writeLists(e, gens, { loadingLists: false });
     }
@@ -334,7 +345,7 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
       if (!e.closed) e.set("error", errorText(p(err)));
       return;
     }
-    if (side === null || side.serverId === null) return;
+    if (e.closed || side === null || side.serverId === null) return;
     writeLists(e, gens.slice(0, 1), { ...side });
     writeLists(e, gens.slice(1), { serverId: side.serverId, databaseOid: side.databaseOid, schema: null });
     await loadLists(e, gens, side.serverId, side.databaseOid);
@@ -405,10 +416,11 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
       src: { db: dbName(st.source, source.databaseOid), schema: source.schema },
       tgt: { db: dbName(st.target, target.databaseOid), schema: target.schema },
     };
-    if (st.diffId !== null) closeId(st.diffId);
+    closeCurrent(e);
     const gen = ++e.compareGen;
     const run: Run = {
       diffId: deps.newId(), gen, registered: false, pendingCancel: false, cancelSent: false, settled: false, closeAfter: false,
+      closeSent: false,
     };
     e.run = run;
     e.ran = null;
@@ -435,7 +447,7 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     const settle = () => {
       run.settled = true;
       run.pendingCancel = false;
-      if (run.closeAfter) closeId(run.diffId);
+      if (run.closeAfter) closeRun(run);
     };
     let r: DiffResult;
     try {
@@ -477,8 +489,8 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
       if (run.registered) sendCancel(run);
       else run.pendingCancel = true;
       run.closeAfter = true;
-    } else if (e.state.diffId !== null) {
-      closeId(e.state.diffId);
+    } else {
+      closeCurrent(e);
     }
   };
 
@@ -571,6 +583,8 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
         filters: [{ name: tsd.script.filterName, extensions: ["sql"] }],
       });
       if (typeof path !== "string") return;
+      // Seçici açıkken sekme kapandıysa, diyalog kapandıysa ya da betik yenilendiyse hiçbir şey yapılmaz.
+      if (s.e.closed || s.e.scriptGen !== gen || s.e.state.script?.data?.sql !== s.sql) return;
       await api.schemaDiffSave(diffId, path);
       deps.notify(tsd.script.saved, "success");
     } catch (err) {
@@ -584,6 +598,7 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
       return get(tabId)?.state ?? null;
     },
     ids: () => order(),
+    servers: () => deps.servers(),
     open,
     close,
     setServer,
