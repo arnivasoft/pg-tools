@@ -18,7 +18,9 @@ SET LOCAL search_path TO pg_catalog, "Hedef Şema";
 CREATE TABLE a (id int);
 -- Tablo b
 CREATE TABLE b (id int);
+-- Tablo a
 ALTER TABLE a ADD CONSTRAINT a_fk FOREIGN KEY (id) REFERENCES b (id);
+-- Tablo b
 ALTER TABLE b ADD CONSTRAINT b_fk FOREIGN KEY (id) REFERENCES a (id);
 
 COMMIT;

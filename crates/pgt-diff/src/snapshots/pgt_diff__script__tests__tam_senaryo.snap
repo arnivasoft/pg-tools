@@ -40,7 +40,9 @@ CREATE SEQUENCE s1;
 CREATE FUNCTION f1() ...;
 -- Tablo t1
 CREATE TABLE t1 (id int);
+-- Sequence s1
 ALTER SEQUENCE s1 OWNED BY t1.id;
+-- Tablo t1
 ALTER TABLE t1 ADD CONSTRAINT fk ...;
 -- Görünüm v1
 CREATE VIEW v1 AS SELECT 1;

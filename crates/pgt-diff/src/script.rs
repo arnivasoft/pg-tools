@@ -282,6 +282,10 @@ fn auto_dropped(it: &ScriptItem, items: &[ScriptItem]) -> bool {
 
 /// Aşamada yer alan öğelerin yazım sırası (öğe indisleri).
 fn phase_order(phase: Phase, idx: &[usize], items: &[ScriptItem]) -> Vec<usize> {
+    debug_assert!(
+        idx.iter().map(|&i| items[i].key).collect::<HashSet<_>>().len() == idx.len(),
+        "aşamada yinelenen öğe anahtarı"
+    );
     let mut base = idx.to_vec();
     base.sort_by(|&a, &b| {
         let (x, y) = (&items[a], &items[b]);
@@ -395,8 +399,8 @@ pub fn assemble(h: &ScriptHeader, items: &[ScriptItem]) -> DiffScript {
     ));
 
     let mut section: Option<Section> = None;
-    // Öğe etiketi her bölümde, o bölümdeki ilk satırdan önce bir kez yazılır.
-    let mut labelled: HashSet<(usize, Section)> = HashSet::new();
+    // Öğe etiketi, ardışık ifadeler arasında öğe değiştiğinde (ve her bölüm başında) yeniden yazılır.
+    let mut last_labelled: Option<usize> = None;
     for phase in ALL_PHASES {
         let Some(idx) = by_phase.get(&phase) else {
             continue;
@@ -406,6 +410,7 @@ pub fn assemble(h: &ScriptHeader, items: &[ScriptItem]) -> DiffScript {
             let it = &items[i];
             if section != Some(sec) {
                 section = Some(sec);
+                last_labelled = None;
                 out.push(String::new());
                 out.push(
                     match sec {
@@ -416,7 +421,8 @@ pub fn assemble(h: &ScriptHeader, items: &[ScriptItem]) -> DiffScript {
                     .into(),
                 );
             }
-            if labelled.insert((i, sec)) {
+            if last_labelled != Some(i) {
+                last_labelled = Some(i);
                 let kind = if sec == Section::Drops {
                     it.target_kind.unwrap_or(it.kind)
                 } else {
@@ -851,6 +857,40 @@ mod tests {
         assert_eq!(utc_timestamp(SystemTime::UNIX_EPOCH), "1970-01-01 00:00:00 UTC");
         let leap = SystemTime::UNIX_EPOCH + Duration::from_secs(1_709_251_199 + 1 + 3661);
         assert_eq!(utc_timestamp(leap), "2024-03-01 01:01:01 UTC");
+    }
+
+    #[test]
+    fn her_ifade_kendi_ogesinin_etiketi_altinda() {
+        let ga = gen_parts(vec![
+            (Phase::Tables, vec![st("CREATE TABLE a (id int)")]),
+            (Phase::ForeignKeys, vec![st("ALTER TABLE a ADD CONSTRAINT a_fk")]),
+        ]);
+        let gb = gen_parts(vec![(Phase::Tables, vec![st("CREATE TABLE b (id int)")])]);
+        let items = [item("a", ObjectKind::Table, "a", &ga), item("b", ObjectKind::Table, "b", &gb)];
+        let s = assemble(&H, &items).sql;
+        let lines: Vec<_> = s.lines().collect();
+        let at = |p: &str| lines.iter().position(|l| l.starts_with(p)).unwrap();
+        // Hem CREATE'ler hem FK, kendi etiketinin hemen altında.
+        assert_eq!(lines[at("ALTER TABLE a ADD CONSTRAINT") - 1], "-- Tablo a");
+        assert_eq!(lines[at("CREATE TABLE b") - 1], "-- Tablo b");
+        assert_eq!(lines[at("CREATE TABLE a") - 1], "-- Tablo a");
+    }
+
+    #[test]
+    fn satir_sonlu_ad_etiket_ve_otomatik_dusen_satirinda_yorumda_kalir() {
+        let mut gt = gen_parts(vec![(Phase::DropTable, vec![st("DROP TABLE \"t\"")])]);
+        gt.drops_table = true;
+        let mut gs = gen_parts(vec![(Phase::DropSequence, vec![st("DROP SEQUENCE s")])]);
+        gs.sequence_owner = Some(("t\nDROP TABLE x; --".into(), "id".into()));
+        let mut t = item("t", ObjectKind::Table, "t\nDROP TABLE x; --", &gt);
+        t.table = None;
+        let s_item = item("s", ObjectKind::Sequence, "s\nDROP SCHEMA y; --", &gs);
+        let sql = assemble(&H, &[t, s_item]).sql;
+        for l in sql.lines() {
+            assert!(!l.starts_with("DROP SCHEMA") && !l.starts_with("x;"), "satır: {l}");
+        }
+        assert!(sql.contains("-- Sequence s?DROP SCHEMA y; --"));
+        assert!(sql.contains("-- s?DROP SCHEMA y; --: bağlı olduğu kolonla birlikte silinir"));
     }
 
     #[test]
