@@ -886,3 +886,6 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 - [ ] Şema karşılaştırma → Betik oluştur → "Riskleri açıkla": betik hedefte yeni sekmede açılır (çalıştırılmaz), diyalog kapanır, asistan kilit/yeniden yazım/veri kaybı risklerini sıralar. Etiketsiz sunucuda ortam isteminden vazgeçilince sekme ve istek oluşmaz. **[—]**
 - [ ] Veritabanı panosu → Sorgu istatistikleri → bir sorgu seç → "Asistanla iyileştir": sorgu yeni sekmede açılır, asistan istatistiklerle iyileştirme önerir. Sunucu panosunda düğme kapalıdır ve gerekçe ipucunda yazar. **[—]**
 - [ ] API anahtarı yokken bir girişe tıklanınca anahtar formu çıkar; anahtar kaydedilince bekleyen istek kendiliğinden gönderilir. **[—]**
+- [ ] Plan aracı: sekmede bir sorgu çalıştırdıktan sonra "bu sorgu c kolonundaki indeksi kullanır mı?" → yanıtın üstünde "Plan alındı: …" görünür ve yanıt gerçek plana dayanır. **[—]**
+- [ ] Plan aracı, sekmede hiç sorgu çalıştırılmamışken ya da `BEGIN` ile açık transaction varken çalışmaz; asistan planı denetleyemediğini söyler, kullanıcının transaction'ı bozulmaz. **[—]**
+- [ ] Asistan bir DELETE/UPDATE için plan aldığında satırlar değişmez (yalnız planlanır). **[—]**

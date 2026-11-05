@@ -35,6 +35,7 @@ export const tai = {
     list_relations: "Tablolar listelendi",
     describe_relation: "Tablo incelendi",
     search_columns: "Kolon arandı",
+    explain_query: "Plan alındı",
   } as Record<string, string>,
   toolsAria: "Asistanın baktığı katalog bilgileri",
   /** Başka ekranlardaki "Asistana sor" girişleri. */

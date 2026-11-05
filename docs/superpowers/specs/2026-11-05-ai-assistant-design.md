@@ -83,6 +83,21 @@ mevcut risk/kilit/üretim kapıları geçerlidir).
   dinamik yükler, QueryTab yalnız türünü kullanır; giriş metinleri her özelliğin kendi metin dosyasındadır. Ortak
   statik içe aktarma ortak parça yaratır ve ana paketin ön yükleme listesini büyütür (ilk denemede +322 / +78 bayt).
 
+## Plan aracı `explain_query` (beşinci dilim)
+- Girdi: tek SQL ifadesi (başında EXPLAIN olmadan). Çıktı: `EXPLAIN (FORMAT JSON)` planı, ANALYZE'sız
+  (ifade planlanır, **çalıştırılmaz**); 30.000 karakterle sınırlı (kırpma yazılır).
+- Katalog havuzunda değil, **kullanıcının sorgu oturumunda** koşar: katalog bağlantıları `search_path=pg_catalog`
+  ile açılır ve paylaşılır (Object Explorer), oturum ayarı değiştirilemez; şemasız adlar ancak kullanıcının arama
+  yoluyla çözülür. Görsel EXPLAIN'in yolu kullanılır (`QueryManager::explain`): tek ifade denetimi, kilit/üretim
+  kapıları, oturum meşgulse beklemeden ret.
+- Kullanıcının oturumu `Idle` değilse (açık ya da hatalı transaction) araç çalışmaz: hatalı bir plan isteği onun
+  transaction'ını bozmasın. Oturum yoksa (sekmede hiç çalıştırılmamış) araç hata döner; model plansız yanıtlar.
+- Ayrı görevde (`tokio::spawn`) koşar: asistan isteği iptal edilse de EXPLAIN yarıda kesilip oturum tutarsız
+  kalmaz; 15 sn'de sunucu tarafında iptal edilir (`QueryManager::cancel`).
+- Bilinen sınır: araç çalışırken (genelde milisaniyeler) kullanıcı aynı sekmede sorgu çalıştırırsa "meşgul" uyarısı
+  alır.
+- Entegrasyon testi `crates/pgt-ai/tests/explain_tool.rs` (PG 10/13/18'de geçti; bakım veritabanında `ai_ex`).
+
 ## Sonraki adımlar
-- EXPLAIN aracı (READ ONLY transaction, tek ifade, zaman sınırı).
+- Ayarlar: model/effort seçimi, aylık kullanım sayacı.
 - Ayarlardan model/effort seçimi; kurumsal ağ geçidi (base URL) desteği.

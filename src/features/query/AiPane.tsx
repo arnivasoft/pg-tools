@@ -48,8 +48,8 @@ export default function AiPane(props: {
   context: (mode: AiMode, prompt: string, sql?: string) => Promise<AiRequest>;
   onInsert: (sql: string) => void;
   canInsert: boolean;
-  /** Sekmenin veritabanı (katalog araçları için); sekme bağlı değilse alanlar `null`. */
-  target: { serverId: string | null; databaseOid: number | null };
+  /** Sekmenin veritabanı (katalog araçları) ve sorgu oturumu (plan aracı); yoksa alanlar `null`. */
+  target: { serverId: string | null; databaseOid: number | null; session: string | null };
   /** Başka bir ekrandan bırakılan bekleyen istek (bakmak için) ve onu alıp silmek için. */
   intent: () => AiIntent | null;
   takeIntent: () => AiIntent | null;

@@ -12,14 +12,14 @@ export const aiIpc = {
   keyClear: () => call<null>("ai_key_clear"),
   /**
    * `turns`: arayüzün bildiği tamamlanmış tur sayısı (arka uç geçmişiyle uyuşmazsa `ai_stale`).
-   * `target`: sekmenin veritabanı; asistanın katalog araçları burada (katalog bağlantı havuzunda) koşar.
+   * `target`: sekmenin veritabanı (katalog araçları, katalog bağlantı havuzunda) ve sorgu oturumu (plan aracı).
    */
   ask: (
     id: string,
     conversation: string,
     turns: number,
     request: AiRequest,
-    target: { serverId: string | null; databaseOid: number | null },
+    target: { serverId: string | null; databaseOid: number | null; session: string | null },
     onEvent: (e: AiEvent) => void,
   ) => {
     const ch = new Channel<AiEvent>();
@@ -31,6 +31,7 @@ export const aiIpc = {
       request,
       serverId: target.serverId,
       databaseOid: target.databaseOid,
+      session: target.session,
       onEvent: ch,
     });
   },

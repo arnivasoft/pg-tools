@@ -14,7 +14,7 @@ Test kullanıcısı `CREATEDB` ve `CREATEROLE` yetkisine sahip olmalı (superuse
     $env:PGT_TEST_URLS = "postgres://postgres:PAROLA@127.0.0.1:5432/postgres"
     cargo test --workspace --all-features
 
-Testler `pgt_fixture`, `pgt_roundtrip`, `pgt_perf`, `pgt_noconn`, `pgt_private`, `pgt_ai_tools` adlı veritabanlarını
+Testler `pgt_fixture`, `pgt_roundtrip`, `pgt_perf`, `pgt_noconn`, `pgt_private`, `pgt_ai_tools` adlı veritabanlarını (ve bakım veritabanında `ai_ex` şemasını)
 ve `pgt_reader`, `pgt_app`, `pgt_limited`, `pgt_forever` rollerini oluşturur/yeniden kurar; üretim sunucusunda çalıştırmayın.
 
 Fixture: `tests/fixtures/schema.sql` her sürümde, `schema_pg11.sql` (procedure, partitioned index, `INCLUDE`,
