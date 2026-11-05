@@ -9,7 +9,7 @@
 //   gönderilir; olay gelmeden `start` dönerse bekleyen iptal düşer.
 // - Bir diffId için `schemaDiffClose` en çok bir kez çağrılır; çalışırken kapanan sekmede `start` yerleşince çağrılır.
 // - Gizlilik: bu modül `console` kullanmaz; bildirimler sabit metindir (yol, ad, SQL yok).
-// - İçe aktarma: `app/strings`, `ui/*`, `query/*`, `explorer/*`, `inspector/*`, `designer/*`, CodeMirror yalnız tür olarak.
+// - İçe aktarma: `app/strings`, `ui/*`, `query/*`, `explorer/*`, inspector ve designer modülleri, CodeMirror yalnız tür olarak.
 import { createSignal } from "solid-js";
 import { createStore, type SetStoreFunction } from "solid-js/store";
 import { tsd } from "../../app/strings-diff";
