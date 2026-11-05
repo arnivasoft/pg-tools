@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use pgt_ai::{AiClient, AiEvent, AiRequest, Cancel};
+use pgt_ai::{AiClient, AiEvent, AiRequest, Cancel, Conversations};
 use pgt_core::ErrorPayload;
 use tauri::State;
 use tauri::ipc::Channel;
@@ -23,6 +23,8 @@ fn payload(code: &str, message: &str) -> ErrorPayload {
 pub struct AiState {
     client: OnceLock<AiClient>,
     running: Mutex<HashMap<Uuid, Cancel>>,
+    /// Sohbet geçmişleri (bellekte; sayfa yenilenince silinir).
+    conversations: Conversations,
 }
 
 impl AiState {
@@ -34,10 +36,12 @@ impl AiState {
         Ok(self.client.get_or_init(|| c))
     }
 
-    pub fn cancel_all(&self) {
+    /// Sayfa yenilemede: akışlar kesilir, sohbetler (arayüzle birlikte kaybolan) silinir.
+    pub fn reset(&self) {
         for (_, c) in self.running.lock().unwrap().drain() {
             c.cancel();
         }
+        self.conversations.clear();
     }
 }
 
@@ -69,9 +73,17 @@ pub fn ai_key_clear(state: State<'_, AppState>) -> CmdResult<()> {
     Ok(state.credentials.forget_ai_key()?)
 }
 
-/// Akışlı istek. Olaylar `on_event` ile gelir; söz akış bitince (ya da iptalde) çözülür.
+/// Sohbete yeni tur. `turns`: arayüzün bildiği tamamlanmış tur sayısı (uyuşmazsa `ai_stale`).
+/// Olaylar `on_event` ile gelir; söz akış bitince (ya da iptalde) çözülür. Başarılı tur geçmişe eklenir.
 #[tauri::command]
-pub async fn ai_ask(state: State<'_, AppState>, id: Uuid, request: AiRequest, on_event: Channel<AiEvent>) -> CmdResult<()> {
+pub async fn ai_ask(
+    state: State<'_, AppState>,
+    id: Uuid,
+    conversation: Uuid,
+    turns: u32,
+    request: AiRequest,
+    on_event: Channel<AiEvent>,
+) -> CmdResult<()> {
     let key = state
         .credentials
         .ai_key()?
@@ -86,8 +98,19 @@ pub async fn ai_ask(state: State<'_, AppState>, id: Uuid, request: AiRequest, on
         running.insert(id, cancel.clone());
     }
     let _guard = Running(&state.ai, id);
+    let pending = state.ai.conversations.begin(conversation, turns, &request)?;
     let mut emit = |e: AiEvent| on_event.send(e).is_ok();
-    Box::pin(client.stream(&key, &request, &cancel, &mut emit)).await
+    let result = Box::pin(client.stream(&key, &pending.messages, &cancel, &mut emit)).await;
+    let content = result.as_ref().ok().cloned().flatten();
+    state.ai.conversations.finish(pending, content);
+    result.map(|_| ())
+}
+
+/// Sohbeti bellekten siler ("Yeni sohbet").
+#[tauri::command(async)]
+pub fn ai_forget(state: State<'_, AppState>, conversation: Uuid) -> CmdResult<()> {
+    state.ai.conversations.forget(conversation);
+    Ok(())
 }
 
 #[tauri::command(async)]

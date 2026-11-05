@@ -872,3 +872,8 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 - [ ] "Durdur" akışı keser; sekme kapatılınca ya da sayfa yenilenince uçuştaki istek iptal olur (uygulama günlüğünde istem/yanıt metni ve anahtar görünmez, yalnız durum kodu ve belirteç sayıları). **[—]**
 - [ ] Kurumsal vekil sunucu ve kurumsal kök sertifika arkasında istek çalışır (sistem vekili + işletim sistemi sertifika deposu). **[—]**
 - [ ] Salt okunur sekmede "Editöre ekle" kapalıdır; "Kopyala" çalışır. **[—]**
+- [ ] Çok turlu sohbet: "son 10 sipariş" → "bunu müşteri adına göre grupla" devam sorusu önceki SQL'i bilerek yanıtlanır; ikinci turun belirteç satırında girdi belirteçleri önbellekten okunur (API konsolunda `cache_read_input_tokens` > 0). **[—]**
+- [ ] Sohbet sekme başınadır: iki sorgu sekmesinde ayrı sohbetler; sekme ya da panel (Sonuç ↔ Asistan) değişince geçmiş ve süren yanıt korunur. **[—]**
+- [ ] "Durdur" ile kesilen tur "Bu yanıt sohbet geçmişine eklenmedi." notunu gösterir ve hemen ardından yeni soru sorulabilir (meşgul hatası yok). **[—]**
+- [ ] "Yeni sohbet" geçmişi temizler; sonraki soru önceki turları bilmez. **[—]**
+- [ ] 40 tur sınırında "Sohbet çok uzadı; yeni sohbet başlatın." iletisi çıkar. **[—]**

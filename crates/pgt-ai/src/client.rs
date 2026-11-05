@@ -8,9 +8,9 @@ use pgt_core::ErrorPayload;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::model::{AiEvent, AiRequest};
+use crate::model::AiEvent;
 use crate::prompt;
-use crate::sse::{Interp, SseParser, interpret};
+use crate::sse::{Accumulator, Interp, SseParser, interpret};
 
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2026-10-21";
@@ -72,17 +72,17 @@ impl AiClient {
         Ok(Self { http })
     }
 
-    /// İsteği akışla çalıştırır. `emit` `false` dönerse (alıcı gitti) istek iptal edilir.
-    /// İptalde `Ok(())` döner ve `Done` gönderilmez.
+    /// Mesaj dizisini akışla gönderir. `emit` `false` dönerse (alıcı gitti) istek iptal edilir.
+    /// Başarıda geçmişe eklenecek asistan içeriği döner; iptalde ya da ret (`refusal`) durumunda `None`
+    /// (iptalde `Done` gönderilmez).
     pub async fn stream(
         &self,
         api_key: &str,
-        req: &AiRequest,
+        messages: &[Value],
         cancel: &Cancel,
         emit: &mut (dyn FnMut(AiEvent) -> bool + Send),
-    ) -> Result<(), ErrorPayload> {
-        let user = prompt::user_message(req).map_err(|m| err("invalid", m, None))?;
-        let body = request_body(&user);
+    ) -> Result<Option<Vec<Value>>, ErrorPayload> {
+        let body = request_body(messages);
         let started = Instant::now();
         let send = self
             .http
@@ -95,32 +95,35 @@ impl AiClient {
             .send();
         let mut resp = tokio::select! {
             r = send => r.map_err(|e| network_error(&e))?,
-            () = cancel.cancelled() => return Ok(()),
+            () = cancel.cancelled() => return Ok(None),
         };
         let status = resp.status();
         tracing::info!(status = status.as_u16(), ms = started.elapsed().as_millis() as u64, "asistan isteği yanıtladı");
         if !status.is_success() {
             let text = tokio::select! {
                 t = resp.text() => t.unwrap_or_default(),
-                () = cancel.cancelled() => return Ok(()),
+                () = cancel.cancelled() => return Ok(None),
             };
             return Err(status_error(status.as_u16(), &text));
         }
 
         let mut parser = SseParser::default();
+        let mut acc = Accumulator::default();
         let (mut input_tokens, mut output_tokens, mut stop) = (0u32, 0u32, String::new());
         loop {
             let chunk = tokio::select! {
                 c = resp.chunk() => c.map_err(|e| network_error(&e))?,
-                () = cancel.cancelled() => return Ok(()),
+                () = cancel.cancelled() => return Ok(None),
             };
             let Some(chunk) = chunk else {
                 return Err(err("network", "Asistan yanıtı yarıda kesildi.", None));
             };
             for data in parser.feed(&chunk) {
-                let event = match interpret(&data) {
+                let Ok(v) = serde_json::from_str::<Value>(&data) else { continue };
+                acc.apply(&v);
+                let event = match interpret(&v) {
                     Interp::Text(text) => AiEvent::Delta { text },
-                    Interp::Fallback => AiEvent::Reset,
+                    Interp::Fallback => AiEvent::Fallback,
                     Interp::InputTokens(n) => {
                         input_tokens = input_tokens.saturating_add(n);
                         continue;
@@ -136,22 +139,23 @@ impl AiClient {
                     }
                     Interp::End => {
                         tracing::info!(input_tokens, output_tokens, stop = %stop, "asistan akışı bitti");
+                        let refused = stop == "refusal";
                         emit(AiEvent::Done { stop_reason: stop, input_tokens, output_tokens });
-                        return Ok(());
+                        return Ok((!refused).then(|| acc.echo_content()));
                     }
                     Interp::Error(message) => return Err(err("ai", "Asistan hatası.", Some(message))),
                     Interp::Ignore => continue,
                 };
                 if !emit(event) {
                     cancel.cancel();
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         }
     }
 }
 
-fn request_body(user: &str) -> Value {
+fn request_body(messages: &[Value]) -> Value {
     json!({
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
@@ -161,7 +165,9 @@ fn request_body(user: &str) -> Value {
         "output_config": { "effort": "medium" },
         "fallbacks": "default",
         "system": prompt::SYSTEM,
-        "messages": [{ "role": "user", "content": user }],
+        // Otomatik önbellek: geçmiş (son önbelleklenebilir bloğa kadar) sonraki turda ucuz okunur.
+        "cache_control": { "type": "ephemeral" },
+        "messages": messages,
     })
 }
 
@@ -190,7 +196,8 @@ mod tests {
 
     #[test]
     fn body_uses_streaming_adaptive_thinking_and_default_fallback() {
-        let b = request_body("merhaba");
+        let b = request_body(&[json!({"role": "user", "content": "merhaba"})]);
+        assert_eq!(b["cache_control"]["type"], "ephemeral");
         assert_eq!(b["model"], MODEL);
         assert_eq!(b["stream"], true);
         assert_eq!(b["thinking"]["type"], "adaptive");

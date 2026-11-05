@@ -3,4 +3,4 @@
 /**
  * Akış olayları (`Channel<AiEvent>`).
  */
-export type AiEvent = { "type": "delta", text: string, } | { "type": "reset" } | { "type": "done", stopReason: string, inputTokens: number, outputTokens: number, };
+export type AiEvent = { "type": "delta", text: string, } | { "type": "fallback" } | { "type": "done", stopReason: string, inputTokens: number, outputTokens: number, };

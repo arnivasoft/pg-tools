@@ -44,8 +44,8 @@ fn main() {
                 state.backup.cancel_all();
                 // Karşılaştırma kimlikleri de arayüzle birlikte kaybolur: çalışanlar iptal edilir, sonuçlar bırakılır.
                 state.diff.clear();
-                // Asistan akışlarının alıcısı gitti: HTTP istekleri kesilir.
-                state.ai.cancel_all();
+                // Asistan akışlarının alıcısı gitti: HTTP istekleri kesilir, sohbet geçmişleri silinir.
+                state.ai.reset();
                 tauri::async_runtime::spawn(async move { query::close_all_on_reload(&query).await });
             }
         })
@@ -156,6 +156,7 @@ fn main() {
             ai::ai_key_clear,
             ai::ai_ask,
             ai::ai_cancel,
+            ai::ai_forget,
             cell::cell_open_pdf,
             cell::cell_save_bytes,
         ])

@@ -4,9 +4,11 @@
 //! Asistan yalnız metin üretir; SQL asla kendiliğinden çalıştırılmaz. İstem/yanıt metni günlüğe yazılmaz.
 
 pub mod client;
+pub mod conversation;
 pub mod model;
 pub mod prompt;
 pub mod sse;
 
 pub use client::{AiClient, Cancel};
+pub use conversation::{Conversations, Pending};
 pub use model::{AiEvent, AiMode, AiRequest};

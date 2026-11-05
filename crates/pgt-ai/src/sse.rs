@@ -1,4 +1,5 @@
-//! Server-Sent Events ayrıştırma ve Messages API akış olaylarının yorumlanması.
+//! Server-Sent Events ayrıştırma, Messages API akış olaylarının yorumlanması ve yanıt içeriğinin
+//! (thinking blokları imzalarıyla birlikte) geri gönderilmek üzere biriktirilmesi.
 
 use serde_json::Value;
 
@@ -41,11 +42,11 @@ impl SseParser {
     }
 }
 
-/// Bir akış olayının anlamı.
+/// Bir akış olayının arayüz için anlamı.
 #[derive(Debug, PartialEq)]
 pub enum Interp {
     Text(String),
-    /// Sunucu tarafı yedek modele geçiş (`fallback` içerik bloğu).
+    /// Sunucu tarafı yedek modele geçiş (`fallback` içerik bloğu). Gelen kısmi metin geçerli kalır.
     Fallback,
     InputTokens(u32),
     Stop { reason: Option<String>, output_tokens: Option<u32> },
@@ -58,10 +59,9 @@ fn u32_at(v: &Value, ptr: &str) -> Option<u32> {
     v.pointer(ptr).and_then(Value::as_u64).map(|n| n.min(u32::MAX as u64) as u32)
 }
 
-pub fn interpret(data: &str) -> Interp {
-    let Ok(v) = serde_json::from_str::<Value>(data) else { return Interp::Ignore };
+pub fn interpret(v: &Value) -> Interp {
     match v.get("type").and_then(Value::as_str) {
-        Some("message_start") => u32_at(&v, "/message/usage/input_tokens").map_or(Interp::Ignore, Interp::InputTokens),
+        Some("message_start") => u32_at(v, "/message/usage/input_tokens").map_or(Interp::Ignore, Interp::InputTokens),
         Some("content_block_start") => match v.pointer("/content_block/type").and_then(Value::as_str) {
             Some("fallback") => Interp::Fallback,
             _ => Interp::Ignore,
@@ -75,7 +75,7 @@ pub fn interpret(data: &str) -> Interp {
         },
         Some("message_delta") => Interp::Stop {
             reason: v.pointer("/delta/stop_reason").and_then(Value::as_str).map(str::to_string),
-            output_tokens: u32_at(&v, "/usage/output_tokens"),
+            output_tokens: u32_at(v, "/usage/output_tokens"),
         },
         Some("message_stop") => Interp::End,
         Some("error") => Interp::Error(
@@ -85,9 +85,75 @@ pub fn interpret(data: &str) -> Interp {
     }
 }
 
+/// Yanıtın içerik bloklarını akıştan yeniden kurar (sohbet geçmişine eklenmek üzere).
+#[derive(Default)]
+pub struct Accumulator {
+    blocks: Vec<Value>,
+}
+
+fn append_str(block: &mut Value, field: &str, add: &str) {
+    if let Some(obj) = block.as_object_mut() {
+        let cur = obj.get(field).and_then(Value::as_str).unwrap_or("").to_string();
+        obj.insert(field.into(), Value::String(cur + add));
+    }
+}
+
+impl Accumulator {
+    pub fn apply(&mut self, v: &Value) {
+        let index = v.get("index").and_then(Value::as_u64).map(|i| i as usize);
+        match (v.get("type").and_then(Value::as_str), index) {
+            (Some("content_block_start"), Some(i)) => {
+                let block = v.get("content_block").cloned().unwrap_or(Value::Null);
+                if self.blocks.len() <= i {
+                    self.blocks.resize(i + 1, Value::Null);
+                }
+                self.blocks[i] = block;
+            }
+            (Some("content_block_delta"), Some(i)) => {
+                let Some(block) = self.blocks.get_mut(i) else { return };
+                let delta = &v["delta"];
+                let s = |k: &str| delta.get(k).and_then(Value::as_str).unwrap_or("");
+                match delta.get("type").and_then(Value::as_str) {
+                    Some("text_delta") => append_str(block, "text", s("text")),
+                    Some("thinking_delta") => append_str(block, "thinking", s("thinking")),
+                    Some("signature_delta") => append_str(block, "signature", s("signature")),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Geri gönderilecek asistan içeriği. Yanıt ortasında yedek modele geçildiyse son `fallback` bloğundan
+    /// önceki thinking/redacted_thinking/tool_use ve tanınmayan model içi bloklar atlanır, metin blokları kalır;
+    /// `fallback` bloğunun kendisi atılır. Boş metin blokları da atılır (API reddeder).
+    pub fn echo_content(self) -> Vec<Value> {
+        let ty = |b: &Value| b.get("type").and_then(Value::as_str).map(str::to_string);
+        let boundary = self.blocks.iter().rposition(|b| ty(b).as_deref() == Some("fallback"));
+        self.blocks
+            .into_iter()
+            .enumerate()
+            .filter(|(i, b)| {
+                let t = ty(b);
+                match t.as_deref() {
+                    None | Some("fallback") => false,
+                    Some("text") => b.get("text").and_then(Value::as_str).is_some_and(|s| !s.is_empty()),
+                    Some(_) => boundary.is_none_or(|f| *i > f),
+                }
+            })
+            .map(|(_, b)| b)
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn j(s: &str) -> Value {
+        serde_json::from_str(s).unwrap()
+    }
 
     #[test]
     fn splits_events_across_chunks_and_crlf() {
@@ -105,32 +171,79 @@ mod tests {
         let mid = line.find('ü').unwrap() + 1; // 'ü' iki baytlık: ortadan böl
         assert!(p.feed(&bytes[..mid]).is_empty());
         let out = p.feed(&bytes[mid..]);
-        assert_eq!(interpret(&out[0]), Interp::Text("ğüş".into()));
+        assert_eq!(interpret(&j(&out[0])), Interp::Text("ğüş".into()));
     }
 
     #[test]
     fn interprets_message_events() {
+        assert_eq!(interpret(&j(r#"{"type":"message_start","message":{"usage":{"input_tokens":42}}}"#)), Interp::InputTokens(42));
         assert_eq!(
-            interpret(r#"{"type":"message_start","message":{"usage":{"input_tokens":42}}}"#),
-            Interp::InputTokens(42)
-        );
-        assert_eq!(
-            interpret(r#"{"type":"content_block_start","index":1,"content_block":{"type":"fallback"}}"#),
+            interpret(&j(r#"{"type":"content_block_start","index":1,"content_block":{"type":"fallback"}}"#)),
             Interp::Fallback
         );
         assert_eq!(
-            interpret(r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"x"}}"#),
+            interpret(&j(r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"x"}}"#)),
             Interp::Ignore
         );
         assert_eq!(
-            interpret(r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}"#),
+            interpret(&j(r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":12}}"#)),
             Interp::Stop { reason: Some("end_turn".into()), output_tokens: Some(12) }
         );
-        assert_eq!(interpret(r#"{"type":"message_stop"}"#), Interp::End);
+        assert_eq!(interpret(&j(r#"{"type":"message_stop"}"#)), Interp::End);
         assert_eq!(
-            interpret(r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#),
+            interpret(&j(r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#)),
             Interp::Error("Overloaded".into())
         );
-        assert_eq!(interpret("not json"), Interp::Ignore);
+    }
+
+    fn feed(acc: &mut Accumulator, events: &[Value]) {
+        for e in events {
+            acc.apply(e);
+        }
+    }
+
+    #[test]
+    fn accumulates_thinking_with_signature_and_text() {
+        let mut acc = Accumulator::default();
+        feed(
+            &mut acc,
+            &[
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ab"}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"SIG"}}),
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
+                json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Mer"}}),
+                json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"haba"}}),
+            ],
+        );
+        assert_eq!(
+            acc.echo_content(),
+            vec![json!({"type":"thinking","thinking":"ab","signature":"SIG"}), json!({"type":"text","text":"Merhaba"})]
+        );
+    }
+
+    #[test]
+    fn mid_output_fallback_drops_earlier_thinking_but_keeps_text() {
+        let mut acc = Accumulator::default();
+        feed(
+            &mut acc,
+            &[
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"x","signature":"S1"}}),
+                json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":"Kısmi "}}),
+                json!({"type":"content_block_start","index":2,"content_block":{"type":"fallback","from":{},"to":{}}}),
+                json!({"type":"content_block_start","index":3,"content_block":{"type":"thinking","thinking":"y","signature":"S2"}}),
+                json!({"type":"content_block_start","index":4,"content_block":{"type":"text","text":"devam"}}),
+                json!({"type":"content_block_start","index":5,"content_block":{"type":"text","text":""}}),
+            ],
+        );
+        assert_eq!(
+            acc.echo_content(),
+            vec![
+                json!({"type":"text","text":"Kısmi "}),
+                json!({"type":"thinking","thinking":"y","signature":"S2"}),
+                json!({"type":"text","text":"devam"}),
+            ]
+        );
     }
 }

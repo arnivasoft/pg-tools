@@ -6,7 +6,7 @@ use ts_rs::TS;
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub enum AiMode {
-    /// Doğal dil isteğinden SQL yaz.
+    /// Serbest istek ya da soru (gerekirse SQL yazar); sohbetin devam soruları da bu kipte.
     Generate,
     /// Verilen SQL'i açıkla.
     Explain,
@@ -39,8 +39,8 @@ pub struct AiRequest {
 pub enum AiEvent {
     /// Yanıta eklenecek metin parçası.
     Delta { text: String },
-    /// Sunucu isteği başka bir modele devretti: o ana kadar gelen metin atılmalı.
-    Reset,
+    /// Sunucu isteği yedek modele devretti; gelen metin geçerli kalır ve yedek model kaldığı yerden sürer.
+    Fallback,
     /// Akış bitti. `stopReason`: `end_turn`, `max_tokens`, `refusal`...
     Done { stop_reason: String, input_tokens: u32, output_tokens: u32 },
 }
