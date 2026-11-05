@@ -28,6 +28,8 @@ fn err(code: &str, message: impl Into<String>) -> ErrorPayload {
 struct Conversation {
     messages: Vec<Value>,
     last_schema: Option<String>,
+    /// Tamamlanmış tur sayısı (bir tur araç sonuçlarıyla birden çok mesaj olabilir).
+    turns: u32,
     chars: usize,
     busy: bool,
     /// Son kullanım sırası (eşit zaman damgası sorunu olmasın diye sayaç).
@@ -64,7 +66,7 @@ impl Conversations {
         if conv.busy {
             return Err(err("busy", "Bu sohbette yanıt bekleniyor."));
         }
-        let have = (conv.messages.len() / 2) as u32;
+        let have = conv.turns;
         if have != turns {
             return Err(err("ai_stale", "Sohbet geçmişi arayüzle uyuşmuyor; yeni sohbet başlatın."));
         }
@@ -87,22 +89,36 @@ impl Conversations {
     }
 
     /// Turu bitirir. `content` varsa (başarılı yanıt) kullanıcı ve asistan mesajları geçmişe eklenir.
-    pub fn finish(&self, p: Pending, content: Option<Vec<Value>>) {
+    /// Turu bitirir. `added` varsa (başarılı tur: asistan mesajları ve araç sonuçları, `agent::run_turn`)
+    /// kullanıcı mesajıyla birlikte geçmişe eklenir.
+    pub fn finish(&self, p: Pending, added: Option<Vec<Value>>) {
         let mut map = self.map.lock().unwrap();
         let Some(conv) = map.get_mut(&p.conversation) else { return };
         conv.busy = false;
-        // Arayüzle aynı kural (`isCommitted`): görünür metni olmayan yanıt geçmişe girmez.
-        let has_text = |c: &Vec<Value>| {
-            c.iter().any(|b| b["type"] == "text" && b["text"].as_str().is_some_and(|s| !s.trim().is_empty()))
+        // Arayüzle aynı kural (`isCommitted`): asistanın görünür metni olmayan tur geçmişe girmez.
+        let has_text = |msgs: &Vec<Value>| {
+            msgs.iter().filter(|m| m["role"] == "assistant").any(|m| {
+                m["content"].as_array().is_some_and(|c| {
+                    c.iter().any(|b| b["type"] == "text" && b["text"].as_str().is_some_and(|s| !s.trim().is_empty()))
+                })
+            })
         };
-        let Some(content) = content.filter(has_text) else { return };
-        let answer_chars: usize = content
+        let Some(added) = added.filter(has_text) else { return };
+        let added_chars: usize = added
             .iter()
-            .map(|b| ["text", "thinking"].iter().filter_map(|k| b.get(*k)?.as_str()).map(|s| s.chars().count()).sum::<usize>())
+            .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default())
+            .map(|b| {
+                ["text", "thinking", "content"]
+                    .iter()
+                    .filter_map(|k| b.get(*k)?.as_str())
+                    .map(|s| s.chars().count())
+                    .sum::<usize>()
+            })
             .sum();
         conv.messages.push(p.user);
-        conv.messages.push(json!({ "role": "assistant", "content": content }));
-        conv.chars += p.chars + answer_chars;
+        conv.messages.extend(added);
+        conv.turns += 1;
+        conv.chars += p.chars + added_chars;
         if let Some(s) = p.schema {
             conv.last_schema = Some(s);
         }
@@ -143,8 +159,29 @@ mod tests {
         }
     }
 
+    fn blocks(text: &str) -> Value {
+        json!([{"type":"thinking","thinking":"","signature":"S"}, {"type":"text","text": text}])
+    }
+
+    /// Araçsız tur: tek asistan mesajı.
     fn answer(text: &str) -> Vec<Value> {
-        vec![json!({"type":"thinking","thinking":"","signature":"S"}), json!({"type":"text","text": text})]
+        vec![json!({"role":"assistant","content": blocks(text)})]
+    }
+
+    #[test]
+    fn tool_rounds_count_as_one_turn() {
+        let c = Conversations::default();
+        let id = Uuid::new_v4();
+        let p = c.begin(id, 0, &ask("e-posta nerede?", "")).unwrap();
+        let tool_use = json!({"role":"assistant","content":[{"type":"tool_use","id":"a","name":"search_columns","input":{"name_contains":"email"}}]});
+        let result = json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"public\tusers\temail\ttext","is_error":false}]});
+        let final_answer = json!({"role":"assistant","content": blocks("users.email")});
+        c.finish(p, Some(vec![tool_use.clone(), result.clone(), final_answer.clone()]));
+        let p = c.begin(id, 1, &ask("peki telefon?", "")).unwrap();
+        assert_eq!(p.messages.len(), 5);
+        assert_eq!(p.messages[1], tool_use);
+        assert_eq!(p.messages[2], result);
+        assert_eq!(p.messages[3], final_answer);
     }
 
     #[test]
@@ -160,7 +197,7 @@ mod tests {
         let p2 = c.begin(id, 1, &ask("ikinci", "public.t(id)")).unwrap();
         assert_eq!(p2.messages.len(), 3);
         assert_eq!(p2.messages[0], first_user, "önceki mesaj değişmeden gönderilir");
-        assert_eq!(p2.messages[1]["content"], json!(answer("A1")), "thinking imzası korunur");
+        assert_eq!(p2.messages[1]["content"], blocks("A1"), "thinking imzası korunur");
         assert!(!p2.messages[2]["content"].as_str().unwrap().contains("<schema>"));
         c.finish(p2, Some(answer("A2")));
 
@@ -176,7 +213,7 @@ mod tests {
         c.finish(p, None);
         let p = c.begin(id, 0, &ask("z", "")).unwrap();
         // Görünür metni olmayan yanıt (yalnız thinking ya da boşluk) da girmez: arayüzün `isCommitted` kuralı.
-        c.finish(p, Some(vec![json!({"type":"thinking","thinking":"","signature":"S"}), json!({"type":"text","text":"  "})]));
+        c.finish(p, Some(answer("  ")));
         let p = c.begin(id, 0, &ask("y", "")).unwrap();
         assert_eq!(p.messages.len(), 1);
         assert!(p.messages[0]["content"].as_str().unwrap().contains("<request>\ny\n</request>"));

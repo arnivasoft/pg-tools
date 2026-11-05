@@ -46,6 +46,25 @@ mevcut risk/kilit/üretim kapıları geçerlidir).
   geçmişe eklenirken son `fallback` bloğundan önceki thinking/tool_use blokları atlanır, metin blokları kalır.
 - "Yeni sohbet" (`ai_forget`) arka uç geçmişini siler.
 
+## Katalog araçları (üçüncü dilim)
+- Üç salt okunur araç (`pgt_ai::tools`): `list_relations(schema, name_contains)`, `describe_relation(schema, name)`
+  (kolonlar, kısıtlar, gelen FK'ler, indeksler, görünüm tanımı), `search_columns(name_contains)`. Her biri sabit,
+  `$n` parametreli katalog sorgusudur; model serbest SQL gönderemez, satır verisi okunmaz. Bölümler listelenmez;
+  sonuç 200 satırla, uzun metin 8.000 karakterle sınırlı (kırpma açıkça yazılır). PG 10+ (entegrasyon testi
+  `crates/pgt-ai/tests/catalog_tools.rs`, `pgt_ai_tools` veritabanı).
+- Araçlar sekmenin veritabanında, uygulamanın katalog bağlantı havuzunda koşar (`ConnectionManager::run`, 35 sn):
+  kullanıcının sorgu oturumu ve açık transaction'ı etkilenmez. Sekmenin veritabanı yoksa araç hata döner.
+- Tanımlar `strict: true`, `additionalProperties: false`, tüm alanlar zorunlu (null olabilir); akışta
+  `eager_input_streaming: true`. Girdi katı ayrıştırılır ve şemaya göre doğrulanır; geçersizse araç çalışmaz,
+  modele `is_error` sonucu döner. `max_tokens`/`refusal` ile biten yanıttaki çağrılar çalıştırılmaz ve geçmişten
+  atılır (sonuçsuz `tool_use` API'de reddedilir).
+- Araç kümesi her istekte aynıdır (değişirse thinking blokları ve önbellek bozulur); son tur `tool_choice: none`
+  ile gider (en çok 6 araç turu). Zorunlu `tool_choice` (`any`/`tool`) Opus 5.5'te 400 döndüğü için kullanılmaz.
+- Bir tur birden çok mesaj olabilir (asistan → araç sonuçları → ... → son asistan); hepsi geçmişe eklenir,
+  paralel çağrıların sonuçları tek kullanıcı mesajında döner. Tur sayacı mesaj sayısından ayrı tutulur.
+- Arayüz yanıtın üstünde çalıştırılan araçları ("Tablo incelendi: shop.orders") ve belirteç satırında önbellekten
+  okunan girdiyi gösterir. Günlüğe araç adı, süre ve başarı yazılır; girdi ve sonuç yazılmaz.
+
 ## Sonraki adımlar
-- Tool use ile katalog sorgulama (yalnız okuma; `strict: true` araçlar).
+- EXPLAIN aracı (READ ONLY transaction, tek ifade, zaman sınırı).
 - Ayarlardan model/effort seçimi; kurumsal ağ geçidi (base URL) desteği.

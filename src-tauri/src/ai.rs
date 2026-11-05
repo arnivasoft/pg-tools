@@ -4,8 +4,10 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use pgt_ai::{AiClient, AiEvent, AiRequest, Cancel, Conversations};
+use pgt_ai::{AiClient, AiEvent, AiRequest, Cancel, Claude, Conversations, ToolExec, run_turn};
 use pgt_core::ErrorPayload;
+use pgt_core::connection::{ConnectionManager, Target};
+use serde_json::Value;
 use tauri::State;
 use tauri::ipc::Channel;
 use uuid::Uuid;
@@ -75,13 +77,17 @@ pub fn ai_key_clear(state: State<'_, AppState>) -> CmdResult<()> {
 
 /// Sohbete yeni tur. `turns`: arayüzün bildiği tamamlanmış tur sayısı (uyuşmazsa `ai_stale`).
 /// Olaylar `on_event` ile gelir; söz akış bitince (ya da iptalde) çözülür. Başarılı tur geçmişe eklenir.
+/// `server_id`/`database_oid`: sekmenin veritabanı (katalog araçları için); yoksa araçlar hata döner.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn ai_ask(
     state: State<'_, AppState>,
     id: Uuid,
     conversation: Uuid,
     turns: u32,
     request: AiRequest,
+    server_id: Option<Uuid>,
+    database_oid: Option<u32>,
     on_event: Channel<AiEvent>,
 ) -> CmdResult<()> {
     let key = state
@@ -100,10 +106,43 @@ pub async fn ai_ask(
     let _guard = Running(&state.ai, id);
     let pending = state.ai.conversations.begin(conversation, turns, &request)?;
     let mut emit = |e: AiEvent| on_event.send(e).is_ok();
-    let result = Box::pin(client.stream(&key, &pending.messages, &cancel, &mut emit)).await;
-    let content = result.as_ref().ok().cloned().flatten();
-    state.ai.conversations.finish(pending, content);
+    let model = Claude { client, api_key: &key };
+    let tools = CatalogTools { manager: &state.manager, target: server_id.zip(database_oid) };
+    let result = Box::pin(run_turn(&model, &pending.messages, &cancel, &mut emit, &tools)).await;
+    let added = result.as_ref().ok().cloned().flatten();
+    state.ai.conversations.finish(pending, added);
     result.map(|_| ())
+}
+
+/// Katalog araçları sekmenin veritabanında, uygulamanın katalog bağlantı havuzunda koşar (kullanıcının sorgu
+/// oturumu ve açık transaction'ı etkilenmez; bağlantı katmanının 35 sn sınırı geçerlidir).
+struct CatalogTools<'a> {
+    manager: &'a ConnectionManager,
+    target: Option<(Uuid, u32)>,
+}
+
+impl ToolExec for CatalogTools<'_> {
+    fn call<'a>(&'a self, name: &'a str, input: &'a Value) -> pgt_ai::agent::BoxFut<'a, Result<String, String>> {
+        Box::pin(async move {
+            let Some((server, oid)) = self.target else {
+                return Err("This query tab has no database connection; answer without catalog lookups.".into());
+            };
+            let started = std::time::Instant::now();
+            let r = self
+                .manager
+                .run(server, Target::Database(oid), |c| {
+                    let input = input.clone();
+                    async move { pgt_ai::tools::run(&c.client, name, &input).await }
+                })
+                .await;
+            // Araç adı ve süre günlüğe yazılır; girdi (tablo adları) ve sonuç yazılmaz.
+            tracing::info!(tool = name, ms = started.elapsed().as_millis() as u64, ok = matches!(r, Ok(Ok(_))), "asistan aracı");
+            match r {
+                Ok(inner) => inner,
+                Err(e) => Err(format!("Catalog query failed: {}", ErrorPayload::from(&e).message)),
+            }
+        })
+    }
 }
 
 /// Sohbeti bellekten siler ("Yeni sohbet").

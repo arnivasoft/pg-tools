@@ -48,7 +48,7 @@ pub enum Interp {
     Text(String),
     /// Sunucu tarafı yedek modele geçiş (`fallback` içerik bloğu). Gelen kısmi metin geçerli kalır.
     Fallback,
-    InputTokens(u32),
+    InputTokens { input: u32, cache_read: u32 },
     Stop { reason: Option<String>, output_tokens: Option<u32> },
     End,
     Error(String),
@@ -61,7 +61,10 @@ fn u32_at(v: &Value, ptr: &str) -> Option<u32> {
 
 pub fn interpret(v: &Value) -> Interp {
     match v.get("type").and_then(Value::as_str) {
-        Some("message_start") => u32_at(v, "/message/usage/input_tokens").map_or(Interp::Ignore, Interp::InputTokens),
+        Some("message_start") => Interp::InputTokens {
+            input: u32_at(v, "/message/usage/input_tokens").unwrap_or(0),
+            cache_read: u32_at(v, "/message/usage/cache_read_input_tokens").unwrap_or(0),
+        },
         Some("content_block_start") => match v.pointer("/content_block/type").and_then(Value::as_str) {
             Some("fallback") => Interp::Fallback,
             _ => Interp::Ignore,
@@ -89,6 +92,16 @@ pub fn interpret(v: &Value) -> Interp {
 #[derive(Default)]
 pub struct Accumulator {
     blocks: Vec<Value>,
+    /// `tool_use` bloklarının parça parça gelen girdi metni (`input_json_delta`), blok sırasına göre.
+    partial: std::collections::HashMap<usize, String>,
+}
+
+/// Biriktirilen yanıt.
+pub struct Finished {
+    pub content: Vec<Value>,
+    /// Girdisi geçerli JSON nesnesi olmayan `tool_use` blokları: (kimlik, ham metin). Bu blokların `input`u `{}`
+    /// yapılır; araç çalıştırılmaz, modele hata sonucu döner.
+    pub invalid_inputs: Vec<(String, String)>,
 }
 
 fn append_str(block: &mut Value, field: &str, add: &str) {
@@ -117,6 +130,7 @@ impl Accumulator {
                     Some("text_delta") => append_str(block, "text", s("text")),
                     Some("thinking_delta") => append_str(block, "thinking", s("thinking")),
                     Some("signature_delta") => append_str(block, "signature", s("signature")),
+                    Some("input_json_delta") => self.partial.entry(i).or_default().push_str(s("partial_json")),
                     _ => {}
                 }
             }
@@ -127,7 +141,30 @@ impl Accumulator {
     /// Geri gönderilecek asistan içeriği. Yanıt ortasında yedek modele geçildiyse son `fallback` bloğundan
     /// önceki thinking/redacted_thinking/tool_use ve tanınmayan model içi bloklar atlanır, metin blokları kalır;
     /// `fallback` bloğunun kendisi atılır. Boş metin blokları da atılır (API reddeder).
-    pub fn echo_content(self) -> Vec<Value> {
+    /// `tool_use` girdileri katı biçimde ayrıştırılır (eager input streaming: API girdiyi doğrulamaz).
+    pub fn finish(mut self) -> Finished {
+        let mut invalid_inputs = Vec::new();
+        for (i, block) in self.blocks.iter_mut().enumerate() {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            let raw = self.partial.remove(&i).unwrap_or_default();
+            let parsed = if raw.trim().is_empty() {
+                Some(Value::Object(Default::default()))
+            } else {
+                serde_json::from_str::<Value>(&raw).ok().filter(Value::is_object)
+            };
+            let input = parsed.unwrap_or_else(|| {
+                let id = block.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+                invalid_inputs.push((id, raw));
+                Value::Object(Default::default())
+            });
+            block["input"] = input;
+        }
+        Finished { content: self.echo_content(), invalid_inputs }
+    }
+
+    fn echo_content(self) -> Vec<Value> {
         let ty = |b: &Value| b.get("type").and_then(Value::as_str).map(str::to_string);
         let boundary = self.blocks.iter().rposition(|b| ty(b).as_deref() == Some("fallback"));
         self.blocks
@@ -176,7 +213,10 @@ mod tests {
 
     #[test]
     fn interprets_message_events() {
-        assert_eq!(interpret(&j(r#"{"type":"message_start","message":{"usage":{"input_tokens":42}}}"#)), Interp::InputTokens(42));
+        assert_eq!(
+            interpret(&j(r#"{"type":"message_start","message":{"usage":{"input_tokens":42,"cache_read_input_tokens":7}}}"#)),
+            Interp::InputTokens { input: 42, cache_read: 7 }
+        );
         assert_eq!(
             interpret(&j(r#"{"type":"content_block_start","index":1,"content_block":{"type":"fallback"}}"#)),
             Interp::Fallback
@@ -218,7 +258,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            acc.echo_content(),
+            acc.finish().content,
             vec![json!({"type":"thinking","thinking":"ab","signature":"SIG"}), json!({"type":"text","text":"Merhaba"})]
         );
     }
@@ -238,12 +278,31 @@ mod tests {
             ],
         );
         assert_eq!(
-            acc.echo_content(),
+            acc.finish().content,
             vec![
                 json!({"type":"text","text":"Kısmi "}),
                 json!({"type":"thinking","thinking":"y","signature":"S2"}),
                 json!({"type":"text","text":"devam"}),
             ]
         );
+    }
+
+    #[test]
+    fn tool_use_input_is_parsed_strictly() {
+        let mut acc = Accumulator::default();
+        feed(
+            &mut acc,
+            &[
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t1","name":"search_columns","input":{}}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"name_con"}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"tains\": \"email\"}"}}),
+                json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t2","name":"list_relations","input":{}}}),
+                json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"schema\": \"pub"}}),
+            ],
+        );
+        let f = acc.finish();
+        assert_eq!(f.content[0]["input"], json!({"name_contains": "email"}));
+        assert_eq!(f.content[1]["input"], json!({}), "yarım girdi boş nesneye çevrilir");
+        assert_eq!(f.invalid_inputs, vec![("t2".to_string(), "{\"schema\": \"pub".to_string())]);
     }
 }

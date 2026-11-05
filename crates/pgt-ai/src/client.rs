@@ -40,7 +40,7 @@ impl Cancel {
     pub fn is_cancelled(&self) -> bool {
         *self.0.borrow()
     }
-    async fn cancelled(&self) {
+    pub(crate) async fn cancelled(&self) {
         let mut rx = self.0.subscribe();
         let _ = rx.wait_for(|c| *c).await;
     }
@@ -72,17 +72,18 @@ impl AiClient {
         Ok(Self { http })
     }
 
-    /// Mesaj dizisini akışla gönderir. `emit` `false` dönerse (alıcı gitti) istek iptal edilir.
-    /// Başarıda geçmişe eklenecek asistan içeriği döner; iptalde ya da ret (`refusal`) durumunda `None`
-    /// (iptalde `Done` gönderilmez).
+    /// Tek bir Messages isteğini akışla gönderir; metin parçaları `emit` ile iletilir. `emit` `false` dönerse
+    /// (alıcı gitti) istek iptal edilir. İptalde `None`. `allow_tools`: `false` ise `tool_choice: none`
+    /// (araç kümesi yine gönderilir; küme değişirse thinking blokları ve önbellek bozulur).
     pub async fn stream(
         &self,
         api_key: &str,
         messages: &[Value],
+        allow_tools: bool,
         cancel: &Cancel,
-        emit: &mut (dyn FnMut(AiEvent) -> bool + Send),
-    ) -> Result<Option<Vec<Value>>, ErrorPayload> {
-        let body = request_body(messages);
+        emit: &mut crate::agent::Emit<'_>,
+    ) -> Result<Option<Outcome>, ErrorPayload> {
+        let body = request_body(messages, allow_tools);
         let started = Instant::now();
         let send = self
             .http
@@ -109,7 +110,7 @@ impl AiClient {
 
         let mut parser = SseParser::default();
         let mut acc = Accumulator::default();
-        let (mut input_tokens, mut output_tokens, mut stop) = (0u32, 0u32, String::new());
+        let (mut usage, mut stop) = (Usage::default(), String::new());
         loop {
             let chunk = tokio::select! {
                 c = resp.chunk() => c.map_err(|e| network_error(&e))?,
@@ -124,8 +125,9 @@ impl AiClient {
                 let event = match interpret(&v) {
                     Interp::Text(text) => AiEvent::Delta { text },
                     Interp::Fallback => AiEvent::Fallback,
-                    Interp::InputTokens(n) => {
-                        input_tokens = input_tokens.saturating_add(n);
+                    Interp::InputTokens { input, cache_read } => {
+                        usage.input_tokens = usage.input_tokens.saturating_add(input);
+                        usage.cache_read_tokens = usage.cache_read_tokens.saturating_add(cache_read);
                         continue;
                     }
                     Interp::Stop { reason, output_tokens: n } => {
@@ -133,15 +135,25 @@ impl AiClient {
                             stop = r;
                         }
                         if let Some(n) = n {
-                            output_tokens = n;
+                            usage.output_tokens = n;
                         }
                         continue;
                     }
                     Interp::End => {
-                        tracing::info!(input_tokens, output_tokens, stop = %stop, "asistan akışı bitti");
-                        let refused = stop == "refusal";
-                        emit(AiEvent::Done { stop_reason: stop, input_tokens, output_tokens });
-                        return Ok((!refused).then(|| acc.echo_content()));
+                        tracing::info!(
+                            input_tokens = usage.input_tokens,
+                            cache_read = usage.cache_read_tokens,
+                            output_tokens = usage.output_tokens,
+                            stop = %stop,
+                            "asistan isteği bitti"
+                        );
+                        let finished = acc.finish();
+                        return Ok(Some(Outcome {
+                            content: finished.content,
+                            invalid_inputs: finished.invalid_inputs,
+                            stop_reason: stop,
+                            usage,
+                        }));
                     }
                     Interp::Error(message) => return Err(err("ai", "Asistan hatası.", Some(message))),
                     Interp::Ignore => continue,
@@ -155,7 +167,33 @@ impl AiClient {
     }
 }
 
-fn request_body(messages: &[Value]) -> Value {
+/// Tek isteğin belirteç kullanımı.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Usage {
+    /// Önbellekten okunmayan girdi belirteçleri.
+    pub input_tokens: u32,
+    pub cache_read_tokens: u32,
+    pub output_tokens: u32,
+}
+
+impl Usage {
+    pub fn add(&mut self, o: Usage) {
+        self.input_tokens = self.input_tokens.saturating_add(o.input_tokens);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(o.cache_read_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(o.output_tokens);
+    }
+}
+
+/// Bir isteğin sonucu: geri gönderilecek asistan içeriği ve durma nedeni.
+pub struct Outcome {
+    pub content: Vec<Value>,
+    /// Girdisi geçerli JSON olarak ayrıştırılamayan `tool_use` blokları: kimlik -> ham metin.
+    pub invalid_inputs: Vec<(String, String)>,
+    pub stop_reason: String,
+    pub usage: Usage,
+}
+
+fn request_body(messages: &[Value], allow_tools: bool) -> Value {
     json!({
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
@@ -164,6 +202,9 @@ fn request_body(messages: &[Value]) -> Value {
         // Opus 5.5'te varsayılan `medium`; açık yazılır.
         "output_config": { "effort": "medium" },
         "fallbacks": "default",
+        "tools": crate::tools::definitions(),
+        // Zorunlu araç seçimi (`any`/`tool`) Opus 5.5'te 400 döner; yalnız `auto` ve `none`.
+        "tool_choice": { "type": if allow_tools { "auto" } else { "none" } },
         "system": prompt::SYSTEM,
         // Otomatik önbellek: geçmiş (son önbelleklenebilir bloğa kadar) sonraki turda ucuz okunur.
         "cache_control": { "type": "ephemeral" },
@@ -196,8 +237,12 @@ mod tests {
 
     #[test]
     fn body_uses_streaming_adaptive_thinking_and_default_fallback() {
-        let b = request_body(&[json!({"role": "user", "content": "merhaba"})]);
+        let b = request_body(&[json!({"role": "user", "content": "merhaba"})], true);
         assert_eq!(b["cache_control"]["type"], "ephemeral");
+        assert_eq!(b["tool_choice"]["type"], "auto");
+        let last = request_body(&[json!({"role": "user", "content": "merhaba"})], false);
+        assert_eq!(last["tool_choice"]["type"], "none");
+        assert_eq!(last["tools"], b["tools"], "araç kümesi her istekte aynı");
         assert_eq!(b["model"], MODEL);
         assert_eq!(b["stream"], true);
         assert_eq!(b["thinking"]["type"], "adaptive");
