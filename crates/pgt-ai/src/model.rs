@@ -41,6 +41,9 @@ pub enum AiEvent {
     Delta { text: String },
     /// Sunucu isteği yedek modele devretti; gelen metin geçerli kalır ve yedek model kaldığı yerden sürer.
     Fallback,
-    /// Akış bitti. `stopReason`: `end_turn`, `max_tokens`, `refusal`...
-    Done { stop_reason: String, input_tokens: u32, output_tokens: u32 },
+    /// Asistan bir katalog aracını çalıştırıyor. `detail`: kısa özet ("public.orders" gibi).
+    Tool { name: String, detail: String },
+    /// Tur bitti (tüm isteklerin toplamı). `stopReason`: `end_turn`, `max_tokens`, `refusal`...
+    /// `inputTokens`: önbellekten okunmayan girdi; `cacheReadTokens`: önbellekten okunan.
+    Done { stop_reason: String, input_tokens: u32, cache_read_tokens: u32, output_tokens: u32 },
 }

@@ -877,3 +877,7 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 - [ ] "Durdur" ile kesilen tur "Bu yanıt sohbet geçmişine eklenmedi." notunu gösterir ve hemen ardından yeni soru sorulabilir (meşgul hatası yok). **[—]**
 - [ ] "Yeni sohbet" geçmişi temizler; sonraki soru önceki turları bilmez. **[—]**
 - [ ] 40 tur sınırında "Sohbet çok uzadı; yeni sohbet başlatın." iletisi çıkar. **[—]**
+- [ ] Katalog araçları: istemde geçmeyen bir tabloyla ilgili soru ("müşterilerin e-postası nerede?") → yanıtın üstünde "Kolon arandı: email" / "Tablo incelendi: …" satırları görünür ve SQL gerçek kolon adlarını kullanır. **[—]**
+- [ ] Araçlar kullanıcının açık transaction'ını etkilemez: `BEGIN; UPDATE …` çalıştırıp (commit etmeden) asistana tablo sorun; transaction durumu değişmez, sonra ROLLBACK edilebilir. **[—]**
+- [ ] Bağlantısı kopmuş sunucuda araç hatası modele iletilir; asistan araçsız yanıt verir (uygulama çökmez). **[—]**
+- [ ] Uygulama günlüğünde yalnız araç adı ve süre görünür; tablo adları ve araç sonuçları yazılmaz. **[—]**

@@ -858,7 +858,15 @@ export default function QueryTab(props: { ctl: QueryController }) {
               <Suspense>
                 {/* Sekme başına ayrı sohbet: sekme değişince panel o sekmenin sohbetiyle yeniden kurulur. */}
                 <Show when={shownId()} keyed>
-                  {(tabId) => <AiPane tabId={tabId} context={aiContext} onInsert={insertSql} canInsert={canInsertAi()} />}
+                  {(tabId) => (
+                    <AiPane
+                      tabId={tabId}
+                      context={aiContext}
+                      onInsert={insertSql}
+                      canInsert={canInsertAi()}
+                      target={{ serverId: model()?.serverId ?? null, databaseOid: model()?.databaseOid ?? null }}
+                    />
+                  )}
                 </Show>
               </Suspense>
             </Match>

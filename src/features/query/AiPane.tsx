@@ -3,6 +3,7 @@
 // süren yanıt arka planda tamamlanır. Sayfa yenilenince (arka uç geçmişiyle birlikte) silinir.
 import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on } from "solid-js";
 import { createStore, type SetStoreFunction } from "solid-js/store";
+import { Search } from "lucide-solid";
 import { copyText } from "../../app/clipboard";
 import { toast } from "../../app/toast";
 import type { AiMode } from "../../ipc/bindings/AiMode";
@@ -43,6 +44,8 @@ export default function AiPane(props: {
   context: (mode: AiMode, prompt: string) => Promise<AiRequest>;
   onInsert: (sql: string) => void;
   canInsert: boolean;
+  /** Sekmenin veritabanı (katalog araçları için); sekme bağlı değilse alanlar `null`. */
+  target: { serverId: string | null; databaseOid: number | null };
 }) {
   // `tabId` bileşen ömrü boyunca sabittir (QueryTab sekme başına yeniden oluşturur).
   const [chat, setChat] = chatFor(props.tabId);
@@ -123,7 +126,7 @@ export default function AiPane(props: {
     setChat("status", "streaming");
     const patch = (f: (t: AssistantTurn) => AssistantTurn) => setChat("turns", idx, (t) => f(t as AssistantTurn));
     try {
-      await aiIpc.ask(id, chat.conversation, chat.committed, request, (ev) => patch((t) => applyEvent(t, ev)));
+      await aiIpc.ask(id, chat.conversation, chat.committed, request, props.target, (ev) => patch((t) => applyEvent(t, ev)));
     } catch (e) {
       const p = toPayload(e);
       if (p.code === "ai_no_key") setHasKey(false);
@@ -161,6 +164,23 @@ export default function AiPane(props: {
     const streaming = () => p.last && chat.status === "streaming";
     return (
       <div class="space-y-2">
+        <Show when={p.turn.tools.length > 0}>
+          <ul class="space-y-0.5 text-[12px] text-muted" aria-label={tai.toolsAria}>
+            <For each={p.turn.tools}>
+              {(s) => (
+                <li class="flex items-center gap-1.5">
+                  <Search size={12} aria-hidden="true" />
+                  <span>
+                    {tai.tool[s.name] ?? s.name}
+                    <Show when={s.detail}>
+                      : <span class="font-mono">{s.detail}</span>
+                    </Show>
+                  </span>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
         <Show when={streaming() && p.turn.text === ""}>
           <p class="text-muted">{tai.thinking}</p>
         </Show>
@@ -201,7 +221,7 @@ export default function AiPane(props: {
             <Show when={p.turn.finish?.stopReason === "max_tokens"}>{tai.maxTokens} </Show>
             <Show when={p.turn.finish?.stopReason === "refusal"}>{tai.refused} </Show>
             <Show when={!p.turn.committed}>{tai.notCommitted} </Show>
-            <Show when={p.turn.finish}>{(f) => tai.usage(f().inputTokens, f().outputTokens)}</Show>
+            <Show when={p.turn.finish}>{(f) => tai.usage(f().inputTokens, f().cacheReadTokens, f().outputTokens)}</Show>
           </p>
         </Show>
       </div>

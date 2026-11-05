@@ -22,8 +22,20 @@ export const tai = {
   thinking: "Düşünüyor…",
   gathering: "Bağlam hazırlanıyor…",
   empty: "İsteğinizi yazın ya da editörde bir ifade seçip açıklatın; devam sorularında asistan önceki yanıtları bilir. Üretilen SQL editöre eklenir; asla kendiliğinden çalıştırılmaz.",
-  privacy: "Seçili SQL, son hata ve şemadaki tablo/kolon adları Anthropic'e (Claude API) gönderilir. Satır verisi gönderilmez.",
-  usage: (inp: number, out: number) => `${inp.toLocaleString("tr-TR")} girdi / ${out.toLocaleString("tr-TR")} çıktı belirteci`,
+  privacy:
+    "Seçili SQL, son hata ve katalog bilgisi (tablo/kolon adları, türler, kısıtlar, indeksler, açıklamalar, görünüm tanımları, tahmini satır sayıları) Anthropic'e (Claude API) gönderilir. Satır verisi gönderilmez; asistan veritabanında yalnız sabit katalog sorguları çalıştırabilir.",
+  usage: (inp: number, cache: number, out: number) => {
+    const n = (x: number) => x.toLocaleString("tr-TR");
+    return cache > 0
+      ? `${n(inp)} girdi (+${n(cache)} önbellekten) / ${n(out)} çıktı belirteci`
+      : `${n(inp)} girdi / ${n(out)} çıktı belirteci`;
+  },
+  tool: {
+    list_relations: "Tablolar listelendi",
+    describe_relation: "Tablo incelendi",
+    search_columns: "Kolon arandı",
+  } as Record<string, string>,
+  toolsAria: "Asistanın baktığı katalog bilgileri",
   maxTokens: "Yanıt uzunluk sınırında kesildi.",
   refused: "Asistan bu isteği yanıtlamadı.",
   noError: "Bu sekmede düzeltilecek bir hata yok: önce sorguyu çalıştırın.",
