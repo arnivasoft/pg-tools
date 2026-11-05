@@ -810,7 +810,7 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-cell-viewer-design.md`. Biçim se
 - [ ] HTML önizleme güvenliği, ön bağlantı ipuçları: önizlemede `<link rel="preconnect" href="https://example.com">` ve `<link rel="dns-prefetch" href="//example.com">` varken Kaynak İzleyicisi / `netstat -n` (ya da DNS istemci günlüğü) bu ana makineye bağlantı ya da DNS sorgusu göstermez; gösterirse bilinen sınır olarak kaydedilir (spec §5). **[—]**
 - [ ] HTML önizleme güvenliği, boyut: 3 MB HTML'de önizleme anahtarı gerekçeyle devre dışı. **[—]**
 - [ ] PDF: "Varsayılan uygulamada aç" sistemin PDF uygulamasını açar; dosya `%LOCALAPPDATA%\com.pgtools.desktop\cell-view\cell-<uuid>.pdf` altındadır; uygulama kapatılınca dosya silinir (okuyucu kapalıyken); okuyucu açıkken kapatılırsa dosya kalır ve 24 saatten eski olunca sonraki açılışta silinir; "Kaydet…" ve iptal; 65 MB PDF'de düğmeler gerekçeyle devre dışı. **[—]**
-- [ ] Boş `''::xml` hücresi Metin sekmesinde "(boş dize)" notunu gösterir (XML sekmesine geçmez). **[—]**
+- [ ] Boş `''::xml` hücresi Metin sekmesinde "(boş dize)" notunu gösterir (bu sütun için daha önce XML elle seçilmemişse XML sekmesine geçmez; elle seçim oturum boyunca hatırlandığı için o durumda boş XML görünümü açılır). **[—]**
 - [ ] 64 MB'ı aşan `bytea` PDF'i: PDF sekmesi bilgi satırı, devre dışı "Varsayılan uygulamada aç" ve "Kaydet…" düğmeleri (ipucu + görünür gerekçe) ve uyarı satırını gösterir; "Kaydet…" önerilmez. **[—]**
 - [ ] Panel genişlet/daralt; dar panelde görünümler taşmaz. **[—]**
 - [ ] Klavye: sekme çubuğunda Sol/Sağ/Home/End, Enter/Space seçimi, devre dışı sekme seçilmez; ekran okuyucu sekme adını ve gerekçeyi okur. **[—]**
