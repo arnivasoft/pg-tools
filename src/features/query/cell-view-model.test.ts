@@ -253,3 +253,20 @@ describe("metinler", () => {
     expect(tcell.pdf.info(null, "5 bayt")).toBe("PDF · 5 bayt");
   });
 });
+
+describe("panel akışı", () => {
+  it("sütun başına hatırlama: PNG → image; hex seçilir → imzasız hücre hex; başka sütun kendi kuralı", () => {
+    const mem = createFormatMemory();
+    const col = { name: "dosya", typeName: "bytea", typeOid: 17 };
+    const other = { name: "belge", typeName: "bytea", typeOid: 17 };
+    const png = cellFacts("\\x89504e470d0a1a0a00", col);
+    expect(pickFormat(png, mem.get(columnKey(col)))).toBe("image");
+    mem.set(columnKey(col), "hex");
+    const plain = cellFacts("\\x0102", col);
+    expect(pickFormat(plain, mem.get(columnKey(col)))).toBe("hex");
+    expect(pickFormat(plain, mem.get(columnKey(other)))).toBe("text");
+    mem.set(columnKey(col), "json");
+    expect(pickFormat(plain, mem.get(columnKey(col)))).toBe("text");
+    expect(mem.get(columnKey(col))).toBe("json");
+  });
+});
