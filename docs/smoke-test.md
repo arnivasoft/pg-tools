@@ -857,3 +857,23 @@ Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2.8, §6
 - [ ] Sayfa yenileme sonrası durum: fark sekmeleri geri gelmez (kalıcı değildir). **[—]**
 - [ ] Klavye (↑/↓, Boşluk, Home/End, Esc) ve ekran okuyucu (ilerleme, şeritler, satır etiketleri). **[—]**
 - [ ] Parola, adres ve betik metni hiçbir bildirimde ya da konsolda (DevTools ve uygulama günlüğü) görünmez. **[—]**
+
+## Yapay zekâ asistanı (ilk dilim)
+
+Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel tembel parçadadır (`AiPane-*.js`); "Asistan" sekmesi ilk açılışta iner.
+
+Ön koşul: yayın exe (`tauri build`); geçerli bir Anthropic API anahtarı; zengin bir şema (Türkçe adlı tablo dahil).
+
+- [ ] Anahtar yokken "Asistan" sekmesi anahtar formunu gösterir; kaydedince form kaybolur; Windows Kimlik Bilgisi Yöneticisi'nde `pg-tools` / `ai:anthropic` kaydı oluşur; "Anahtarı sil" kaydı siler ve formu geri getirir. **[—]**
+- [ ] Geçersiz anahtarla istek "API anahtarı geçersiz…" iletisini ve API'nin ayrıntısını gösterir. **[—]**
+- [ ] "SQL yaz" (Ctrl+Enter): yanıt akışla gelir; istemde adı geçen tablonun kolonları doğru kullanılır; "Editöre ekle" SQL'i imleç konumuna ekler ve **çalıştırmaz**. **[—]**
+- [ ] "Seçimi açıkla": seçim yoksa imleçteki ifade açıklanır. **[—]**
+- [ ] Hatalı sorgu çalıştırıldıktan sonra "Hatayı düzelt": hata veren ifade ve hata metni gönderilir; hata yokken "düzeltilecek bir hata yok" iletisi çıkar. **[—]**
+- [ ] "Durdur" akışı keser; sekme kapatılınca ya da sayfa yenilenince uçuştaki istek iptal olur (uygulama günlüğünde istem/yanıt metni ve anahtar görünmez, yalnız durum kodu ve belirteç sayıları). **[—]**
+- [ ] Kurumsal vekil sunucu ve kurumsal kök sertifika arkasında istek çalışır (sistem vekili + işletim sistemi sertifika deposu). **[—]**
+- [ ] Salt okunur sekmede "Editöre ekle" kapalıdır; "Kopyala" çalışır. **[—]**
+- [ ] Çok turlu sohbet: "son 10 sipariş" → "bunu müşteri adına göre grupla" devam sorusu önceki SQL'i bilerek yanıtlanır; ikinci turun belirteç satırında girdi belirteçleri önbellekten okunur (API konsolunda `cache_read_input_tokens` > 0). **[—]**
+- [ ] Sohbet sekme başınadır: iki sorgu sekmesinde ayrı sohbetler; sekme ya da panel (Sonuç ↔ Asistan) değişince geçmiş ve süren yanıt korunur. **[—]**
+- [ ] "Durdur" ile kesilen tur "Bu yanıt sohbet geçmişine eklenmedi." notunu gösterir ve hemen ardından yeni soru sorulabilir (meşgul hatası yok). **[—]**
+- [ ] "Yeni sohbet" geçmişi temizler; sonraki soru önceki turları bilmez. **[—]**
+- [ ] 40 tur sınırında "Sohbet çok uzadı; yeni sohbet başlatın." iletisi çıkar. **[—]**

@@ -122,7 +122,22 @@ impl Credentials {
         self.session.lock().unwrap().remove(&server);
         self.store.delete(&password_key(server))
     }
+
+    /// Asistan (Anthropic) API anahtarı; yalnız kalıcı depoda tutulur.
+    pub fn ai_key(&self) -> Result<Option<String>> {
+        self.store.get(AI_KEY)
+    }
+
+    pub fn set_ai_key(&self, key: &str) -> Result<()> {
+        self.store.set(AI_KEY, key)
+    }
+
+    pub fn forget_ai_key(&self) -> Result<()> {
+        self.store.delete(AI_KEY)
+    }
 }
+
+const AI_KEY: &str = "ai:anthropic";
 
 #[cfg(test)]
 mod tests {
@@ -172,6 +187,17 @@ mod tests {
         assert_eq!(c.password(id).unwrap(), None);
         assert_eq!(store.get(&password_key(id)).unwrap(), None);
         c.forget(id).unwrap(); // olmayan kaydı silmek hata değildir
+    }
+
+    #[test]
+    fn ai_key_round_trip_is_separate_from_passwords() {
+        let (store, c) = creds();
+        assert_eq!(c.ai_key().unwrap(), None);
+        c.set_ai_key("sk-ant-test").unwrap();
+        assert_eq!(c.ai_key().unwrap().as_deref(), Some("sk-ant-test"));
+        assert_eq!(Credentials::new(store).ai_key().unwrap().as_deref(), Some("sk-ant-test"));
+        c.forget_ai_key().unwrap();
+        assert_eq!(c.ai_key().unwrap(), None);
     }
 
     #[cfg(windows)]

@@ -4,12 +4,15 @@
 import { closeCompletion } from "@codemirror/autocomplete";
 import type { EditorState } from "@codemirror/state";
 import { Download, PanelRight } from "lucide-solid";
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
+import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, on, onCleanup, onMount, untrack } from "solid-js";
 import { t } from "../../app/strings";
 import { texp } from "./strings-export";
 import { tqt } from "./strings-querytab";
 import { readStorage, writeStorage } from "../../app/storage";
 import { toast } from "../../app/toast";
+import type { AiMode } from "../../ipc/bindings/AiMode";
+import type { AiRequest } from "../../ipc/bindings/AiRequest";
+import type { CompletionItem } from "../../ipc/bindings/CompletionItem";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { FormatOptions } from "../../ipc/bindings/FormatOptions";
 import type { QueryEvent } from "../../ipc/bindings/QueryEvent";
@@ -20,6 +23,7 @@ import { commands } from "../../ipc/commands";
 import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
 import { isProductionLabel } from "../servers/server-form";
+import { mentionedRelations, schemaText, sliceChars } from "./ai-model";
 import { CellPanel } from "./CellPanel";
 import { createRunConfirm } from "./ConfirmRunDialog";
 import { ContextBar } from "./ContextBar";
@@ -46,6 +50,7 @@ import { ResultStrip } from "./ResultStrip";
 import { looksLikePlanResult } from "./plan-model";
 import { PlanView } from "./PlanView";
 import { MAX_TAB_ROWS } from "./result-model";
+import { tai } from "./strings-ai";
 import { tplan } from "./strings-plan";
 import { isQueryTabId } from "./tabs-store";
 import { canCancel, canCommit, canLoadMoreRows, canRollback, sameScope, swapEditorState, type SavedView } from "./querytab-model";
@@ -64,7 +69,10 @@ const MIN_EDITOR = 80;
 const FORMAT_FAILED = "biçimlendirilemedi";
 const DEFAULT_FORMAT: FormatOptions = { keywordCase: "upper", indent: 2, comma: "trailing", maxLine: 120 };
 
-type ResultPane = "result" | "messages" | "history" | "plan";
+/** Asistan paneli ayrı tembel parça: yalnız sekmesi açılınca yüklenir. */
+const AiPane = lazy(() => import("./AiPane"));
+
+type ResultPane = "result" | "messages" | "history" | "plan" | "ai";
 type EditorPrefs = { checkEnabled: boolean; format: FormatOptions };
 
 export default function QueryTab(props: { ctl: QueryController }) {
@@ -562,6 +570,69 @@ export default function QueryTab(props: { ctl: QueryController }) {
     v.focus();
   };
 
+  // ---- yapay zekâ asistanı: bağlam (seçim/imleçteki ifade, son hata, şema adları). Satır verisi gönderilmez.
+  const serverShort = (serverId: string | null): string => {
+    if (!serverId) return "";
+    for (const n of ctl.tree().nodes.values()) if (n.kind === "server" && n.serverId === serverId) return n.detail ?? "";
+    return "";
+  };
+  const lastError = (m: NonNullable<ReturnType<typeof model>>): { text: string; offset: number | null } => {
+    const failed = m.run.result?.stmts.find((s) => s.status === "failed" && s.error);
+    if (failed?.error) {
+      const e = failed.error;
+      return { text: [e.message, e.detail, e.hint].filter(Boolean).join("\n"), offset: failed.charOffset };
+    }
+    const note = [...m.notes].reverse().find((n) => n.level === "error");
+    return { text: note ? [note.text, note.hint].filter(Boolean).join("\n") : "", offset: null };
+  };
+  const aiContext = async (mode: AiMode, prompt: string): Promise<AiRequest> => {
+    const m = model();
+    if (!editor || !m) throw new Error(tai.noTab);
+    const state = editor.getState();
+    const doc = state.doc.toString();
+    const sel = state.selection.main;
+    const session = m.session;
+    const err = mode === "fix" ? lastError(m) : { text: "", offset: null };
+    if (mode === "fix" && !err.text) throw new Error(tai.noError);
+    let sql = sel.empty ? "" : doc.slice(sel.from, sel.to);
+    if (!sql && mode !== "generate" && session) {
+      try {
+        // Düzeltmede hata veren ifade (son çalıştırmanın metni), değilse imleçteki ifade.
+        const { text, scope } =
+          mode === "fix" && err.offset !== null && m.last
+            ? { text: m.last.text, scope: { type: "atCursor" as const, offset: err.offset } }
+            : editor.getSnapshot("stmt");
+        const plan = (await commands.qtAnalyze(session, text, scope))[0];
+        if (plan) sql = sliceChars(text, plan.charOffset, plan.charLen);
+      } catch {
+        // analiz başarısızsa aşağıda tüm metne düşülür
+      }
+    }
+    if (!sql && mode !== "generate") sql = doc;
+    let schema = "";
+    if (session) {
+      try {
+        const relations = await commands.qtComplete(session, { type: "relations", schema: null });
+        const columns = new Map<string, CompletionItem[]>();
+        for (const r of mentionedRelations(prompt, relations)) {
+          columns.set(r.quoted, await commands.qtComplete(session, { type: "columns", schema: null, relation: r.label }));
+        }
+        if (sql.trim()) {
+          const scoped = await commands.qtComplete(session, { type: "scoped", sql, offset: Array.from(sql).length, prefix: "" });
+          if (scoped.length > 0) columns.set("Columns in scope of the SQL", scoped);
+        }
+        schema = schemaText(relations, columns);
+      } catch {
+        // şema özeti isteğe bağlı: oturum meşgulse onsuz gönderilir
+      }
+    }
+    return { mode, prompt, sql, error: err.text, schema, serverVersion: serverShort(m.serverId) };
+  };
+  const canInsertAi = () => {
+    const m = model();
+    return !!m && !m.serverGone && !!editor && !editor.getState().readOnly;
+  };
+
   // ---- editör yüksekliği
   const onSplitDown = (e: PointerEvent) => {
     e.preventDefault();
@@ -675,6 +746,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
             {paneButton("messages", () => (messageCount() > 0 ? `${r.messages} (${messageCount()})` : r.messages))}
             {paneButton("history", () => r.history)}
             {paneButton("plan", () => tplan.pane)}
+            {paneButton("ai", () => tai.pane)}
           </div>
           <div class="flex-1" />
           <Show when={pane() === "result" && gridPlan()}>
@@ -781,6 +853,14 @@ export default function QueryTab(props: { ctl: QueryController }) {
                   <MessagesView messages={result()?.messages ?? []} />
                 </div>
               </div>
+            </Match>
+            <Match when={pane() === "ai"}>
+              <Suspense>
+                {/* Sekme başına ayrı sohbet: sekme değişince panel o sekmenin sohbetiyle yeniden kurulur. */}
+                <Show when={shownId()} keyed>
+                  {(tabId) => <AiPane tabId={tabId} context={aiContext} onInsert={insertSql} canInsert={canInsertAi()} />}
+                </Show>
+              </Suspense>
             </Match>
             <Match when={pane() === "plan"}>
               <PlanView entry={explainer.plan(shownId() ?? "")} />

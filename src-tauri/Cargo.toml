@@ -15,6 +15,7 @@ pgt-dash.workspace = true
 pgt-ddl.workspace = true
 pgt-backup.workspace = true
 pgt-diff.workspace = true
+pgt-ai.workspace = true
 tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2.8"
 tokio.workspace = true
