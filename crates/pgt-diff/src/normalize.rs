@@ -442,12 +442,9 @@ fn side_parts(l: &Loaded, side: SideTag, cx: &NormCtx) -> Option<(ObjectDef, Opt
 }
 
 /// Kaynak tarafın "elle" gerekçeleri: modelin dışı özellikler, bölüm/kalıtım/bölümlü tablo.
-fn manual_reasons(def: &ObjectDef) -> Vec<String> {
+/// Bölüm alt tablosu / kalıtım çocuğu gerekçeleri.
+fn structure_reasons(def: &ObjectDef) -> Vec<String> {
     let mut r = vec![];
-    let us = unsupported_field(def);
-    if !us.is_empty() {
-        r.push(format!("Modelin dışında özellikler var: {}", us.join(", ")));
-    }
     if let ObjectDef::Table(t) = def {
         if t.is_partition {
             r.push("Bölüm alt tablosu (ATTACH modellenmez)".to_string());
@@ -455,6 +452,18 @@ fn manual_reasons(def: &ObjectDef) -> Vec<String> {
         if t.inherits {
             r.push("Kalıtım çocuğu (INHERITS modellenmez)".to_string());
         }
+    }
+    r
+}
+
+fn manual_reasons(def: &ObjectDef) -> Vec<String> {
+    let mut r = vec![];
+    let us = unsupported_field(def);
+    if !us.is_empty() {
+        r.push(format!("Modelin dışında özellikler var: {}", us.join(", ")));
+    }
+    if let ObjectDef::Table(t) = def {
+        r.extend(structure_reasons(def));
         if t.partition_text.is_some() {
             r.push("Bölümlenmiş tablo oluşturma modellenmez".to_string());
         }
@@ -585,26 +594,33 @@ fn compare_same_kind(
         }
         _ => true,
     };
+    let unsupported_differs = us_s != us_t;
+    if unsupported_differs {
+        let diff: Vec<&str> = us_s
+            .symmetric_difference(&us_t)
+            .map(|s| s.as_str())
+            .collect();
+        p.problem = Some(ItemProblem::Manual);
+        p.notes
+            .push(format!("Modelin dışında fark var: {}", diff.join(", ")));
+    }
     if comparable(&aligned) == comparable(td) {
-        if us_s != us_t {
-            let diff: Vec<&str> = us_s
-                .symmetric_difference(&us_t)
-                .map(|s| s.as_str())
-                .collect();
-            p.status = ItemStatus::Different;
-            p.problem = Some(ItemProblem::Manual);
-            p.notes
-                .push(format!("Modelin dışında fark var: {}", diff.join(", ")));
-        } else if !acl_equal_state {
-            p.status = ItemStatus::Different;
+        p.status = if unsupported_differs || !acl_equal_state {
+            ItemStatus::Different
         } else {
-            p.status = ItemStatus::Same;
-        }
+            ItemStatus::Same
+        };
     } else {
         p.status = ItemStatus::Different;
         if let (ObjectDef::Table(a), ObjectDef::Table(b)) = (&aligned, td) {
-            if a.is_partition || a.inherits || b.is_partition || b.inherits {
+            for r in structure_reasons(&aligned)
+                .into_iter()
+                .chain(structure_reasons(td))
+            {
                 p.problem = Some(ItemProblem::Manual);
+                if !p.notes.contains(&r) {
+                    p.notes.push(r);
+                }
             }
             if a.partition_text != b.partition_text {
                 p.problem = Some(ItemProblem::Manual);
@@ -1511,6 +1527,52 @@ mod tests {
         assert_eq!(
             st(&prep(Some(&lt(s)), Some(&lt(t)), DEF)),
             (Different, Some(Manual))
+        );
+    }
+
+    #[test]
+    fn unsupported_farki_modeller_farkliyken_de_elle() {
+        use ItemProblem::*;
+        use ItemStatus::*;
+        let mut s = table("src", vec![col("a", Some(1)), col("x", Some(2))]);
+        s.unsupported = vec!["EXCLUDE ex".into()];
+        let t = table("tgt", vec![col("a", Some(1))]);
+        let p = prep(Some(&lt(s)), Some(&lt(t)), DEF);
+        assert_eq!(st(&p), (Different, Some(Manual)));
+        assert!(
+            p.notes
+                .contains(&"Modelin dışında fark var: EXCLUDE ex".to_string())
+        );
+
+        let mut v = view("src", "SELECT 1");
+        v.unsupported = vec!["TRIGGER t".into()];
+        let sv = loaded(ObjectDef::View(v), None);
+        let tv = loaded(ObjectDef::View(view("tgt", "SELECT 2")), None);
+        let p = prep(Some(&sv), Some(&tv), DEF);
+        assert_eq!(st(&p), (Different, Some(Manual)));
+        assert!(
+            p.notes
+                .contains(&"Modelin dışında fark var: TRIGGER t".to_string())
+        );
+    }
+
+    #[test]
+    fn iki_tarafli_bolum_kalitim_gerekcesi_notu() {
+        use ItemProblem::*;
+        use ItemStatus::*;
+        let s = table("src", vec![col("a", Some(1)), col("x", Some(2))]);
+        let mut t = table("tgt", vec![col("a", Some(1))]);
+        t.is_partition = true;
+        t.inherits = true;
+        let p = prep(Some(&lt(s)), Some(&lt(t)), DEF);
+        assert_eq!(st(&p), (Different, Some(Manual)));
+        assert!(
+            p.notes
+                .contains(&"Bölüm alt tablosu (ATTACH modellenmez)".to_string())
+        );
+        assert!(
+            p.notes
+                .contains(&"Kalıtım çocuğu (INHERITS modellenmez)".to_string())
         );
     }
 
