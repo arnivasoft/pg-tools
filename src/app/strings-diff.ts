@@ -116,6 +116,9 @@ export const tsd = {
     invalid_path: "Kayıt yolu geçersiz.",
     write_failed: "Dosya yazılamadı.",
     connectFailed: "Sunucuya bağlanılamadı.",
+    not_connected: "Sunucu bağlantısı yok; yeniden karşılaştırın.",
+    connection_lost: "Sunucu bağlantısı koptu; yeniden karşılaştırın.",
+    unknown_server: "Sunucu artık kayıtlı değil; başka bir sunucu seçin.",
   } as Readonly<Record<string, string>>,
   passwordRequiredHint: "Sunucu bağlantısını kesip yeniden bağlanın; parola istenir.",
 } as const;

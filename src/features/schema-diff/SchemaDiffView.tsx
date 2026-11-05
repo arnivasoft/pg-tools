@@ -20,12 +20,16 @@ import { SidePicker } from "./SidePicker";
 
 const ScriptDialog = lazy(() => import("./ScriptDialog"));
 
-/** Devre dışı düğme + görünür gerekçe (`aria-describedby`; `title` fare için). */
+/**
+ * Devre dışı düğme + görünür gerekçe (`aria-describedby`; `title` fare için). `busy`: `disabled` yerine `aria-disabled`
+ * (odak düğmede kalır; tıklama işleyicisi kendisi korur).
+ */
 function GatedButton(props: {
   label: string;
   reason: string | null;
   primary?: boolean;
-  onClick: () => void;
+  busy?: boolean;
+  onClick: (ev: MouseEvent) => void;
 }) {
   const id = createUniqueId();
   return (
@@ -33,9 +37,10 @@ function GatedButton(props: {
       <Button
         variant={props.primary ? "primary" : "secondary"}
         disabled={props.reason !== null}
+        aria-disabled={props.busy || undefined}
         title={props.reason ?? undefined}
         aria-describedby={props.reason !== null ? id : undefined}
-        onClick={() => props.onClick()}
+        onClick={(ev) => props.onClick(ev)}
       >
         {props.label}
       </Button>
@@ -124,7 +129,7 @@ function Body(props: { diff: DiffController; tabId: string; m: DiffModel }) {
   const visible = createMemo(() => visibleItems(items(), m().filters, foldSearch(m().search)));
   const cnt = createMemo(() => counts(items()));
   const compareReason = () => {
-    const b = compareBlocked(m().source, m().target, running());
+    const b = compareBlocked(m().source, m().target, running(), (sid) => d.servers().some((c) => c.id === sid));
     return b === null ? null : tsd.blocked[b];
   };
   const scriptReason = () => {
@@ -171,14 +176,18 @@ function Body(props: { diff: DiffController; tabId: string; m: DiffModel }) {
             {opt("comments")}
           </fieldset>
           <span class="flex-1" />
-          <Show
-            when={running()}
-            fallback={<GatedButton label={tsd.compare} reason={compareReason()} primary onClick={() => void d.compare(id)} />}
-          >
-            <Button disabled={m().cancelRequested} onClick={() => d.cancel(id)}>
-              {m().cancelRequested ? tsd.cancelling : tsd.cancel}
-            </Button>
-          </Show>
+          {/* Karşılaştır ve İptal tek düğmedir: etiket değişir, öğe değişmez, klavye odağı kaybolmaz. İptal `disabled`
+              olmaz (`aria-disabled`; `cancel` tekrarı etkisizdir). Çift tıklamanın ikinci tıklaması iptal etmez. */}
+          <GatedButton
+            label={running() ? (m().cancelRequested ? tsd.cancelling : tsd.cancel) : tsd.compare}
+            reason={running() ? null : compareReason()}
+            primary={!running()}
+            busy={running() && m().cancelRequested}
+            onClick={(ev) => {
+              if (!running()) void d.compare(id);
+              else if (ev.detail < 2) d.cancel(id);
+            }}
+          />
         </div>
         <Show when={running()}>
           <div class="flex items-center gap-4">
@@ -289,8 +298,9 @@ function Body(props: { diff: DiffController; tabId: string; m: DiffModel }) {
                   <span class="text-[12px] text-muted">{tsd.category[categoryOf(it())]}</span>
                 </h3>
                 <Show when={problemText(it())}>{(t) => <p class="text-[12px] text-danger">{t()}</p>}</Show>
+                {/* Rol yok: ↑/↓ ile her gezinmede yeniden okunmasın; satır etiketi sorun durumunu zaten taşır. */}
                 <Show when={it().errors.length > 0}>
-                  <div role="alert" class="mt-1 text-[12px] text-danger">
+                  <div class="mt-1 text-[12px] text-danger">
                     <p class="font-semibold">{tsd.detail.errors}</p>
                     <ul class="list-disc pl-5">
                       <For each={it().errors}>{(x) => <li>{x}</li>}</For>
@@ -313,7 +323,7 @@ function Body(props: { diff: DiffController; tabId: string; m: DiffModel }) {
             fallback={<LineDiffView itemKey={m().detail?.key ?? null} detail={m().detail?.data ?? null} />}
           >
             {(e) => (
-              <p role="alert" class="p-3 text-[12px] text-danger">
+              <p role="status" class="p-3 text-[12px] text-danger">
                 {e()}
               </p>
             )}

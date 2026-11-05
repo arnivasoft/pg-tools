@@ -44,6 +44,7 @@ const ITEMS: DiffItem[] = [
 ];
 const RESULT: DiffResult = { items: ITEMS, sourceVersion: "16", targetVersion: "16", warnings: [], elapsedMs: 10 };
 const SCRIPT: DiffScript = { sql: SQL, transactional: true, warnings: [], risk: "safe", statements: 1 };
+const SERVERS = ["s1", "s2", "s3"].map((id) => ({ id, name: `ad ${id}` })) as unknown as ReturnType<DiffControllerDeps["servers"]>;
 const detailOf = (k: string): DiffDetail => ({ sourceText: `src ${k}`, targetText: `tgt ${k}`, lines: [] });
 
 function deferred<T>() {
@@ -94,7 +95,7 @@ function setup() {
   const picker: Picker = { save: vi.fn(async () => PATH as string | null) };
   const deps: DiffControllerDeps = {
     api: api as unknown as DiffControllerDeps["api"],
-    servers: () => [],
+    servers: () => SERVERS,
     nodeLabel: (id) => (id === "sch" ? "Şube" : null),
     connect: vi.fn(async () => true),
     tabs: tabs as unknown as DiffControllerDeps["tabs"],
@@ -393,7 +394,7 @@ describe("diff-controller", () => {
       expect(s.m().cancelRequested).toBe(false);
     });
 
-    it("ilk olaydan önce cancel → hemen çağrı yok, ilk olayda bir kez gönderilir", async () => {
+    it("ilk olaydan önce cancel → hemen bir kez, bekleyen de ilk olayda bir kez (en çok iki)", async () => {
       const s = mk();
       await s.ready();
       void s.ctl.compare("s1");
@@ -401,15 +402,15 @@ describe("diff-controller", () => {
       s.ctl.cancel("s1");
       s.ctl.cancel("s1");
       expect(s.m().cancelRequested).toBe(true);
-      expect(s.api.schemaDiffCancel).not.toHaveBeenCalled();
+      expect(s.api.schemaDiffCancel.mock.calls).toEqual([["d1"]]);
       s.starts[0].onEvent(ev("source", 0, 3));
-      expect(s.api.schemaDiffCancel).toHaveBeenCalledTimes(1);
-      expect(s.api.schemaDiffCancel).toHaveBeenCalledWith("d1");
+      expect(s.api.schemaDiffCancel.mock.calls).toEqual([["d1"], ["d1"]]);
       s.starts[0].onEvent(ev("target", 0, 3));
-      expect(s.api.schemaDiffCancel).toHaveBeenCalledTimes(1);
+      s.ctl.cancel("s1");
+      expect(s.api.schemaDiffCancel).toHaveBeenCalledTimes(2);
     });
 
-    it("ilk olaydan önce cancel ve olay gelmeden start döner → hiç gönderilmez", async () => {
+    it("ilk olaydan önce cancel ve olay gelmeden start döner → yalnız hemen gönderilen, bekleyen düşer", async () => {
       const s = mk();
       await s.ready();
       void s.ctl.compare("s1");
@@ -417,11 +418,11 @@ describe("diff-controller", () => {
       s.ctl.cancel("s1");
       s.starts[0].d.reject(err("schema_not_found"));
       await flush();
-      expect(s.api.schemaDiffCancel).not.toHaveBeenCalled();
+      expect(s.api.schemaDiffCancel).toHaveBeenCalledTimes(1);
       expect(s.m().error).toBe(tsd.errors.schema_not_found);
       // Geç (kayıt sonrası) bir olay da artık iptal göndermez.
       s.starts[0].onEvent(ev("source", 0, 3));
-      expect(s.api.schemaDiffCancel).not.toHaveBeenCalled();
+      expect(s.api.schemaDiffCancel).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -631,19 +632,19 @@ describe("diff-controller", () => {
       expect(s.api.schemaDiffClose).toHaveBeenCalledTimes(1);
     });
 
-    it("ilk olaydan önce close → cancel ilk olayda, close yerleşince bir kez", async () => {
+    it("ilk olaydan önce close → cancel hemen ve ilk olayda, close yerleşince bir kez", async () => {
       const s = mk();
       await s.ready();
       void s.ctl.compare("s1");
       await flush();
       const st = s.starts[0];
       s.ctl.close("s1");
-      expect(s.api.schemaDiffCancel).not.toHaveBeenCalled();
+      expect(s.api.schemaDiffCancel.mock.calls).toEqual([["d1"]]);
       expect(s.api.schemaDiffClose).not.toHaveBeenCalled();
       expect(() => st.onEvent(ev("source", 0, 3))).not.toThrow();
-      expect(s.api.schemaDiffCancel.mock.calls).toEqual([["d1"]]);
+      expect(s.api.schemaDiffCancel.mock.calls).toEqual([["d1"], ["d1"]]);
       st.onEvent(ev("source", 1, 3));
-      expect(s.api.schemaDiffCancel).toHaveBeenCalledTimes(1);
+      expect(s.api.schemaDiffCancel).toHaveBeenCalledTimes(2);
       expect(s.api.schemaDiffClose).not.toHaveBeenCalled();
       st.d.reject(err("cancelled"));
       await flush();
@@ -786,6 +787,149 @@ describe("diff-controller", () => {
       expect(s.picker.save).toHaveBeenCalledTimes(3);
       expect(s.api.schemaDiffSave).not.toHaveBeenCalled();
       expect(s.deps.notify).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("son inceleme düzeltmeleri", () => {
+    const connectMock = (s: S) => s.deps.connect as ReturnType<typeof vi.fn>;
+    /** Hedef ayrı sunucuda (s2/7/public). */
+    const twoServers = async (s: S) => {
+      await s.ready();
+      await s.ctl.setServer("s1", "target", "s2");
+      await s.ctl.setDatabase("s1", "target", 7);
+      s.ctl.setSchema("s1", "target", "public");
+      connectMock(s).mockClear();
+    };
+
+    it("compare start'tan önce iki sunucuya da bağlanır", async () => {
+      const s = mk();
+      await twoServers(s);
+      void s.ctl.compare("s1");
+      await flush();
+      expect(connectMock(s).mock.calls).toEqual([["s1"], ["s2"]]);
+      expect(connectMock(s).mock.invocationCallOrder[1]).toBeLessThan(s.api.schemaDiffStart.mock.invocationCallOrder[0]);
+      expect(s.api.schemaDiffStart).toHaveBeenCalledTimes(1);
+    });
+
+    it("aynı sunucu iki tarafta → tek bağlanma", async () => {
+      const s = mk();
+      await s.ready();
+      connectMock(s).mockClear();
+      void s.ctl.compare("s1");
+      await flush();
+      expect(connectMock(s).mock.calls).toEqual([["s1"]]);
+      expect(s.api.schemaDiffStart).toHaveBeenCalledTimes(1);
+    });
+
+    it("connect false (ya da hata) → start yok, connectFailed, phase idle", async () => {
+      for (const fail of [() => Promise.resolve(false), () => Promise.reject(new Error("x"))]) {
+        cur?.dispose();
+        const s = mk();
+        await twoServers(s);
+        connectMock(s).mockResolvedValueOnce(true).mockImplementationOnce(fail);
+        await s.ctl.compare("s1");
+        await flush();
+        expect(s.api.schemaDiffStart).not.toHaveBeenCalled();
+        expect(s.m().error).toBe(tsd.errors.connectFailed);
+        expect(s.m().phase).toBe("idle");
+        expect(s.m().diffId).toBeNull();
+        s.ctl.close("s1");
+        expect(s.api.schemaDiffClose).not.toHaveBeenCalled();
+        expect(s.api.schemaDiffCancel).not.toHaveBeenCalled();
+      }
+    });
+
+    it("bağlanırken running: ikinci compare engellenir", async () => {
+      const s = mk();
+      await s.ready();
+      const conn = deferred<boolean>();
+      connectMock(s).mockReturnValueOnce(conn.promise);
+      void s.ctl.compare("s1");
+      expect(s.m().phase).toBe("running");
+      await s.ctl.compare("s1");
+      conn.resolve(true);
+      await flush();
+      expect(s.api.schemaDiffStart).toHaveBeenCalledTimes(1);
+    });
+
+    it("bağlanırken sekme kapanırsa start, iptal ve kapatma çağrısı yok", async () => {
+      const s = mk();
+      await s.ready();
+      const conn = deferred<boolean>();
+      connectMock(s).mockReturnValueOnce(conn.promise);
+      const p = s.ctl.compare("s1");
+      await flush();
+      s.ctl.close("s1");
+      conn.resolve(true);
+      await p;
+      await flush();
+      expect(s.api.schemaDiffStart).not.toHaveBeenCalled();
+      expect(s.api.schemaDiffCancel).not.toHaveBeenCalled();
+      expect(s.api.schemaDiffClose).not.toHaveBeenCalled();
+    });
+
+    it("bağlanırken iptal → start yok, İptal edildi. şeridi", async () => {
+      const s = mk();
+      await s.ready();
+      const conn = deferred<boolean>();
+      connectMock(s).mockReturnValueOnce(conn.promise);
+      const p = s.ctl.compare("s1");
+      await flush();
+      s.ctl.cancel("s1");
+      expect(s.m().cancelRequested).toBe(true);
+      conn.resolve(true);
+      await p;
+      expect(s.api.schemaDiffStart).not.toHaveBeenCalled();
+      expect(s.api.schemaDiffCancel).not.toHaveBeenCalled();
+      expect(s.m().phase).toBe("idle");
+      expect(s.m().banner).toBe(tsd.cancelled);
+      expect(s.m().cancelRequested).toBe(false);
+    });
+
+    it("start not_connected / connection_lost / unknown_server → eşlenmiş metin, ham ileti yok", async () => {
+      for (const code of ["not_connected", "connection_lost", "unknown_server"]) {
+        cur?.dispose();
+        const s = mk();
+        await s.ready();
+        void s.ctl.compare("s1");
+        await flush();
+        s.starts[0].d.reject(err(code, "ham ileti"));
+        await flush();
+        expect(s.m().error).toBe(tsd.errors[code]);
+        expect(s.m().error).not.toContain("ham ileti");
+        expect(s.m().phase).toBe("idle");
+      }
+    });
+
+    it("silinmiş sunucu (servers()'ta yok) → compare çağrı yapmaz", async () => {
+      const s = mk();
+      await s.ready();
+      connectMock(s).mockClear();
+      s.deps.servers = () => SERVERS.filter((c) => c.id !== "s1");
+      await s.ctl.compare("s1");
+      expect(s.deps.connect).not.toHaveBeenCalled();
+      expect(s.api.schemaDiffStart).not.toHaveBeenCalled();
+      expect(s.m().phase).toBe("idle");
+    });
+
+    it("comparedTarget karşılaştırılan hedefi tutar; Query Tool seçici değişse de onu kullanır", async () => {
+      const s = mk();
+      await s.ready();
+      await s.ctl.setDatabase("s1", "target", 8);
+      s.ctl.setSchema("s1", "target", "public");
+      void s.ctl.compare("s1");
+      await flush();
+      expect(s.m().comparedTarget).toEqual({ serverId: "s1", databaseOid: 8, schema: "public" });
+      s.starts[0].d.resolve(RESULT);
+      await flush();
+      await s.ctl.buildScript("s1");
+      // Diyalog açıkken (normalde kipli) seçici değişirse:
+      await s.ctl.setServer("s1", "target", "s2");
+      expect(s.m().target.serverId).toBe("s2");
+      expect(s.m().comparedTarget).toEqual({ serverId: "s1", databaseOid: 8, schema: "public" });
+      await s.ctl.openInQueryTool("s1");
+      expect(s.deps.openScript).toHaveBeenCalledWith({ serverId: "s1", databaseOid: 8, database: "arsiv", text: SQL });
+      expect(s.m().script).toBeNull();
     });
   });
 });

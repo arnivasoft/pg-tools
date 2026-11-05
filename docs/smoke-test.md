@@ -836,6 +836,9 @@ Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2.8, §6
 - [ ] Sunucu değişince veritabanı ve şema seçicileri, veritabanı değişince şema seçicisi sıfırlanır. **[—]**
 - [ ] "↔" kaynak ile hedefi yer değiştirir. **[—]**
 - [ ] Kaynak ve hedef aynı şemayken "Karşılaştır" kapalıdır ve gerekçe görünür. **[—]**
+- [ ] Seçimden sonra Explorer'da sunucu bağlantısı kesilince "Karşılaştır" yeniden bağlanır (gerekirse parola istenir); parola isteminden vazgeçilince "Sunucuya bağlanılamadı." şeridi görünür, karşılaştırma başlamaz. **[—]**
+- [ ] Seçili sunucu kaydı silinince "Karşılaştır" kapanır ve "Kaynak ve hedefte sunucu, veritabanı ve şema seçin." gerekçesi görünür. **[—]**
+- [ ] Klavyeyle "Karşılaştır" (Enter) → düğme "İptal" olur ve odak düğmede kalır; "İptal" → "İptal ediliyor…", odak yine düğmede; iş bitince "Karşılaştır" odakta. "Karşılaştır"a çift tıklama işi iptal etmez. **[—]**
 - [ ] Büyük şemada taraf başına ilerleme çubukları ilerler; "İptal" → "İptal edildi.", kısmi sonuç yok; karşılaştırma sürerken Explorer akıcı. **[—]**
 - [ ] Sonuç sayıları (toplamı öğe sayısı) ve kategori filtreleri; "Aynı" varsayılan olarak gizli. **[—]**
 - [ ] Arama: `ilçe` yazınca `İLÇE` bulunur. **[—]**
@@ -845,11 +848,12 @@ Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2.8, §6
 - [ ] Betik önizleme: risk rozeti, ifade sayısı, transaction metni, uyarılar; CodeMirror'da kaydırma. **[—]**
 - [ ] Üretim etiketli hedefte "Hedef üretim sunucusu: ‹ad›" bandı, kilitli hedefte kilit bandı (ikisi birden olabilir); kaynak üretimken bant yok. **[—]**
 - [ ] "Query Tool'da aç": hedef sunucu/veritabanında yeni sekme açılır, metin çalıştırılmamıştır; çalıştırınca mevcut risk/kilit kapıları devreye girer. **[—]**
+- [ ] Etiketsiz hedef sunucuda "Query Tool'da aç": ortam istemi betik diyaloğunun üstünde açılır ve odak alır; istemden vazgeçilince sekme açılmaz, betik diyaloğu da kapanır (bilinen sınır: `openScript` başarıyı bildirmez; betik yeniden oluşturulur). **[—]**
 - [ ] "Kopyala": pano betik metnini içerir, bildirim "Kopyalandı.". **[—]**
 - [ ] "Kaydet…": önerilen ad; Türkçe ve ASCII dışı karakterli yol; vazgeçme (kayıt yok); var olan dosyanın üzerine yazma sorusu (Windows); bildirim "Betik kaydedildi." (yol yazılmaz). **[—]**
 - [ ] Betik Query Tool'da çalıştırılıp yeniden karşılaştırılınca yalnız "Aynı" (ve seçilmeyen/elle yapılacak öğeler) kalır. **[—]**
 - [ ] Karşılaştırma sürerken sekmeyi kapatma: hata ya da bildirim yok, arka uç işi iptal edilir. **[—]**
-- [ ] Dokuzdan fazla karşılaştırmadan sonra eski sekmede ayrıntı/betik istenince "Sonuç artık yok …" şeridi görünür. **[—]**
+- [ ] Sekizden fazla karşılaştırma tamamlandıktan sonra (en fazla 8 sonuç tutulur; 9. karşılaştırma tamamlanınca en eskisi düşer) en eski sekmede ayrıntı/betik istenince "Sonuç artık yok …" şeridi görünür. **[—]**
 - [ ] Sayfa yenileme sonrası durum: fark sekmeleri geri gelmez (kalıcı değildir). **[—]**
 - [ ] Klavye (↑/↓, Boşluk, Home/End, Esc) ve ekran okuyucu (ilerleme, şeritler, satır etiketleri). **[—]**
 - [ ] Parola, adres ve betik metni hiçbir bildirimde ya da konsolda (DevTools ve uygulama günlüğü) görünmez. **[—]**

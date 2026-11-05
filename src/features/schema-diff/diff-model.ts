@@ -119,9 +119,12 @@ export function swapSides<T>(a: T, b: T): [T, T] {
 
 export type Blocked = keyof typeof tsd.blocked;
 
-export function compareBlocked(src: SideSel, tgt: SideSel, running: boolean): Blocked | null {
+/** `known`: sunucu kayıtlı mı (silinmiş sunucuyu tutan taraf eksik sayılır). */
+export function compareBlocked(
+  src: SideSel, tgt: SideSel, running: boolean, known: (serverId: string) => boolean = () => true,
+): Blocked | null {
   if (running) return "running";
-  if (!sideComplete(src) || !sideComplete(tgt)) return "incomplete";
+  if (!sideComplete(src) || !sideComplete(tgt) || !known(src.serverId) || !known(tgt.serverId)) return "incomplete";
   if (sameSide(src, tgt)) return "same";
   return null;
 }
@@ -159,7 +162,8 @@ const MAX_NAME = 120;
 export function suggestScriptName(src: Named, tgt: Named, now: Date): string {
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
   const base = `${src.db}_${src.schema}__${tgt.db}_${tgt.schema}_${stamp}`.replace(BAD_FILE_CHARS, "_");
-  return `${Array.from(base).slice(0, MAX_NAME - 4).join("")}.sql`;
+  // Kesimden sonra sondaki boşluk ve nokta atılır (Windows dosya adında bunları sessizce siler).
+  return `${Array.from(base).slice(0, MAX_NAME - 4).join("").replace(/[\s.]+$/u, "")}.sql`;
 }
 
 export function progressView(p: { loaded: number; total: number } | null): { percent: number | null; text: string } {

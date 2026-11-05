@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { tsd } from "../../app/strings-diff";
 import type { DdlTarget } from "../../ipc/bindings/DdlTarget";
 import type { DiffItem } from "../../ipc/bindings/DiffItem";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
@@ -98,6 +99,14 @@ describe("seçici", () => {
     expect(compareBlocked(full, full, false)).toBe("same");
     expect(compareBlocked(full, { ...full, schema: "y" }, false)).toBeNull();
   });
+  it("compareBlocked: kayıtlı olmayan (silinmiş) sunucu → incomplete", () => {
+    const other = { ...full, schema: "y" };
+    expect(compareBlocked(full, other, false, (id) => id === "s")).toBeNull();
+    expect(compareBlocked(full, other, false, () => false)).toBe("incomplete");
+    expect(compareBlocked(full, { ...other, serverId: "silindi" }, false, (id) => id === "s")).toBe("incomplete");
+    expect(compareBlocked({ ...full, serverId: "silindi" }, other, false, (id) => id === "s")).toBe("incomplete");
+    expect(compareBlocked(full, other, true, () => false)).toBe("running");
+  });
   it("scriptBlocked sırası", () => {
     const ok = { running: false, hasResult: true, stale: false, selected: 1 };
     expect(scriptBlocked(ok)).toBeNull();
@@ -134,6 +143,13 @@ describe("adlandırma", () => {
     expect(long.length).toBeLessThanOrEqual(120);
     expect(long.endsWith(".sql")).toBe(true);
   });
+  it("suggestScriptName: kesimden sonra sondaki boşluk ve noktalar atılır", () => {
+    // Kesim (116 karakter) "a" ile 113 karakter, ardından ". ." üçlüsüne denk gelir.
+    const n = suggestScriptName({ db: `${"a".repeat(113)}. .x`, schema: "s" }, { db: "b", schema: "t" }, new Date(2026, 9, 31, 14, 5));
+    expect(n).toBe(`${"a".repeat(113)}.sql`);
+    const dots = suggestScriptName({ db: `${"a".repeat(114)}..`, schema: "s" }, { db: "b", schema: "t" }, new Date(2026, 9, 31, 14, 5));
+    expect(dots).toBe(`${"a".repeat(114)}.sql`);
+  });
 });
 
 describe("görünüm yardımcıları", () => {
@@ -153,6 +169,12 @@ describe("görünüm yardımcıları", () => {
     expect(problemText(item({ problem: "load_failed" }))).toBe("Yüklenemedi");
     expect(problemText(item({ problem: "build_failed" }))).toBe("Üretilemedi");
     expect(problemText(item())).toBeNull();
+  });
+  it("errorText: tsd.errors'taki her kod eşlenmiş metni döndürür", () => {
+    const p = (code: string) => ({ code, message: "m", detail: null, hint: "ipucu" });
+    const codes = Object.keys(tsd.errors);
+    expect(codes).toEqual(expect.arrayContaining(["not_connected", "connection_lost", "unknown_server", "connectFailed"]));
+    for (const code of codes) expect(errorText(p(code)), code).toBe(tsd.errors[code]);
   });
   it("errorText", () => {
     const p = (code: string) => ({ code, message: "m", detail: null, hint: null });

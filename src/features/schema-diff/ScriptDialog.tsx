@@ -72,7 +72,8 @@ export default function ScriptDialog(props: { diff: DiffController; tabId: strin
   const d = props.diff;
   const s = () => d.model(props.tabId)?.script ?? null;
   const data = () => s()?.data ?? null;
-  const targetServerId = () => d.model(props.tabId)?.target.serverId ?? null;
+  // Karşılaştırılan hedef (seçicinin şimdiki değeri değil): bant betiğin gideceği sunucuyu gösterir.
+  const targetServerId = () => d.model(props.tabId)?.comparedTarget?.serverId ?? null;
   const close = () => d.closeScript(props.tabId);
   return (
     <Dialog

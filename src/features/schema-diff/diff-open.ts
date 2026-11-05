@@ -2,12 +2,13 @@
 // dinamik içe aktarır.
 //
 // Paket bütçesi: bu modül BİLEREK bağımlılıksızdır (yalnızca ana paket modülleri ve türler; çalışma zamanında yalnızca
-// `toPayload`). Solid ya da strings-diff gibi başka bir parçayı statik içe aktarsaydı ana paketteki `import("./diff-open")`
-// çağrısı `__vite__mapDeps` girdisi kazanırdı (bkz. data-open.ts). Denetleyici ve açıcı bu yüzden sekme panelleriyle aynı
+// `t`). Parça yüklenemezse bildirim sabit metindir (`t.app.chunkLoadFailed`; ham tarayıcı iletisi gösterilmez). Solid
+// ya da strings-diff gibi başka bir parçayı statik içe aktarsaydı ana paketteki `import("./diff-open")` çağrısı
+// `__vite__mapDeps` girdisi kazanırdı (bkz. data-open.ts). Denetleyici ve açıcı bu yüzden sekme panelleriyle aynı
 // tembel parçada (`DiffTabs`) iner; buradaki `ctl` yüzü yüklenene dek güvenli varsayılanlar döner.
+import { t } from "../../app/strings";
 import type { ToastKind } from "../../app/toast-model";
 import type { Api } from "../../ipc/commands";
-import { toPayload } from "../../ipc/errors";
 import type { TreeState } from "../explorer/tree-model";
 import type { QueryController } from "../query/query-controller";
 import type { TabsStore } from "../query/tabs-store";
@@ -73,7 +74,7 @@ export function createSchemaDiff(deps: DiffDeps) {
   const open = (nodeId: string): Promise<void> =>
     load().then(
       (x) => x.open(nodeId),
-      (err: unknown) => deps.notify(toPayload(err).message, "error"),
+      () => deps.notify(t.app.chunkLoadFailed, "error"),
     );
   return { ctl, open };
 }

@@ -1,4 +1,4 @@
-// Şema karşılaştırma görünümlerinin saf yardımcıları (Plan 30): satır erişilebilirlik metni, risk tonu, satır farkı
+// Şema karşılaştırma görünümlerinin saf yardımcıları (Plan 30): satır erişilebilirlik metni, satır farkı
 // zemini, not/hata rozeti, toplu seçim kutusu ve seçici liste durumları. DOM ve Solid yok; yalnızca diff-model, strings-diff ve türler içe aktarılır.
 import { tsd } from "../../app/strings-diff";
 import type { DiffItem } from "../../ipc/bindings/DiffItem";

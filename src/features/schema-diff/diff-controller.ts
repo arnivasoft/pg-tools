@@ -4,9 +4,13 @@
 // Kurallar:
 // - Üç bağımsız kuşak vardır: seçici listeleri (taraf başına), karşılaştırma ve ayrıntı (betik diyaloğu için de ayrı bir
 //   sayaç). Eski kuşağın yanıtı, olayı ve hatası durum yazmaz; kapanan sekmeye hiçbir şey yazılmaz.
+// - Karşılaştırma önce iki tarafın sunucusuna bağlanır (`deps.connect`, sunucu başına bir kez; gerekirse parola
+//   istenir); `phase = "running"` bağlanmadan önce yazılır, böylece kapı çift tıklamayı engeller. Bağlanırken iptal ya
+//   da kapatma istenirse `schemaDiffStart` hiç çağrılmaz.
 // - İptal sırası (spec §6.8): arka uç işi ilk `await`'inden önce kaydeder; kayıttan önce gelen `schema_diff_cancel`
 //   etkisizdir. Bu çalıştırmanın ilk olayı kaydı kanıtlar: ondan önceki iptal bekletilir ve ilk olayda (bir kez)
-//   gönderilir; olay gelmeden `start` dönerse bekleyen iptal düşer.
+//   gönderilir; olay gelmeden `start` dönerse bekleyen iptal düşer. Ayrıca `start` çağrıldıktan sonra istenen iptal
+//   hemen de bir kez gönderilir (iş büyük olasılıkla kayıtlıdır; bilinmeyen kimlikte etkisizdir), yani en çok iki çağrı.
 // - Bir diffId için `schemaDiffClose` en çok bir kez çağrılır; çalışırken kapanan sekmede `start` yerleşince çağrılır.
 // - Gizlilik: bu modül `console` kullanmaz; bildirimler sabit metindir (yol, ad, SQL yok).
 // - İçe aktarma: `app/strings`, `ui/*`, `query/*`, `explorer/*`, inspector ve designer modülleri, CodeMirror yalnız tür olarak.
@@ -73,6 +77,8 @@ export interface DiffModel {
   options: DiffOptions;
   phase: Phase;
   cancelRequested: boolean;
+  /** Son karşılaştırmanın hedef tarafı (başlarken alınan anlık görüntü; betik diyaloğunun hedef bandı bunu okur). */
+  comparedTarget: DiffSide | null;
   diffId: string | null;
   progress: { source: { loaded: number; total: number } | null; target: { loaded: number; total: number } | null };
   result: DiffResult | null;
@@ -125,6 +131,8 @@ type Named = { db: string; schema: string };
 interface Run {
   diffId: string;
   gen: number;
+  /** `schemaDiffStart` çağrıldı (bağlanma bitti). */
+  started: boolean;
   /** İlk olay geldi: arka uç işi kaydetti, iptal artık etkilidir. */
   registered: boolean;
   pendingCancel: boolean;
@@ -165,6 +173,7 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
   const entries = new Map<string, Entry>();
   const [order, setOrder] = createSignal<string[]>([]);
   let listSeq = 0;
+  const known = (serverId: string) => deps.servers().some((c) => c.id === serverId);
 
   const get = (tabId: string): Entry | null => {
     const e = entries.get(tabId);
@@ -184,6 +193,13 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     if (run.cancelSent) return;
     run.cancelSent = true;
     api.schemaDiffCancel(run.diffId).catch(() => {});
+  };
+  /** Kayıttan sonra doğrudan; önce ise bekletilir (ilk olayda gönderilir) ve `start` çağrıldıysa hemen de bir kez denenir. */
+  const requestCancel = (run: Run) => {
+    if (run.registered) return sendCancel(run);
+    if (run.pendingCancel) return;
+    run.pendingCancel = true;
+    if (run.started) api.schemaDiffCancel(run.diffId).catch(() => {});
   };
 
   const clearDetailTimer = (e: Entry) => {
@@ -326,7 +342,7 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     const [state, set] = createStore<DiffModel>({
       tabId, source: emptySideState(), target: emptySideState(),
       options: { ownership: false, tablespace: false, comments: true },
-      phase: "idle", cancelRequested: false, diffId: null, progress: { source: null, target: null },
+      phase: "idle", cancelRequested: false, comparedTarget: null, diffId: null, progress: { source: null, target: null },
       result: null, stale: false, banner: null, error: null,
       filters: defaultFilters(), search: "", selected: new Set<string>(), focused: null, detail: null, script: null,
     });
@@ -408,7 +424,7 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     const e = get(tabId);
     if (!e) return;
     const st = e.state;
-    if (compareBlocked(st.source, st.target, st.phase === "running") !== null) return;
+    if (compareBlocked(st.source, st.target, st.phase === "running", known) !== null) return;
     const source: DiffSide = { serverId: st.source.serverId!, databaseOid: st.source.databaseOid!, schema: st.source.schema! };
     const target: DiffSide = { serverId: st.target.serverId!, databaseOid: st.target.databaseOid!, schema: st.target.schema! };
     const options: DiffOptions = { ...st.options };
@@ -419,8 +435,8 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     closeCurrent(e);
     const gen = ++e.compareGen;
     const run: Run = {
-      diffId: deps.newId(), gen, registered: false, pendingCancel: false, cancelSent: false, settled: false, closeAfter: false,
-      closeSent: false,
+      diffId: deps.newId(), gen, started: false, registered: false, pendingCancel: false, cancelSent: false, settled: false,
+      closeAfter: false, closeSent: false,
     };
     e.run = run;
     e.ran = null;
@@ -430,10 +446,30 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     e.scriptGen++;
     clearDetailTimer(e);
     e.set({
-      phase: "running", cancelRequested: false, diffId: run.diffId, progress: { source: null, target: null }, result: null,
-      stale: false, banner: null, error: null, selected: new Set<string>(), focused: null, detail: null, script: null,
+      phase: "running", cancelRequested: false, comparedTarget: target, diffId: run.diffId,
+      progress: { source: null, target: null }, result: null, stale: false, banner: null, error: null,
+      selected: new Set<string>(), focused: null, detail: null, script: null,
     });
     const current = () => !e.closed && e.compareGen === gen;
+    // Bağlan (sunucu başına bir kez; bağlıysa ucuz). Her `await` sonrası: kapanan sekme, yeni kuşak ya da istenen iptal →
+    // `start` yok. Çalıştırma yerleşmiş sayılır (henüz hiçbir IPC kimliği yok: iptal/kapatma çağrısı gönderilmez).
+    for (const serverId of new Set([source.serverId, target.serverId])) {
+      let ok: boolean;
+      try {
+        ok = await deps.connect(serverId);
+      } catch {
+        ok = false;
+      }
+      if (!current() || run.pendingCancel || !ok) {
+        run.settled = true;
+        run.pendingCancel = false;
+        if (!current()) return;
+        if (ok) e.set({ phase: "idle", cancelRequested: false, banner: tsd.cancelled, diffId: null });
+        else e.set({ phase: "idle", cancelRequested: false, error: tsd.errors.connectFailed, diffId: null });
+        return;
+      }
+    }
+    run.started = true;
     const onEvent = (ev: DiffEvent) => {
       if (!run.registered && !run.settled) {
         run.registered = true;
@@ -473,8 +509,7 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     const run = e?.run;
     if (!e || !run || run.settled || e.state.phase !== "running") return;
     e.set("cancelRequested", true);
-    if (run.registered) sendCancel(run);
-    else run.pendingCancel = true;
+    requestCancel(run);
   };
 
   const close = (tabId: string) => {
@@ -486,8 +521,7 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     setOrder((o) => o.filter((x) => x !== tabId));
     const run = e.run;
     if (run && !run.settled) {
-      if (run.registered) sendCancel(run);
-      else run.pendingCancel = true;
+      requestCancel(run);
       run.closeAfter = true;
     } else {
       closeCurrent(e);
@@ -549,12 +583,10 @@ export function createDiffController(deps: DiffControllerDeps): DiffTabCtl {
     if (!s) return;
     const { target, names } = s.ran;
     const gen = s.e.scriptGen;
-    try {
-      await deps.openScript({ serverId: target.serverId, databaseOid: target.databaseOid, database: names.tgt.db, text: s.sql });
-    } catch (err) {
-      scriptError(s.e, gen, err);
-      return;
-    }
+    // Sınır: `QueryController.openScript` başarıyı bildirmez (`Promise<void>`; reddetmez). Sunucu yoksa ya da başka bir
+    // açılış sürüyorsa kendisi bildirir ya da sessizce döner, ortam istemi iptal edilirse de sessizce döner; diyalog
+    // yine kapanır. Dönüş değeri eklemek ana pakete bayt ekler (sıfır pay); elle kontrol listesinde izlenir.
+    await deps.openScript({ serverId: target.serverId, databaseOid: target.databaseOid, database: names.tgt.db, text: s.sql });
     if (!s.e.closed && s.e.scriptGen === gen) closeScript(tabId);
   };
 
