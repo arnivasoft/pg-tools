@@ -13,7 +13,9 @@ import type { Setting } from "../../ipc/bindings/Setting";
 import type { SignalKind } from "../../ipc/bindings/SignalKind";
 import type { SignalOutcome } from "../../ipc/bindings/SignalOutcome";
 import type { Statements } from "../../ipc/bindings/Statements";
+import type { StatementRow } from "../../ipc/bindings/StatementRow";
 import type { StatementsOrder } from "../../ipc/bindings/StatementsOrder";
+import type { OpenForAssistant } from "../query/ai-intent";
 import type { Api } from "../../ipc/commands";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import { errorText, toPayload } from "../../ipc/errors";
@@ -126,6 +128,8 @@ export interface DashControllerDeps {
   api: Api;
   notify(text: string, kind: ToastKind): void;
   poller?: Partial<PollerDeps>;
+  /** "Asistanla iyileştir": sorgu yeni sorgu sekmesinde (çalıştırılmadan) açılır ve asistana istek bırakılır. */
+  openForAssistant?: OpenForAssistant;
 }
 
 export function createDashController(deps: DashControllerDeps) {
@@ -498,9 +502,23 @@ export function createDashController(deps: DashControllerDeps) {
     return signal(tabId, row, kind);
   };
 
+  /**
+   * Seçili pg_stat_statements satırını asistana gönderir. Yalnız veritabanı panosunda (sunucu panosunda sorgunun
+   * veritabanı bilinmez; katalog araçları yanlış veritabanına bakardı).
+   */
+  const improveInAssistant = async (tabId: string, row: StatementRow, label: string, stats: string): Promise<void> => {
+    const m = model(tabId);
+    if (!m || m.databaseOid === null || !row.query || !deps.openForAssistant) return;
+    await deps.openForAssistant(
+      { serverId: m.serverId, databaseOid: m.databaseOid, database: m.info?.database ?? null, text: row.query },
+      { mode: "optimize", label, sql: row.query, extra: stats },
+    );
+  };
+
   return {
     model,
     ids: () => (registry(), [...entries.keys()]),
+    improveInAssistant,
     open,
     close,
     reopen,

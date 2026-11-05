@@ -65,6 +65,24 @@ mevcut risk/kilit/üretim kapıları geçerlidir).
 - Arayüz yanıtın üstünde çalıştırılan araçları ("Tablo incelendi: shop.orders") ve belirteç satırında önbellekten
   okunan girdiyi gösterir. Günlüğe araç adı, süre ve başarı yazılır; girdi ve sonuç yazılmaz.
 
+## "Asistana sor" girişleri (dördüncü dilim)
+- Yeni kipler: `plan` (EXPLAIN planını yorumla; `extra` = plan JSON'u), `review` (değişiklik betiğinin kilit,
+  yeniden yazım ve veri kaybı riskleri; betik `<script>` bölümünde), `optimize` (yavaş sorgu; `extra` =
+  pg_stat_statements istatistikleri). `AiRequest.extra` yeni alan.
+- Girişler:
+  - İletiler paneli (sekmede hata varken): "Asistanla düzelt" → `fix` (hata veren ifade ve hata metni).
+  - Plan paneli (plan varken): "Planı açıkla" → `plan` (EXPLAIN metni + JSON).
+  - Şema karşılaştırma betik diyaloğu: "Riskleri açıkla" → betik hedefte yeni sorgu sekmesinde açılır
+    (çalıştırılmaz), diyalog kapanır, `review` isteği bırakılır.
+  - Dashboard sorgu istatistikleri ayrıntısı: "Asistanla iyileştir" → sorgu yeni sekmede açılır, `optimize`
+    isteği istatistiklerle bırakılır. Yalnız veritabanı panosunda (sunucu panosunda sorgunun veritabanı bilinmez;
+    katalog araçları yanlış veritabanına bakardı).
+- Bekleyen istek sekme modelinde durur (`TabModel.aiIntent`); QueryTab paneli Asistan'a çevirir, AiPane isteği alıp
+  gönderir (anahtar yoksa kaydedilene dek bekler). Taslağa yazılmaz.
+- Paket bütçesi: istek mantığı ana pakette değildir. `ai-intent.ts`'i şema farkı ve dashboard yalnız tıklanınca
+  dinamik yükler, QueryTab yalnız türünü kullanır; giriş metinleri her özelliğin kendi metin dosyasındadır. Ortak
+  statik içe aktarma ortak parça yaratır ve ana paketin ön yükleme listesini büyütür (ilk denemede +322 / +78 bayt).
+
 ## Sonraki adımlar
 - EXPLAIN aracı (READ ONLY transaction, tek ifade, zaman sınırı).
 - Ayarlardan model/effort seçimi; kurumsal ağ geçidi (base URL) desteği.

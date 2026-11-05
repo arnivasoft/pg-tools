@@ -168,6 +168,13 @@ export const td = {
     selectHint: "Ayrıntı için bir sorgu seçin.",
     detail: "Sorgu",
     copy: "Kopyala",
+    /** Asistan girişi (metin burada: `strings-ai` ortak parçaya bölünmesin). */
+    optimize: "Asistanla iyileştir",
+    optimizeTitle: "Sorguyu yeni sorgu sekmesinde açar (çalıştırmaz) ve asistana istatistiklerle birlikte gönderir",
+    optimizeNoDb: "Bu pano tüm sunucuyu gösteriyor; sorgunun veritabanı belli değil. Veritabanı düğümünden açılan panoda kullanın.",
+    /** Asistana giden istatistik satırı (model için İngilizce alan adları). */
+    stats: (calls: number, totalMs: number, meanMs: number, rows: number) =>
+      `calls: ${calls}, total_exec_time: ${totalMs.toFixed(1)} ms, mean_exec_time: ${meanMs.toFixed(1)} ms, rows: ${rows}`,
     copied: "Sorgu panoya kopyalandı.",
     copyFailed: "Panoya kopyalanamadı.",
     emptyQuery: "(boş sorgu)",

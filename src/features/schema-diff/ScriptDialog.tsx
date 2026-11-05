@@ -92,6 +92,9 @@ export default function ScriptDialog(props: { diff: DiffController; tabId: strin
           <Button disabled={data() === null} onClick={() => void d.copyScript(props.tabId)}>
             {tsd.copy}
           </Button>
+          <Button disabled={data() === null} title={tsd.reviewTitle} onClick={() => void d.reviewInAssistant(props.tabId)}>
+            {tsd.review}
+          </Button>
           <Button variant="primary" disabled={data() === null} onClick={() => void d.openInQueryTool(props.tabId)}>
             {tsd.openInQuery}
           </Button>

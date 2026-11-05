@@ -3,7 +3,7 @@
 // Görsel EXPLAIN akışı ve sekme başına plan durumu `explain-controller`dadır (QueryTab yalnız bağlar).
 import { closeCompletion } from "@codemirror/autocomplete";
 import type { EditorState } from "@codemirror/state";
-import { Download, PanelRight } from "lucide-solid";
+import { Download, PanelRight, Sparkles } from "lucide-solid";
 import { For, Match, Show, Suspense, Switch, createEffect, createMemo, createSignal, lazy, on, onCleanup, onMount, untrack } from "solid-js";
 import { t } from "../../app/strings";
 import { texp } from "./strings-export";
@@ -45,6 +45,7 @@ import { HistorySettings, HistoryView } from "./HistoryView";
 import { MessagesView } from "./MessagesView";
 import { errorRange } from "./offsets";
 import type { QueryController, TabNote } from "./query-controller";
+import type { AiIntent } from "./ai-intent";
 import { ResultGrid, type ActiveCell } from "./ResultGrid";
 import { ResultStrip } from "./ResultStrip";
 import { looksLikePlanResult } from "./plan-model";
@@ -585,7 +586,8 @@ export default function QueryTab(props: { ctl: QueryController }) {
     const note = [...m.notes].reverse().find((n) => n.level === "error");
     return { text: note ? [note.text, note.hint].filter(Boolean).join("\n") : "", offset: null };
   };
-  const aiContext = async (mode: AiMode, prompt: string): Promise<AiRequest> => {
+  /** `sqlOverride`: başka bir ekrandan gelen istekte gönderilecek SQL (plan, betik, istatistikteki sorgu). */
+  const aiContext = async (mode: AiMode, prompt: string, sqlOverride?: string): Promise<AiRequest> => {
     const m = model();
     if (!editor || !m) throw new Error(tai.noTab);
     const state = editor.getState();
@@ -594,8 +596,9 @@ export default function QueryTab(props: { ctl: QueryController }) {
     const session = m.session;
     const err = mode === "fix" ? lastError(m) : { text: "", offset: null };
     if (mode === "fix" && !err.text) throw new Error(tai.noError);
-    let sql = sel.empty ? "" : doc.slice(sel.from, sel.to);
-    if (!sql && mode !== "generate" && session) {
+    const given = sqlOverride !== undefined;
+    let sql = given ? sqlOverride : sel.empty ? "" : doc.slice(sel.from, sel.to);
+    if (!given && !sql && mode !== "generate" && session) {
       try {
         // Düzeltmede hata veren ifade (son çalıştırmanın metni), değilse imleçteki ifade.
         const { text, scope } =
@@ -608,7 +611,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
         // analiz başarısızsa aşağıda tüm metne düşülür
       }
     }
-    if (!sql && mode !== "generate") sql = doc;
+    if (!given && !sql && mode !== "generate") sql = doc;
     let schema = "";
     if (session) {
       try {
@@ -626,7 +629,26 @@ export default function QueryTab(props: { ctl: QueryController }) {
         // şema özeti isteğe bağlı: oturum meşgulse onsuz gönderilir
       }
     }
-    return { mode, prompt, sql, error: err.text, schema, serverVersion: serverShort(m.serverId) };
+    return { mode, prompt, sql, error: err.text, schema, serverVersion: serverShort(m.serverId), extra: "" };
+  };
+  // Başka bir ekran bu sekmeye asistan isteği bıraktıysa Asistan panelini aç (istek panelde gönderilir).
+  createEffect(() => {
+    if (model()?.aiIntent) setPane("ai");
+  });
+  /** Etkin sekmede hata var mı ("Asistanla düzelt" düğmesi). */
+  const hasAiError = () => {
+    const m = model();
+    return !!m && lastError(m).text !== "";
+  };
+  const askHere = (intent: AiIntent) => {
+    const id = shownId();
+    if (id) ctl.patch(id, { aiIntent: intent });
+  };
+  /** Sekmenin bekleyen isteğini alır ve siler. */
+  const takeIntent = (tabId: string): AiIntent | null => {
+    const i = ctl.model(tabId)?.aiIntent ?? null;
+    if (i) ctl.patch(tabId, { aiIntent: null });
+    return i;
   };
   const canInsertAi = () => {
     const m = model();
@@ -749,6 +771,23 @@ export default function QueryTab(props: { ctl: QueryController }) {
             {paneButton("ai", () => tai.pane)}
           </div>
           <div class="flex-1" />
+          <Show when={pane() === "messages" && hasAiError()}>
+            <Button variant="ghost" class="h-6 text-[12px]" title={tai.entry.fixTitle} onClick={() => askHere({ mode: "fix", label: tai.fix })}>
+              <Sparkles size={13} /> {tai.entry.fix}
+            </Button>
+          </Show>
+          <Show when={pane() === "plan" && explainer.plan(shownId() ?? "")}>
+            {(entry) => (
+              <Button
+                variant="ghost"
+                class="h-6 text-[12px]"
+                title={tai.entry.planTitle}
+                onClick={() => askHere({ mode: "plan", label: tai.entry.plan, sql: entry().sql ?? "", extra: entry().json })}
+              >
+                <Sparkles size={13} /> {tai.entry.plan}
+              </Button>
+            )}
+          </Show>
           <Show when={pane() === "result" && gridPlan()}>
             {(json) => (
               <Button
@@ -864,6 +903,8 @@ export default function QueryTab(props: { ctl: QueryController }) {
                       context={aiContext}
                       onInsert={insertSql}
                       canInsert={canInsertAi()}
+                      intent={() => ctl.model(tabId)?.aiIntent ?? null}
+                      takeIntent={() => takeIntent(tabId)}
                       target={{ serverId: model()?.serverId ?? null, databaseOid: model()?.databaseOid ?? null }}
                     />
                   )}

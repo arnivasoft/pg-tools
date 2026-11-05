@@ -13,6 +13,7 @@ import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
 import { applyEvent, emptyChat, isCommitted, newAssistant, type AssistantTurn, type ChatState, type UserTurn } from "./ai-chat";
 import { aiIpc } from "./ai-ipc";
+import type { AiIntent } from "./ai-intent";
 import { splitBlocks } from "./ai-model";
 import { tai } from "./strings-ai";
 
@@ -33,19 +34,25 @@ const [hasKey, setHasKey] = createSignal<boolean | null>(null);
 let keyAsked = false;
 
 function userLabel(t: UserTurn): string {
-  if (t.mode === "explain") return t.text ? `${tai.explain}: ${t.text}` : tai.explain;
-  if (t.mode === "fix") return t.text ? `${tai.fix}: ${t.text}` : tai.fix;
-  return t.text;
+  const head = t.label ?? (t.mode === "explain" ? tai.explain : t.mode === "fix" ? tai.fix : null);
+  if (head === null) return t.text;
+  return t.text ? `${head}: ${t.text}` : head;
 }
 
 export default function AiPane(props: {
   tabId: string;
-  /** Seçili SQL, son hata, şema özeti ve sürüm; eksik bağlam için `Error` (Türkçe ileti) fırlatır. */
-  context: (mode: AiMode, prompt: string) => Promise<AiRequest>;
+  /**
+   * Seçili SQL (ya da `sql` verilirse o), son hata, şema özeti ve sürüm; eksik bağlam için `Error` (Türkçe ileti)
+   * fırlatır.
+   */
+  context: (mode: AiMode, prompt: string, sql?: string) => Promise<AiRequest>;
   onInsert: (sql: string) => void;
   canInsert: boolean;
   /** Sekmenin veritabanı (katalog araçları için); sekme bağlı değilse alanlar `null`. */
   target: { serverId: string | null; databaseOid: number | null };
+  /** Başka bir ekrandan bırakılan bekleyen istek (bakmak için) ve onu alıp silmek için. */
+  intent: () => AiIntent | null;
+  takeIntent: () => AiIntent | null;
 }) {
   // `tabId` bileşen ömrü boyunca sabittir (QueryTab sekme başına yeniden oluşturur).
   const [chat, setChat] = chatFor(props.tabId);
@@ -104,23 +111,30 @@ export default function AiPane(props: {
     }
   };
 
-  const ask = async (mode: AiMode) => {
+  /** `intent` verilirse istek başka bir ekrandan gelmiştir: taslak kullanılmaz ve silinmez. */
+  const ask = async (mode: AiMode, intent?: AiIntent) => {
     if (busy()) return;
     const id = crypto.randomUUID();
-    const prompt = draft();
+    const prompt = intent ? (intent.prompt ?? "") : draft();
     setNotice(null);
     setChat({ requestId: id, status: "gathering" });
     let request: AiRequest;
     try {
-      request = await props.context(mode, prompt);
+      request = { ...(await props.context(mode, prompt, intent?.sql)), extra: intent?.extra ?? "" };
     } catch (e) {
       setChat({ requestId: null, status: "idle" });
       setNotice(toPayload(e).message);
       return;
     }
     if (chat.requestId !== id) return;
-    setDraft("");
-    const user: UserTurn = { role: "user", mode, text: prompt.trim(), sql: mode === "generate" ? "" : request.sql };
+    if (!intent) setDraft("");
+    const user: UserTurn = {
+      role: "user",
+      mode,
+      text: prompt.trim(),
+      sql: mode === "generate" ? "" : request.sql,
+      label: intent?.label,
+    };
     setChat("turns", (t) => [...t, user, newAssistant()]);
     const idx = chat.turns.length - 1;
     setChat("status", "streaming");
@@ -139,6 +153,13 @@ export default function AiPane(props: {
       setChat({ requestId: null, status: "idle" });
     }
   };
+
+  // Bekleyen dış istek: anahtar hazır ve sohbet boştayken alınıp gönderilir (anahtar yoksa kaydedilene dek bekler).
+  createEffect(() => {
+    if (!props.intent() || hasKey() !== true || chat.status !== "idle") return;
+    const i = props.takeIntent();
+    if (i) void ask(i.mode, i);
+  });
 
   /** Akışı keser; durum, istek kapanınca (`finally`) boşa döner. */
   const stop = () => {

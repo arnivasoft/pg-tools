@@ -7,7 +7,8 @@ import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 export type Finish = { stopReason: string; inputTokens: number; cacheReadTokens: number; outputTokens: number };
 export type ToolStep = { name: string; detail: string };
 
-export type UserTurn = { role: "user"; mode: AiMode; text: string; sql: string };
+/** `label`: başka bir ekrandan gelen istekte başlık ("Planı açıkla" gibi). */
+export type UserTurn = { role: "user"; mode: AiMode; text: string; sql: string; label?: string };
 export type AssistantTurn = {
   role: "assistant";
   text: string;

@@ -12,6 +12,12 @@ pub enum AiMode {
     Explain,
     /// Hata veren SQL'i düzelt.
     Fix,
+    /// EXPLAIN planını yorumla (`extra`: plan metni/JSON'u).
+    Plan,
+    /// Değişiklik betiğinin risklerini incele (kilit, tablo yeniden yazımı, veri kaybı).
+    Review,
+    /// Yavaş sorguyu iyileştir (`extra`: varsa pg_stat_statements istatistikleri).
+    Optimize,
 }
 
 /// Arayüzün topladığı bağlam. Boş alanlar isteme eklenmez.
@@ -30,6 +36,9 @@ pub struct AiRequest {
     pub schema: String,
     /// Sunucu sürümü ("16.4" gibi); bilinmiyorsa boş.
     pub server_version: String,
+    /// Kipe özgü ek bağlam: `Plan` için EXPLAIN çıktısı, `Optimize` için istatistikler; diğerlerinde boş.
+    #[serde(default)]
+    pub extra: String,
 }
 
 /// Akış olayları (`Channel<AiEvent>`).

@@ -22,7 +22,7 @@ export interface DiffDeps {
   tabs: TabsStore;
   connect: (serverId: string) => Promise<boolean>;
   notify: (text: string, kind: ToastKind) => void;
-  query: Pick<QueryController, "servers" | "openScript">;
+  query: Pick<QueryController, "servers" | "openScript" | "tabs" | "patch">;
 }
 
 interface Inner {
@@ -68,6 +68,7 @@ export function createSchemaDiff(deps: DiffDeps) {
     buildScript: (id) => i()?.buildScript(id) ?? done,
     closeScript: (id) => i()?.closeScript(id),
     openInQueryTool: (id) => i()?.openInQueryTool(id) ?? done,
+    reviewInAssistant: (id) => i()?.reviewInAssistant(id) ?? done,
     copyScript: (id) => i()?.copyScript(id) ?? done,
     saveScript: (id) => i()?.saveScript(id) ?? done,
   };

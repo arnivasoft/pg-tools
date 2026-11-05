@@ -4,6 +4,7 @@ import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { Api } from "../../ipc/commands";
 import { emptyTree } from "../explorer/tree-model";
 import { createQueryController } from "./query-controller";
+import { openForAssistant } from "./ai-intent";
 
 const server: ServerConfig = {
   id: "S1", name: "srv", group: null, host: "h", port: 5432, maintenanceDb: "postgres", username: "u", savePassword: false,
@@ -113,6 +114,25 @@ describe("openScript (designer betiği Query Tool'da)", () => {
     expect(ctl.model(tab.id)?.run.status).toBe("noSession"); // oturum açılmadı, çalıştırılmadı
     expect(api.qtOpen).not.toHaveBeenCalled();
     expect(api.qtRun).not.toHaveBeenCalled();
+  });
+
+  it("openForAssistant: yeni sekmeye (çalıştırmadan) açar ve asistan isteğini o sekmenin modeline bırakır", async () => {
+    const { ctl, api } = scriptSetup({ ...server, label: "test" });
+    const intent = { mode: "review" as const, label: "Riskleri açıkla", sql: "DROP TABLE t;" };
+    await openForAssistant(ctl, { serverId: "S1", databaseOid: 42, database: "app", text: "DROP TABLE t;" }, intent);
+    const id = ctl.tabs.state.activeId!;
+    expect(ctl.text(id)).toBe("DROP TABLE t;");
+    expect(api.qtRun).not.toHaveBeenCalled();
+    expect(ctl.model(id)?.aiIntent).toEqual(intent);
+  });
+
+  it("openForAssistant: ortam isteminden vazgeçilirse istek bırakılmaz", async () => {
+    const { ctl } = scriptSetup({ ...server, label: null });
+    const p = openForAssistant(ctl, { serverId: "S1", databaseOid: 1, database: "app", text: "x" }, { mode: "review", label: "r", sql: "x" });
+    await vi.waitFor(() => expect(ctl.envGate.request()).not.toBeNull());
+    ctl.envGate.answer(null);
+    await p;
+    expect(ctl.tabs.state.tabs).toHaveLength(0);
   });
 
   it("kilitli sunucuda da açar (çalıştırma kapısı ayrı)", async () => {

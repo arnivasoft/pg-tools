@@ -4,6 +4,7 @@ import { createSignal, type Accessor, type Setter } from "solid-js";
 import { t } from "../../app/strings";
 import type { ToastKind } from "../../app/toast-model";
 import type { ClosePolicy } from "../../ipc/bindings/ClosePolicy";
+import type { AiIntent } from "./ai-intent";
 import type { Scope } from "../../ipc/bindings/Scope";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { SessionOptions } from "../../ipc/bindings/SessionOptions";
@@ -50,6 +51,8 @@ export interface TabModel {
   historyKey: number;
   /** Bu sekmede yazarken denetim geçici olarak kapalı (bağlam şeridi; kalıcı değil). */
   checkOff: boolean;
+  /** Başka bir ekrandan asistana bırakılan bekleyen istek (`ai-intent.ts`); Asistan paneli alıp `null` yapar. */
+  aiIntent?: AiIntent | null;
 }
 
 interface Entry {

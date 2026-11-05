@@ -28,6 +28,9 @@ export const tsd = {
   cancelling: "İptal ediliyor…",
   buildScript: "Betik oluştur",
   openInQuery: "Query Tool'da aç",
+  /** Asistan girişi (metin burada: `strings-ai` ortak parçaya bölünüp ana paketin ön yükleme listesini büyütmesin). */
+  review: "Riskleri açıkla",
+  reviewTitle: "Betiği yeni sorgu sekmesinde açar (çalıştırmaz) ve asistana kilit, yeniden yazım ve veri kaybı risklerini sorar",
   copy: "Kopyala",
   save: "Kaydet…",
   close: "Kapat",
