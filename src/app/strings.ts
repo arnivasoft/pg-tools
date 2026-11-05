@@ -82,10 +82,8 @@ export const t = {
   toast: { dismiss: "Kapat" },
   query: {
     objectTab: "Nesne",
-    errorMark: "Hata",
     tabs: {
       ariaLabel: "Sağ panel sekmeleri",
-      close: "Sekmeyi kapat (orta tık)",
       closeNamed: (title: string) => `‘${title}’ sekmesini kapat (orta tık)`,
       txOpen: "açık transaction",
       txFailed: "hatalı transaction",

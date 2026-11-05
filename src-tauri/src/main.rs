@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod backup;
+mod cell;
 mod commands;
 mod dash;
 mod data;
@@ -47,6 +48,7 @@ fn main() {
         })
         .setup(|app| {
             window::init(app);
+            cell::setup(app);
             let state = state::AppState::init();
             let manager = state.manager.clone();
             let query = state.query.clone();
@@ -146,6 +148,8 @@ fn main() {
             schema_diff::schema_diff_script,
             schema_diff::schema_diff_save,
             schema_diff::schema_diff_close,
+            cell::cell_open_pdf,
+            cell::cell_save_bytes,
         ])
         .build(tauri::generate_context!())
         .expect("pg-tools başlatılamadı")
@@ -161,6 +165,8 @@ fn main() {
                 let backup_cancels = state.backup.cancel_all();
                 // Karşılaştırmalar: çalışanlar iptal edilir (ayrılmış bağlantılar süreçle birlikte düşer).
                 state.diff.clear();
+                // Hücre görüntüleyicinin geçici PDF'leri silinir.
+                cell::on_exit(app);
                 // Zaman aşımı geleceği çalışma zamanı İÇİNDE kurulmalı: dışarıda `tokio::time::timeout` "no reactor running" ile panikler.
                 tauri::async_runtime::block_on(async move {
                     if ddl_cancels > 0 || backup_cancels > 0 {

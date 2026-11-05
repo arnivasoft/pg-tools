@@ -1,6 +1,7 @@
 /** Editör ayarları metinleri: yalnızca tembel QueryTab parçasındaki EditorSettings kullanır (ana paket bütçesi). */
 export const tedit = {
   title: "Editör",
+  errorMark: "Hata",
   checkToggle: "Yazarken hata denetimi",
   keywordCase: "Anahtar sözcükler",
   keywordCases: { upper: "BÜYÜK", lower: "küçük", preserve: "Koru" },

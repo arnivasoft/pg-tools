@@ -789,6 +789,34 @@ Sözleşme: `docs/superpowers/specs/2026-10-18-visual-explain-design.md` §1. Pl
 - [ ] Klavye ağacı ve ekran okuyucu: ağaca Tab ile girilir (tek sekme durağı); ↑/↓ satır, → aç / ilk çocuk, ← kapat / üst düğüm, Home/End ilk/son; Enter ayrıntı panelini açar ve odağı oraya taşır, Esc ağaca döndürür. Ekran okuyucu düğümü "ağaç öğesi, düzey N, açık/kapalı" olarak okur; sapma rozeti metin olarak ("12× az tahmin") ve süre/maliyet/satır değerleri etiketleriyle okunur, çubuklar okunmaz. IME bileşimi sırasında tuşlar ağacı gezdirmez. **[—]**
 - [ ] Tema: açık ve koyu temada çubuklar, seçili satır, uyarı (sarı çerçeve) ve kritik (kırmızı) sapma rozetleri, menü ve ham JSON okunaklı; seçili satır vurgusu odak halkasından ayırt edilir. **[—]**
 
+## Hücre görüntüleyici (Plan 31)
+
+Sözleşme: `docs/superpowers/specs/2026-11-05-cell-viewer-design.md`. Biçim sekmeleri ve görünümler tembel parçalardadır (QueryTab, `CellViewers`, dil parçaları).
+
+Ön koşul: yayın exe (`tauri build`); Docker PG 10 ve 18. Örnek tablo: `bytea` sütununda PNG, JPEG, GIF (animasyonlu), WebP, BMP, ICO, SVG (içinde `<script>` olan), PDF, imzasız rastgele bayt, 25 MB PNG, 70 MB bayt; `jsonb` (iç içe, büyük tamsayılı `12345678901234567890`); `text` sütununda JSON, HTML e-posta gövdesi (uzak `<img>` izleme pikseli), `<script>` içeren HTML, XML, 3 MB HTML; `xml` sütunu (belge: `<?xml …?>` + DOCTYPE; içerik parçası; `xml:space="preserve"`; CDATA; 5 MB XML); Türkçe adlı sütun. Örnek SQL: küçük dosyalar `decode('<base64>', 'base64')` ile, büyükler (25 MB PNG, 70 MB bayt, PDF) `pg_read_binary_file` yerine istemciden yüklenmiş veriyle (ör. `psql` `\lo_import` ya da parametreli INSERT) eklenir; 70 MB için `decode(repeat('AAAA', 24466602), 'base64')`, 5 MB XML için `repeat('<a>x</a>', 700000)` kullanılabilir.
+
+- [ ] Kendiliğinden seçim: `jsonb` -> JSON, `xml` -> XML, PNG -> Görsel, PDF -> PDF, imzasız -> Metin; devre dışı sekmelerde ipucu gerekçesi görünür. **[—]**
+- [ ] Sütun başına hatırlama: Onaltılık seçip satır değiştirme; başka sütun etkilenmez; yeni sorgu sekmesinde de geçerli (oturum boyu); uygulama yeniden açılınca sıfırlanır. **[—]**
+- [ ] Metin sekmesi bugünkü gibi (1 MB kırpma uyarısı dahil) ve hiçbir yeni parça yüklemez (DevTools Network). **[—]**
+- [ ] Onaltılık: ofset/16 bayt/ASCII hizası; 70 MB değerde ilk 16 MB notu ve akıcı kaydırma; `text` sütununda `ş` -> `C5 9F`. **[—]**
+- [ ] Görsel: yedi biçim çizilir; animasyonlu GIF oynar; SVG içindeki `<script>` çalışmaz (alert/IPC yok); sığdır/gerçek boyut; boyut bilgisi; 25 MB PNG'de sınır iletisi; bozuk PNG'de "çözülemedi"; "Kaydet…" dosyası özgünle aynı (`certutil -hashfile … SHA256` karşılaştırması). **[—]**
+- [ ] JSON: renklendirme açık ve koyu temada okunur; katlama; büyük tamsayı kaybolmaz; 5 MB JSON'da sınır iletisi. **[—]**
+- [ ] XML: `xml` sütununda biçimlendirme ve renklendirme (açık/koyu tema), katlama; "Biçimlendir" kapalıyken özgün metin; `xml:space="preserve"` ve CDATA içeriği değişmez; `<ad>Ayşe</ad>` tek satırda; `text` sütunundaki XML'de XML ve HTML sekmeleri etkin ama Metin seçili; `text` sütununda `42` için XML gerekçeyle devre dışı; 5 MB XML'de sınır iletisi; DTD/dış varlık içeren değerde ağ isteği yok (Network). **[—]**
+- [ ] HTML kaynak: biçimlendirme ve "Biçimlendir" kapalıyken özgün metin; `<script>`/`<style>` içerikleri renklenir. **[—]**
+- [ ] HTML önizleme güvenliği, betikler: `<script>alert(1)</script>`, `<img src=x onerror="alert(1)">`, `<script>window.__TAURI_INTERNALS__.invoke('list_servers')</script>` ve `<script>parent.postMessage('x','*')</script>` içeren değerde hiçbir uyarı çıkmaz; DevTools Console'da yalnız sandbox engel iletileri görünür; Tauri IPC'ye **erişilemez** (uygulama günlüğünde ve Network'te `ipc.localhost` isteği yok). **[—]**
+- [ ] HTML önizleme güvenliği, ağ: uzak `<img src="https://…">`, `<link rel=stylesheet href="https://…">` ve `@import` için Network'te **hiç istek yok**. **[—]**
+- [ ] HTML önizleme güvenliği, gezinme: `<a href="https://example.com">` ve `<a target="_top">` tıklaması uygulamayı ya da iframe'i uzak sayfaya götürmez; `<meta http-equiv="refresh" content="0;url=https://example.com">` yönlendirmez; `<form action=…>` gönderilmez. **[—]**
+- [ ] HTML önizleme güvenliği, WebView2: önizleme CSP ihlali olmadan çizilir (çizmezse durulur, sorulur). **[—]**
+- [ ] HTML önizleme güvenliği, ön bağlantı ipuçları: önizlemede `<link rel="preconnect" href="https://example.com">` ve `<link rel="dns-prefetch" href="//example.com">` varken Kaynak İzleyicisi / `netstat -n` (ya da DNS istemci günlüğü) bu ana makineye bağlantı ya da DNS sorgusu göstermez; gösterirse bilinen sınır olarak kaydedilir (spec §5). **[—]**
+- [ ] HTML önizleme güvenliği, boyut: 3 MB HTML'de önizleme anahtarı gerekçeyle devre dışı. **[—]**
+- [ ] PDF: "Varsayılan uygulamada aç" sistemin PDF uygulamasını açar; dosya `%LOCALAPPDATA%\com.pgtools.desktop\cell-view\cell-<uuid>.pdf` altındadır; uygulama kapatılınca dosya silinir (okuyucu kapalıyken); okuyucu açıkken kapatılırsa dosya kalır ve 24 saatten eski olunca sonraki açılışta silinir; "Kaydet…" ve iptal; 65 MB PDF'de düğmeler gerekçeyle devre dışı. **[—]**
+- [ ] Boş `''::xml` hücresi Metin sekmesinde "(boş dize)" notunu gösterir (bu sütun için daha önce XML elle seçilmemişse XML sekmesine geçmez; elle seçim oturum boyunca hatırlandığı için o durumda boş XML görünümü açılır). **[—]**
+- [ ] 64 MB'ı aşan `bytea` PDF'i: PDF sekmesi bilgi satırı, devre dışı "Varsayılan uygulamada aç" ve "Kaydet…" düğmeleri (ipucu + görünür gerekçe) ve uyarı satırını gösterir; "Kaydet…" önerilmez. **[—]**
+- [ ] Panel genişlet/daralt; dar panelde görünümler taşmaz. **[—]**
+- [ ] Klavye: sekme çubuğunda Sol/Sağ/Home/End, Enter/Space seçimi, devre dışı sekme seçilmez; ekran okuyucu sekme adını ve gerekçeyi okur. **[—]**
+- [ ] Gizlilik: değer, yol ya da dosya adı uygulama günlüğünde (`%LOCALAPPDATA%\com.pgtools.desktop\logs`) ve bildirimlerde görünmez. **[—]**
+- [ ] Açılış süresi ve bellek Plan 21 ölçümüyle aynı aralıkta (ana paket değişmedi). **[—]**
+
 ## Şema karşılaştırma arka ucu (Plan 29)
 
 Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2 ve §6. Arayüz Plan 30'dadır; bu bölümde GUI maddesi yoktur.

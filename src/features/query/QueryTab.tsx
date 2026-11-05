@@ -88,6 +88,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
   const [pane, setPane] = createSignal<ResultPane>("result");
   const [cell, setCell] = createSignal<ActiveCell | null>(null);
   const [cellPanel, setCellPanel] = createSignal(false);
+  const [cellWide, setCellWide] = createSignal(false);
   const [historyEnabled, setHistoryEnabled] = createSignal(true);
   const toggleHistory = async (enabled: boolean) => {
     try {
@@ -744,8 +745,8 @@ export default function QueryTab(props: { ctl: QueryController }) {
                     </Show>
                   </div>
                   <Show when={cellPanel()}>
-                    <div class="w-72 shrink-0 border-l border-border">
-                      <CellPanel cell={cell()} />
+                    <div class={`shrink-0 border-l border-border ${cellWide() ? "w-[36rem]" : "w-72"}`}>
+                      <CellPanel cell={cell()} wide={cellWide()} onToggleWide={() => setCellWide(!cellWide())} />
                     </div>
                   </Show>
                 </div>

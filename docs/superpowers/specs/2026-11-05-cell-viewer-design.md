@@ -1,7 +1,7 @@
 # pg-tools — Hücre Görüntüleyici (Biçim Sekmeleri) Tasarımı
 
 - **Tarih:** 2026-11-05
-- **Durum:** Tasarım; Plan 31 yazıldı (`docs/superpowers/plans/2026-11-05-cell-viewer-p31.md`), XML sekmesi eklendi (2026-11-05), uygulanıyor
+- **Durum:** Plan 31 uygulandı (feat/cell-viewer); elle kontrol bekliyor (`docs/smoke-test.md` "Hücre görüntüleyici (Plan 31)"). Plan: `docs/superpowers/plans/2026-11-05-cell-viewer-p31.md`; XML sekmesi 2026-11-05'te eklendi
 - **Kapsam:**
   - Query Tool'un hücre paneli (`src/features/query/CellPanel.tsx`) bugün seçili hücrenin değerini düz metin olarak gösterir (json/jsonb kayıpsız girintilenir, 1 MB üstü kırpılır).
   - Panele biçim sekmeleri eklenir: **Metin**, **Onaltılık**, **Görsel**, **JSON**, **XML**, **HTML**, **PDF**.
@@ -170,10 +170,48 @@
 - HTML önizlemesi betik çalıştırmaz: betikle çizilen içerik boş görünür. Uzak görsel, stil ve yazı tipleri yüklenmez.
 - XML sekmesi iyi biçimliliği doğrulamaz, ad alanlarını ve varlıkları çözmez, şemaya (XSD/DTD) göre denetlemez; önizleme yoktur.
 - HTML biçimleyici tam bir HTML5 ayrıştırıcısı değildir (örtük kapanan `<p>`/`<li>` girintisi kayabilir); önizleme her zaman özgün metni kullanır.
+- HTML önizlemesinde `<link rel=preconnect|dns-prefetch>` Chromium'da CSP kapsamı dışında olabilir; sandbox'lı iframe'de DNS/TCP bağlantısı açıp açmadığı doğrulanmadı (smoke).
 - Panel genişliği iki adımlıdır (sürüklenerek boyutlandırma yok).
+- Metin sütununda JSON algılaması, seçim başına bir kez en çok 4 MiB'lık değeri `JSON.parse` ile dener; büyük değerlerde onlarca ms sürebilir (§4'teki 5 ms hedefi yalnız 1 KB önek algılaması için geçerlidir). Sonuç hücre başına önbelleğe alınır.
 
 ## 6. Takip işleri
 
 - Veri düzenleyiciye aynı görüntüleyici (paylaşılan `CellViewers` parçası).
 - `bytea` içindeki UTF-8 metni JSON/XML/HTML olarak açma; metin sütunundaki base64 görseller.
 - Gömülü PDF görüntüleyici (pdf.js; ayrı tembel parça, CSP `worker-src` gerektirir).
+
+## 7. Plan 31 uygulama notları
+
+**Paket ölçümleri** (`bun run bundle:check` ve `bun run build`, 2026-11-05):
+
+| Parça | Bayt | Not |
+|---|---|---|
+| Ana paket (`index-*.js`) | 127,333 | Plan 31 öncesi tavan 127,364; tavan ölçülen değere indirildi (sıfır pay) |
+| Açılış kümesi (index + solid + web) | 155,006 | Önceki tavan 155,037; tavan ölçülen değere indirildi |
+| `QueryTab-*.js` | 117,398 | Sekme çubuğu, panel, model, metinler |
+| `CellViewers-*.js` | 18,082 | Onaltılık, Görsel, JSON/XML/HTML kabı, PDF, `cell-format.ts`, `cell-ipc.ts`, `cell-code.ts` |
+| `@codemirror/lang-json` parçası | 2,397 | İlk JSON gösteriminde yüklenir |
+| `@codemirror/lang-xml` parçası | 14,350 | İlk XML gösteriminde yüklenir |
+| `@codemirror/lang-html` parçası | 139,208 | İlk HTML kaynağı gösteriminde yüklenir (CSS/JS alt dilleri dahil) |
+
+**Son tur sapmaları (nihai inceleme):**
+
+- `CellFacts.byteLength` metinde `charLength`'e eşittir (O(1)); tam UTF-8 toplamı gösterildiği yerde hesaplanır (Onaltılık: `hexTotal`; Görsel bilgi satırı: kodlanmış uzunluk). Metin görsel (SVG) boyut koruması UTF-16 birimiyle çalışır.
+- Boş dize (`""`) her türde kendiliğinden Metin sekmesine düşer (boş `xml` "(boş dize)" notunu gösterir).
+- Panel: "Paneli genişlet" etiketi sabit, durum `aria-pressed` ile; sekme paneli `tabindex=0`; devre dışı sekmede üzerine gelme arka planı yok; görüntüleyici yükleme hatası hücre değişince sıfırlanır (yeniden denenir).
+- PDF sekmesi 64 MiB üstünde de çizilir (yalnız 16 baytlık önek çözülür): bilgi satırı, gerekçeli devre dışı düğmeler ve uyarı; genel boyut bildirimi "Kaydet…" önermez. `SizeNotice` yalnız dosya işlemi izinliyse "Kaydet…" önerir.
+- Arka uç hata kodları `invalid`, `too_large`, `io`; çözme ve dosya yazma `spawn_blocking` içinde.
+
+**Telafi kaydı:** `commands.ts` `call` dışa aktarımı ve QueryTab dinamik içe aktarmasındaki `.then(e=>e.t)` ile ön yükleme haritası ana paketi ve açılış kümesini tavanın 20 B üstüne çıkardı (127,384 / 155,057). Tavan yükseltilmedi; telafi:
+
+1. `t.query.errorMark` ("Hata") `src/app/strings.ts`'ten `tedit.errorMark`'a (`src/features/query/strings-editor.ts`) taşındı. Kanıt: `rg "errorMark" src` yalnız `editor.ts` (tembel QueryTab parçası) kullanıyor. Sonuç: 127,367 / 155,040 (3 B eksik).
+2. `t.query.tabs.close` ("Sekmeyi kapat (orta tık)") `strings.ts`'ten silindi: taşınmadı, çünkü ölü anahtar. Kanıt: `rg "tabs\.close" src --glob "*strings*"` yalnız tanımı gösterir, hiçbir tüketici yok (`QueryTabs.tsx` `closeNamed` kullanır). Sonuç: 127,333 / 155,006 (tavanın 31 B altı).
+
+**Uygulamada çıkan sapmalar:**
+
+- `CellPanel`, `lazy()`/`Suspense`/`ErrorBoundary`/`createUniqueId` yerine önbellekli düz dinamik içe aktarma ve sinyaller kullanır: Solid çalışma zamanının açılış parçasına girmesi (+469 B açılış) bu yolla önlendi. Yükleme hatası "görünümler yüklenemedi" durumuna düşer.
+- Görsel sekmesine bilgi satırı (§2.2) eklendi (plan kaydında eksikti).
+- Onaltılık/boyut hesabı sınırlı `utf8Bytes` ile yapılır (büyük metinde tam kodlama yok); SVG boyut denetimi karakter uzunluğunu kullanır.
+- HTML biçimleyici girintisi 32 görsel düzeyle sınırlandı (`MAX_INDENT`; kapanmamış `<li>`/derin iç içelikte ikinci dereceden bellek büyümesini önler); `previewDoc` yalnız HTML boşluk sınıfını yok sayar (NBSP/BOM CSP `meta`'sını gövdeye itmesin).
+- Dil parçası yükleme hatası sonraki denemede yeniden denenir (önbellekte reddedilmiş söz tutulmaz).
+- `saveCell` `cell-format.ts`'e eklendi (Task 6); `cell-ipc.ts` yalnız `CellViewers.tsx` tarafından içe aktarılır.
