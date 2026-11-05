@@ -1,0 +1,9 @@
+---
+source: crates/pgt-diff/src/generate.rs
+expression: render(&g)
+---
+Routines [DataLoss] DROP FUNCTION s.f(integer)
+Routines [Safe] CREATE FUNCTION s.f(a integer) RETURNS text LANGUAGE "sql" VOLATILE PARALLEL UNSAFE AS $pgt$SELECT 1$pgt$
+uyarı: Yeniden oluşturma: yetkiler (GRANT) yeniden verilmelidir
+not: Yeniden kurulacak (DROP + CREATE)
+risk: DataLoss

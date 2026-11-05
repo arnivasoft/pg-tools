@@ -373,7 +373,7 @@ pub fn mentions_schema(def: &ObjectDef, schema: &str) -> bool {
 
 /// Alıcı bazında birleştirilmiş (aynı alıcı tek satır, yetkiler birleşir, `grant_option` OR'lanır),
 /// kanonik sıralı grant listesi. `rename`: bu alıcı yerine geçecek ad (hedef sahibi -> kaynak sahibi).
-fn canonical_grants(acl: &AclDef, rename: Option<(&str, &str)>) -> Vec<AclGrant> {
+pub(crate) fn canonical_grants(acl: &AclDef, rename: Option<(&str, &str)>) -> Vec<AclGrant> {
     let mut out: Vec<AclGrant> = vec![];
     for g in &acl.grants {
         let grantee = match (&g.grantee, rename) {

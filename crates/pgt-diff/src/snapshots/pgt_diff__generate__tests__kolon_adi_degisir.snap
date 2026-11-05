@@ -1,0 +1,7 @@
+---
+source: crates/pgt-diff/src/generate.rs
+expression: render(&g)
+---
+Tables [DataLoss] ALTER TABLE s.a DROP COLUMN eski
+Tables [Safe] ALTER TABLE s.a ADD COLUMN yeni text
+risk: DataLoss

@@ -1,0 +1,7 @@
+---
+source: crates/pgt-diff/src/generate.rs
+expression: render(&g)
+---
+Privileges [Destructive] REVOKE SELECT ON TABLE s.a FROM PUBLIC
+Privileges [Safe] GRANT INSERT ON TABLE s.a TO rw
+risk: Destructive

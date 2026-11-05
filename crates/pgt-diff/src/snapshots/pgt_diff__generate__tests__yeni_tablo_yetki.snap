@@ -1,0 +1,10 @@
+---
+source: crates/pgt-diff/src/generate.rs
+expression: render(&g)
+---
+Tables [Safe] CREATE TABLE s.a (
+  id integer NOT NULL,
+  b_id integer
+)
+Privileges [Safe] GRANT SELECT ON TABLE s.a TO PUBLIC
+risk: Safe

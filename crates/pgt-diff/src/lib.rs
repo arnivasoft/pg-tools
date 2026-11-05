@@ -6,6 +6,7 @@
 //! (READ ONLY transaction, katalog profili); betik uygulanmaz, yalnız metin üretilir.
 
 pub mod cancel;
+pub mod generate;
 pub mod key;
 pub mod linediff;
 pub mod list;
@@ -18,6 +19,7 @@ pub use key::{KeyClass, Listed, Pair, class_of, item_key, match_objects};
 pub use model::*;
 pub use linediff::{MAX_DIFF_LINES, ddl_text, line_diff};
 pub use cancel::CancelToken;
+pub use generate::{GenFailure, Generated, Phase, default_grants, fk_add_plan, generate};
 pub use normalize::{
     NormCtx, Prepared, acl_equal, align_to_target, mentions_schema, normalize, normalize_acl, prepare,
     unsupported_for_compare,

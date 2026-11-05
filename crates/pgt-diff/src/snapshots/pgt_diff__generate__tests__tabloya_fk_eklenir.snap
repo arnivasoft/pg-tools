@@ -1,0 +1,8 @@
+---
+source: crates/pgt-diff/src/generate.rs
+expression: render(&g)
+---
+ForeignKeys [Safe] ALTER TABLE s.a ADD CONSTRAINT a_b_fkey FOREIGN KEY (b_id) REFERENCES s.b (id) ON UPDATE NO ACTION ON DELETE NO ACTION
+uyarı: Kısıt ekleme mevcut satırları tarar (PRIMARY KEY/UNIQUE indeks oluşturur); işlem boyunca tablo yazmalara kapalı kalır ve büyük tablolarda uzun sürer. FOREIGN KEY ve CHECK için NOT VALID ile ekleyip sonra doğrulamak kilidi kısaltır
+uyarı: Uzun süren ALTER TABLE kilit beklerken tablodaki diğer sorguları da bekletir; uygulamadan önce oturumda lock_timeout ayarlamayı düşünün (ör. SET lock_timeout = '5s')
+risk: Safe
