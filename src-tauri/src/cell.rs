@@ -5,7 +5,7 @@
 //!   eskiler süpürülür.
 //! - **Kaydetme:** çözülen baytlar kullanıcının seçtiği yola yazılır (üzerine yazma onayı yerel diyalogda alınmıştır).
 //! - **Gizlilik:** bu katman `tracing` yazmaz; değer, bayt ve yollar iletilere girmez.
-//! - **Hata kodları:** `too_large`, `invalid`, `write_failed`.
+//! - **Hata kodları:** `too_large`, `invalid`, `io`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -92,7 +92,8 @@ pub fn sweep_stale(dir: &Path, now: SystemTime, max_age: Duration) -> usize {
             continue;
         }
         let Ok(modified) = meta.modified() else { continue };
-        if modified + max_age < now && std::fs::remove_file(entry.path()).is_ok() {
+        // Okuyucu (PDF uygulaması) kapanışta dosyayı kilitli tutuyorsa silinemez; sonraki açılışın 24 saatlik süpürmesine kalır.
+        if modified.checked_add(max_age).is_some_and(|expiry| expiry < now) && std::fs::remove_file(entry.path()).is_ok() {
             removed += 1;
         }
     }
@@ -134,60 +135,87 @@ pub fn on_exit(app: &tauri::AppHandle) {
     app.state::<CellTemp>().remove_all();
 }
 
-/// Boyut denetimi (çözmeden) + çözme.
-fn decode_checked(data: &str) -> CmdResult<Vec<u8>> {
-    if decoded_len(data).is_some_and(|n| n > MAX_FILE_BYTES) {
+/// Boyut denetimi (çözmeden): `\x` önekli metnin çözülmüş uzunluğu `max`'ı aşarsa `too_large`.
+fn check_size(text: &str, max: usize) -> CmdResult<()> {
+    if decoded_len(text).is_some_and(|n| n > max) {
         return Err(payload("too_large", MSG_TOO_LARGE));
     }
+    Ok(())
+}
+
+/// Boyut denetimi (çözmeden) + çözme.
+fn decode_checked(data: &str, max: usize) -> CmdResult<Vec<u8>> {
+    check_size(data, max)?;
     decode_bytea_hex(data).map_err(|m| payload("invalid", m))
+}
+
+/// PDF açma yolunun saf kısmı: boyut + çözme + imza.
+fn decode_pdf(data: &str, max: usize) -> CmdResult<Vec<u8>> {
+    let bytes = decode_checked(data, max)?;
+    if !is_pdf(&bytes) {
+        return Err(payload("invalid", MSG_NOT_PDF));
+    }
+    Ok(bytes)
+}
+
+/// Kaydetme yolunun saf kısmı: yol doğrulama + çözme + yazma.
+fn save_decoded(data: &str, path: &str, max: usize) -> CmdResult<()> {
+    path_arg(path).map_err(|m| payload("invalid", m))?;
+    let bytes = decode_checked(data, max)?;
+    std::fs::write(path, bytes).map_err(|_| payload("io", MSG_WRITE))
+}
+
+/// Çözülmüş PDF'i geçici dosyaya yazar ve Gezgin ile açar.
+#[cfg(windows)]
+fn write_and_open(app: &tauri::AppHandle, bytes: &[u8]) -> CmdResult<()> {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    let io = || payload("io", MSG_WRITE);
+    let dir = cache_dir(app).ok_or_else(io)?;
+    std::fs::create_dir_all(&dir).map_err(|_| io())?;
+    let path = dir.join(temp_file_name(uuid::Uuid::new_v4()));
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|_| io())?;
+    let written = file.write_all(bytes).and_then(|_| file.flush());
+    drop(file);
+    // Yarım yazılmış dosya da kaydedilir ki kapanışta silinsin.
+    app.state::<CellTemp>().remember(path.clone());
+    written.map_err(|_| io())?;
+    let arg = path_arg(&path.to_string_lossy()).map_err(|m| payload("invalid", m))?;
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    let exe = Path::new(&root).join("explorer.exe");
+    std::process::Command::new(exe)
+        .raw_arg(arg)
+        .spawn()
+        .map(drop)
+        .map_err(|_| payload("io", "Varsayılan uygulama başlatılamadı."))
 }
 
 /// `bytea` PDF'ini geçici dosyaya yazıp varsayılan uygulamada açar (beklenmez).
 #[tauri::command]
-pub async fn cell_open_pdf(app: tauri::AppHandle, temp: tauri::State<'_, CellTemp>, data: String) -> CmdResult<()> {
-    let bytes = decode_checked(&data)?;
-    if !is_pdf(&bytes) {
-        return Err(payload("invalid", MSG_NOT_PDF));
-    }
-    #[cfg(windows)]
-    {
-        use std::io::Write;
-        use std::os::windows::process::CommandExt;
-        let dir = cache_dir(&app).ok_or_else(|| payload("write_failed", MSG_WRITE))?;
-        std::fs::create_dir_all(&dir).map_err(|_| payload("write_failed", MSG_WRITE))?;
-        let path = dir.join(temp_file_name(uuid::Uuid::new_v4()));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|_| payload("write_failed", MSG_WRITE))?;
-        let written = file.write_all(&bytes).and_then(|_| file.flush());
-        drop(file);
-        // Yarım yazılmış dosya da kaydedilir ki kapanışta silinsin.
-        temp.remember(path.clone());
-        written.map_err(|_| payload("write_failed", MSG_WRITE))?;
-        let arg = path_arg(&path.to_string_lossy()).map_err(|m| payload("invalid", m))?;
-        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-        let exe = Path::new(&root).join("explorer.exe");
-        std::process::Command::new(exe)
-            .raw_arg(arg)
-            .spawn()
-            .map(drop)
-            .map_err(|_| payload("invalid", "Varsayılan uygulama başlatılamadı."))
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (app, temp);
-        Err(payload("invalid", "Bu işlem yalnız Windows'ta desteklenir."))
-    }
+pub async fn cell_open_pdf(app: tauri::AppHandle, data: String) -> CmdResult<()> {
+    // Çözme ve dosya yazma (en çok 64 MiB) async işçilerini tutmasın.
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = decode_pdf(&data, MAX_FILE_BYTES)?;
+        #[cfg(windows)]
+        {
+            write_and_open(&app, &bytes)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (app, bytes);
+            Err(payload("invalid", "Bu işlem yalnız Windows'ta desteklenir."))
+        }
+    })
+    .await
+    .map_err(|_| payload("io", MSG_WRITE))?
 }
 
 /// Çözülen baytları `path`'e yazar (varsa üzerine yazar).
 #[tauri::command]
 pub async fn cell_save_bytes(data: String, path: String) -> CmdResult<()> {
-    path_arg(&path).map_err(|m| payload("invalid", m))?;
-    let bytes = decode_checked(&data)?;
-    std::fs::write(&path, bytes).map_err(|_| payload("write_failed", MSG_WRITE))
+    tauri::async_runtime::spawn_blocking(move || save_decoded(&data, &path, MAX_FILE_BYTES))
+        .await
+        .map_err(|_| payload("io", MSG_WRITE))?
 }
 
 #[cfg(test)]
@@ -269,5 +297,52 @@ mod tests {
         assert_eq!(temp.remove_all(), 0);
         assert!(!b.exists());
         assert!(c.exists());
+    }
+
+    #[test]
+    fn check_size_uses_decoded_length() {
+        assert!(check_size("\\x0a0b", 2).is_ok());
+        assert_eq!(check_size("\\x0a0b0c", 2).unwrap_err().code, "too_large");
+        // Önek yoksa çözme yapılmaz; boyut denetimi geçer (çözme `invalid` verir).
+        assert!(check_size("abcdef", 1).is_ok());
+    }
+
+    #[test]
+    fn decode_pdf_rejects_non_pdf_and_oversize() {
+        assert_eq!(decode_pdf("\\x255044462d312e37", 100).unwrap(), b"%PDF-1.7".to_vec());
+        let e = decode_pdf("\\x89504e47", 100).unwrap_err();
+        assert_eq!((e.code.as_str(), e.message.as_str()), ("invalid", MSG_NOT_PDF));
+        assert_eq!(decode_pdf("\\x255044462d", 2).unwrap_err().code, "too_large");
+        assert_eq!(decode_pdf("\\xzz", 100).unwrap_err().code, "invalid");
+    }
+
+    #[test]
+    fn save_decoded_round_trips_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("çıktı.bin").to_string_lossy().into_owned();
+        save_decoded("\\x00ff10807f", &path, 100).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), vec![0x00, 0xFF, 0x10, 0x80, 0x7F]);
+        // Üzerine yazar.
+        save_decoded("\\x01", &path, 100).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn save_decoded_rejects_bad_path_and_reports_io() {
+        assert_eq!(save_decoded("\\x01", "C:\\x\"y", 100).unwrap_err().code, "invalid");
+        assert_eq!(save_decoded("\\x01", "C:\\x\ny", 100).unwrap_err().code, "invalid");
+        assert_eq!(save_decoded("\\x0102", "C:\\x.bin", 1).unwrap_err().code, "too_large");
+        // Var olmayan dizine yazma `io` döndürür.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("yok").join("a.bin");
+        let e = save_decoded("\\x01", &missing.to_string_lossy(), 100).unwrap_err();
+        assert_eq!((e.code.as_str(), e.message.as_str()), ("io", MSG_WRITE));
+    }
+
+    #[test]
+    fn sweep_does_not_panic_on_time_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("cell-a.pdf"), b"x").unwrap();
+        assert_eq!(sweep_stale(dir.path(), SystemTime::now(), Duration::MAX), 0);
     }
 }
