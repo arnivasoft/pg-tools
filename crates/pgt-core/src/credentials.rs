@@ -123,21 +123,24 @@ impl Credentials {
         self.store.delete(&password_key(server))
     }
 
-    /// Asistan (Anthropic) API anahtarı; yalnız kalıcı depoda tutulur.
-    pub fn ai_key(&self) -> Result<Option<String>> {
-        self.store.get(AI_KEY)
+    /// Asistan sağlayıcısının API anahtarı (`name`: `ai:anthropic`, `ai:openrouter`); yalnız kalıcı depoda tutulur.
+    pub fn ai_key(&self, name: &str) -> Result<Option<String>> {
+        self.store.get(ai_name(name)?)
     }
 
-    pub fn set_ai_key(&self, key: &str) -> Result<()> {
-        self.store.set(AI_KEY, key)
+    pub fn set_ai_key(&self, name: &str, key: &str) -> Result<()> {
+        self.store.set(ai_name(name)?, key)
     }
 
-    pub fn forget_ai_key(&self) -> Result<()> {
-        self.store.delete(AI_KEY)
+    pub fn forget_ai_key(&self, name: &str) -> Result<()> {
+        self.store.delete(ai_name(name)?)
     }
 }
 
-const AI_KEY: &str = "ai:anthropic";
+/// Asistan anahtar adları `ai:` önekiyle sınırlıdır (sunucu parolası kayıtlarına erişilemesin).
+fn ai_name(name: &str) -> Result<&str> {
+    if name.starts_with("ai:") { Ok(name) } else { Err(Error::Invalid(format!("geçersiz anahtar adı: {name}"))) }
+}
 
 #[cfg(test)]
 mod tests {
@@ -190,14 +193,20 @@ mod tests {
     }
 
     #[test]
-    fn ai_key_round_trip_is_separate_from_passwords() {
+    fn ai_keys_are_per_provider_and_separate_from_passwords() {
         let (store, c) = creds();
-        assert_eq!(c.ai_key().unwrap(), None);
-        c.set_ai_key("sk-ant-test").unwrap();
-        assert_eq!(c.ai_key().unwrap().as_deref(), Some("sk-ant-test"));
-        assert_eq!(Credentials::new(store).ai_key().unwrap().as_deref(), Some("sk-ant-test"));
-        c.forget_ai_key().unwrap();
-        assert_eq!(c.ai_key().unwrap(), None);
+        assert_eq!(c.ai_key("ai:anthropic").unwrap(), None);
+        c.set_ai_key("ai:anthropic", "sk-ant-test").unwrap();
+        c.set_ai_key("ai:openrouter", "sk-or-test").unwrap();
+        assert_eq!(c.ai_key("ai:anthropic").unwrap().as_deref(), Some("sk-ant-test"));
+        assert_eq!(Credentials::new(store).ai_key("ai:openrouter").unwrap().as_deref(), Some("sk-or-test"));
+        c.forget_ai_key("ai:anthropic").unwrap();
+        assert_eq!(c.ai_key("ai:anthropic").unwrap(), None);
+        assert_eq!(c.ai_key("ai:openrouter").unwrap().as_deref(), Some("sk-or-test"));
+        // Sunucu parolası kayıtlarına bu yoldan erişilemez.
+        let id = Uuid::new_v4();
+        c.remember(id, "p", true).unwrap();
+        assert!(c.ai_key(&password_key(id)).is_err());
     }
 
     #[cfg(windows)]

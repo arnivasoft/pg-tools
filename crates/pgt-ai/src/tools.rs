@@ -18,14 +18,24 @@ const SYSTEM_SCHEMAS: &str = "n.nspname NOT IN ('pg_catalog', 'information_schem
      AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp%'";
 
 /// Araç tanımları (her istekte aynı dizi: araç kümesi değişirse thinking blokları ve önbellek bozulur).
-pub fn definitions() -> Value {
+/// `eager`: `eager_input_streaming: true` eklenir (Claude API; OpenRouter'da belgeli değil).
+pub fn definitions(eager: bool) -> Value {
+    let mut defs = base_definitions();
+    if eager {
+        for d in defs.as_array_mut().into_iter().flatten() {
+            d["eager_input_streaming"] = Value::Bool(true);
+        }
+    }
+    defs
+}
+
+fn base_definitions() -> Value {
     let nullable = |desc: &str| json!({ "type": ["string", "null"], "description": desc });
     json!([
         {
             "name": "list_relations",
             "description": "List tables, partitioned tables, views, materialized views and foreign tables in the connected database, with estimated row count, total size and comment. Partitions are omitted. Use it to discover which tables exist before writing SQL.",
             "strict": true,
-            "eager_input_streaming": true,
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -40,7 +50,6 @@ pub fn definitions() -> Value {
             "name": "describe_relation",
             "description": "Describe one relation: columns (type, nullability, default, comment), primary/unique/check/foreign-key constraints, foreign keys from other tables that reference it, indexes, and the definition of a view. Use it before writing joins or filters on a table.",
             "strict": true,
-            "eager_input_streaming": true,
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -55,7 +64,6 @@ pub fn definitions() -> Value {
             "name": "search_columns",
             "description": "Find columns whose name contains a substring (case-insensitive) across all non-system relations. Use it to locate where a concept (e.g. customer_id, email) is stored.",
             "strict": true,
-            "eager_input_streaming": true,
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -69,7 +77,6 @@ pub fn definitions() -> Value {
             "name": EXPLAIN_TOOL,
             "description": "Get the estimated execution plan of ONE SQL statement with plain EXPLAIN (no ANALYZE: the statement is planned, never executed), in the user's query session so their search_path applies. Use it to check whether an index would be used or where the cost goes. Replace $1-style parameters with representative literal values. It fails if the user's session is busy, has an open transaction, or has not been opened yet; then answer without the plan.",
             "strict": true,
-            "eager_input_streaming": true,
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -151,7 +158,7 @@ pub fn summary(name: &str, input: &Value) -> String {
 pub fn validate(name: &str, input: &Value) -> Result<(), String> {
     let bad = |e: serde_json::Error| format!("Invalid input for {name}: {e}");
     // Şemadaki her alan zorunludur (null olabilir); serde eksik `Option` alanını sessizce kabul ederdi.
-    let defs = definitions();
+    let defs = base_definitions();
     if let Some(def) = defs.as_array().and_then(|a| a.iter().find(|d| d["name"] == name)) {
         let obj = input.as_object().ok_or_else(|| format!("Invalid input for {name}: expected an object"))?;
         for key in def["input_schema"]["required"].as_array().into_iter().flatten().filter_map(Value::as_str) {
@@ -390,7 +397,9 @@ mod tests {
 
     #[test]
     fn definitions_are_strict_with_required_fields() {
-        let defs = definitions();
+        assert_eq!(definitions(true)[0]["eager_input_streaming"], true);
+        assert!(definitions(false)[0].get("eager_input_streaming").is_none());
+        let defs = definitions(false);
         let defs = defs.as_array().unwrap();
         assert_eq!(defs.len(), 4);
         for d in defs {

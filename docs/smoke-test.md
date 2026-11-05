@@ -889,3 +889,8 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 - [ ] Plan aracı: sekmede bir sorgu çalıştırdıktan sonra "bu sorgu c kolonundaki indeksi kullanır mı?" → yanıtın üstünde "Plan alındı: …" görünür ve yanıt gerçek plana dayanır. **[—]**
 - [ ] Plan aracı, sekmede hiç sorgu çalıştırılmamışken ya da `BEGIN` ile açık transaction varken çalışmaz; asistan planı denetleyemediğini söyler, kullanıcının transaction'ı bozulmaz. **[—]**
 - [ ] Asistan bir DELETE/UPDATE için plan aldığında satırlar değişmez (yalnız planlanır). **[—]**
+- [ ] Ayarlar: Claude ve OpenRouter anahtarları ayrı ayrı kaydedilir/silinir (Kimlik Bilgisi Yöneticisi'nde `ai:anthropic`, `ai:openrouter`); özet satırı sağlayıcı · model · effort'u gösterir; ayarlar uygulama yeniden açılınca korunur (`ai.json`). **[—]**
+- [ ] OpenRouter + `anthropic/claude-opus-5.5`: sohbet, katalog araçları ve plan aracı çalışır; belirteç satırı görünür. **[—]**
+- [ ] OpenRouter + Claude dışı bir model (ör. bir `openai/…` modeli): yanıt gelir; araç ya da effort desteklenmezse hata ayrıntısı görünür, effort "Varsayılan" ile yeniden denenebilir. **[—]**
+- [ ] Effort "En yüksek" ve "Varsayılan" arasında geçiş sohbeti bozmaz; sağlayıcı ya da model değişince sürmekte olan sohbet "yeni sohbet başlatın" der, "Yeni sohbet" sonrası çalışır. **[—]**
+- [ ] Geçersiz model adı (ör. `claude-yok`) → "Model bulunamadı…" ya da sağlayıcının hata ayrıntısı; boşluklu model adı kaydedilmez. **[—]**

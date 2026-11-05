@@ -11,7 +11,7 @@ use std::pin::Pin;
 use pgt_core::ErrorPayload;
 use serde_json::{Value, json};
 
-use crate::client::{AiClient, Cancel, Outcome, Usage};
+use crate::client::{AiClient, Cancel, Outcome, Profile, Usage};
 use crate::model::AiEvent;
 use crate::tools;
 
@@ -31,9 +31,10 @@ pub trait Model: Send + Sync {
     ) -> BoxFut<'a, Result<Option<Outcome>, ErrorPayload>>;
 }
 
-/// Gerçek istemci + anahtar.
+/// Gerçek istemci + sağlayıcı profili + anahtar.
 pub struct Claude<'k> {
     pub client: &'k AiClient,
+    pub profile: &'k Profile,
     pub api_key: &'k str,
 }
 
@@ -45,7 +46,7 @@ impl Model for Claude<'_> {
         cancel: &'a Cancel,
         emit: &'a mut Emit<'_>,
     ) -> BoxFut<'a, Result<Option<Outcome>, ErrorPayload>> {
-        Box::pin(self.client.stream(self.api_key, messages, allow_tools, cancel, emit))
+        Box::pin(self.client.stream(self.profile, self.api_key, messages, allow_tools, cancel, emit))
     }
 }
 

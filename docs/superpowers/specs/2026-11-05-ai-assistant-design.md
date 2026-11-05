@@ -98,6 +98,32 @@ mevcut risk/kilit/üretim kapıları geçerlidir).
   alır.
 - Entegrasyon testi `crates/pgt-ai/tests/explain_tool.rs` (PG 10/13/18'de geçti; bakım veritabanında `ai_ex`).
 
+## Sağlayıcı, model ve effort seçimi (altıncı dilim)
+- Ayarlar `%APPDATA%\pg-tools\ai.json`'da (`pgt_ai::settings::AiSettings`): `provider` (`anthropic` |
+  `openRouter`), sağlayıcı başına model (`anthropicModel`, varsayılan `claude-opus-5-5`; `openrouterModel`, varsayılan
+  `anthropic/claude-opus-5.5`) ve `effort` (`null` = modelin varsayılanı, ya da low…max). Ana paketteki `AppSettings`'e
+  dokunulmaz. Okunamayan dosyada varsayılanlar.
+- Anahtarlar sağlayıcı başına Kimlik Bilgisi Yöneticisi'nde (`ai:anthropic`, `ai:openrouter`); `Credentials::ai_key`
+  yalnız `ai:` önekli adları kabul eder (sunucu parolalarına bu yoldan erişilemez). Arayüze yalnız "kayıtlı mı" döner.
+- İki sağlayıcı da **Anthropic Messages biçimini** kullanır: OpenRouter'ın `POST https://openrouter.ai/api/v1/messages`
+  uç noktası (`Authorization: Bearer`) aynı istek/akış biçimini, `thinking: adaptive`, `output_config.effort`,
+  `cache_control` ve `strict` araçları belgeliyor (2026-11-05 itibarıyla OpenRouter API başvurusu). Bu yüzden ayrı bir
+  istemci yazılmadı; istek profile göre kurulur (`client::Profile`):
+  - Claude API: `x-api-key` + `anthropic-version`; `fallbacks: "default"` + beta başlığı yalnız destekleyen modellerde
+    (fable-5-1, opus-5-5, opus-5, sonnet-5-5); araçlarda `eager_input_streaming`.
+  - OpenRouter: `Authorization: Bearer`; `fallbacks` ve `eager_input_streaming` gönderilmez (OpenRouter'da
+    belgelenmedi); `thinking` yalnız `anthropic/` modellerinde. Effort her modelde iletilir; desteklemeyen modelde
+    kullanıcı "Varsayılan" seçer.
+  - Effort "Varsayılan" ise `output_config` gönderilmez.
+- Sohbet bir sağlayıcı + modele bağlıdır (`Profile::conversation_tag`): geçmiş (thinking blokları, araç turları)
+  başka modele taşınmaz; değişirse `ai_stale` ("yeni sohbet başlatın"). Effort değişimi sohbeti bozmaz.
+- Yeni hata kodu `ai_billing` (402, yetersiz kredi); 404 "model bulunamadı" olarak açıklanır.
+- Arayüz: Asistan panelinde özet satırı (sağlayıcı · model · effort) ve "Ayarlar"; ayar paneli (`AiSettingsPanel`)
+  sağlayıcı seçimi, model (öneri listeli serbest metin), effort ve seçili sağlayıcının anahtarı. OpenRouter seçiliyken
+  verinin hem OpenRouter'dan hem modelin sağlayıcısından geçtiği yazılır.
+- Bilinen sınır: OpenRouter üzerinden Claude dışı modellerde araç kullanımı ve effort desteği modele bağlıdır; elle
+  denenmedi.
+
 ## Sonraki adımlar
-- Ayarlar: model/effort seçimi, aylık kullanım sayacı.
+- Aylık kullanım sayacı / uyarı eşiği.
 - Ayarlardan model/effort seçimi; kurumsal ağ geçidi (base URL) desteği.

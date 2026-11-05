@@ -1,10 +1,15 @@
-//! Yapay zekâ asistanı komutları (`ai_*`). Anahtar Windows Kimlik Bilgisi Yöneticisi'nde tutulur ve arayüze
-//! hiç gönderilmez; istem/yanıt metni günlüğe yazılmaz. Asistan yalnız metin üretir, SQL çalıştırmaz.
+//! Yapay zekâ asistanı komutları (`ai_*`). Sağlayıcı (Claude API / OpenRouter), model ve effort `ai.json`'da;
+//! anahtarlar sağlayıcı başına Windows Kimlik Bilgisi Yöneticisi'nde tutulur ve arayüze hiç gönderilmez;
+//! istem/yanıt metni günlüğe yazılmaz. Asistan yalnız metin üretir, SQL çalıştırmaz.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use pgt_ai::{AiClient, AiEvent, AiRequest, Cancel, Claude, Conversations, ToolExec, run_turn};
+use pgt_ai::{
+    AiClient, AiEvent, AiProvider, AiRequest, AiSettings, AiSettingsView, Cancel, Claude, Conversations, Profile, ToolExec,
+    run_turn,
+};
 use pgt_core::ErrorPayload;
 use pgt_core::connection::{ConnectionManager, Target};
 use pgt_query::session::QueryManager;
@@ -22,15 +27,28 @@ fn payload(code: &str, message: &str) -> ErrorPayload {
 }
 
 /// HTTP istemcisi ilk istekte kurulur (sertifika deposu okuması açılışı yavaşlatmasın).
-#[derive(Default)]
 pub struct AiState {
     client: OnceLock<AiClient>,
     running: Mutex<HashMap<Uuid, Cancel>>,
     /// Sohbet geçmişleri (bellekte; sayfa yenilenince silinir).
     conversations: Conversations,
+    settings: Mutex<AiSettings>,
+    settings_path: PathBuf,
 }
 
 impl AiState {
+    /// `ai.json` okunamazsa varsayılanlar (Claude API, `claude-opus-5-5`, effort varsayılan).
+    pub fn load(config_dir: &Path) -> Self {
+        let settings_path = config_dir.join("ai.json");
+        Self {
+            client: OnceLock::new(),
+            running: Mutex::new(HashMap::new()),
+            conversations: Conversations::default(),
+            settings: Mutex::new(AiSettings::load(&settings_path)),
+            settings_path,
+        }
+    }
+
     fn client(&self) -> CmdResult<&AiClient> {
         if let Some(c) = self.client.get() {
             return Ok(c);
@@ -57,23 +75,54 @@ impl Drop for Running<'_> {
     }
 }
 
+fn view(state: &AppState, settings: AiSettings) -> CmdResult<AiSettingsView> {
+    let has = |p: AiProvider| -> CmdResult<bool> { Ok(state.credentials.ai_key(p.key_name())?.is_some()) };
+    Ok(AiSettingsView {
+        has_anthropic_key: has(AiProvider::Anthropic)?,
+        has_openrouter_key: has(AiProvider::OpenRouter)?,
+        settings,
+    })
+}
+
+/// Ayarlar ve hangi sağlayıcının anahtarının kayıtlı olduğu (anahtarlar dönmez).
 #[tauri::command(async)]
-pub fn ai_key_status(state: State<'_, AppState>) -> CmdResult<bool> {
-    Ok(state.credentials.ai_key()?.is_some())
+pub fn ai_settings_get(state: State<'_, AppState>) -> CmdResult<AiSettingsView> {
+    let s = state.ai.settings.lock().unwrap().clone();
+    view(&state, s)
+}
+
+/// Sağlayıcı, modeller ve effort. Geçersiz model adı `invalid`, dosyaya yazılmaz.
+#[tauri::command(async)]
+pub fn ai_settings_set(state: State<'_, AppState>, settings: AiSettings) -> CmdResult<AiSettingsView> {
+    let settings = AiSettings {
+        anthropic_model: settings.anthropic_model.trim().to_string(),
+        openrouter_model: settings.openrouter_model.trim().to_string(),
+        ..settings
+    };
+    settings.validate().map_err(|m| payload("invalid", &m))?;
+    settings
+        .save(&state.ai.settings_path)
+        .map_err(|e| payload("write_failed", &format!("Asistan ayarları kaydedilemedi: {e}")))?;
+    *state.ai.settings.lock().unwrap() = settings.clone();
+    view(&state, settings)
 }
 
 #[tauri::command(async)]
-pub fn ai_key_set(state: State<'_, AppState>, key: String) -> CmdResult<()> {
+pub fn ai_key_set(state: State<'_, AppState>, provider: AiProvider, key: String) -> CmdResult<AiSettingsView> {
     let key = key.trim();
     if key.is_empty() || key.chars().any(char::is_whitespace) {
         return Err(payload("invalid", "Geçerli bir API anahtarı girin."));
     }
-    Ok(state.credentials.set_ai_key(key)?)
+    state.credentials.set_ai_key(provider.key_name(), key)?;
+    let s = state.ai.settings.lock().unwrap().clone();
+    view(&state, s)
 }
 
 #[tauri::command(async)]
-pub fn ai_key_clear(state: State<'_, AppState>) -> CmdResult<()> {
-    Ok(state.credentials.forget_ai_key()?)
+pub fn ai_key_clear(state: State<'_, AppState>, provider: AiProvider) -> CmdResult<AiSettingsView> {
+    state.credentials.forget_ai_key(provider.key_name())?;
+    let s = state.ai.settings.lock().unwrap().clone();
+    view(&state, s)
 }
 
 /// Sohbete yeni tur. `turns`: arayüzün bildiği tamamlanmış tur sayısı (uyuşmazsa `ai_stale`).
@@ -93,10 +142,15 @@ pub async fn ai_ask(
     session: Option<Uuid>,
     on_event: Channel<AiEvent>,
 ) -> CmdResult<()> {
-    let key = state
-        .credentials
-        .ai_key()?
-        .ok_or_else(|| payload("ai_no_key", "Asistan için önce bir Anthropic API anahtarı girin."))?;
+    // İstek başına ayarların anlık görüntüsü: akış sürerken ayar değişse de bu tur aynı profille biter.
+    let profile = Profile::from_settings(&state.ai.settings.lock().unwrap());
+    let key = state.credentials.ai_key(profile.provider.key_name())?.ok_or_else(|| {
+        let name = match profile.provider {
+            AiProvider::Anthropic => "Claude (Anthropic)",
+            AiProvider::OpenRouter => "OpenRouter",
+        };
+        payload("ai_no_key", &format!("Asistan için önce {name} API anahtarını girin."))
+    })?;
     let client = state.ai.client()?;
     let cancel = Cancel::default();
     {
@@ -107,9 +161,9 @@ pub async fn ai_ask(
         running.insert(id, cancel.clone());
     }
     let _guard = Running(&state.ai, id);
-    let pending = state.ai.conversations.begin(conversation, turns, &request)?;
+    let pending = state.ai.conversations.begin(conversation, turns, &profile.conversation_tag(), &request)?;
     let mut emit = |e: AiEvent| on_event.send(e).is_ok();
-    let model = Claude { client, api_key: &key };
+    let model = Claude { client, profile: &profile, api_key: &key };
     let tools = CatalogTools {
         manager: &state.manager,
         target: server_id.zip(database_oid),
