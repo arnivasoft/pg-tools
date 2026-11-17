@@ -4,6 +4,7 @@ mod kinds;
 mod quote;
 pub mod node;
 pub mod props;
+pub mod search;
 pub mod version;
 
 use std::sync::atomic::{AtomicBool, Ordering};

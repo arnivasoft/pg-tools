@@ -48,3 +48,17 @@ pub(crate) async fn query_one_ddl(mgr: &ConnectionManager, server: Uuid, target:
 pub(crate) async fn query_one(mgr: &ConnectionManager, server: Uuid, target: Target, sql: &'static VersionedSql, params: Params, what: &str) -> Result<Row> {
     query(mgr, server, target, sql, params).await?.into_iter().next().ok_or_else(|| Error::NotFound(what.to_string()))
 }
+
+/// Sabit parçalardan çalışma anında kurulan SQL için `query` (ör. `search.rs`). Metin yalnız kod sabitlerinden
+/// oluşmalıdır; kullanıcı verisi her zaman parametredir.
+pub(crate) async fn query_text(mgr: &ConnectionManager, server: Uuid, target: Target, sql: Arc<String>, params: Params) -> Result<Vec<Row>> {
+    mgr.run(server, target, move |c| {
+        let params = params.clone();
+        let sql = sql.clone();
+        async move {
+            let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p.as_ref() as &(dyn ToSql + Sync)).collect();
+            c.client.query(sql.as_str(), &refs).await
+        }
+    })
+    .await
+}
