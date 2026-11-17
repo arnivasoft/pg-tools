@@ -14,6 +14,8 @@ pub const FIXTURE_DB: &str = "pgt_fixture";
 const SCHEMA_SQL: &str = include_str!("../fixtures/schema.sql");
 const SCHEMA_PG11_SQL: &str = include_str!("../fixtures/schema_pg11.sql");
 const SCHEMA_PG12_SQL: &str = include_str!("../fixtures/schema_pg12.sql");
+const SEARCH_SQL: &str = include_str!("../fixtures/search.sql");
+const SEARCH_PG11_SQL: &str = include_str!("../fixtures/search_pg11.sql");
 
 static SETUP: OnceCell<()> = OnceCell::const_new();
 
@@ -50,6 +52,10 @@ async fn setup_all() {
         }
         if version_num / 10_000 >= 12 {
             db.batch_execute(SCHEMA_PG12_SQL).await.unwrap();
+        }
+        db.batch_execute(SEARCH_SQL).await.unwrap();
+        if version_num / 10_000 >= 11 {
+            db.batch_execute(SEARCH_PG11_SQL).await.unwrap();
         }
         db.batch_execute("ANALYZE").await.unwrap();
     }
