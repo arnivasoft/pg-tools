@@ -6,6 +6,7 @@ import { toast } from "../../app/toast";
 import type { CsvDelimiter } from "../../ipc/bindings/CsvDelimiter";
 import type { CsvOptions } from "../../ipc/bindings/CsvOptions";
 import { commands } from "../../ipc/commands";
+import { tabCommands } from "./tab-commands";
 import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
@@ -48,7 +49,7 @@ export function createExportUi() {
       {
         askOptions,
         pickPath: (defaultName) => save({ defaultPath: defaultName, filters: [{ name: e.filterName, extensions: ["csv"] }], title: e.dialogTitle }),
-        exportCsv: commands.qtExportCsv,
+        exportCsv: tabCommands.qtExportCsv,
         onProgress: setRows,
         setRunning,
       },

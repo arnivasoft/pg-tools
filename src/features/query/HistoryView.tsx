@@ -2,7 +2,7 @@ import { For, Show, createResource, createSignal, onCleanup } from "solid-js";
 import { tstrip } from "./strings-strip";
 import { toast } from "../../app/toast";
 import type { HistoryEntry } from "../../ipc/bindings/HistoryEntry";
-import { commands, type Api } from "../../ipc/commands";
+import { tabCommands, type TabApi } from "./tab-commands";
 import { toPayload } from "../../ipc/errors";
 import { ConfirmDialog } from "../../ui/ConfirmDialogView";
 import { inputClass } from "../../ui/Field";
@@ -17,9 +17,9 @@ export function HistoryView(props: {
   onInsert: (sql: string) => void;
   /** Her `scriptDone` sonrası çağıran artırır. */
   refreshKey?: number;
-  api?: Pick<Api, "qtHistoryList">;
+  api?: Pick<TabApi, "qtHistoryList">;
 }) {
-  const api = () => props.api ?? commands;
+  const api = () => props.api ?? tabCommands;
   const [input, setInput] = createSignal("");
   const [debounced, setDebounced] = createSignal("");
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -93,9 +93,9 @@ export function HistorySettings(props: {
   enabled: boolean;
   onToggle: (enabled: boolean) => void;
   onCleared?: () => void;
-  api?: Pick<Api, "qtHistoryClear" | "qtDraftsClear">;
+  api?: Pick<TabApi, "qtHistoryClear" | "qtDraftsClear">;
 }) {
-  const api = () => props.api ?? commands;
+  const api = () => props.api ?? tabCommands;
   const [confirming, setConfirming] = createSignal(false);
   const h = thist;
   const clear = async () => {

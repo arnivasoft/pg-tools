@@ -4,7 +4,7 @@ import { t } from "../../app/strings";
 import { timp } from "../../app/strings-import";
 import { toast } from "../../app/toast";
 import type { ImportItem } from "../../ipc/bindings/ImportItem";
-import { commands } from "../../ipc/commands";
+import { importCommands } from "./import-commands";
 import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
@@ -39,7 +39,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
       const picked = await openFile({ multiple: false, filters: [{ name: timp.fileFilter, extensions: ["json"] }] });
       if (typeof picked !== "string" || gen !== generation) return;
       setReading(true);
-      const list = await commands.previewPgadminImport(picked);
+      const list = await importCommands.previewPgadminImport(picked);
       if (gen !== generation) return;
       setPath(picked);
       setOpenWarnings(new Set<number>());
@@ -75,7 +75,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
     setError(null);
     try {
       const valid = new Set(items().filter((i) => i.error === null).map((i) => i.index));
-      const count = await commands.applyPgadminImport(p, [...selected()].filter((i) => valid.has(i)));
+      const count = await importCommands.applyPgadminImport(p, [...selected()].filter((i) => valid.has(i)));
       toast.show(timp.done(count), "success");
       props.onImported();
       props.onClose();
@@ -86,7 +86,7 @@ export function ImportDialog(props: { open: boolean; onClose: () => void; onImpo
       // yenile ki aktarılanlar "zaten var" olarak işaretlensin ve yeniden denemede kopya oluşmasın.
       props.onImported();
       try {
-        const list = await commands.previewPgadminImport(p);
+        const list = await importCommands.previewPgadminImport(p);
         if (gen === generation) {
           setItems(list);
           setSelected(defaultSelection(list));

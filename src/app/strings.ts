@@ -63,6 +63,7 @@ export const t = {
     backup: "Yedekle…",
     restore: "Geri yükle…",
     schemaDiff: "Şema karşılaştır…",
+    searchObjects: "Nesne ara…",
     dropObject: "Sil…",
     gone: "Bu öğe artık yok.",
     disconnected: "Bağlantı kesildi.",

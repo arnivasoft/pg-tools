@@ -78,15 +78,15 @@ describe("qualifiedParts / actionsFor", () => {
   it("menu per node kind", () => {
     expect(actionsFor(s, node(s, "srv-down"))).toEqual(["openQueryTool", "connect", "editServer", "deleteServer", "copyName"]);
     expect(actionsFor(s, node(s, "srv-up"))).toEqual(["openQueryTool", "openDashboard", "refresh", "disconnect", "restore", "editServer", "deleteServer", "copyName"]);
-    expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["createObject", "refresh", "copyName"]);
-    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "openData", "editObject", "renameObject", "privilegesObject", "maintenance", "backup", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
-    expect(actionsFor(s, node(s, "col-id"))).toEqual(["editObject", "copyName", "copyQualifiedName", "copyDdl"]);
-    expect(actionsFor(s, node(s, "con-1"))).toEqual(["editObject", "copyName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["searchObjects", "createObject", "refresh", "copyName"]);
+    expect(actionsFor(s, node(s, "tbl-orders"))).toEqual(["openQueryTool", "openData", "searchObjects", "editObject", "renameObject", "privilegesObject", "maintenance", "backup", "dropObject", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "col-id"))).toEqual(["searchObjects", "editObject", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "con-1"))).toEqual(["searchObjects", "editObject", "copyName", "copyDdl"]);
   });
   it("Dashboard: bağlı sunucuda ve veritabanında var, bağlı olmayan sunucuda ve diğer düğümlerde yok", () => {
     expect(actionsFor(s, node(s, "srv-up"))).toContain("openDashboard");
     expect(actionsFor(s, node(s, "db-app"))).toEqual([
-      "openQueryTool", "openDashboard", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "restore", "schemaDiff", "dropObject",
+      "openQueryTool", "openDashboard", "searchObjects", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "restore", "schemaDiff", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
     expect(actionsFor(s, node(s, "srv-down"))).not.toContain("openDashboard");
@@ -246,22 +246,22 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
 
   it("koleksiyonlarda createObject (Query Tool grubunun hemen ardından)", () => {
     for (const id of ["coll-sch", "coll-seq", "coll-ext", "coll-idx"]) {
-      expect(actionsFor(s, node(s, id))).toEqual(["createObject", "refresh", "copyName"]);
+      expect(actionsFor(s, node(s, id))).toEqual(["searchObjects", "createObject", "refresh", "copyName"]);
     }
   });
   it("nesnelerde editObject/renameObject/dropObject, Query Tool eylemlerinden sonra", () => {
     expect(actionsFor(s, node(s, "sch-app"))).toEqual([
-      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "schemaDiff", "dropObject",
+      "openQueryTool", "searchObjects", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "schemaDiff", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
-    expect(actionsFor(s, node(s, "idx-1"))).toEqual(["editObject", "renameObject", "maintenance", "dropObject", "copyName", "copyQualifiedName", "copyDdl"]);
+    expect(actionsFor(s, node(s, "idx-1"))).toEqual(["searchObjects", "editObject", "renameObject", "maintenance", "dropObject", "copyName", "copyQualifiedName", "copyDdl"]);
     for (const id of ["seq-1", "ext-1"]) {
       const a = actionsFor(s, node(s, id));
       expect(a.filter((x) => DES.includes(x))).toEqual(["editObject", "renameObject", "dropObject"]);
     }
   });
   it("tablo: Tables koleksiyonunda createObject; tablo ve bölüm düğümünde edit/rename/drop", () => {
-    expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["createObject", "refresh", "copyName"]);
+    expect(actionsFor(s, node(s, "coll-tables"))).toEqual(["searchObjects", "createObject", "refresh", "copyName"]);
     for (const id of ["tbl-orders", "tbl-partition"]) {
       expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual(["editObject", "renameObject", "dropObject"]);
     }
@@ -295,7 +295,7 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
   });
   it("Function/Procedure/Trigger Function/Type/Domain/Trigger koleksiyonlarında createObject", () => {
     for (const id of ["coll-fn", "coll-proc", "coll-tfn", "coll-type", "coll-dom", "coll-trg"]) {
-      expect(actionsFor(s, node(s, id))).toEqual(["createObject", "refresh", "copyName"]);
+      expect(actionsFor(s, node(s, id))).toEqual(["searchObjects", "createObject", "refresh", "copyName"]);
     }
   });
   it("function, procedure, triggerFunction, type, domain ve trigger düğümünde edit/rename/drop", () => {
@@ -449,7 +449,7 @@ describe("yetki eylemleri (Yetkiler… / Varsayılan yetkiler…)", () => {
       expect(des(id)).toEqual(["editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "dropObject"]);
     }
     expect(actionsFor(s, node(s, "sch-app"))).toEqual([
-      "openQueryTool", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "schemaDiff", "dropObject",
+      "openQueryTool", "searchObjects", "editObject", "renameObject", "privilegesObject", "defaultPrivilegesObject", "maintenance", "backup", "schemaDiff", "dropObject",
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
   });
@@ -651,5 +651,48 @@ describe("schemaDiff (Plan 30)", () => {
   });
   it("menü metni", () => {
     expect(t.menu.schemaDiff).toBe("Şema karşılaştır…");
+  });
+});
+
+describe("searchObjects (Plan 32)", () => {
+  const s = (() => {
+    const tree = sampleTree();
+    const add = (id: string, parent: string, kind: NodeKind, label: string, extra: Partial<TreeNode> = {}) => {
+      tree.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, color: null, tag: null, ...extra });
+      tree.parent.set(id, parent);
+      tree.children.set(parent, [...(tree.children.get(parent) ?? []), id]);
+    };
+    add("grp", ROOT, "serverGroup", "Grup", { hasChildren: true });
+    add("coll-roles", "srv-up", "roleCollection", "Roles", { hasChildren: true });
+    add("role-1", "coll-roles", "role", "app_user");
+    add("coll-ts", "srv-up", "tablespaceCollection", "Tablespaces", { hasChildren: true });
+    add("ts-1", "coll-ts", "tablespace", "pg_default");
+    return tree;
+  })();
+  const all = (id: string) => actionsFor(s, node(s, id));
+
+  it("veritabanında ve altındaki her düğümde (koleksiyonlar dahil) var", () => {
+    for (const id of ["db-app", "sch-app", "coll-tables", "tbl-orders", "coll-cols", "col-id", "idx-1", "tbl-partition", "col-part", "fn-fmt-int"]) {
+      expect(all(id), id).toContain("searchObjects");
+    }
+  });
+  it("sunucuda, grupta, roller/tablespace koleksiyonunda ve altında yok", () => {
+    for (const id of ["srv-up", "srv-down", "grp", "coll-roles", "role-1", "coll-ts", "ts-1"]) expect(all(id), id).not.toContain("searchObjects");
+  });
+  it("grup 3; kilitli sunucuda açık", () => {
+    expect(groupOf("searchObjects")).toBe(3);
+    const locked = sampleTree();
+    const srv = locked.nodes.get("srv-up")!;
+    locked.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
+    expect(disabledReason("searchObjects", { state: () => locked } as unknown as ActionDeps, "db-app")).toBeNull();
+    expect(disabledReason("searchObjects", { serverLocked: () => true } as unknown as ActionDeps, "col-id")).toBeNull();
+  });
+  it("executeAction openSearch(id) çağırır", async () => {
+    const d = { ...deps(s), openSearch: vi.fn() };
+    await executeAction(d as unknown as ActionDeps, "searchObjects", "col-id");
+    expect(d.openSearch.mock.calls).toEqual([["col-id"]]);
+  });
+  it("menü metni", () => {
+    expect(t.menu.searchObjects).toBe("Nesne ara…");
   });
 });

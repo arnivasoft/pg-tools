@@ -202,6 +202,17 @@ pub async fn list_children(state: State<'_, AppState>, id: String) -> CmdResult<
 }
 
 #[tauri::command]
+pub async fn search_objects(
+    state: State<'_, AppState>,
+    server_id: Uuid,
+    database_oid: u32,
+    query: String,
+    kinds: Vec<pgt_catalog::search::SearchKind>,
+) -> CmdResult<pgt_catalog::search::SearchResult> {
+    Ok(Box::pin(state.catalog.search(server_id, database_oid, &query, &kinds)).await?)
+}
+
+#[tauri::command]
 pub async fn get_properties(state: State<'_, AppState>, id: String) -> CmdResult<Vec<PropertySection>> {
     Ok(Box::pin(state.catalog.properties(&NodeId::parse(&id)?)).await?)
 }

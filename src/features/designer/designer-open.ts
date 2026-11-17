@@ -24,6 +24,8 @@ import { ancestorOfKind, type TreeState } from "../explorer/tree-model";
 import type { QueryController } from "../query/query-controller";
 import type { TabsStore } from "../query/tabs-store";
 import { isProductionLabel } from "../servers/server-form";
+import { ddlCommands, type DdlApi } from "../../ipc/ddl-commands";
+import { designerCommands, type DesignerApi } from "./designer-commands";
 import { createDesignerController, type DesignerController, type DesignerControllerDeps } from "./designer-controller";
 import { aclTabKey, defaultAclTabKey, designerTabKey, focusFieldOf, isServerScoped, kindLabel } from "./designer-model";
 import type { DropInput } from "./drop-controller";
@@ -184,7 +186,8 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
 }
 
 export interface DesignerDeps extends Omit<DesignerOpenDeps, "designer" | "openDrop"> {
-  api: DesignerControllerDeps["api"] & DesignerOpenDeps["api"];
+  /** Designer'a özgü komutlar bu parçada (designer-commands.ts); tembel parçaların ortak `ddl_*` komutları ddl-commands.ts'te. */
+  api: Omit<DesignerControllerDeps["api"], keyof DesignerApi | keyof DdlApi> & DesignerOpenDeps["api"];
   /**
    * `servers`: sunucu listesi (tepkisel; kayıt değişince açık sekmelerin ad/kilit/üretim bilgisi yenilenir);
    * `openScript`: "Query Tool'da aç" (ApplyBar) — betik yeni sorgu sekmesinde, çalıştırılmadan.
@@ -203,7 +206,7 @@ export function createDesigner(deps: DesignerDeps) {
   // Sekme başlıkları/panelleri hemen ardından gerekecek: açılış isteğiyle paralel insin.
   void import("./DesignerTabs").catch(() => {});
   const ctl = createDesignerController({
-    api: deps.api,
+    api: { ...deps.api, ...designerCommands, ...ddlCommands },
     notify: deps.notify,
     serverInfo: (id) => {
       const c = deps.query.servers().find((s) => s.id === id);

@@ -166,6 +166,31 @@ export class ExplorerController {
     this.update((s) => select(s, id));
   }
 
+  /**
+   * Nesne arama sonucuna gider (Plan 32): süzgeci temizler, sunucunun ağaçtaki atalarını ve sunucuyu açar, arka uçtan
+   * gelen zinciri (`path`, sunucunun çocuğundan hedefin ebeveynine) sırayla açar ve hedefi seçer. Yüklü ama eskimiş bir
+   * liste bir kez yeniden okunur. `false`: sunucu bağlanamadı ya da bir adım ağaçta yok.
+   */
+  async reveal(serverId: string, path: string[], id: string): Promise<boolean> {
+    this.setFilter("");
+    const server = [...this.get().nodes.values()].find((n) => n.kind === "server" && n.serverId === serverId);
+    if (!server) return false;
+    const above: string[] = [];
+    for (let cur = this.get().parent.get(server.id); cur !== undefined && cur !== ROOT; cur = this.get().parent.get(cur)) above.unshift(cur);
+    for (const a of above) await this.expand(a);
+    await this.expand(server.id);
+    if (!this.get().expanded.has(server.id)) return false;
+    let prev = server.id;
+    for (const step of [...path, id]) {
+      if (!this.get().nodes.has(step) && this.get().children.has(prev)) await this.reload(prev);
+      if (!this.get().nodes.has(step)) return false;
+      if (step !== id) await this.expand(step);
+      prev = step;
+    }
+    this.select(id);
+    return true;
+  }
+
   async refresh(id: string): Promise<void> {
     if (id === ROOT || this.get().children.has(id)) await this.load(id);
   }

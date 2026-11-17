@@ -567,3 +567,22 @@ Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2.8, §6
 **Paket tavanları:** `scripts/bundle-budget.json` ana paket 127,314 B, açılış kümesi 154,987 B (sıfır pay; `__vite__mapDeps` 39 girdi). Plan 30'un ana paket artışı (+1,333 B: menü eylemi, sekme deposu, `QueryTabs` bağlantısı, `App` yükleyicisi, `Channel`) Query Tool'un yalnız tembel parçalarca kullanılan saf yardımcılarının ana paket modüllerinden `env-model.ts` (`tx-dialogs` parçası) ve `querytab-model.ts`'e (QueryTab parçası) taşınması ve `tabs-store.ts`'teki yinelenen kimlik/açma kodunun ortak yardımcılara toplanmasıyla telafi edildi (spec §7.3). Fark sekmesinin parçaları (`DiffTabs`, `SchemaDiffView`, `ScriptDialog`) tembeldir ve boşta ısıtma listesinde değildir (ilk kullanımda iner). Kural ve denetim: "Ana paket bütçesi (Plan 21)".
 
 Elle kontrol: `docs/smoke-test.md` "Şema karşılaştırma (Plan 30)".
+
+## Nesne arama testleri (Plan 32)
+
+Sözleşme: `docs/superpowers/specs/2026-11-17-object-search-design.md` §2, §3 ve §7. Rust birim testleri `cargo test -p pgt-catalog --lib` ile, ön yüz testleri `bun run test` (vitest, `environment: node`) altında Docker'sız koşar. Diyalog bileşeni (`SearchDialog.tsx`: DOM, odak, klavye, kaydırma) birim testli değildir; mantık `search-model.ts`'tedir, bileşen elle kontrol edilir.
+
+| Dosya | Kapsam |
+|---|---|
+| `crates/pgt-catalog/src/search.rs` (Rust birim) | `LIKE` kaçırma (`%`, `_`, `\`), uzunluk sınırı ve boş metin, tür süzgecine ve sürüme (PG10 `proisagg`/procedure yok) göre SQL parçalarının seçimi, tablo/kolon zincirinin ağaç kimlikleriyle eşleşmesi, bölüm zincirinin kök tablonun şemasından geçmesi, türetilmiş tablonun sabit sütun listesi, yabancı tablo bölümü kolonu, view/MV sahibi, şema ve veritabanı düzeyindeki türler |
+| `crates/pgt-catalog/tests/search.rs` | Docker (fikstür `tests/fixtures/search.sql`, PG 11+ için `search_pg11.sql`): her sonucun `path` zinciri `list_children` ile yürünür ve `id` son adımın çocuğudur; gizli nesneler (kimlik sequence'ı, iç trigger, tablo satır tipi, dizi tipi) dönmez; bölüm zinciri kök şemadan geçer; `%`/`_` joker değildir; tür süzgeci; sistem nesneleri `show_system` ayarını izler; sıralama (tam eşleşme önce); boş ve 200 karakteri aşan metin |
+| `src/features/search/search-commands.test.ts` | `search_objects` parametre adları arka uçla birebir; hata yükünün alanları (`code`, `message`, …) taşınır |
+| `src/features/search/search-model.test.ts` | 250 ms gecikme (üç `setQuery` → tek arama), `searchNow`, nesil sayacı (eski yanıt yok sayılır), `toggleKind`/`setAllKinds`, boş sorgu `idle`, 200 karakter sınırı, `not_connected` → bir kez `connect` + yeniden deneme (ikincisinde hata metni, `connect` `false` → hata), `move` sınırları, `setActive` (aralık dışı yok sayılır), yazım/arama sürerken `activeHit` null (Enter eski sonuca gitmez), veritabanı başına bellek içi hafıza |
+| `src/features/explorer/controller.test.ts` ("ExplorerController.reveal") | Grup açılır, sunucu bağlanır, zincir sırayla `expand` edilir, düğüm seçilir; ağaç süzgeci temizlenir; yüklü ama eskimiş liste tam bir kez yeniden yüklenir; silinmiş düğümde (en çok bir yeniden yükleme), bağlanamayan ve bilinmeyen sunucuda `false` |
+| `src/features/explorer/actions.test.ts` ("searchObjects (Plan 32)") | Menü: veritabanında ve altındaki her düğümde (koleksiyonlar, tablo, kolon, indeks, bölüm, fonksiyon) görünür; sunucu, grup, Roller/Tablespace koleksiyonları ve altlarında gizli; grup 3; kilitli sunucuda açık; `openSearch(id)` çağrısı; metin "Nesne ara…". Mevcut tam menü listeleri `searchObjects`'i Query Tool eylemlerinin ardına alır |
+
+Docker matrisi: `powershell -File scripts/test-matrix.ps1 -Versions 10,11,12,13,14,15,16,17,18 -SkipPerf` (Plan 32 Task 2'de PG 10–18 yeşil; `search.rs` 8 test).
+
+**Paket tavanları:** `scripts/bundle-budget.json` ana paket 126,582 B, açılış kümesi 154,255 B (sıfır pay; `__vite__mapDeps` 42 girdi). Plan 32'nin ana paket artışı (`reveal`, menü eylemi, App kancası ve tembel diyalog yükleyicisi; Plan 32 öncesine göre +1,542 B) yalnız tembel parçaların kullandığı komut sarmalayıcılarının `src/ipc/commands.ts`'ten tembel modüllere taşınmasıyla telafi edildi (spec §7). Arama diyaloğu (`SearchDialog`, `search-model`, `search-commands`, `strings-search`) tembeldir ve boşta ısıtma listesinde değildir. Kural ve denetim: "Ana paket bütçesi (Plan 21)".
+
+Elle kontrol: `docs/smoke-test.md` "Nesne arama (Plan 32)".

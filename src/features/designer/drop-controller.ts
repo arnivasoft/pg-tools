@@ -16,7 +16,8 @@ import type { ApplyOutcome } from "../../ipc/bindings/ApplyOutcome";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { PlanView } from "../../ipc/bindings/PlanView";
-import type { Api } from "../../ipc/commands";
+import type { DdlApi } from "../../ipc/ddl-commands";
+import type { DesignerApi } from "./designer-commands";
 import { errorText, toPayload } from "../../ipc/errors";
 import { applyGate, applyOptionsFor, canSubmit, cloneDef, type ApplyGate, type ConfirmState } from "./designer-model";
 import { dropOptionsFor, dropRequest, dropStatusText, type DropStatus } from "./drop-model";
@@ -51,7 +52,7 @@ export interface DropState {
 }
 
 export interface DropControllerDeps {
-  api: Pick<Api, "ddlLoad" | "ddlPreview" | "ddlApply" | "ddlCancel">;
+  api: Pick<DdlApi, "ddlPreview" | "ddlApply" | "ddlCancel"> & Pick<DesignerApi, "ddlLoad">;
   notify(text: string, kind: ToastKind): void;
   serverInfo(serverId: string): { name: string; locked: boolean; production: boolean } | null;
   /** Explorer düğüm yenilemesi (hatası yutulur). */

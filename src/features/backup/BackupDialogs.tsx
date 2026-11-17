@@ -7,6 +7,7 @@ import type { ToastKind } from "../../app/toast-model";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { TreeNode } from "../../ipc/bindings/TreeNode";
 import type { Api } from "../../ipc/commands";
+import { ddlCommands } from "../../ipc/ddl-commands";
 import { backupCommands } from "./backup-commands";
 import { createBackupController, createRestoreController, type BackupControllerDeps } from "./backup-controller";
 import { BackupDialog } from "./BackupDialog";
@@ -17,7 +18,7 @@ import { RestoreDialog } from "./RestoreDialog";
 type ExplorerRefresh = { refresh: (id: string) => Promise<void> };
 
 export interface BackupDialogDeps {
-  api: Pick<Api, "settingsGet" | "listServers" | "ddlTargetOf" | "ddlLookup" | "listChildren">;
+  api: Pick<Api, "settingsGet" | "listServers" | "ddlTargetOf" | "listChildren">;
   /** Explorer ağacı: düğüm kimliğinden sunucu/veritabanı/kapsam, sunucu `detail`'i sürüm, `flags.locked` kilit. */
   tree: Accessor<{ nodes: Map<string, TreeNode>; parent: Map<string, string>; children: Map<string, string[]> }>;
   /** Sorgu denetleyicisinin sunucu listesi (üretim etiketi ve ad için). */
@@ -32,7 +33,7 @@ export function BackupDialogs(props: { job: { mode: "backup" | "restore"; nodeId
   const deps = untrack(() => props.deps);
   const common: BackupControllerDeps = {
     // Yedekleme komutları bu parçada (backup-commands.ts); ortak komutlar App'ten gelir.
-    api: { ...deps.api, ...backupCommands },
+    api: { ...deps.api, ...backupCommands, ddlLookup: ddlCommands.ddlLookup },
     tree: () => deps.tree(),
     servers: () => deps.query.servers(),
     connect: deps.connect,

@@ -29,6 +29,7 @@ import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { SideTag } from "../../ipc/bindings/SideTag";
 import type { Api } from "../../ipc/commands";
+import type { DdlApi } from "../../ipc/ddl-commands";
 import { toPayload } from "../../ipc/errors";
 import type { OpenForAssistant } from "../query/ai-intent";
 import type { QueryController } from "../query/query-controller";
@@ -44,7 +45,7 @@ export const DETAIL_DELAY_MS = 120;
 export type Picker = { save(o: { defaultPath: string; filters: { name: string; extensions: string[] }[] }): Promise<string | null> };
 
 export interface DiffControllerDeps {
-  api: DiffApi & Pick<Api, "ddlTargetOf" | "ddlLookup">;
+  api: DiffApi & Pick<Api, "ddlTargetOf"> & Pick<DdlApi, "ddlLookup">;
   servers: () => ServerConfig[];
   /** `deps.tree().nodes.get(nodeId)?.label ?? null` */
   nodeLabel: (nodeId: string) => string | null;
