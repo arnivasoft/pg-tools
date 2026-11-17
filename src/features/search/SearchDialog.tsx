@@ -6,9 +6,7 @@
 import { createEffect, createUniqueId, For, on, onCleanup, Show, untrack, type JSX } from "solid-js";
 import { ts } from "../../app/strings-search";
 import type { ToastKind } from "../../app/toast-model";
-import type { NodeKind } from "../../ipc/bindings/NodeKind";
 import type { SearchHit } from "../../ipc/bindings/SearchHit";
-import type { SearchKind } from "../../ipc/bindings/SearchKind";
 import { toPayload } from "../../ipc/errors";
 import { Dialog } from "../../ui/Dialog";
 import { inputClass } from "../../ui/Field";
@@ -26,9 +24,6 @@ export type SearchDialogProps = {
   notify: (text: string, kind: ToastKind) => void;
   onClose: () => void;
 };
-
-/** Ağaç türünün etiketi (`ts.kinds` arama türleriyle adlandırılır; bölüm ağaçta tablo türündedir). */
-const kindLabel = (k: NodeKind) => ts.kinds[(k === "materializedView" ? "matview" : k) as SearchKind] ?? k;
 
 export function SearchDialog(props: SearchDialogProps) {
   return (
@@ -178,7 +173,7 @@ function SearchPanel(p: { target: SearchTarget; props: SearchDialogProps }) {
                 onClick={() => search.setActive(i())}
                 onDblClick={() => go(hit)}
               >
-                <span class="w-32 shrink-0 truncate text-[11px] text-muted">{kindLabel(hit.kind)}</span>
+                <span class="w-32 shrink-0 truncate text-[11px] text-muted">{ts.kinds[hit.searchKind]}</span>
                 <span class="min-w-0 truncate font-medium">{hit.name}</span>
                 <span class="ml-auto min-w-0 shrink truncate text-[12px] text-muted">
                   {[hit.schema, hit.owner].filter(Boolean).join(".")}

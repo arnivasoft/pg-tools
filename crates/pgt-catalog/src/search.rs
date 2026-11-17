@@ -34,6 +34,7 @@ pub struct SearchHit {
     pub id: String,
     pub path: Vec<String>,
     pub kind: NodeKind,
+    pub search_kind: SearchKind,
     pub name: String,
     pub schema: Option<String>,
     pub owner: Option<String>,
@@ -226,6 +227,7 @@ pub(crate) fn to_hit(server: Uuid, db: u32, h: &RawHit, chains: &HashMap<u32, Ch
         id: id.to_string(),
         path: path.iter().map(ToString::to_string).collect(),
         kind,
+        search_kind: h.kind,
         name: h.name.clone(),
         schema: h.schema_name.clone(),
         owner: h.owner.clone(),
@@ -289,6 +291,13 @@ async fn load_chains(cat: &Catalog, server: Uuid, db: u32, rels: Vec<u32>) -> Re
         .collect())
 }
 
+/// En çok `MAX_HITS` satır tutar; fazlası varsa `true` döner (sorgu `MAX_HITS + 1` satır ister).
+pub(crate) fn cap<T>(mut rows: Vec<T>) -> (Vec<T>, bool) {
+    let truncated = rows.len() > MAX_HITS;
+    rows.truncate(MAX_HITS);
+    (rows, truncated)
+}
+
 impl Catalog {
     pub async fn search(&self, server: Uuid, db: u32, query: &str, kinds: &[SearchKind]) -> Result<SearchResult> {
         let Some(q) = normalize(query)? else { return Ok(SearchResult { hits: Vec::new(), truncated: false }) };
@@ -304,8 +313,8 @@ impl Catalog {
         let sql = Arc::new(assemble(&parts));
         let params = p![format!("%{}%", escape_like(&q)), q.clone(), format!("{}%", escape_like(&q)), self.show_system()];
         let rows = query_text(&self.mgr, server, Target::Database(db), sql, params).await?;
-        let truncated = rows.len() > MAX_HITS;
-        let raw: Vec<RawHit> = rows.iter().take(MAX_HITS).map(RawHit::from_row).collect::<Result<_>>()?;
+        let (rows, truncated) = cap(rows);
+        let raw: Vec<RawHit> = rows.iter().map(RawHit::from_row).collect::<Result<_>>()?;
         let parts: Vec<u32> = raw.iter().filter(|h| h.rel_oid != 0 && (h.kind == SearchKind::Partition || matches!(h.rel_kind.as_str(), "r" | "p" | "f"))).map(|h| h.rel_oid).collect();
         let chains = if parts.is_empty() { HashMap::new() } else { load_chains(self, server, db, parts).await? };
         let hits = raw.iter().map(|h| to_hit(server, db, h, &chains)).collect();
@@ -373,6 +382,14 @@ mod tests {
     }
 
     #[test]
+    fn cap_truncates_only_above_max_hits() {
+        let (rows, truncated) = cap((0..MAX_HITS).collect::<Vec<_>>());
+        assert_eq!((rows.len(), truncated), (MAX_HITS, false));
+        let (rows, truncated) = cap((0..=MAX_HITS).collect::<Vec<_>>());
+        assert_eq!((rows.len(), truncated), (MAX_HITS, true));
+    }
+
+    #[test]
     fn partition_chain_goes_through_root_schema() {
         // tbl:50 bölüm; zincir kök 30 (şema 2201) → 40 → 50.
         let mut h = raw(SearchKind::Partition, "r");
@@ -382,6 +399,7 @@ mod tests {
         let hit = to_hit(srv(), 1, &h, &chains);
         let s = format!("srv:{U}/db:1/sch:2201");
         assert_eq!(hit.id, format!("{s}/tbl:30/tbl:40/tbl:50"));
+        assert_eq!(hit.search_kind, SearchKind::Partition);
         assert_eq!(
             hit.path[3..].to_vec(),
             vec![s.clone(), format!("{s}/tables"), format!("{s}/tbl:30"), format!("{s}/tbl:30/partitions"),

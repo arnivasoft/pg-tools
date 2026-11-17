@@ -135,7 +135,7 @@ export function createSearch(deps: SearchDeps, target: { serverId: string; datab
     setKinds(cur.includes(k) ? cur.filter((x) => x !== k) : ALL_KINDS.filter((x) => x === k || cur.includes(x)));
   };
   const setAllKinds = () => {
-    if (disposed) return;
+    if (disposed || state().kinds.length === 0) return;
     setKinds([]);
   };
 

@@ -4,7 +4,7 @@ import type { SearchHit } from "../../ipc/bindings/SearchHit";
 import type { SearchResult } from "../../ipc/bindings/SearchResult";
 import { ALL_KINDS, createSearch, SEARCH_DELAY_MS, type SearchDeps } from "./search-model";
 
-const hit = (name: string): SearchHit => ({ id: name, path: [], kind: "table", name, schema: "public", owner: null, system: false });
+const hit = (name: string): SearchHit => ({ id: name, path: [], kind: "table", searchKind: "table", name, schema: "public", owner: null, system: false });
 const res = (...names: string[]): SearchResult => ({ hits: names.map(hit), truncated: false });
 const flush = async () => {
   for (let i = 0; i < 5; i++) await Promise.resolve();
@@ -99,6 +99,17 @@ describe("search-model", () => {
     s.setAllKinds();
     expect(s.state().kinds).toEqual([]);
     expect(ALL_KINDS).toHaveLength(17);
+  });
+
+  it("setAllKinds kinds zaten boşken yeniden aramaz", async () => {
+    const { deps } = setup();
+    const s = createSearch(deps, target());
+    s.setQuery("a");
+    await flush();
+    const n = calls(deps).length;
+    s.setAllKinds();
+    await flush();
+    expect(calls(deps).length).toBe(n);
   });
 
   it("boş sorgu idle, arama yok", async () => {

@@ -36,5 +36,4 @@ export const ts = {
   notFound: "Nesne ağaçta bulunamadı; listeyi yenileyin.",
   listLabel: "Arama sonuçları",
   filterLabel: "Türler",
-  chunkLoadFailed: "Arama penceresi yüklenemedi.",
 };
