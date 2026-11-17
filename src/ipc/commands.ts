@@ -24,17 +24,6 @@ import type { StmtPlan } from "./bindings/StmtPlan";
 import type { TreeNode } from "./bindings/TreeNode";
 import type { TxAction } from "./bindings/TxAction";
 import type { TxState } from "./bindings/TxState";
-import type { ActivityReport } from "./bindings/ActivityReport";
-import type { DashInfo } from "./bindings/DashInfo";
-import type { LockReport } from "./bindings/LockReport";
-import type { Overview } from "./bindings/Overview";
-import type { PreparedXact } from "./bindings/PreparedXact";
-import type { Sample } from "./bindings/Sample";
-import type { Setting } from "./bindings/Setting";
-import type { SignalKind } from "./bindings/SignalKind";
-import type { SignalOutcome } from "./bindings/SignalOutcome";
-import type { Statements } from "./bindings/Statements";
-import type { StatementsOrder } from "./bindings/StatementsOrder";
 import type { AclDef } from "./bindings/AclDef";
 import type { ApplyOptions } from "./bindings/ApplyOptions";
 import type { ApplyOutcome } from "./bindings/ApplyOutcome";
@@ -127,18 +116,6 @@ export const commands = {
   settingsSetHistory: (enabled: boolean) => call<AppSettings>("settings_set_history", { enabled }),
   settingsSetEditor: (checkEnabled: boolean, format: FormatOptions) =>
     call<AppSettings>("settings_set_editor", { checkEnabled, format }),
-
-  // Dashboard (pg_stat_* izleme). Hata `code`ları: `42501` yetki, `invalid` kendi oturumu, `not_found` kapanmış id.
-  dashOpen: (serverId: string, databaseOid: number | null) => call<DashInfo>("dash_open", { serverId, databaseOid }),
-  dashClose: (id: string) => call<null>("dash_close", { id }),
-  dashSample: (id: string) => call<Sample>("dash_sample", { id }),
-  dashOverview: (id: string) => call<Overview>("dash_overview", { id }),
-  dashActivity: (id: string) => call<ActivityReport>("dash_activity", { id }),
-  dashLocks: (id: string) => call<LockReport>("dash_locks", { id }),
-  dashSettings: (id: string) => call<Setting[]>("dash_settings", { id }),
-  dashPrepared: (id: string) => call<PreparedXact[]>("dash_prepared", { id }),
-  dashStatements: (id: string, order: StatementsOrder) => call<Statements>("dash_statements", { id, order }),
-  dashSignal: (id: string, pid: number, kind: SignalKind) => call<SignalOutcome>("dash_signal", { id, pid, kind }),
 
   // Nesne diyalogları (ddl_*): Tauri parametre adları src-tauri/src/ddl.rs ile birebir (camelCase).
   ddlTargetOf: (nodeId: string) => call<DdlTarget>("ddl_target_of", { nodeId }),

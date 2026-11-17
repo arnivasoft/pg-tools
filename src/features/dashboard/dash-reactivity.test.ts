@@ -2,7 +2,7 @@
 // `solid-js`'i yalnızca kendisi için TARAYICI yapısına yönlendirir. dash-open sekmeyi modelden ÖNCE açar: model
 // okuyucusu girdi eklenince yeniden çalışmalıdır (aksi halde ikinci dashboard sekmesi hiç yüklenmez görünür).
 import { describe, expect, it, vi } from "vitest";
-import type { Api } from "../../ipc/commands";
+import type { DashApi } from "./dash-commands";
 
 vi.mock("solid-js", async () => await import("solid-js/dist/solid.js" as string));
 
@@ -16,7 +16,7 @@ describe("dash-controller tepkisellik (tarayıcı yapısı)", () => {
       dashClose: vi.fn(async () => null),
     };
     const ctl = createDashController({
-      api: api as unknown as Api,
+      api: api as unknown as DashApi,
       notify: vi.fn(),
       poller: { visible: () => true, onVisibility: () => () => {} },
     });

@@ -909,3 +909,5 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 - [ ] Pencere kenar ve köşelerinden yeniden boyutlandırılabilir; Windows 11'de köşeler yuvarlak ve gölgelidir. **[—]**
 - [ ] Kapat düğmesi açık transaction varken sistem kapat düğmesindeki gibi onay diyaloğunu gösterir; vazgeçilince pencere açık kalır. Taslaklar kaydedilir. Alt+F4 de aynı davranır. **[—]**
 - [ ] Yedekleme ve geri yükleme diyalogları (komutları tembel parçaya taşındı) önceki gibi çalışır: araç algılama, plan önizlemesi, başlatma, iptal, "Gezgin'de göster", pg bin klasörü seçimi. **[—]**
+- [ ] Durum çubuğunun sağ ucunda uygulama sürümü (ör. `v0.1.0`, `tauri.conf.json` ile aynı) görünür; dar pencerede soldaki durum metni kısalır, sürüm kesilmez. **[—]**
+- [ ] Dashboard (komutları tembel parçaya taşındı) önceki gibi çalışır: açılış, grafikler, oturumlar, kilitler, ayarlar, hazırlanmış transaction'lar, sorgu istatistikleri, oturum iptal/sonlandırma. **[—]**

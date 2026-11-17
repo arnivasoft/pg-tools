@@ -16,7 +16,7 @@ import type { Statements } from "../../ipc/bindings/Statements";
 import type { StatementRow } from "../../ipc/bindings/StatementRow";
 import type { StatementsOrder } from "../../ipc/bindings/StatementsOrder";
 import type { OpenForAssistant } from "../query/ai-intent";
-import type { Api } from "../../ipc/commands";
+import type { DashApi } from "./dash-commands";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import { errorText, toPayload } from "../../ipc/errors";
 import { SampleRing, toRates, type RateSeries } from "./dash-model";
@@ -125,7 +125,7 @@ interface Entry {
 }
 
 export interface DashControllerDeps {
-  api: Api;
+  api: DashApi;
   notify(text: string, kind: ToastKind): void;
   poller?: Partial<PollerDeps>;
   /** "Asistanla iyileştir": sorgu yeni sorgu sekmesinde (çalıştırılmadan) açılır ve asistana istek bırakılır. */

@@ -4,7 +4,7 @@ import type { ActivityRow } from "../../ipc/bindings/ActivityRow";
 import type { DashInfo } from "../../ipc/bindings/DashInfo";
 import type { Overview } from "../../ipc/bindings/Overview";
 import type { Sample } from "../../ipc/bindings/Sample";
-import type { Api } from "../../ipc/commands";
+import type { DashApi } from "./dash-commands";
 import { createDashController } from "./dash-controller";
 
 const info = (n: number): DashInfo => ({ id: `D${n}`, versionNum: 160000, selfPid: 1, database: null });
@@ -50,7 +50,7 @@ function setup(extra: Partial<Parameters<typeof createDashController>[0]> = {}) 
   };
   const notify = vi.fn();
   const ctl = createDashController({
-    api: api as unknown as Api,
+    api: api as unknown as DashApi,
     notify,
     poller: { visible: () => true, onVisibility: () => () => {} },
     ...extra,
