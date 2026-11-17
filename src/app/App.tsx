@@ -43,6 +43,14 @@ const MaintenanceDialog = lazy(() => loadMaintenanceDialog().then((m) => ({ defa
 export const loadBackupDialogs = () => import("../features/backup/BackupDialogs");
 const BackupDialogs = lazy(() => loadBackupDialogs().then((m) => ({ default: m.BackupDialogs })));
 const ServerDialog = lazy(() => import("../features/servers/ServerDialog").then((m) => ({ default: m.ServerDialog })));
+/** Pencere düğmeleri tembel parçada; `main.tsx` pencereyi bu parça yüklendikten sonra gösterir (sonradan belirmez). */
+export const loadWindowControls = () => import("./WindowControls");
+const WindowControls = lazy(loadWindowControls);
+/** Başlık çubuğunun boş alanı (özel çerçeve): sürükle; çift tıkla büyüt / önceki boyuta getir. */
+const titleMouseDown = (e: MouseEvent) => {
+  if (e.button || (e.target as Element).closest("button,input,a,select,textarea,[role]")) return;
+  void commands.win(e.detail === 2 ? "max" : "drag").catch(() => {});
+};
 const ImportDialog = lazy(() => import("../features/servers/ImportDialog").then((m) => ({ default: m.ImportDialog })));
 
 const SHOW_SYSTEM_KEY = "pgt.showSystem";
@@ -239,7 +247,7 @@ export default function App() {
 
   return (
     <div class="flex h-full flex-col">
-      <header class="flex h-9 shrink-0 items-center gap-1 border-b border-border bg-panel px-2">
+      <header class="flex h-9 shrink-0 select-none items-center gap-1 border-b border-border bg-panel px-2" onMouseDown={titleMouseDown}>
         <Toolbar
           showSystem={showSystem()}
           onToggleSystem={() => void toggleSystem()}
@@ -276,6 +284,9 @@ export default function App() {
             <Pencil size={14} />
           </Button>
         </Toolbar>
+        <Suspense>
+          <WindowControls />
+        </Suspense>
       </header>
       <SplitPane
         left={<ExplorerMenu explorer={explorer} deps={actionDeps} treeRef={setTreeEl} />}

@@ -899,3 +899,13 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 
 - [ ] Koyu ve açık temada Sorgu Aracı editöründe metin seçilince seçili metin okunur; odak editörden çıkınca seçim daha soluk (gri) tonda kalır. Aynısı Inspector DDL görünümü ve fonksiyon gövdesi editöründe de geçerli. **[—]**
 - [ ] İmleç bir parantezin yanındayken eşleşen parantez seçimden ayrı bir tonda ve çerçeveli görünür; eşleşmeyen parantez kırmızımsı tondadır; seçimin içindeyken de ayırt edilir. **[—]**
+
+## Özel başlık çubuğu (pencere çerçevesi)
+
+- [ ] Uygulama Windows çerçevesi olmadan açılır; üst çubuk (araç çubuğu) temanın rengindedir, açılışta beyaz kare ya da sonradan beliren düğme görünmez. Tema değiştirilince (sistem/açık/koyu) üst çubuk da değişir. **[—]**
+- [ ] Sağ üstte küçült / ekranı kapla / kapat düğmeleri vardır; simgeler Windows simgeleridir (kutu ya da boş kare değil). Kapat üzerine gelince kırmızı olur. **[—]**
+- [ ] Araç çubuğunun boş alanından sürüklenince pencere taşınır; Aero Snap (kenara/köşeye sürükleme, üst kenara sürükleyince ekranı kaplama) çalışır. Düğmeler ve filtre kutusu sürüklemeyi başlatmaz. **[—]**
+- [ ] Boş alana çift tıklama ekranı kaplar / önceki boyuta getirir; ekranı kaplayınca orta düğmenin simgesi ve ipucu "Önceki boyuta getir" olur, ekranı kaplamış pencere görev çubuğunun altına taşmaz. Win+↑/↓ ve sürükleyerek geri almada simge doğru kalır. **[—]**
+- [ ] Pencere kenar ve köşelerinden yeniden boyutlandırılabilir; Windows 11'de köşeler yuvarlak ve gölgelidir. **[—]**
+- [ ] Kapat düğmesi açık transaction varken sistem kapat düğmesindeki gibi onay diyaloğunu gösterir; vazgeçilince pencere açık kalır. Taslaklar kaydedilir. Alt+F4 de aynı davranır. **[—]**
+- [ ] Yedekleme ve geri yükleme diyalogları (komutları tembel parçaya taşındı) önceki gibi çalışır: araç algılama, plan önizlemesi, başlatma, iptal, "Gezgin'de göster", pg bin klasörü seçimi. **[—]**

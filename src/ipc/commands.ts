@@ -6,13 +6,6 @@ import type { CompletionItem } from "./bindings/CompletionItem";
 import type { CompletionRequest } from "./bindings/CompletionRequest";
 import type { CsvOptions } from "./bindings/CsvOptions";
 import type { AppSettings } from "./bindings/AppSettings";
-import type { BackupEvent } from "./bindings/BackupEvent";
-import type { BackupRequest } from "./bindings/BackupRequest";
-import type { JobPlan } from "./bindings/JobPlan";
-import type { JobSummary } from "./bindings/JobSummary";
-import type { RestoreRequest } from "./bindings/RestoreRequest";
-import type { RestoreSource } from "./bindings/RestoreSource";
-import type { ToolDetection } from "./bindings/ToolDetection";
 import type { DraftTab } from "./bindings/DraftTab";
 import type { ExplainOptions } from "./bindings/ExplainOptions";
 import type { ExplainResult } from "./bindings/ExplainResult";
@@ -69,7 +62,7 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   }
 }
 
-function channel<T>(onMessage: (m: T) => void): Channel<T> {
+export function channel<T>(onMessage: (m: T) => void): Channel<T> {
   const ch = new Channel<T>();
   ch.onmessage = onMessage;
   return ch;
@@ -88,6 +81,8 @@ export const commands = {
   startupNotice: () => call<string | null>("startup_notice"),
   /** İlk çizimden sonra: gizli ana pencereyi tema arka planıyla gösterir (bkz. src-tauri/src/window.rs). */
   appReady: (dark: boolean) => call<null>("app_ready", { dark }),
+  /** Özel başlık çubuğu: pencere işlemi; dönüş büyütülmüş mü (bkz. src-tauri/src/window.rs). */
+  win: (action: "drag" | "min" | "max" | "close") => call<boolean>("win", { action }),
   deleteServer: (serverId: string) => call<null>("delete_server", { serverId }),
   setShowSystem: (value: boolean) => call<null>("set_show_system", { value }),
   quoteIdentifiers: (serverId: string, names: string[]) => call<string[]>("quote_identifiers", { serverId, names }),
@@ -165,31 +160,6 @@ export const commands = {
     call<MaintenanceTarget>("ddl_load_maintenance_target", { serverId, databaseOid, object }),
   ddlMaintenanceProgress: (serverId: string, databaseOid: number, applyId: string) =>
     call<MaintenanceProgress | null>("ddl_maintenance_progress", { serverId, databaseOid, applyId }),
-  // Yedekleme / geri yükleme (Plan 26 arka ucu; parametre adları spec §5). `jobId` ön yüzde üretilir (crypto.randomUUID()).
-  backupTools: (serverId: string) => call<ToolDetection>("backup_tools", { serverId }),
-  backupPlan: (serverId: string, databaseOid: number, request: BackupRequest) =>
-    call<JobPlan>("backup_plan", { serverId, databaseOid, request }),
-  backupStart: (serverId: string, databaseOid: number, request: BackupRequest, jobId: string, onEvent: (e: BackupEvent) => void) =>
-    call<JobSummary>("backup_start", { serverId, databaseOid, request, jobId, onEvent: channel(onEvent) }),
-  backupCancel: (jobId: string) => call<null>("backup_cancel", { jobId }),
-  /** Dosyayı Gezgin'de seçili gösterir (mutlak ve var olan yol; yalnız Windows). */
-  backupReveal: (path: string) => call<null>("backup_reveal", { path }),
-  restoreInspect: (path: string) => call<RestoreSource>("restore_inspect", { path }),
-  restorePlan: (serverId: string, databaseOid: number | null, request: RestoreRequest) =>
-    call<JobPlan>("restore_plan", { serverId, databaseOid, request }),
-  restoreStart: (
-    serverId: string,
-    databaseOid: number | null,
-    request: RestoreRequest,
-    jobId: string,
-    confirmed: boolean,
-    confirmedProduction: boolean,
-    onEvent: (e: BackupEvent) => void,
-  ) =>
-    call<JobSummary>("restore_start", {
-      serverId, databaseOid, request, jobId, confirmed, confirmedProduction, onEvent: channel(onEvent),
-    }),
-  settingsSetPgBinDir: (dir: string | null) => call<AppSettings>("settings_set_pg_bin_dir", { dir }),
 };
 
 export type Api = typeof commands;

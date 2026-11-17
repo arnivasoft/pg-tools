@@ -78,6 +78,7 @@ fn main() {
             commands::get_ddl,
             commands::startup_notice,
             window::app_ready,
+            window::win,
             commands::delete_server,
             commands::set_show_system,
             commands::quote_identifiers,

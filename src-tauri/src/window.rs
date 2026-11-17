@@ -57,6 +57,28 @@ pub fn app_ready(window: WebviewWindow, dark: bool) {
     reveal(&window, dark);
 }
 
+/// Özel başlık çubuğunun pencere düğmeleri (`tauri.conf.json` → `"decorations": false`).
+///
+/// Tauri'nin JS pencere API'si yerine kendi komutumuz: yetenek dosyasına izin eklemeye gerek kalmaz ve ana
+/// pakete `@tauri-apps/api/window` girmez. `close`, `CloseRequested` olayını tetikler; ön yüzün kapanış kancası
+/// (açık transaction diyaloğu, taslak kaydı) sistem kapatma düğmesindeki gibi çalışır. Dönüş: pencere büyütülmüş mü.
+#[tauri::command]
+pub fn win(window: WebviewWindow, action: &str) -> bool {
+    let r = match action {
+        "drag" => window.start_dragging(),
+        "min" => window.minimize(),
+        "max" => {
+            if window.is_maximized().unwrap_or(false) { window.unmaximize() } else { window.maximize() }
+        }
+        "close" => window.close(),
+        _ => Ok(()),
+    };
+    if let Err(e) = r {
+        tracing::warn!(error = %e, action, "pencere işlemi başarısız");
+    }
+    window.is_maximized().unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

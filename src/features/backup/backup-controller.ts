@@ -27,6 +27,7 @@ import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { ToolDetection } from "../../ipc/bindings/ToolDetection";
 import type { TreeNode } from "../../ipc/bindings/TreeNode";
 import type { Api } from "../../ipc/commands";
+import type { BackupApi } from "./backup-commands";
 import { isProductionLabel } from "../servers/server-form";
 import {
   applyEvent,
@@ -61,11 +62,7 @@ export type Picker = {
 };
 
 export interface BackupControllerDeps {
-  api: Pick<
-    Api,
-    | "ddlTargetOf" | "ddlLookup" | "listChildren" | "backupTools" | "backupPlan" | "backupStart" | "backupCancel" | "backupReveal"
-    | "restoreInspect" | "restorePlan" | "restoreStart" | "settingsGet" | "settingsSetPgBinDir"
-  >;
+  api: Pick<Api, "ddlTargetOf" | "ddlLookup" | "listChildren" | "settingsGet"> & BackupApi;
   tree: () => { nodes: Map<string, TreeNode>; parent: Map<string, string>; children: Map<string, string[]> };
   servers: () => ServerConfig[];
   connect: (serverId: string) => Promise<boolean>;
