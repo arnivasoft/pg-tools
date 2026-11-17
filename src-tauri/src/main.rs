@@ -74,6 +74,7 @@ fn main() {
             commands::connect_server,
             commands::disconnect_server,
             commands::list_children,
+            commands::search_objects,
             commands::get_properties,
             commands::get_ddl,
             commands::startup_notice,
