@@ -911,3 +911,11 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 - [ ] Yedekleme ve geri yükleme diyalogları (komutları tembel parçaya taşındı) önceki gibi çalışır: araç algılama, plan önizlemesi, başlatma, iptal, "Gezgin'de göster", pg bin klasörü seçimi. **[—]**
 - [ ] Durum çubuğunun sağ ucunda uygulama sürümü (ör. `v0.1.0`, `tauri.conf.json` ile aynı) görünür; dar pencerede soldaki durum metni kısalır, sürüm kesilmez. **[—]**
 - [ ] Dashboard (komutları tembel parçaya taşındı) önceki gibi çalışır: açılış, grafikler, oturumlar, kilitler, ayarlar, hazırlanmış transaction'lar, sorgu istatistikleri, oturum iptal/sonlandırma. **[—]**
+
+## Dağıtım: WebView2 çevrimdışı kurulum ve çerçeve koruması
+
+- [ ] `bun run tauri build` kurulum paketini üretir (ilk derlemede Microsoft'tan WebView2 çevrimdışı kurulum dosyası indirilir); kurulum dosyası önceki sürümden yaklaşık 130 MB büyüktür. **[—]**
+- [ ] WebView2 yüklü olmayan, internetsiz bir Windows Server 2019/2022'de (ya da WebView2'si kaldırılmış bir sanal makinede) kurulum WebView2'yi sessizce kurar ve uygulama açılır. **[—]**
+- [ ] WebView2 zaten yüklü bir makinede kurulum ek bir şey kurmadan biter. **[—]**
+- [ ] Ön yüz yüklenemezse (ör. düz `cargo build --release` exe'si, geliştirme sunucusu kapalı) pencere 3 sn sonra **Windows çerçevesiyle** görünür: taşınabilir, küçültülebilir, kapat düğmesiyle kapanır. **[—]**
+- [ ] Normal açılışta (`tauri build` exe'si) çerçeve görünmez; yalnız özel başlık çubuğu vardır. **[—]**

@@ -1,5 +1,5 @@
 import { FileInput, Pencil, Plus, SquareTerminal } from "lucide-solid";
-import { createEffect, createSignal, lazy, onCleanup, onMount, Show, Suspense } from "solid-js";
+import { createComponent, createEffect, createSignal, lazy, onCleanup, onMount, Show, Suspense, type Component } from "solid-js";
 import { createExplorer } from "../features/explorer/explorer-store";
 import type { ActionDeps } from "../features/explorer/actions";
 import { ExplorerMenu } from "../features/explorer/ExplorerMenu";
@@ -43,9 +43,13 @@ const MaintenanceDialog = lazy(() => loadMaintenanceDialog().then((m) => ({ defa
 export const loadBackupDialogs = () => import("../features/backup/BackupDialogs");
 const BackupDialogs = lazy(() => loadBackupDialogs().then((m) => ({ default: m.BackupDialogs })));
 const ServerDialog = lazy(() => import("../features/servers/ServerDialog").then((m) => ({ default: m.ServerDialog })));
-/** Pencere düğmeleri tembel parçada; `main.tsx` pencereyi bu parça yüklendikten sonra gösterir (sonradan belirmez). */
+/**
+ * Pencere düğmeleri tembel parçada; `main.tsx` pencereyi bu parça yüklendikten sonra gösterir (sonradan belirmez).
+ * `lazy` kullanılmaz: yükleme hatası uygulamayı düşürmesin; düğmeler çizilmez, `main.tsx` Windows çerçevesini geri açar.
+ */
 export const loadWindowControls = () => import("./WindowControls");
-const WindowControls = lazy(loadWindowControls);
+const [windowControls, setWindowControls] = createSignal<Component | null>(null);
+loadWindowControls().then((m) => setWindowControls(() => m.default), () => {});
 /** Başlık çubuğunun boş alanı (özel çerçeve): sürükle; çift tıkla büyüt / önceki boyuta getir. */
 const titleMouseDown = (e: MouseEvent) => {
   if (e.button || (e.target as Element).closest("button,input,a,select,textarea,[role]")) return;
@@ -284,9 +288,10 @@ export default function App() {
             <Pencil size={14} />
           </Button>
         </Toolbar>
-        <Suspense>
-          <WindowControls />
-        </Suspense>
+        {(() => {
+          const C = windowControls();
+          return C && createComponent(C, {});
+        })()}
       </header>
       <SplitPane
         left={<ExplorerMenu explorer={explorer} deps={actionDeps} treeRef={setTreeEl} />}

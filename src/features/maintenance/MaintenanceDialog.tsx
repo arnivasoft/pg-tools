@@ -7,6 +7,7 @@ import { phaseLabel, tm } from "../../app/strings-maintenance";
 import type { ToastKind } from "../../app/toast-model";
 import type { MaintenanceOp } from "../../ipc/bindings/MaintenanceOp";
 import type { TreeNode } from "../../ipc/bindings/TreeNode";
+import { maintenanceCommands, type MaintenanceApi } from "./maintenance-commands";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
 import { inputClass } from "../../ui/Field";
@@ -27,7 +28,8 @@ import {
 } from "./maintenance-model";
 
 export interface MaintenanceDialogDeps {
-  api: MaintenanceControllerDeps["api"];
+  /** Bakıma özgü komutlar bu parçada (maintenance-commands.ts); ortak `ddl_*` komutları App'ten gelir. */
+  api: Omit<MaintenanceControllerDeps["api"], keyof MaintenanceApi>;
   /** Explorer ağacı: sunucu düğümünün `detail`'i (`ServerInfo.version`) sürüm, `flags.locked` kilit kaynağıdır. */
   tree: () => { nodes: Map<string, TreeNode> };
   notify: (text: string, kind: ToastKind) => void;
@@ -55,7 +57,7 @@ function serverInfoFrom(tree: MaintenanceDialogDeps["tree"], serverId: string) {
 export function MaintenanceDialog(props: { nodeId: string | null; deps: MaintenanceDialogDeps; onClose: () => void }) {
   const deps = untrack(() => props.deps);
   const ctl = createMaintenanceController({
-    api: deps.api,
+    api: { ...deps.api, ...maintenanceCommands },
     // Diyalogun sunucusu için hafızalı bilgi (ağaç değişince yeniden hesaplanır; her kapı çağrısında taranmaz).
     serverInfo: (id) => (id === currentServer() ? currentInfo() : serverInfoFrom(deps.tree, id)),
     notify: deps.notify,
