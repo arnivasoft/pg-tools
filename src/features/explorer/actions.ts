@@ -25,7 +25,7 @@ function ownedByTable(s: TreeState, id: string): boolean {
 export type ActionId =
   | "refresh" | "connect" | "disconnect" | "editServer" | "deleteServer"
   | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool" | "openDashboard" | "openData"
-  | "createObject" | "editObject" | "renameObject" | "privilegesObject" | "defaultPrivilegesObject" | "maintenance" | "backup" | "restore" | "schemaDiff" | "dropObject";
+  | "createObject" | "editObject" | "renameObject" | "privilegesObject" | "defaultPrivilegesObject" | "maintenance" | "backup" | "restore" | "schemaDiff" | "searchObjects" | "dropObject";
 
 /**
  * Nesne diyaloğu (designer) eylemleri: adı `Object` ile biten eylemler (ana paket bütçesi için liste yerine sonek);
@@ -55,6 +55,8 @@ export interface ActionDeps {
   openBackup?(id: string, mode: "backup" | "restore"): void;
   /** "Şema karşılaştır…" (Plan 30; tembel sekme, kilitli sunucuda da açılır — salt okunur). */
   openSchemaDiff?(id: string): void;
+  /** "Nesne ara…" (Plan 32; tembel diyalog, kilitli sunucuda da açılır — salt okunur). */
+  openSearch?(id: string): void;
   /** Düğümün sunucusu salt okunur kilitli mi (designer eylemleri kapalı)? Verilmezse ağaçtaki sunucu düğümünün kilidi. */
   serverLocked?(nodeId: string): boolean;
   /** Sunucunun sorgu oturumlarını kapatacak işlemden (silme, bağlantı kesme) önce: açık transaction'lar için sorar. */
@@ -106,13 +108,15 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
   const q: ActionId[] = canOpenQueryTool(node.kind) ? ["openQueryTool"] : [];
   if (canOpenData(node.kind)) q.push("openData");
   if (canOpenDashboard(node)) q.push("openDashboard");
+  // Plan 32: veritabanında ve altındaki her düğümde (koleksiyonlar dahil); grup 3'ün başı.
+  if (ancestorOfKind(s, node.id, ["database"])) q.push("searchObjects");
   if (node.kind === "serverGroup") return ["refresh", "copyName"];
   if (node.kind === "server") {
     return node.flags.connected
       ? [...q, "refresh", "disconnect", "restore", "editServer", "deleteServer", "copyName"]
       : [...q, "connect", "editServer", "deleteServer", "copyName"];
   }
-  if (isCollection(node.kind)) return canCreateIn(node.kind) ? ["createObject", "refresh", "copyName"] : ["refresh", "copyName"];
+  if (isCollection(node.kind)) return canCreateIn(node.kind) ? [...q, "createObject", "refresh", "copyName"] : [...q, "refresh", "copyName"];
   const out: ActionId[] = [...q];
   // Önceden tanımlı pg_* rolleri arka uçta da reddedilir; menü göstermez.
   if (canEditObject(node.kind) && !(node.kind === "role" && node.flags.system)) {
@@ -140,7 +144,7 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
 /** Menüde ayırıcı yerleşimi için eylem grubu. */
 export function groupOf(a: ActionId): number {
   if (a === "openQueryTool" || a === "openDashboard" || a === "openData") return -1;
-  if (a.endsWith("Object") || a === "maintenance" || a === "backup" || a === "restore" || a === "schemaDiff") return 3;
+  if (a.endsWith("Object") || a === "maintenance" || a === "backup" || a === "restore" || a === "schemaDiff" || a === "searchObjects") return 3;
   if (a === "refresh" || a === "connect" || a === "disconnect") return 0;
   if (a === "editServer" || a === "deleteServer") return 1;
   return 2;
@@ -197,6 +201,9 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
         return;
       case "schemaDiff":
         deps.openSchemaDiff?.(id);
+        return;
+      case "searchObjects":
+        deps.openSearch?.(id);
         return;
       case "disconnect":
         if (node.serverId && deps.beforeServerChange && !(await deps.beforeServerChange(node.serverId, node.label))) return;

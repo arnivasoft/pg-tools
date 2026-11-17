@@ -919,3 +919,23 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 - [ ] WebView2 zaten yüklü bir makinede kurulum ek bir şey kurmadan biter. **[—]**
 - [ ] Ön yüz yüklenemezse (ör. düz `cargo build --release` exe'si, geliştirme sunucusu kapalı) pencere 3 sn sonra **Windows çerçevesiyle** görünür: taşınabilir, küçültülebilir, kapat düğmesiyle kapanır. **[—]**
 - [ ] Normal açılışta (`tauri build` exe'si) çerçeve görünmez; yalnız özel başlık çubuğu vardır. **[—]**
+
+## Nesne arama (Plan 32)
+
+- [ ] Bağlam menüsü: "Nesne ara…" veritabanı düğümünde ve altındaki her düğümde (şema, koleksiyonlar, tablo, kolon, indeks, fonksiyon) görünür; sunucu, sunucu grubu, Roller ve Tablespace'ler (ve altları) üzerinde görünmez. Düzenleme eylemleriyle aynı grupta, Query Tool eylemlerinden sonradır. Kilitli (salt okunur) sunucuda da açıktır. **[—]**
+- [ ] Diyalog başlığı "Nesne ara — `<veritabanı>` (`<sunucu>`)"; açılınca odak arama kutusundadır. Boş kutuda "En az bir karakter yazın." görünür. **[—]**
+- [ ] Yazınca yaklaşık 250 ms sonra arar ("Aranıyor…" → "N sonuç"); hızlı yazımda yalnız son metnin sonuçları görünür. Enter, gecikmeyi beklemeden arar (yazım sürerken Enter eski sonuca gitmez). **[—]**
+- [ ] Tür süzgeci: "Tümü" + 17 tür onay kutusu sarılan satırdadır; bir tür seçilince "Tümü" kalkar ve yalnız o tür aranır; "Tümü" yeniden seçilince süzgeç sıfırlanır; "Tümü" işaretliyken tıklamak onu kaldırmaz. Tab ve Boşluk ile kutular kullanılabilir. **[—]**
+- [ ] `%` ve `_` içeren arama (ör. `a_b`, `50%`) joker sayılmaz: yalnız bu karakterleri içeren adlar döner. Büyük/küçük harf duyarsızdır. 200 karakterden uzun metin "Arama en fazla 200 karakter olabilir." der. **[—]**
+- [ ] 500'den çok sonuç veren aramada (ör. tek harf, çok kolonlu veritabanı) "500 sonuç İlk 500 sonuç gösteriliyor; aramayı daraltın." görünür; liste kaydırılabilir. **[—]**
+- [ ] Satırda tür adı, nesne adı ve sağda `şema.sahip` bağlamı (kolon/indeks/trigger için `şema.tablo`) vardır; sistem nesneleri soluk görünür. **[—]**
+- [ ] Klavye: ↓/↑ etkin satırı değiştirir ve liste etkin satırı görünür tutar; Enter etkin sonuca gider; Esc diyaloğu kapatır ve odak önceki öğeye döner. Tek tık satırı etkinleştirir, çift tık gider. **[—]**
+- [ ] Sonuca gitme: kapalı bir sunucu grubundaki, bağlı olmayan sunucunun veritabanında (önce ağaçta bağlanıp diyaloğu açın, sonra bağlantıyı kesin) arama parola sorar ya da bağlanır; sonuca gidilince diyalog kapanır, grup/sunucu/veritabanı/şema/koleksiyonlar sırayla açılır, düğüm seçili ve görünür olur, odak ağaçtadır, Inspector düğümü gösterir. Ağaç süzgeci doluysa temizlenir. **[—]**
+- [ ] Kolon, indeks, kısıt, trigger ve (iç içe, başka şemadaki) bölüm sonucuna gitme doğru düğümü seçer; bölüm zinciri kök tablonun şemasından geçer. **[—]**
+- [ ] Ağaç önceden yüklüyken (Tables listesi açık) Query Tool'da yeni tablo oluşturun, aramada bulun ve gidin: liste bir kez yenilenir ve yeni tablo seçilir. **[—]**
+- [ ] Aramadan sonra Query Tool'da silinen nesneye gitmek "Nesne ağaçta bulunamadı; listeyi yenileyin." bildirimini gösterir (bildirimde nesne adı yok). **[—]**
+- [ ] "Sistem nesnelerini göster" kapalıyken `pg_catalog`/`information_schema` nesneleri sonuçta yoktur; açıkken vardır ve gidilebilir. **[—]**
+- [ ] Hafıza: diyalog kapatılıp aynı veritabanında yeniden açılınca son arama metni ve süzgeç geri gelir ve arama yinelenir; başka veritabanında boş başlar. Uygulama yeniden açılınca hatırlanmaz. **[—]**
+- [ ] Ekran okuyucu (NVDA/Narrator): arama kutusu "combobox" olarak, etkin sonuç ↓/↑ ile seslendirilir; "Aranıyor…", "N sonuç", "Sonuç yok." ve hata metinleri canlı bölgeden duyurulur; tür kutuları "Türler" grubunda okunur. **[—]**
+- [ ] Açık ve koyu temada diyalog, etkin satır vurgusu, soluk sistem satırları ve uyarı metni okunur. **[—]**
+- [ ] Telafi (komutlar tembel parçalara taşındı) sonrası önceki gibi çalışır: Query Tool'da biçimlendirme, sözdizimi denetimi, tamamlama, EXPLAIN / görsel plan, transaction düğmeleri, CSV dışa aktarma, geçmiş listesi ve temizleme, editör/geçmiş ayarları; nesne diyaloğunda oluşturma/düzenleme/yetkiler/varsayılan yetkiler/silme; bakım; yedekleme/geri yükleme hedef seçimi; şema karşılaştırma seçicileri; sunucu diyaloğunda "Bağlantıyı sına"; pgAdmin içe aktarma. **[—]**

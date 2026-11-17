@@ -3,13 +3,14 @@
 // tembel iner (`@tauri-apps/plugin-dialog` bu parçaya girmez).
 import { copyText } from "../../app/clipboard";
 import { tsd } from "../../app/strings-diff";
+import { ddlCommands } from "../../ipc/ddl-commands";
 import { diffApi } from "./diff-commands";
 import { createDiffController, type DiffTabCtl } from "./diff-controller";
 import type { DiffDeps } from "./diff-open";
 
 export function startDiff(deps: DiffDeps): { ctl: DiffTabCtl; open: (nodeId: string) => Promise<void> } {
   const ctl = createDiffController({
-    api: { ...diffApi, ddlTargetOf: deps.api.ddlTargetOf, ddlLookup: deps.api.ddlLookup },
+    api: { ...diffApi, ddlTargetOf: deps.api.ddlTargetOf, ddlLookup: ddlCommands.ddlLookup },
     servers: () => deps.query.servers(),
     nodeLabel: (nodeId) => deps.tree().nodes.get(nodeId)?.label ?? null,
     connect: deps.connect,

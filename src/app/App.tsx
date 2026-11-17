@@ -7,11 +7,13 @@ import { createDeleteConfirm } from "../ui/ConfirmDialog";
 import { copyText } from "./clipboard";
 import { Inspector } from "../features/inspector/Inspector";
 import { refreshInspector } from "../features/inspector/inspector-revision";
-import { ROOT } from "../features/explorer/tree-model";
+import { ROOT, ancestorOfKind, serverOf } from "../features/explorer/tree-model";
 import type { Dashboard } from "../features/dashboard/dash-open";
 import type { Designer } from "../features/designer/designer-open";
 import type { Data } from "../features/data/data-open";
 import type { SchemaDiff } from "../features/schema-diff/diff-open";
+import type { SearchDialogProps } from "../features/search/SearchDialog";
+import type { SearchHit } from "../ipc/bindings/SearchHit";
 import { createPasswordPrompt } from "../features/servers/PasswordPrompt";
 import { groupsOf } from "../features/servers/server-form";
 import { createQueryController } from "../features/query/query-controller";
@@ -42,6 +44,9 @@ const MaintenanceDialog = lazy(() => loadMaintenanceDialog().then((m) => ({ defa
 /** Yedekleme / geri yükleme diyalogları (Plan 27): tembel parça; `prefetchIdle` ile ısıtılır. */
 export const loadBackupDialogs = () => import("../features/backup/BackupDialogs");
 const BackupDialogs = lazy(() => loadBackupDialogs().then((m) => ({ default: m.BackupDialogs })));
+/** Nesne arama diyaloğu (Plan 32): tembel parça; ilk "Nesne ara…"da yüklenir. */
+export const loadSearchDialog = () => import("../features/search/SearchDialog");
+const SearchDialog = lazy(() => loadSearchDialog().then((m) => ({ default: m.SearchDialog })));
 const ServerDialog = lazy(() => import("../features/servers/ServerDialog").then((m) => ({ default: m.ServerDialog })));
 /**
  * Pencere düğmeleri tembel parçada; `main.tsx` pencereyi bu parça yüklendikten sonra gösterir (sonradan belirmez).
@@ -134,6 +139,10 @@ export default function App() {
   const [backupJob, setBackupJob] = createSignal<{ mode: "backup" | "restore"; nodeId: string } | null>(null);
   const [backupEverOpened, setBackupEverOpened] = createSignal(false);
   createEffect(() => backupJob() !== null && setBackupEverOpened(true));
+  // Nesne arama (Plan 32): hedef veritabanı; kapanınca null.
+  const [searchTarget, setSearchTarget] = createSignal<SearchDialogProps["target"]>(null);
+  const [searchEverOpened, setSearchEverOpened] = createSignal(false);
+  createEffect(() => searchTarget() !== null && setSearchEverOpened(true));
   const [groups, setGroups] = createSignal<string[]>([]);
 
   const openDialog = async (serverId: string | null) => {
@@ -147,6 +156,25 @@ export default function App() {
     } catch (e) {
       toast.show(toPayload(e).message, "error");
     }
+  };
+  const openSearch = async (id: string) => {
+    const tree = explorer.state();
+    const db = ancestorOfKind(tree, id, ["database"]);
+    if (!db) return;
+    try {
+      const target = await commands.qtTargetOf(id);
+      if (target.databaseOid === null) return;
+      // Sunucu düğümünün etiketi kayıttaki addır.
+      setSearchTarget({ ...target, databaseOid: target.databaseOid, databaseName: db.label, serverName: serverOf(tree, id)?.label ?? "" });
+    } catch (e) {
+      toast.show(toPayload(e).message, "error");
+    }
+  };
+  /** Arama sonucuna git: ağaçta açar ve seçer; başarıda odak ağaca (bulunamazsa diyalog parçası bildirir). */
+  const revealHit = async (hit: SearchHit, serverId: string): Promise<boolean> => {
+    const ok = await explorer.controller.reveal(serverId, hit.path, hit.id);
+    if (ok) treeEl()?.focus();
+    return ok;
   };
   const deleteConfirm = createDeleteConfirm();
   const actionDeps: ActionDeps = {
@@ -164,6 +192,7 @@ export default function App() {
     openBackup: (id, mode) => setBackupJob({ mode, nodeId: id }),
     openData: (id) => void loadData().then((d) => d.open(id), loadFailed),
     openSchemaDiff: (id) => void loadDiff().then((d) => d.open(id), loadFailed),
+    openSearch: (id) => void openSearch(id),
     beforeServerChange: query.confirmServerChange,
     afterServerChange: (serverId, gone) => {
       query.serverSessionsClosed(serverId, gone);
@@ -322,6 +351,17 @@ export default function App() {
       <Show when={backupEverOpened()}>
         <Suspense>
           <BackupDialogs job={backupJob()} deps={{ ...lazyDeps(), explorer: explorer.controller }} onClose={() => setBackupJob(null)} />
+        </Suspense>
+      </Show>
+      <Show when={searchEverOpened()}>
+        <Suspense>
+          <SearchDialog
+            target={searchTarget()}
+            connect={connectServer}
+            onReveal={revealHit}
+            notify={toast.show}
+            onClose={() => setSearchTarget(null)}
+          />
         </Suspense>
       </Show>
       <Show when={importEverOpened()}>

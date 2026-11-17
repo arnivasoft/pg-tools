@@ -1,7 +1,7 @@
 # pg-tools — Nesne Arama Tasarımı
 
 - **Tarih:** 2026-11-17
-- **Durum:** Tasarım; Plan 32 (`docs/superpowers/plans/2026-11-17-object-search-p32.md`) ile uygulanacak
+- **Durum:** Plan 32 (`docs/superpowers/plans/2026-11-17-object-search-p32.md`) uygulandı (arka uç Docker PG 10–18 yeşil); elle kontrol bekliyor (`docs/smoke-test.md` "Nesne arama (Plan 32)"). Uygulama notları: §7.
 - **Kapsam:**
   - Bir veritabanında nesneleri **adına göre** arama: pgAdmin'deki "Search Objects" karşılığı.
   - Sonuca gidildiğinde Object Explorer ağacında düğümün ataları sırayla açılır, düğüm seçilir ve görünür kılınır. Inspector seçili düğümü kendiliğinden gösterir.
@@ -141,3 +141,33 @@ SearchResult { hits: SearchHit[], truncated: boolean }
 - Tanım içeriğinde arama (`prosrc`, `pg_get_viewdef`, yorumlar).
 - Sunucu genelinde arama (bağlantıya izin veren tüm veritabanları).
 - Sonuç satırında bağlam menüsü (Query Tool'da aç, verileri görüntüle).
+
+## 7. Plan 32 uygulama notları
+
+**Kararlar:**
+
+- **Menü yeri:** `searchObjects` eylemi `actionsFor`'da Query Tool eylemlerinin (grup −1) hemen ardına, grup 3'ün başına eklenir; görünürlük `ancestorOfKind(state, id, ["database"]) !== null` (düğümün kendisi dahil). Koleksiyonların listesi de bu öneki alır (`[...q, "createObject", …]`). `disabledReason` kilidi uygulamaz (ad `Object` ile bitmez: designer soneki kuralı korunur).
+- **Hedef çözümü (App):** `qtTargetOf(id)` sunucu ve veritabanı OID'ini verir; veritabanı adı ağaçtaki veritabanı atasının etiketi, sunucu adı ağaçtaki sunucu düğümünün etiketidir (`serverOf(...).label`; sunucu düğümünün etiketi kayıttaki addır, `query.servers()` taraması yerine — ana paket baytı). Hedef `{ ...target, databaseOid, databaseName, serverName }` olarak kurulur.
+- **Diyalog** (`src/features/search/SearchDialog.tsx`, tembel): `<Show keyed>` her açılışta yeni bir model kurar, kapanınca `dispose`. Odak arama kutusunda kalır (`role="combobox"`, `aria-controls`, `aria-expanded`, `aria-activedescendant`); liste `role="listbox"`, satırlar `role="option"` + `aria-selected`; satırlarda `mousedown` varsayılanı engellenir (odak kutudan çıkmaz). Etkin satır `scrollIntoView({ block: "nearest" })` ile görünür kalır. Durum satırı tek bir `role="status"` / `aria-live="polite"` bölgesidir (ipucu, "Aranıyor…", sayı + kırpılma uyarısı, "Sonuç yok.", hata).
+- **Model eklemeleri** (`search-model.ts`): `setActive(i)` (tek tıkla etkinleştirme; aralık dışı yok sayılır) ve `activeHit()`'in yazım gecikmesi ya da arama sürerken `null` dönmesi: Enter eski sonuç listesindeki satıra gitmez, hemen arar (spec §2.5 "Enter hemen arar" ile "Enter seçili sonuca gider" çelişkisini çözer).
+- **Tür etiketi:** satırdaki tür adı `ts.kinds`'ten `NodeKind` → `SearchKind` eşlemesiyle (`materializedView` → `matview`) alınır. Bölümler ağaçta `table` türündedir; satırda "Tablo" görünür (ön yüz kimlik ayrıştırmaz).
+- **Bağlam:** `şema.sahip` (`[schema, owner].filter(Boolean).join(".")`); sistem nesnesi satırı soluk (`text-muted`).
+- **Gitme:** diyalog önce `onClose()` ile kapanır, sonra `onReveal(hit, serverId)`; `false` → `notify(ts.notFound, "error")`, ret → `toPayload(e).message` (ad içermez). Başarıda App ağaca odak verir (`treeEl()?.focus()`).
+- **Yükleme hatası:** Bakım diyaloğu emsaliyle `lazy` + `<Suspense>`; ayrı bir "yüklenemedi" bildirimi yok. `ts.chunkLoadFailed` bu yüzden kullanılmıyor (tembel modülde, ana pakete etkisi yok).
+- Diyalog `prefetchIdle` listesine eklenmedi (ana paket baytı); ilk "Nesne ara…"da iner.
+
+**Paket ölçümleri ve telafi kaydı** (`npm run build` + `npm run bundle:check`, 2026-11-17). Plan 32 öncesi tavanlar: ana paket 126,623 B, açılış kümesi 154,296 B. Tavan yükseltilmedi; her adımda aday komutların tüm çağrı yerleri `rg` ile denetlendi, ana paketten (yani `src/main.tsx`'ten dinamik içe aktarma olmadan ulaşılan bir modülden) çağrılan hiçbir komut taşınmadı:
+
+| Adım | Ana paket | Açılış kümesi | `mapDeps` |
+|---|---|---|---|
+| Task 4 sonrası (`reveal`) | 127,168 | 154,841 | 40 |
+| Task 6 bağlantısı (menü eylemi, metin, App kancası, tembel diyalog) | 128,165 | 155,838 | 41 |
+| 1. Designer'a özgü `ddlDefaults`, `ddlLoad`, `ddlLoadAcl`, `ddlLoadDefaultAcl` → `features/designer/designer-commands.ts`; QueryTab parçasına özgü `qtExplain`, `qtComplete`, `qtCheck`, `qtFormat`, `qtExportCsv`, `qtHistoryList`, `qtHistoryClear`, `settingsSetHistory`, `settingsSetEditor` → `features/query/tab-commands.ts` | 127,255 | 154,928 | 41 |
+| 2. QueryTab parçasına özgü `qtAnalyze`, `qtTx`, `qtHistoryPushMany`, `qtDraftsClear` → `tab-commands.ts` | 127,052 | 154,725 | 41 |
+| 3. `previewPgadminImport`, `applyPgadminImport` → `features/servers/import-commands.ts` (ImportDialog); `testConnection` → `features/servers/connection-commands.ts` (ServerDialog) | 126,855 | 154,528 | 41 |
+| 4. Birden çok tembel parçanın ortak `ddlLookup`, `ddlPreview`, `ddlApply`, `ddlCancel` → `src/ipc/ddl-commands.ts` (designer, bakım, yedekleme, şema karşılaştırma; ayrı ortak parça) | 126,632 | 154,305 | 42 |
+| 5. App `openSearch`: sunucu adı `serverOf(...).label`, hedef yayılımla kurulur | **126,582** | **154,255** | 42 |
+
+Tavanlar ölçülen değerlere indirildi: `mainMaxBytes` 126,582, `startupMaxBytes` 154,255 (sıfır pay). Adım 1'in iki taşıması birlikte ölçüldü (−910 B). Taşınan komutların tüketicileri komutları ya doğrudan yeni modülden alır (QueryTab, ExportUi, HistoryView, ImportDialog, ServerDialog, diff-opener) ya da enjekte edilen `api`'ye yayılımla ekler (`createDesigner`: `{ ...deps.api, ...designerCommands, ...ddlCommands }`, `MaintenanceDialog`: `{ ...deps.api, ...maintenanceCommands, ...ddlCommands }`, `BackupDialogs`: `ddlLookup`); `Pick<Api, …>` türleri `DesignerApi`, `TabApi`, `DdlApi` ile güncellendi. `commands.ts`'te kalan komutların her biri ana paketten de çağrılır ya da birden çok tembel parçaca paylaşılır ve ayrı bir ortak parça gerektirir (`ddlTargetOf`, `settingsGet`, `qtCancel`, `qtRun`, `qtMore`, `qtClose`).
+
+**Elle kontrol:** `docs/smoke-test.md` "Nesne arama (Plan 32)" (telafi sonrası Query Tool / designer / bakım / yedekleme / şema karşılaştırma / sunucu diyaloğu gerilemesi dahil).

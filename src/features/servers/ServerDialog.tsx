@@ -6,6 +6,7 @@ import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { SslMode } from "../../ipc/bindings/SslMode";
 import { commands } from "../../ipc/commands";
+import { testConnection } from "./connection-commands";
 import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
@@ -76,7 +77,7 @@ export function ServerDialog(props: {
     setBusy(true);
     setFeedback(null);
     try {
-      const info = await commands.testConnection(r.config, r.password);
+      const info = await testConnection(r.config, r.password);
       if (gen === generation) setFeedback({ kind: "ok", text: tsrv.testOk(info.version) });
     } catch (e) {
       if (gen === generation) setFeedback({ kind: "error", error: toPayload(e) });

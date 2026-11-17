@@ -39,7 +39,8 @@ import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
 import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { PlanRequest } from "../../ipc/bindings/PlanRequest";
 import type { PlanView } from "../../ipc/bindings/PlanView";
-import type { Api } from "../../ipc/commands";
+import type { DdlApi } from "../../ipc/ddl-commands";
+import type { DesignerApi } from "./designer-commands";
 import { errorText, toPayload } from "../../ipc/errors";
 import {
   applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, isAclDef, isDefaultAclDef, isObjectDef, isServerScoped, localBlock, planHasRedacted,
@@ -229,7 +230,7 @@ export interface AppliedInfo {
 }
 
 export interface DesignerControllerDeps {
-  api: Pick<Api, "ddlDefaults" | "ddlLoad" | "ddlLoadAcl" | "ddlLoadDefaultAcl" | "ddlLookup" | "ddlPreview" | "ddlApply" | "ddlCancel">;
+  api: DdlApi & DesignerApi;
   notify(text: string, kind: ToastKind): void;
   serverInfo(serverId: string): ServerInfo | null;
   /** Explorer düğüm yenilemesi (hatası yutulur). */

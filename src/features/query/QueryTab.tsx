@@ -20,6 +20,7 @@ import type { StmtPlan } from "../../ipc/bindings/StmtPlan";
 import type { TxAction } from "../../ipc/bindings/TxAction";
 import type { TxMode } from "../../ipc/bindings/TxMode";
 import { commands } from "../../ipc/commands";
+import { tabCommands } from "./tab-commands";
 import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
 import { isProductionLabel } from "../servers/server-form";
@@ -101,7 +102,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
   const [historyEnabled, setHistoryEnabled] = createSignal(true);
   const toggleHistory = async (enabled: boolean) => {
     try {
-      setHistoryEnabled((await commands.settingsSetHistory(enabled)).historyEnabled);
+      setHistoryEnabled((await tabCommands.settingsSetHistory(enabled)).historyEnabled);
     } catch (e) {
       notify(toPayload(e).message);
     }
@@ -114,7 +115,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
   const prefsSaver = createSerialSaver<EditorPrefs>({
     get: editorPrefs,
     set: (v) => setEditorPrefs(v),
-    save: (v) => commands.settingsSetEditor(v.checkEnabled, v.format),
+    save: (v) => tabCommands.settingsSetEditor(v.checkEnabled, v.format),
     failed: (e) => notify(toPayload(e).message),
   });
   const saveEditorSettings = (check: boolean, format: FormatOptions) => void prefsSaver.save({ checkEnabled: check, format });
@@ -131,7 +132,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
   const complete = createCompletionSource({
     fetch: async (request) => {
       const s = model()?.session;
-      return s ? commands.qtComplete(s, request) : [];
+      return s ? tabCommands.qtComplete(s, request) : [];
     },
     isBusy: () => {
       const m = model();
@@ -156,7 +157,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
   const checker = createCheckScheduler({
     gate: checkGate,
     view: () => editor?.checkView() ?? null,
-    request: commands.qtCheck,
+    request: tabCommands.qtCheck,
     apply: (marks) => editor?.setLintMarks(marks),
     // Sessiz (tasarım §6): yalnızca hata kodu, SQL metni yok.
     failed: (e) => console.debug("denetim başarısız", toPayload(e).code),
@@ -187,7 +188,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
     return null;
   };
   const explainer = createExplainController({
-    api: commands,
+    api: { ...commands, ...tabCommands },
     ctl,
     snapshot: (id) => (editor && shownId() === id && activeId() === id ? editor.getSnapshot("stmt") : null),
     beforeRun: (id) => {
@@ -329,7 +330,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
     const outcome = await runWithGuards(snap, {
       session,
       limit: ROW_LIMIT,
-      analyze: async (s, text, scope) => (plans = await commands.qtAnalyze(s, text, scope)),
+      analyze: async (s, text, scope) => (plans = await tabCommands.qtAnalyze(s, text, scope)),
       run: commands.qtRun,
       confirm: (items) => runConfirm.ask(items, production),
       onEvent: (ev) => onEvent(id, runId, ev, snap, () => plans),
@@ -405,7 +406,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
       });
       // Tek çağrı, arka uçta tek dosya yazımı; yalnızca son MAX_HISTORY girdi anlamlıdır.
       if (entries.length > 0)
-        void commands
+        void tabCommands
           .qtHistoryPushMany(entries.slice(-HISTORY_MAX))
           .catch((err) => console.warn("geçmiş yazılamadı", toPayload(err).code))
           .finally(() => ctl.update(id, (x) => ({ ...x, historyKey: x.historyKey + 1 })));
@@ -466,7 +467,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
     if (action === "commit" ? !canCommit(m.run) : !canRollback(m.run)) return;
     ctl.patch(id, { op: "tx" });
     try {
-      ctl.dispatch(id, { type: "txChanged", tx: await commands.qtTx(m.session, action) });
+      ctl.dispatch(id, { type: "txChanged", tx: await tabCommands.qtTx(m.session, action) });
     } catch (err) {
       const e = toPayload(err);
       const route = routeError(e);
@@ -508,7 +509,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
     const snap = editor.getSnapshot("stmt");
     ctl.patch(id, { op: "export" });
     try {
-      const plans = await commands.qtAnalyze(session, snap.text, snap.scope);
+      const plans = await tabCommands.qtAnalyze(session, snap.text, snap.scope);
       // Şeritteki seçim yalnızca analiz kapsamı son çalıştırmanınkiyle aynıysa anlamlıdır (dizinler kapsam içidir).
       const preferred = m.last && m.last.text === snap.text && sameScope(m.last.scope, snap.scope) ? m.selectedStmt : null;
       const target = exportTarget(plans, true, preferred);
@@ -549,7 +550,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
     const original = doc.slice(range.from, range.to);
     if (original.trim() === "") return;
     try {
-      const formatted = await commands.qtFormat(original, formatOptions());
+      const formatted = await tabCommands.qtFormat(original, formatOptions());
       const insert = formatReplacement(original, formatted, range.whole);
       // Bu arada yazıldıysa ya da sekme değiştiyse sessizce vazgeç (metin değişmez).
       if (insert === null || !editor || shownId() !== id) return;
@@ -605,7 +606,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
           mode === "fix" && err.offset !== null && m.last
             ? { text: m.last.text, scope: { type: "atCursor" as const, offset: err.offset } }
             : editor.getSnapshot("stmt");
-        const plan = (await commands.qtAnalyze(session, text, scope))[0];
+        const plan = (await tabCommands.qtAnalyze(session, text, scope))[0];
         if (plan) sql = sliceChars(text, plan.charOffset, plan.charLen);
       } catch {
         // analiz başarısızsa aşağıda tüm metne düşülür
@@ -615,13 +616,13 @@ export default function QueryTab(props: { ctl: QueryController }) {
     let schema = "";
     if (session) {
       try {
-        const relations = await commands.qtComplete(session, { type: "relations", schema: null });
+        const relations = await tabCommands.qtComplete(session, { type: "relations", schema: null });
         const columns = new Map<string, CompletionItem[]>();
         for (const r of mentionedRelations(prompt, relations)) {
-          columns.set(r.quoted, await commands.qtComplete(session, { type: "columns", schema: null, relation: r.label }));
+          columns.set(r.quoted, await tabCommands.qtComplete(session, { type: "columns", schema: null, relation: r.label }));
         }
         if (sql.trim()) {
-          const scoped = await commands.qtComplete(session, { type: "scoped", sql, offset: Array.from(sql).length, prefix: "" });
+          const scoped = await tabCommands.qtComplete(session, { type: "scoped", sql, offset: Array.from(sql).length, prefix: "" });
           if (scoped.length > 0) columns.set("Columns in scope of the SQL", scoped);
         }
         schema = schemaText(relations, columns);

@@ -175,6 +175,35 @@ describe("search-model", () => {
     expect(s.activeHit()?.name).toBe("b");
   });
 
+  it("setActive: aralık dışı yok sayılır", async () => {
+    const { deps } = setup({ search: vi.fn(async () => res("a", "b", "c")) });
+    const s = createSearch(deps, target());
+    s.setQuery("a");
+    s.searchNow();
+    await flush();
+    s.setActive(2);
+    expect(s.activeHit()?.name).toBe("c");
+    s.setActive(3);
+    s.setActive(-1);
+    expect(s.state().active).toBe(2);
+  });
+
+  it("activeHit: yazım sürerken ya da arama sürerken null (Enter eski sonuca gitmez)", async () => {
+    const { deps, fire } = setup({ search: vi.fn(async () => res("a", "b")) });
+    const s = createSearch(deps, target());
+    s.setQuery("a");
+    s.searchNow();
+    await flush();
+    expect(s.activeHit()?.name).toBe("a");
+    s.setQuery("ab");
+    expect(s.activeHit()).toBeNull();
+    fire();
+    expect(s.state().status).toBe("searching");
+    expect(s.activeHit()).toBeNull();
+    await flush();
+    expect(s.activeHit()?.name).toBe("a");
+  });
+
   it("hafıza: aynı hedef geri yüklenir ve arar; farklı veritabanı boş başlar", async () => {
     const { deps } = setup();
     const t = target();

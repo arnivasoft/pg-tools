@@ -145,8 +145,13 @@ export function createSearch(deps: SearchDeps, target: { serverId: string; datab
     const from = s.active < 0 ? (delta === 1 ? -1 : s.hits.length) : s.active;
     patch({ active: Math.min(s.hits.length - 1, Math.max(0, from + delta)) });
   };
+  const setActive = (i: number) => {
+    if (i >= 0 && i < state().hits.length) patch({ active: i });
+  };
+  /** Yazım ya da arama sürerken null: Enter eski sonuca gitmez, hemen arar. */
   const activeHit = (): SearchHit | null => {
     const s = state();
+    if (timer !== null || s.status !== "done") return null;
     return s.active >= 0 && s.active < s.hits.length ? s.hits[s.active] : null;
   };
   const dispose = () => {
@@ -157,5 +162,5 @@ export function createSearch(deps: SearchDeps, target: { serverId: string; datab
 
   if (state().query.trim() !== "") run();
 
-  return { state: state as Accessor<SearchState>, setQuery, searchNow, toggleKind, setAllKinds, move, activeHit, dispose };
+  return { state: state as Accessor<SearchState>, setQuery, searchNow, toggleKind, setAllKinds, move, setActive, activeHit, dispose };
 }
