@@ -56,6 +56,7 @@ const EXT: &str = "EXISTS (SELECT 1 FROM pg_depend i WHERE i.classid = 'pg_proc'
 const FRAGMENTS: &[(SearchKind, u32, u32, &str)] = &[
     (SearchKind::Schema, 10, 99, "SELECT 'schema' AS kind, n.oid, 0::int2 AS attnum, n.nspname::text AS name, n.nspname::text AS match_name, n.oid AS schema_oid, n.nspname::text AS schema_name, 0::oid AS rel_oid, ''::text AS rel_kind, NULL::text AS owner, {SYS} AS is_system FROM pg_namespace n WHERE n.nspname ILIKE $1 ESCAPE '\\'"),
     (SearchKind::Table, 10, 99, "SELECT 'table', c.oid, 0::int2, c.relname::text, c.relname::text, n.oid, n.nspname::text, c.oid, c.relkind::text, NULL::text, {SYS} FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND NOT c.relispartition AND c.relname ILIKE $1 ESCAPE '\\'"),
+    // Not: bölümün is_system'ı bölümün kendi şemasından gelir (kök tablonunkinden değil); bilinen sınırlama.
     (SearchKind::Partition, 10, 99, "SELECT 'partition', c.oid, 0::int2, c.relname::text, c.relname::text, n.oid, n.nspname::text, c.oid, c.relkind::text, (SELECT pc.relname::text FROM pg_inherits i JOIN pg_class pc ON pc.oid = i.inhparent WHERE i.inhrelid = c.oid LIMIT 1), {SYS} FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relispartition AND c.relname ILIKE $1 ESCAPE '\\'"),
     (SearchKind::View, 10, 99, "SELECT 'view', c.oid, 0::int2, c.relname::text, c.relname::text, n.oid, n.nspname::text, c.oid, 'v', NULL::text, {SYS} FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'v' AND c.relname ILIKE $1 ESCAPE '\\'"),
     (SearchKind::Matview, 10, 99, "SELECT 'matview', c.oid, 0::int2, c.relname::text, c.relname::text, n.oid, n.nspname::text, c.oid, 'm', NULL::text, {SYS} FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'm' AND c.relname ILIKE $1 ESCAPE '\\'"),
@@ -67,7 +68,7 @@ const FRAGMENTS: &[(SearchKind, u32, u32, &str)] = &[
     (SearchKind::Sequence, 10, 99, "SELECT 'sequence', c.oid, 0::int2, c.relname::text, c.relname::text, n.oid, n.nspname::text, 0::oid, '', NULL::text, {SYS} FROM pg_class c JOIN pg_sequence s ON s.seqrelid = c.oid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'S' AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'i') AND c.relname ILIKE $1 ESCAPE '\\'"),
     (SearchKind::Type, 10, 99, "SELECT 'type', t.oid, 0::int2, t.typname::text, t.typname::text, n.oid, n.nspname::text, 0::oid, '', NULL::text, {SYS} FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype IN ('e', 'c', 'r', 'b') AND (t.typtype <> 'c' OR EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = t.typrelid AND c.relkind = 'c')) AND NOT EXISTS (SELECT 1 FROM pg_type el WHERE el.oid = t.typelem AND el.typarray = t.oid) AND t.typname ILIKE $1 ESCAPE '\\'"),
     (SearchKind::Domain, 10, 99, "SELECT 'domain', t.oid, 0::int2, t.typname::text, t.typname::text, n.oid, n.nspname::text, 0::oid, '', NULL::text, {SYS} FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typtype = 'd' AND t.typname ILIKE $1 ESCAPE '\\'"),
-    (SearchKind::Column, 10, 99, "SELECT 'column', 0::oid, a.attnum, a.attname::text, a.attname::text, n.oid, n.nspname::text, c.oid, c.relkind::text, c.relname::text, {SYS} FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'v', 'm') AND a.attnum > 0 AND NOT a.attisdropped AND a.attname ILIKE $1 ESCAPE '\\'"),
+    (SearchKind::Column, 10, 99, "SELECT 'column', 0::oid, a.attnum, a.attname::text, a.attname::text, n.oid, n.nspname::text, c.oid, c.relkind::text, c.relname::text, {SYS} FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE (c.relkind IN ('r', 'p', 'v', 'm') OR (c.relkind = 'f' AND c.relispartition)) AND a.attnum > 0 AND NOT a.attisdropped AND a.attname ILIKE $1 ESCAPE '\\'"),
     (SearchKind::Index, 10, 99, "SELECT 'index', x.indexrelid, 0::int2, ic.relname::text, ic.relname::text, n.oid, n.nspname::text, c.oid, c.relkind::text, c.relname::text, {SYS} FROM pg_index x JOIN pg_class ic ON ic.oid = x.indexrelid JOIN pg_am am ON am.oid = ic.relam JOIN pg_class c ON c.oid = x.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'm') AND ic.relname ILIKE $1 ESCAPE '\\'"),
     (SearchKind::Constraint, 10, 99, "SELECT 'constraint', k.oid, 0::int2, k.conname::text, k.conname::text, n.oid, n.nspname::text, c.oid, c.relkind::text, c.relname::text, {SYS} FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND k.contype IN ('p', 'u', 'c', 'x', 'f') AND k.conname ILIKE $1 ESCAPE '\\'"),
     (SearchKind::Trigger, 10, 99, "SELECT 'trigger', g.oid, 0::int2, g.tgname::text, g.tgname::text, n.oid, n.nspname::text, c.oid, c.relkind::text, c.relname::text, {SYS} FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND NOT g.tgisinternal AND g.tgname ILIKE $1 ESCAPE '\\'"),
@@ -104,12 +105,18 @@ fn selected(kinds: &[SearchKind], major: u32) -> Vec<String> {
 }
 
 /// Seçilen türlerin (boş = hepsi) sürüme uyan parçalarından tek sorgu. Sıralama: tam eşleşme, önek, ad, şema, tür.
+#[cfg(test)]
 pub(crate) fn build_sql(kinds: &[SearchKind], major: u32) -> String {
-    let parts = selected(kinds, major);
+    assemble(&selected(kinds, major))
+}
+
+/// `$2` ham (kırpılmış) metin, `$3` kaçırılmış ham metin + `%`; küçük harfe çevirme sunucuda (`lower`) yapılır.
+fn assemble(parts: &[String]) -> String {
     format!(
-        "SELECT * FROM ({}) h WHERE ($4 OR NOT h.is_system) \
-         ORDER BY CASE WHEN lower(h.match_name) = $2 THEN 0 WHEN lower(h.match_name) LIKE $3 ESCAPE '\\' THEN 1 ELSE 2 END, \
-         h.name COLLATE \"C\", h.schema_name COLLATE \"C\", h.kind LIMIT {}",
+        concat!(
+        "SELECT * FROM ({}) h(kind, oid, attnum, name, match_name, schema_oid, schema_name, rel_oid, rel_kind, owner, is_system) WHERE ($4 OR NOT h.is_system) ",
+        "ORDER BY CASE WHEN lower(h.match_name) = lower($2) THEN 0 WHEN lower(h.match_name) LIKE lower($3) ESCAPE '\\' THEN 1 ELSE 2 END, ",
+        "h.name COLLATE \"C\", h.schema_name COLLATE \"C\", h.kind LIMIT {}"),
         parts.join(" UNION ALL "),
         MAX_HITS + 1
     )
@@ -290,16 +297,16 @@ impl Catalog {
         }
         let major = PgVersion(self.mgr.info(server).ok_or(Error::NotConnected)?.version_num).major();
         let started = std::time::Instant::now();
-        let lower = q.to_lowercase();
-        if selected(kinds, major).is_empty() {
+        let parts = selected(kinds, major);
+        if parts.is_empty() {
             return Ok(SearchResult { hits: Vec::new(), truncated: false });
         }
-        let sql = Arc::new(build_sql(kinds, major));
-        let params = p![format!("%{}%", escape_like(&q)), lower.clone(), format!("{}%", escape_like(&lower)), self.show_system()];
+        let sql = Arc::new(assemble(&parts));
+        let params = p![format!("%{}%", escape_like(&q)), q.clone(), format!("{}%", escape_like(&q)), self.show_system()];
         let rows = query_text(&self.mgr, server, Target::Database(db), sql, params).await?;
         let truncated = rows.len() > MAX_HITS;
         let raw: Vec<RawHit> = rows.iter().take(MAX_HITS).map(RawHit::from_row).collect::<Result<_>>()?;
-        let parts: Vec<u32> = raw.iter().filter(|h| h.rel_oid != 0 && matches!(h.rel_kind.as_str(), "r" | "p")).map(|h| h.rel_oid).collect();
+        let parts: Vec<u32> = raw.iter().filter(|h| h.rel_oid != 0 && (h.kind == SearchKind::Partition || matches!(h.rel_kind.as_str(), "r" | "p" | "f"))).map(|h| h.rel_oid).collect();
         let chains = if parts.is_empty() { HashMap::new() } else { load_chains(self, server, db, parts).await? };
         let hits = raw.iter().map(|h| to_hit(server, db, h, &chains)).collect();
         tracing::debug!(count = raw.len(), truncated, ms = started.elapsed().as_millis() as u64, "nesne araması");
@@ -380,6 +387,25 @@ mod tests {
             vec![s.clone(), format!("{s}/tables"), format!("{s}/tbl:30"), format!("{s}/tbl:30/partitions"),
                  format!("{s}/tbl:30/tbl:40"), format!("{s}/tbl:30/tbl:40/partitions")]
         );
+    }
+
+    #[test]
+    fn derived_table_has_fixed_column_list() {
+        let sql = build_sql(&[SearchKind::Table], 16);
+        assert!(sql.contains("h(kind, oid, attnum, name, match_name, schema_oid, schema_name, rel_oid, rel_kind, owner, is_system)"));
+        assert!(sql.contains("lower($2)"));
+    }
+
+    #[test]
+    fn foreign_partition_column_goes_through_chain() {
+        let mut h = raw(SearchKind::Column, "f");
+        h.attnum = 2;
+        h.rel_oid = 50;
+        let chains = std::collections::HashMap::from([(50u32, Chain { root_schema: 2201, parents: vec![30] })]);
+        let hit = to_hit(srv(), 1, &h, &chains);
+        let s = format!("srv:{U}/db:1/sch:2201");
+        assert_eq!(hit.id, format!("{s}/tbl:30/tbl:50/col:2"));
+        assert_eq!(hit.path.last().unwrap(), &format!("{s}/tbl:30/tbl:50/columns"));
     }
 
     #[test]
