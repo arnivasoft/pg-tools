@@ -542,3 +542,75 @@ describe("ExplorerController reload after an in-flight load", () => {
     expect(get().children.get(ROOT)).toEqual(["a2"]);
   });
 });
+
+describe("ExplorerController.reveal", () => {
+  const grp = n("grp:g", { kind: "serverGroup" });
+  const srv = n("srv:U", { kind: "server", serverId: "U" });
+  const tree = (): Record<string, TreeNode[]> => ({
+    [ROOT]: [grp],
+    "grp:g": [srv],
+    "srv:U": [n("srv:U/dbs")],
+    "srv:U/dbs": [n("db:1")],
+    "db:1": [n("tbl:1", { hasChildren: false })],
+  });
+  const chain = ["srv:U/dbs", "db:1"];
+  async function ready(children = tree(), deps: Partial<ExplorerDeps> = {}) {
+    const h = setup(children, deps);
+    await h.c.load(ROOT);
+    await h.c.expand("grp:g");
+    h.c.collapse("grp:g");
+    return h;
+  }
+  const calls = (listChildren: { mock: { calls: unknown[][] } }, id: string) => listChildren.mock.calls.filter((c) => c[0] === id).length;
+
+  it("opens group, connects server, walks chain and selects target", async () => {
+    const { c, get, connectServer, listChildren } = await ready();
+    expect(await c.reveal("U", chain, "tbl:1")).toBe(true);
+    expect(connectServer).toHaveBeenCalledWith("U", null, false);
+    expect(get().selected).toBe("tbl:1");
+    for (const id of ["grp:g", "srv:U", "srv:U/dbs", "db:1"]) expect(get().expanded.has(id)).toBe(true);
+    expect(listChildren.mock.calls.map((x) => x[0])).toEqual([ROOT, "grp:g", "srv:U", "srv:U/dbs", "db:1"]);
+  });
+
+  it("clears the filter", async () => {
+    const { c, get } = await ready();
+    c.setFilter("abc");
+    await c.reveal("U", chain, "tbl:1");
+    expect(get().filter).toBe("");
+  });
+
+  it("reloads a stale list exactly once", async () => {
+    const children = tree();
+    const { c, get, listChildren } = await ready(children);
+    await c.expand("srv:U");
+    await c.expand("srv:U/dbs");
+    await c.expand("db:1");
+    children["db:1"] = [n("tbl:1", { hasChildren: false }), n("tbl:2", { hasChildren: false })];
+    // db:1 listesi yüklü ama tbl:2 yok
+    expect(await c.reveal("U", chain, "tbl:2")).toBe(true);
+    expect(get().selected).toBe("tbl:2");
+    expect(calls(listChildren, "db:1")).toBe(2);
+  });
+
+  it("returns false for a deleted node without retrying more than once", async () => {
+    const { c, get, listChildren } = await ready();
+    await c.reveal("U", chain, "tbl:1");
+    const before = calls(listChildren, "db:1");
+    expect(await c.reveal("U", chain, "tbl:gone")).toBe(false);
+    expect(get().selected).toBe("tbl:1");
+    expect(calls(listChildren, "db:1") - before).toBe(1);
+    expect(calls(listChildren, "db:1")).toBeLessThanOrEqual(2);
+  });
+
+  it("returns false when the server cannot connect", async () => {
+    const connectServer = vi.fn().mockRejectedValue(err("password_required"));
+    const { c, get } = await ready(tree(), { api: { listChildren: async (id: string) => tree()[id] ?? [], connectServer, disconnectServer: vi.fn() } });
+    expect(await c.reveal("U", chain, "tbl:1")).toBe(false);
+    expect(get().selected).toBeNull();
+  });
+
+  it("returns false for an unknown server id", async () => {
+    const { c } = await ready();
+    expect(await c.reveal("nope", chain, "tbl:1")).toBe(false);
+  });
+});
