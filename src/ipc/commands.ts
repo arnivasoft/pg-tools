@@ -6,13 +6,6 @@ import type { CompletionItem } from "./bindings/CompletionItem";
 import type { CompletionRequest } from "./bindings/CompletionRequest";
 import type { CsvOptions } from "./bindings/CsvOptions";
 import type { AppSettings } from "./bindings/AppSettings";
-import type { BackupEvent } from "./bindings/BackupEvent";
-import type { BackupRequest } from "./bindings/BackupRequest";
-import type { JobPlan } from "./bindings/JobPlan";
-import type { JobSummary } from "./bindings/JobSummary";
-import type { RestoreRequest } from "./bindings/RestoreRequest";
-import type { RestoreSource } from "./bindings/RestoreSource";
-import type { ToolDetection } from "./bindings/ToolDetection";
 import type { DraftTab } from "./bindings/DraftTab";
 import type { ExplainOptions } from "./bindings/ExplainOptions";
 import type { ExplainResult } from "./bindings/ExplainResult";
@@ -31,17 +24,6 @@ import type { StmtPlan } from "./bindings/StmtPlan";
 import type { TreeNode } from "./bindings/TreeNode";
 import type { TxAction } from "./bindings/TxAction";
 import type { TxState } from "./bindings/TxState";
-import type { ActivityReport } from "./bindings/ActivityReport";
-import type { DashInfo } from "./bindings/DashInfo";
-import type { LockReport } from "./bindings/LockReport";
-import type { Overview } from "./bindings/Overview";
-import type { PreparedXact } from "./bindings/PreparedXact";
-import type { Sample } from "./bindings/Sample";
-import type { Setting } from "./bindings/Setting";
-import type { SignalKind } from "./bindings/SignalKind";
-import type { SignalOutcome } from "./bindings/SignalOutcome";
-import type { Statements } from "./bindings/Statements";
-import type { StatementsOrder } from "./bindings/StatementsOrder";
 import type { AclDef } from "./bindings/AclDef";
 import type { ApplyOptions } from "./bindings/ApplyOptions";
 import type { ApplyOutcome } from "./bindings/ApplyOutcome";
@@ -69,7 +51,7 @@ export async function call<T>(cmd: string, args?: Record<string, unknown>): Prom
   }
 }
 
-function channel<T>(onMessage: (m: T) => void): Channel<T> {
+export function channel<T>(onMessage: (m: T) => void): Channel<T> {
   const ch = new Channel<T>();
   ch.onmessage = onMessage;
   return ch;
@@ -88,6 +70,8 @@ export const commands = {
   startupNotice: () => call<string | null>("startup_notice"),
   /** İlk çizimden sonra: gizli ana pencereyi tema arka planıyla gösterir (bkz. src-tauri/src/window.rs). */
   appReady: (dark: boolean) => call<null>("app_ready", { dark }),
+  /** Özel başlık çubuğu: pencere işlemi; dönüş büyütülmüş mü (bkz. src-tauri/src/window.rs). */
+  win: (action: "drag" | "min" | "max" | "close") => call<boolean>("win", { action }),
   deleteServer: (serverId: string) => call<null>("delete_server", { serverId }),
   setShowSystem: (value: boolean) => call<null>("set_show_system", { value }),
   quoteIdentifiers: (serverId: string, names: string[]) => call<string[]>("quote_identifiers", { serverId, names }),
@@ -133,18 +117,6 @@ export const commands = {
   settingsSetEditor: (checkEnabled: boolean, format: FormatOptions) =>
     call<AppSettings>("settings_set_editor", { checkEnabled, format }),
 
-  // Dashboard (pg_stat_* izleme). Hata `code`ları: `42501` yetki, `invalid` kendi oturumu, `not_found` kapanmış id.
-  dashOpen: (serverId: string, databaseOid: number | null) => call<DashInfo>("dash_open", { serverId, databaseOid }),
-  dashClose: (id: string) => call<null>("dash_close", { id }),
-  dashSample: (id: string) => call<Sample>("dash_sample", { id }),
-  dashOverview: (id: string) => call<Overview>("dash_overview", { id }),
-  dashActivity: (id: string) => call<ActivityReport>("dash_activity", { id }),
-  dashLocks: (id: string) => call<LockReport>("dash_locks", { id }),
-  dashSettings: (id: string) => call<Setting[]>("dash_settings", { id }),
-  dashPrepared: (id: string) => call<PreparedXact[]>("dash_prepared", { id }),
-  dashStatements: (id: string, order: StatementsOrder) => call<Statements>("dash_statements", { id, order }),
-  dashSignal: (id: string, pid: number, kind: SignalKind) => call<SignalOutcome>("dash_signal", { id, pid, kind }),
-
   // Nesne diyalogları (ddl_*): Tauri parametre adları src-tauri/src/ddl.rs ile birebir (camelCase).
   ddlTargetOf: (nodeId: string) => call<DdlTarget>("ddl_target_of", { nodeId }),
   ddlDefaults: (serverId: string, databaseOid: number | null, kind: ObjectKind, ctx: CreateContext, preset: CreatePreset | null = null) =>
@@ -165,31 +137,6 @@ export const commands = {
     call<MaintenanceTarget>("ddl_load_maintenance_target", { serverId, databaseOid, object }),
   ddlMaintenanceProgress: (serverId: string, databaseOid: number, applyId: string) =>
     call<MaintenanceProgress | null>("ddl_maintenance_progress", { serverId, databaseOid, applyId }),
-  // Yedekleme / geri yükleme (Plan 26 arka ucu; parametre adları spec §5). `jobId` ön yüzde üretilir (crypto.randomUUID()).
-  backupTools: (serverId: string) => call<ToolDetection>("backup_tools", { serverId }),
-  backupPlan: (serverId: string, databaseOid: number, request: BackupRequest) =>
-    call<JobPlan>("backup_plan", { serverId, databaseOid, request }),
-  backupStart: (serverId: string, databaseOid: number, request: BackupRequest, jobId: string, onEvent: (e: BackupEvent) => void) =>
-    call<JobSummary>("backup_start", { serverId, databaseOid, request, jobId, onEvent: channel(onEvent) }),
-  backupCancel: (jobId: string) => call<null>("backup_cancel", { jobId }),
-  /** Dosyayı Gezgin'de seçili gösterir (mutlak ve var olan yol; yalnız Windows). */
-  backupReveal: (path: string) => call<null>("backup_reveal", { path }),
-  restoreInspect: (path: string) => call<RestoreSource>("restore_inspect", { path }),
-  restorePlan: (serverId: string, databaseOid: number | null, request: RestoreRequest) =>
-    call<JobPlan>("restore_plan", { serverId, databaseOid, request }),
-  restoreStart: (
-    serverId: string,
-    databaseOid: number | null,
-    request: RestoreRequest,
-    jobId: string,
-    confirmed: boolean,
-    confirmedProduction: boolean,
-    onEvent: (e: BackupEvent) => void,
-  ) =>
-    call<JobSummary>("restore_start", {
-      serverId, databaseOid, request, jobId, confirmed, confirmedProduction, onEvent: channel(onEvent),
-    }),
-  settingsSetPgBinDir: (dir: string | null) => call<AppSettings>("settings_set_pg_bin_dir", { dir }),
 };
 
 export type Api = typeof commands;
