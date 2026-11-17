@@ -25,6 +25,7 @@ import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { ServerMessage } from "../../ipc/bindings/ServerMessage";
 import type { Api } from "../../ipc/commands";
+import type { MaintenanceApi } from "./maintenance-commands";
 import {
   createProgressPoller,
   defaultOperation,
@@ -95,10 +96,7 @@ export type GateReason = keyof typeof tm.blocked;
 export type Gate = { ok: true; confirm: boolean } | { ok: false; reason: GateReason };
 
 export interface MaintenanceControllerDeps {
-  api: Pick<
-    Api,
-    "ddlTargetOf" | "ddlLoadMaintenanceTarget" | "ddlPreview" | "ddlApply" | "ddlCancel" | "ddlMaintenanceProgress"
-  >;
+  api: Pick<Api, "ddlTargetOf" | "ddlPreview" | "ddlApply" | "ddlCancel"> & MaintenanceApi;
   /** Sunucu sürümü (bilinmiyorsa null → istemci kapısı yok) ve salt okunur kilit (canlı; tek kaynak). */
   serverInfo(serverId: string): { versionNum: number | null; locked: boolean } | null;
   notify(text: string, kind: ToastKind): void;

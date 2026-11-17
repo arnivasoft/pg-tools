@@ -9,7 +9,11 @@ render(() => <App />, document.getElementById("root")!);
 // Ana pencere gizli açılır (beyaz kare olmasın): tema ve ilk DOM hazır, şimdi tema rengiyle göster.
 // Tauri dışında (düz tarayıcı önizlemesi) komut başarısız olur; yok sayılır.
 // Özel başlık çubuğunun düğmeleri tembel parçada: pencere onlar yüklendikten sonra görünür.
+// Parça yüklenemezse düğmesiz kalmasın: arka uç Windows çerçevesini geri açar (`frame`).
 void loadWindowControls()
-  .catch(() => {})
-  .then(() => commands.appReady(document.documentElement.dataset.theme === "dark"))
+  .then(
+    () => false,
+    () => true,
+  )
+  .then((frame) => commands.appReady(document.documentElement.dataset.theme === "dark", frame))
   .catch(() => {});

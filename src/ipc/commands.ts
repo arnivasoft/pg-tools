@@ -32,8 +32,6 @@ import type { CreatePreset } from "./bindings/CreatePreset";
 import type { DdlTarget } from "./bindings/DdlTarget";
 import type { DefaultAclDef } from "./bindings/DefaultAclDef";
 import type { DefaultAclScope } from "./bindings/DefaultAclScope";
-import type { MaintenanceProgress } from "./bindings/MaintenanceProgress";
-import type { MaintenanceTarget } from "./bindings/MaintenanceTarget";
 import type { LookupItem } from "./bindings/LookupItem";
 import type { LookupRequest } from "./bindings/LookupRequest";
 import type { ObjectDef } from "./bindings/ObjectDef";
@@ -69,7 +67,8 @@ export const commands = {
   getDdl: (id: string) => call<string>("get_ddl", { id }),
   startupNotice: () => call<string | null>("startup_notice"),
   /** İlk çizimden sonra: gizli ana pencereyi tema arka planıyla gösterir (bkz. src-tauri/src/window.rs). */
-  appReady: (dark: boolean) => call<null>("app_ready", { dark }),
+  /** `frame`: pencere düğmeleri yüklenemedi; Windows çerçevesi geri açılır. */
+  appReady: (dark: boolean, frame: boolean) => call<null>("app_ready", { dark, frame }),
   /** Özel başlık çubuğu: pencere işlemi; dönüş büyütülmüş mü (bkz. src-tauri/src/window.rs). */
   win: (action: "drag" | "min" | "max" | "close") => call<boolean>("win", { action }),
   deleteServer: (serverId: string) => call<null>("delete_server", { serverId }),
@@ -132,11 +131,6 @@ export const commands = {
   ddlApply: (serverId: string, databaseOid: number | null, request: PlanRequest, options: ApplyOptions) =>
     call<ApplyOutcome>("ddl_apply", { serverId, databaseOid, request, options }),
   ddlCancel: (applyId: string) => call<null>("ddl_cancel", { applyId }),
-  // Bakım (Plan 24 arka ucu): hedef bilgisi ve uygulama sırasındaki ilerleme (applyId ApplyOptions'takiyle aynı).
-  ddlLoadMaintenanceTarget: (serverId: string, databaseOid: number, object: ObjectRef) =>
-    call<MaintenanceTarget>("ddl_load_maintenance_target", { serverId, databaseOid, object }),
-  ddlMaintenanceProgress: (serverId: string, databaseOid: number, applyId: string) =>
-    call<MaintenanceProgress | null>("ddl_maintenance_progress", { serverId, databaseOid, applyId }),
 };
 
 export type Api = typeof commands;

@@ -21,6 +21,14 @@ fn background(dark: bool) -> Color {
     if dark { DARK_BG } else { LIGHT_BG }
 }
 
+/// Özel başlık çubuğu çizilemediğinde (ön yüz yüklenemedi, düğme parçası yüklenemedi) Windows çerçevesini geri
+/// açar: pencere çerçevesiz ve düğmesiz kalmasın (taşınabilsin, kapatılabilsin).
+fn restore_frame<R: Runtime>(window: &WebviewWindow<R>) {
+    if let Err(e) = window.set_decorations(true) {
+        tracing::warn!(error = %e, "pencere çerçevesi geri açılamadı");
+    }
+}
+
 /// Pencere ve WebView arka planını temaya ayarlar ve (gizliyse) gösterir.
 fn reveal<R: Runtime>(window: &WebviewWindow<R>, dark: bool) {
     if let Err(e) = window.set_background_color(Some(background(dark))) {
@@ -46,14 +54,20 @@ pub fn init<R: Runtime>(app: &tauri::App<R>) {
         if !window.is_visible().unwrap_or(true) {
             // smoke-release.ps1 logda "fallback-show" arar: ön yüz pencereyi göstermediyse başarısız sayılır.
             tracing::warn!("fallback-show: pencere yedek zamanlayıcıyla gösterildi (ön yüz app_ready çağırmadı)");
+            // Ön yüz yüklenmediyse özel başlık çubuğu da yoktur: Windows çerçevesi geri açılır.
+            restore_frame(&window);
             reveal(&window, dark);
         }
     });
 }
 
 /// Ön yüz ilk çizimden hemen sonra çağırır. Yenilemede (pencere zaten görünür) yalnızca arka planı günceller.
+/// `frame`: pencere düğmeleri yüklenemedi; Windows çerçevesi geri açılır.
 #[tauri::command]
-pub fn app_ready(window: WebviewWindow, dark: bool) {
+pub fn app_ready(window: WebviewWindow, dark: bool, frame: bool) {
+    if frame {
+        restore_frame(&window);
+    }
     reveal(&window, dark);
 }
 
