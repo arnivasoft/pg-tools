@@ -826,13 +826,13 @@ Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2 ve §6
 
 ## Şema karşılaştırma (Plan 30)
 
-- [ ] Veritabanı düğümünden açınca ve hedefte veritabanı seçince şema seçicisi "Seçin…" gösterir (listedeki ilk şema kendiliğinden seçili görünmez); iki tarafta şema seçilince "Karşılaştır" etkinleşir. **[—]**
 Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2.8, §6 ve §7. Sekme tembel parçadadır (`DiffTabs-*.js`, `SchemaDiffView-*.js`, `ScriptDialog-*.js`); ilk açılışta iner.
 
 Ön koşul: yayın exe (`tauri build`); Docker PG 13, 16 ve 18 sunucuları; zengin iki şema (Plan 29 `diff_roundtrip` fikstürü elle kurulabilir), Türkçe adlı şema/tablo (`Şube`, `İLÇE`), bölümlü tablo ve 2.000 nesneli büyük bir şema; "Üretim" etiketli ve salt okunur kilitli bir hedef sunucu kaydı.
 
 - [ ] Menü görünürlüğü: "Şema karşılaştır…" şema ve veritabanı düğümünde var; sistem şemasında, tabloda ve sunucuda yok; kilitli sunucuda açık (devre dışı değil). **[—]**
 - [ ] Şema düğümünden açılışta kaynak (sunucu, veritabanı, şema) dolu, hedef aynı sunucu ve veritabanında şeması boş; veritabanı düğümünden açılışta kaynak şeması boş. **[—]**
+- [ ] Veritabanı düğümünden açınca ve hedefte veritabanı seçince şema seçicisi "Seçin…" gösterir (listedeki ilk şema kendiliğinden seçili görünmez); iki tarafta şema seçilince "Karşılaştır" etkinleşir. **[—]**
 - [ ] Bağlı olmayan sunucu seçilince parola istemi çıkar; vazgeçilince seçici hata/gerekçe gösterir, sekme açık kalır. **[—]**
 - [ ] Sunucu değişince veritabanı ve şema seçicileri, veritabanı değişince şema seçicisi sıfırlanır. **[—]**
 - [ ] "↔" kaynak ile hedefi yer değiştirir. **[—]**
