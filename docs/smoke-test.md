@@ -832,6 +832,7 @@ Sözleşme: `docs/superpowers/specs/2026-10-31-schema-diff-design.md` §2.8, §6
 
 - [ ] Menü görünürlüğü: "Şema karşılaştır…" şema ve veritabanı düğümünde var; sistem şemasında, tabloda ve sunucuda yok; kilitli sunucuda açık (devre dışı değil). **[—]**
 - [ ] Şema düğümünden açılışta kaynak (sunucu, veritabanı, şema) dolu, hedef aynı sunucu ve veritabanında şeması boş; veritabanı düğümünden açılışta kaynak şeması boş. **[—]**
+- [ ] Veritabanı düğümünden açınca ve hedefte veritabanı seçince şema seçicisi "Seçin…" gösterir (listedeki ilk şema kendiliğinden seçili görünmez); iki tarafta şema seçilince "Karşılaştır" etkinleşir. **[—]**
 - [ ] Bağlı olmayan sunucu seçilince parola istemi çıkar; vazgeçilince seçici hata/gerekçe gösterir, sekme açık kalır. **[—]**
 - [ ] Sunucu değişince veritabanı ve şema seçicileri, veritabanı değişince şema seçicisi sıfırlanır. **[—]**
 - [ ] "↔" kaynak ile hedefi yer değiştirir. **[—]**

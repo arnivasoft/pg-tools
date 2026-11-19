@@ -39,9 +39,12 @@ function Select(props: {
         aria-describedby={described() || undefined}
         onChange={(e) => props.onChange(e.currentTarget.value)}
       >
-        <Show when={props.loading} fallback={<option value="">{tsd.choose}</option>}>
-          <option value="">{tsd.loading}</option>
-        </Show>
+        {/* Yer tutucu satır hiç kaldırılmaz (yalnız metni değişir) ve seçim boşken seçili kalır. Yükleme sırasında
+            satırı değiştirmek, tarayıcının listedeki ilk gerçek seçeneği seçili göstermesine yol açıyordu; denetleyicinin
+            değeri `null` kaldığından "Karşılaştır" kapalı kalıyor ve aynı seçeneği yeniden seçmek `change` üretmiyordu. */}
+        <option value="" selected={props.value === ""}>
+          {props.loading ? tsd.loading : tsd.choose}
+        </option>
         {props.children}
       </select>
       <Show when={reason()}>
