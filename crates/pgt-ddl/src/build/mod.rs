@@ -35,7 +35,7 @@ pub mod view;
 
 pub use sqlscan::{ScanResult, scan_semicolons};
 
-use crate::model::{DomainDef, FieldError, MatViewDef, ObjectDef, ObjectKind, TableDef, TriggerDef, ViewDef};
+use crate::model::{DomainDef, FieldError, MatViewDef, ObjectDef, ObjectKind, PolicyDef, TableDef, TablespaceDef, TriggerDef, ViewDef};
 use crate::plan::{Plan, Risk, Statement};
 
 /// PG tanımlayıcı üst sınırı (BAYT, UTF-8).
@@ -289,6 +289,8 @@ fn invalid_utf8_locked(d: &ObjectDef) -> bool {
         ObjectDef::Trigger(d) => &d.unsupported,
         ObjectDef::Type(d) => &d.unsupported,
         ObjectDef::Domain(d) => &d.unsupported,
+        ObjectDef::Policy(d) => &d.unsupported,
+        ObjectDef::Tablespace(d) => &d.unsupported,
         _ => return false,
     };
     unsupported.iter().any(|u| u == crate::load::INVALID_UTF8_REASON)
@@ -312,6 +314,12 @@ fn droppable_despite_invalid_utf8(d: &ObjectDef) -> Option<ObjectDef> {
         }
         ObjectDef::Trigger(x) if only_reason(&x.unsupported) => {
             ObjectDef::Trigger(TriggerDef { unsupported: vec![], editable: true, ..x.clone() })
+        }
+        ObjectDef::Policy(x) if only_reason(&x.unsupported) => {
+            ObjectDef::Policy(PolicyDef { unsupported: vec![], editable: true, ..x.clone() })
+        }
+        ObjectDef::Tablespace(x) if only_reason(&x.unsupported) => {
+            ObjectDef::Tablespace(TablespaceDef { unsupported: vec![], editable: true, ..x.clone() })
         }
         _ => return None,
     })
@@ -622,6 +630,53 @@ mod tests {
         let ObjectDef::Domain(d) = &dom else { unreachable!() };
         let changed = ObjectDef::Domain(DomainDef { comment: Some("x".into()), ..d.clone() });
         assert_eq!(paths(alter(&dom, &changed, &ctx()).unwrap_err()), ro, "drop dışı kilitli kalır");
+    }
+
+    #[test]
+    fn invalid_utf8_policy_and_tablespace_stay_droppable_but_locked() {
+        let reason = vec![crate::load::INVALID_UTF8_REASON.to_string()];
+        let ro = vec![("object".to_string(), routine::READ_ONLY_MSG.to_string())];
+        let paths = |e: Vec<FieldError>| e.into_iter().map(|e| (e.path, e.message)).collect::<Vec<_>>();
+        let pol = ObjectDef::Policy(PolicyDef {
+            schema: "s".into(),
+            table: "t".into(),
+            name: "p".into(),
+            command: PolicyCommand::All,
+            permissive: true,
+            roles: vec![],
+            using: Some("x = 'a\u{FFFD}'::s.\"a\u{FFFD}_multirange\"".into()),
+            with_check: None,
+            comment: None,
+            editable: false,
+            unsupported: reason.clone(),
+            table_rls: None,
+        });
+        assert!(invalid_utf8_locked(&pol));
+        let p = drop(&pol, false, &ctx()).unwrap();
+        assert!(p.statements[0].sql.starts_with("DROP POLICY") && !p.statements[0].sql.contains('\u{FFFD}'), "{p:?}");
+        let ObjectDef::Policy(d) = &pol else { unreachable!() };
+        let changed = ObjectDef::Policy(PolicyDef { comment: Some("x".into()), ..d.clone() });
+        assert_eq!(paths(alter(&pol, &changed, &ctx()).unwrap_err()), ro, "drop dışı kilitli kalır");
+        assert_eq!(paths(create(&pol, &ctx()).unwrap_err()), ro);
+        // Başka gerekçe de varsa drop kilitli kalır.
+        let both = ObjectDef::Policy(PolicyDef { unsupported: vec![reason[0].clone(), "komut 'x'".into()], ..d.clone() });
+        assert_eq!(paths(drop(&both, false, &ctx()).unwrap_err()), ro);
+
+        let ts = ObjectDef::Tablespace(TablespaceDef {
+            name: "ts".into(),
+            owner: None,
+            location: "/a\u{FFFD}".into(),
+            options: TablespaceOptions::default(),
+            comment: None,
+            editable: false,
+            unsupported: reason,
+        });
+        assert!(invalid_utf8_locked(&ts));
+        let p = drop(&ts, false, &ctx()).unwrap();
+        assert!(p.statements[0].sql.starts_with("DROP TABLESPACE") && !p.statements[0].sql.contains('\u{FFFD}'), "{p:?}");
+        let ObjectDef::Tablespace(d) = &ts else { unreachable!() };
+        let changed = ObjectDef::Tablespace(TablespaceDef { comment: Some("x".into()), ..d.clone() });
+        assert_eq!(paths(alter(&ts, &changed, &ctx()).unwrap_err()), ro);
     }
 
     fn table() -> ObjectDef {

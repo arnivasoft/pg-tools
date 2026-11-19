@@ -32,6 +32,8 @@ if ($LASTEXITCODE -ne 0) {
 # `max_connections=300`: test ikilileri çok çekirdekte tüm testleri paralel koşar (her test birkaç bağlantı açar);
 # varsayılan 100 sınırı aşılınca alakasız testler 53300 ile düşer.
 $password = [guid]::NewGuid().ToString("N")
+# Tablespace testleri için kapsayıcı içi dizin kökü (`PGT_TEST_TS_ROOT`; yalnızca test komutu süresince ayarlanır).
+$tsRoot = "/var/lib/postgresql/pgt_ts"
 $urls = @()
 $names = @()
 
@@ -59,10 +61,16 @@ try {
         }
         if (-not $ready) { throw "$name hazır olmadı" }
     }
+    # Tablespace testleri: her kapsayıcıda `postgres` kullanıcısına ait boş ts1…ts8 dizinleri (her test kendi dizinini kullanır).
+    foreach ($name in $names) {
+        docker exec $name sh -c "mkdir -p $tsRoot/ts1 $tsRoot/ts2 $tsRoot/ts3 $tsRoot/ts4 $tsRoot/ts5 $tsRoot/ts6 $tsRoot/ts7 $tsRoot/ts8 && chown -R postgres:postgres $tsRoot" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "$name tablespace dizinleri hazırlanamadı" }
+    }
     # Resmi imaj ilk başlatmada geçici bir sunucu açıp kapatır; kalıcı sunucunun ayağa kalkması için kısa bekleme.
     Start-Sleep -Seconds 3
 
     $env:PGT_TEST_URLS = ($urls -join ",")
+    $env:PGT_TEST_TS_ROOT = $tsRoot
     $cargoArgs = @("test", "--workspace", "--all-features")
     if ($NoFailFast) { $cargoArgs += "--no-fail-fast" }
     if ($SkipPerf) {
@@ -74,6 +82,7 @@ try {
 }
 finally {
     Remove-Item Env:PGT_TEST_URLS -ErrorAction SilentlyContinue
+    Remove-Item Env:PGT_TEST_TS_ROOT -ErrorAction SilentlyContinue
     if (-not $KeepContainers) {
         foreach ($name in $names) { docker rm -f $name *> $null }
     }

@@ -94,6 +94,35 @@ pub async fn cleanup_in(ts: &TestServer, prefix: &str, tag: &str) {
     admin.batch_execute(&format!("DROP ROLE IF EXISTS {}", role_name_in(prefix, tag))).await.unwrap();
 }
 
+/// Tablespace Docker testlerinin kök dizini (`PGT_TEST_TS_ROOT`; sunucu kapsayıcısı içindeki, `postgres` kullanıcısına
+/// ait boş alt dizinleri `ts1`…`ts8` barındırır — `scripts/test-matrix.ps1` hazırlar). Tanımlı değilse `None`: tablespace
+/// testleri atlanır (başarısız sayılmaz). Her test kendi alt dizinini kullanır; aynı dizin iki testte paylaşılmaz.
+pub fn ts_root() -> Option<String> {
+    let v = std::env::var("PGT_TEST_TS_ROOT").ok().filter(|v| !v.is_empty());
+    if v.is_none() {
+        eprintln!("PGT_TEST_TS_ROOT tanımlı değil, tablespace testi atlanıyor");
+    }
+    v
+}
+
+/// Tablespace adı: `pgt_ddl_ts_<etiket>` (küme geneli; etiket testler arasında benzersiz ve `_` içermez).
+pub fn ts_name(tag: &str) -> String {
+    assert!(!tag.contains('_'), "tablespace etiketi '_' içeremez: {tag}");
+    format!("pgt_ddl_ts_{tag}")
+}
+
+/// Etiketin tablespace'lerini (`pgt_ddl_ts_<etiket>` ve `…_<son ek>` türevleri; yeniden adlandırma testleri) siler.
+/// İçindeki nesneler veritabanıyla birlikte silinmiş olmalıdır: önce `cleanup_in`/`drop_test_database`.
+pub async fn drop_test_tablespaces(ts: &TestServer, tag: &str) {
+    let admin = admin_client(ts, &ts.config.maintenance_db).await;
+    let base = ts_name(tag);
+    let sql = "SELECT spcname::text FROM pg_tablespace WHERE spcname::text = $1::text OR left(spcname::text, length($1::text) + 1) = $1::text || '_'";
+    for r in admin.query(sql, &[&base]).await.unwrap() {
+        let name: String = r.get(0);
+        admin.batch_execute(&format!("DROP TABLESPACE IF EXISTS {}", pgt_ddl::quote_ident(&name))).await.unwrap();
+    }
+}
+
 // ---- küme (sunucu kapsamlı) nesneleri: veritabanı ve rol ----
 
 /// Küme nesnesi adı: veritabanı `pgt_ddl_dbk_<ana sürüm>_<etiket>`, rol `pgt_ddl_rk_<etiket>` (her sürüm ayrı
