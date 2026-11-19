@@ -27,6 +27,7 @@ mod sqlscan;
 pub mod table;
 pub mod table_alter;
 pub mod table_constraint;
+pub mod tablespace;
 pub mod trigger;
 pub mod type_canon;
 pub mod type_syntax;
@@ -203,8 +204,7 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Type(d) => pgtype::validate(ctx, d),
         ObjectDef::Domain(d) => domain::validate(ctx, d),
         ObjectDef::Policy(d) => policy::validate(ctx, d),
-        // Geçici: üreticiler sonraki görevlerde (Plan 34).
-        ObjectDef::Tablespace(_) => vec![err("object", "henüz desteklenmiyor")],
+        ObjectDef::Tablespace(d) => tablespace::validate(ctx, d),
     }
 }
 
@@ -354,8 +354,7 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Type(d) => pgtype::create(ctx, d),
         ObjectDef::Domain(d) => domain::create(ctx, d),
         ObjectDef::Policy(d) => policy::create(ctx, d),
-        // Geçici: üreticiler sonraki görevlerde (Plan 34).
-        ObjectDef::Tablespace(_) => Err(vec![err("object", "henüz desteklenmiyor")]),
+        ObjectDef::Tablespace(d) => tablespace::create(ctx, d),
     }
 }
 
@@ -404,6 +403,8 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         // Policy kendi doğrulamasını yapar: tablo değiştirilemez, yalnızca değişen/yazılan alanlar, salt okunur kapısı;
         // komut/permissive değişimi ve ifade kaldırma aynı transaction'da yeniden kurma (Karar 3).
         (ObjectDef::Policy(o), ObjectDef::Policy(n)) => return policy::alter(ctx, o, n),
+        // Tablespace kendi doğrulamasını yapar: konum create-only, yalnızca değişen/yazılan alanlar, salt okunur kapısı.
+        (ObjectDef::Tablespace(o), ObjectDef::Tablespace(n)) => return tablespace::alter(ctx, o, n),
         // Type kendi doğrulamasını yapar: yalnızca değişen/yazılan alanlar, enum/composite `original` eşlemesi, range
         // gövdesi sabit, tür (variant) değişmez, salt okunur kapısı.
         (ObjectDef::Type(o), ObjectDef::Type(n)) => return pgtype::alter(ctx, o, n),
@@ -473,8 +474,8 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Domain(d) => domain::drop(d, cascade),
         // Politika CASCADE bilmez: `cascade` yok sayılır (Karar 3).
         ObjectDef::Policy(d) => policy::drop(d),
-        // Geçici: üreticiler sonraki görevlerde (Plan 34).
-        ObjectDef::Tablespace(_) => Err(vec![err("object", "henüz desteklenmiyor")]),
+        // Tablespace CASCADE bilmez: `cascade` yok sayılır (Karar 7).
+        ObjectDef::Tablespace(d) => tablespace::drop(d),
     }
 }
 

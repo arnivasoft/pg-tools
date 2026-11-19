@@ -693,6 +693,13 @@ pub(crate) fn has_comment(c: &Option<String>) -> bool {
 pub(crate) fn create(d: &TableDef) -> Plan {
     let q = qualified(&d.schema, &d.name);
     let mut statements = vec![stmt(create_sql(d), Risk::Safe, None)];
+    // Satır güvenliği (Plan 34 Karar 4): boş yeni tabloda Safe; sahip/yorumdan önce.
+    if d.row_security.enabled {
+        statements.push(stmt(format!("ALTER TABLE {q} ENABLE ROW LEVEL SECURITY"), Risk::Safe, None));
+    }
+    if d.row_security.forced {
+        statements.push(stmt(format!("ALTER TABLE {q} FORCE ROW LEVEL SECURITY"), Risk::Safe, None));
+    }
     if let Some(o) = &d.owner {
         statements.push(stmt(
             format!("ALTER TABLE {q} OWNER TO {}", quote_ident(o)),
@@ -984,6 +991,33 @@ mod tests {
         assert_eq!(p.risk(), Risk::Safe);
         assert!(p.statements[0].transactional && p.statements[0].note.is_none());
         assert!(p.warnings.is_empty());
+    }
+
+    #[test]
+    fn create_row_security_statements() {
+        let rls = |enabled, forced| TableDef {
+            owner: Some("app".into()),
+            comment: Some("Tablo".into()),
+            row_security: RowSecurity { enabled, forced },
+            ..base()
+        };
+        // Yalnız enabled; CREATE TABLE'dan sonra, sahip/yorumdan önce; Safe.
+        let p = ok(&rls(true, false), &ctx());
+        assert_eq!(
+            sqls(&p),
+            [
+                "CREATE TABLE public.t (\n  id integer\n)",
+                "ALTER TABLE public.t ENABLE ROW LEVEL SECURITY",
+                "ALTER TABLE public.t OWNER TO app",
+                "COMMENT ON TABLE public.t IS 'Tablo'",
+            ]
+        );
+        assert_eq!(p.risk(), Risk::Safe);
+        let p = ok(&rls(true, true), &ctx());
+        assert_eq!(sqls(&p)[1..3], ["ALTER TABLE public.t ENABLE ROW LEVEL SECURITY", "ALTER TABLE public.t FORCE ROW LEVEL SECURITY"]);
+        assert_eq!(p.risk(), Risk::Safe);
+        // Kapalı: ifade yok.
+        assert!(!sqls(&ok(&rls(false, false), &ctx())).iter().any(|s| s.contains("ROW LEVEL")));
     }
 
     #[test]

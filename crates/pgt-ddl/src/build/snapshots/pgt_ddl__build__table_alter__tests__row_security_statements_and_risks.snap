@@ -1,0 +1,13 @@
+---
+source: crates/pgt-ddl/src/build/table_alter.rs
+expression: out
+---
+[Destructive] ALTER TABLE public.t ENABLE ROW LEVEL SECURITY  -- Politikası olmayan tabloda sahibi dışındakiler hiçbir satır görmez.
+
+[Destructive] ALTER TABLE public.t FORCE ROW LEVEL SECURITY  -- Politikası olmayan tabloda sahibi dışındakiler hiçbir satır görmez.
+
+[Safe] ALTER TABLE public.t NO FORCE ROW LEVEL SECURITY
+WARN: Tablonun politikaları devre dışı kalır.
+
+[Safe] ALTER TABLE public.t DISABLE ROW LEVEL SECURITY
+WARN: Tablonun politikaları devre dışı kalır.

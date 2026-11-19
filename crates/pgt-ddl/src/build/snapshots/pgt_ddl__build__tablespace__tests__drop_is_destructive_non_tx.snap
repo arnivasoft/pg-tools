@@ -1,0 +1,5 @@
+---
+source: crates/pgt-ddl/src/build/tablespace.rs
+expression: "render(&bdrop(&o(&h), false, &ctx_v(160000)).unwrap())"
+---
+[Destructive non-tx] DROP TABLESPACE "Ts ""x"""  -- Tablespace boş olmalıdır; içinde nesne varsa sunucu reddeder.

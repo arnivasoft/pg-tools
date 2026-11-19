@@ -55,6 +55,8 @@ use crate::model::{ColumnDef, ConstraintKind, FieldError, IdentityKind, Persiste
 use crate::plan::{Plan, Risk, Statement};
 use crate::quote::{qualified, quote_ident};
 
+const RLS_ENABLE_NOTE: &str = "Politikası olmayan tabloda sahibi dışındakiler hiçbir satır görmez.";
+const RLS_OFF_WARNING: &str = "Tablonun politikaları devre dışı kalır.";
 const RENAME_TABLE_NOTE: &str = "Tabloya adla başvuran fonksiyonlar ve uygulama sorguları etkilenir";
 const SET_SCHEMA_NOTE: &str =
     "Tablonun indeksleri, kısıtları ve kolonlarına bağlı diziler de taşınır; adla başvuran bağımlılar etkilenir";
@@ -542,6 +544,7 @@ fn build(
     ctx: &BuildCtx,
 ) -> Result<Plan, Vec<FieldError>> {
     let mut out = Out::default();
+    let mut rls_off = false;
     let mut warnings = vec![];
     if order_changed(old, new) {
         warnings.push(COLUMN_ORDER_WARNING.to_string());
@@ -856,6 +859,25 @@ fn build(
         };
         out.push(sql, Risk::Safe, Some(FILLFACTOR_NOTE));
     }
+    // Satır güvenliği (Plan 34 Karar 4): kolon/kısıt ifadelerinden sonra, yorumdan önce; bölüm/INHERITS çocuğunda da
+    // serbest (kolon/kısıt kilidi bunu kapsamaz). Açmak/zorlamak Destructive (politikasız tabloda satırlar görünmez
+    // olur), kapatmak Safe + uyarı. FORCE, ENABLE olmadan etkisizdir; yine de bayrak ayrı yazılır.
+    if old.row_security.enabled != new.row_security.enabled {
+        if new.row_security.enabled {
+            out.push(format!("ALTER TABLE {q} ENABLE ROW LEVEL SECURITY"), Risk::Destructive, Some(RLS_ENABLE_NOTE));
+        } else {
+            out.push(format!("ALTER TABLE {q} DISABLE ROW LEVEL SECURITY"), Risk::Safe, None);
+            rls_off = true;
+        }
+    }
+    if old.row_security.forced != new.row_security.forced {
+        if new.row_security.forced {
+            out.push(format!("ALTER TABLE {q} FORCE ROW LEVEL SECURITY"), Risk::Destructive, Some(RLS_ENABLE_NOTE));
+        } else {
+            out.push(format!("ALTER TABLE {q} NO FORCE ROW LEVEL SECURITY"), Risk::Safe, None);
+            rls_off = true;
+        }
+    }
     if norm_comment(&old.comment) != norm_comment(&new.comment) {
         out.push(table_comment_sql(&q, &norm_comment(&new.comment)), Risk::Safe, None);
     }
@@ -904,6 +926,9 @@ fn build(
                 ));
             }
         }
+    }
+    if rls_off {
+        warnings.push(RLS_OFF_WARNING.to_string());
     }
     if pk_dropped {
         warnings.push(PK_DROP_WARNING.to_string());
@@ -1879,6 +1904,63 @@ mod tests {
             })
         });
         assert!(ok(&nv, &nv, &ctx()).statements.is_empty());
+    }
+
+    #[test]
+    fn row_security_statements_and_risks() {
+        let l = loaded();
+        let rs = |enabled, forced| with(&l, |d| d.row_security = RowSecurity { enabled, forced });
+        let (off, en, enf) = (rs(false, false), rs(true, false), rs(true, true));
+        // Değişmeyen bayrak → ifade yok.
+        for d in [&off, &en, &enf] {
+            assert!(ok(d, d, &ctx()).statements.is_empty());
+        }
+        let mut out = String::new();
+        for (old, new, sql, risk) in [
+            (&off, &en, "ALTER TABLE public.t ENABLE ROW LEVEL SECURITY", Risk::Destructive),
+            (&en, &enf, "ALTER TABLE public.t FORCE ROW LEVEL SECURITY", Risk::Destructive),
+            (&enf, &en, "ALTER TABLE public.t NO FORCE ROW LEVEL SECURITY", Risk::Safe),
+            (&en, &off, "ALTER TABLE public.t DISABLE ROW LEVEL SECURITY", Risk::Safe),
+        ] {
+            let p = ok(old, new, &ctx());
+            assert_eq!(sqls(&p), [sql]);
+            assert_eq!(p.statements[0].risk, risk);
+            assert!(p.statements[0].transactional);
+            if risk == Risk::Destructive {
+                assert_eq!(p.statements[0].note.as_deref(), Some(RLS_ENABLE_NOTE));
+                assert!(!p.warnings.contains(&RLS_OFF_WARNING.to_string()));
+            } else {
+                assert!(p.statements[0].note.is_none());
+                assert!(p.warnings.contains(&RLS_OFF_WARNING.to_string()));
+            }
+            out.push_str(&render(&p));
+            out.push('\n');
+        }
+        insta::assert_snapshot!(out);
+        // Sıra: kolon ifadelerinden sonra, yorumdan önce; yeni adla.
+        let new = with(&off, |d| {
+            d.name = "t2".into();
+            d.comment = Some("Yeni".into());
+            d.row_security = RowSecurity { enabled: true, forced: true };
+            d.columns.push(col("x", "text"));
+        });
+        let p = ok(&off, &new, &ctx());
+        let s = sqls(&p);
+        let pos = |needle: &str| s.iter().position(|x| x.contains(needle)).unwrap();
+        assert!(pos("ADD COLUMN") < pos("ENABLE ROW LEVEL"));
+        assert!(pos("ENABLE ROW LEVEL") < pos("FORCE ROW LEVEL"));
+        assert!(pos("FORCE ROW LEVEL") < pos("COMMENT ON TABLE"));
+        assert!(s[pos("ENABLE ROW LEVEL")].starts_with("ALTER TABLE public.t2 "));
+        // Bölüm tablosunda ve INHERITS çocuğunda izinli.
+        for flag in ["part", "inh"] {
+            let base = with(&off, |d| {
+                d.is_partition = flag == "part";
+                d.inherits = flag == "inh";
+            });
+            let en = with(&base, |d| d.row_security.enabled = true);
+            let p = ok(&base, &en, &ctx());
+            assert_eq!(sqls(&p), ["ALTER TABLE public.t ENABLE ROW LEVEL SECURITY"]);
+        }
     }
 
     #[test]
