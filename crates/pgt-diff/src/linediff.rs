@@ -389,6 +389,7 @@ mod tests {
             partition_text: None,
             is_partition: false,
             inherits: false,
+            row_security: pgt_ddl::RowSecurity::default(),
             unsupported: vec![],
         }
     }

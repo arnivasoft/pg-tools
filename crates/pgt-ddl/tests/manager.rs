@@ -1211,6 +1211,7 @@ async fn table_protect_body(ts: TestServer) {
         partition_text: None,
         is_partition: false,
         inherits: false,
+        row_security: RowSecurity::default(),
         unsupported: vec![],
     };
     let r = f.apply_with(&PlanRequest::Drop { object, def: tbl(&fake), cascade: true, force: false }, |o| (o.confirmed, o.confirmed_production) = (true, true)).await;

@@ -843,6 +843,7 @@ mod tests {
             partition_text: None,
             is_partition: false,
             inherits: false,
+            row_security: RowSecurity::default(),
             unsupported: vec![],
         }
     }

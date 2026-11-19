@@ -201,6 +201,8 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Trigger(d) => trigger::validate(ctx, d),
         ObjectDef::Type(d) => pgtype::validate(ctx, d),
         ObjectDef::Domain(d) => domain::validate(ctx, d),
+        // Geçici: üreticiler sonraki görevlerde (Plan 34).
+        ObjectDef::Policy(_) | ObjectDef::Tablespace(_) => vec![err("object", "henüz desteklenmiyor")],
     }
 }
 
@@ -261,6 +263,13 @@ pub(crate) fn validate_identity(def: &ObjectDef) -> Vec<FieldError> {
             check_old_schema_ident("schema", &d.schema, &mut e);
             check_old_ident("name", &d.name, &mut e);
         }
+        // Politika: tablo kapsamlı (Trigger gibi); tablo adı da ifadeye girer.
+        ObjectDef::Policy(d) => {
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("table", &d.table, &mut e);
+            check_old_ident("name", &d.name, &mut e);
+        }
+        ObjectDef::Tablespace(d) => check_old_ident("name", &d.name, &mut e),
     }
     e
 }
@@ -342,6 +351,8 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Trigger(d) => trigger::create(ctx, d),
         ObjectDef::Type(d) => pgtype::create(ctx, d),
         ObjectDef::Domain(d) => domain::create(ctx, d),
+        // Geçici: üreticiler sonraki görevlerde (Plan 34).
+        ObjectDef::Policy(_) | ObjectDef::Tablespace(_) => Err(vec![err("object", "henüz desteklenmiyor")]),
     }
 }
 
@@ -454,6 +465,8 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Trigger(d) => trigger::drop(d, cascade),
         ObjectDef::Type(d) => pgtype::drop(d, cascade),
         ObjectDef::Domain(d) => domain::drop(d, cascade),
+        // Geçici: üreticiler sonraki görevlerde (Plan 34).
+        ObjectDef::Policy(_) | ObjectDef::Tablespace(_) => Err(vec![err("object", "henüz desteklenmiyor")]),
     }
 }
 
@@ -617,6 +630,7 @@ mod tests {
             partition_text: None,
             is_partition: false,
             inherits: false,
+            row_security: RowSecurity::default(),
             unsupported: vec![],
         })
     }

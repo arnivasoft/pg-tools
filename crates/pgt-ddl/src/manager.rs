@@ -1276,6 +1276,8 @@ impl DdlManager {
                 (ObjectKind::Type, FIND_TYPE_SQL.into(), text(&[&d.schema, &d.name, &typtype.to_string()]))
             }
             ObjectDef::Domain(d) => (ObjectKind::Domain, FIND_TYPE_SQL.into(), text(&[&d.schema, &d.name, &"d".to_string()])),
+            // Geçici: oid araması sonraki görevlerde (Plan 34); en iyi çaba → `None`.
+            ObjectDef::Policy(_) | ObjectDef::Tablespace(_) => return None,
         };
         let row = self
             .mgr
@@ -1423,6 +1425,7 @@ impl DdlManager {
                     partition_text: None,
                     is_partition: false,
                     inherits: false,
+                    row_security: RowSecurity::default(),
                     unsupported: vec![],
                 })
             }
@@ -1604,6 +1607,8 @@ impl DdlManager {
                     unsupported: vec![],
                 })
             }
+            // Geçici: varsayılanlar sonraki görevlerde (Plan 34).
+            ObjectKind::Policy | ObjectKind::Tablespace => return invalid("henüz desteklenmiyor"),
         })
     }
 
@@ -2058,6 +2063,7 @@ mod tests {
             partition_text: None,
             is_partition: false,
             inherits: false,
+            row_security: RowSecurity::default(),
             unsupported: vec![],
         })
     }

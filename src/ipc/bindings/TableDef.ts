@@ -3,6 +3,7 @@ import type { ColumnDef } from "./ColumnDef";
 import type { ConstraintDef } from "./ConstraintDef";
 import type { PartitionByDef } from "./PartitionByDef";
 import type { Persistence } from "./Persistence";
+import type { RowSecurity } from "./RowSecurity";
 
 export type TableDef = { schema: string, name: string, owner: string | null, tablespace: string | null, persistence: Persistence, columns: Array<ColumnDef>, constraints: Array<ConstraintDef>, 
 /**
@@ -21,6 +22,10 @@ isPartition: boolean,
  * Yalnızca yüklemede dolar: tablo kalıtımla bir üst tabloya bağlıdır.
  */
 inherits: boolean, 
+/**
+ * Satır güvenliği bayrakları (`relrowsecurity`/`relforcerowsecurity`); eksikse kapalı (geri uyum).
+ */
+rowSecurity: RowSecurity, 
 /**
  * Yalnızca yüklemede dolar: modellenmeyen ve alter'ın dokunmadığı kısıt/özelliklerin insan okunur listesi.
  */

@@ -199,7 +199,8 @@ pub fn normalize(def: &ObjectDef, side: SideTag, cx: &NormCtx) -> ObjectDef {
                 db.owner = None;
             }
         }
-        ObjectDef::Extension(_) | ObjectDef::Role(_) => {}
+        // Politika/Tablespace şema karşılaştırmasına girmez (backlog); dokunulmaz.
+        ObjectDef::Extension(_) | ObjectDef::Role(_) | ObjectDef::Policy(_) | ObjectDef::Tablespace(_) => {}
     }
     d
 }
@@ -766,6 +767,7 @@ mod tests {
             partition_text: None,
             is_partition: false,
             inherits: false,
+            row_security: pgt_ddl::RowSecurity::default(),
             unsupported: vec![],
         }
     }

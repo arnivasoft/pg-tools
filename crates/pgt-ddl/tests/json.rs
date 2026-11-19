@@ -93,14 +93,34 @@ fn defs() -> Vec<(ObjectKind, Value)> {
                    "constraints": [{"name": null, "expression": "VALUE > 0", "notValid": true, "validated": false, "original": null, "validate": false}],
                    "editable": true, "unsupported": []}),
         ),
+        (
+            ObjectKind::Policy,
+            json!({"kind": "policy", "schema": "public", "table": "t", "name": "pol", "command": "select", "permissive": true,
+                   "roles": ["a"], "using": "owner = current_user", "withCheck": null, "comment": null, "editable": true,
+                   "unsupported": [], "tableRls": {"enabled": true, "forced": false}}),
+        ),
+        (
+            ObjectKind::Tablespace,
+            json!({"kind": "tablespace", "name": "fast", "owner": "me", "location": "/mnt/ssd",
+                   "options": {"seqPageCost": "1.5", "randomPageCost": null, "effectiveIoConcurrency": null, "maintenanceIoConcurrency": "4"},
+                   "comment": null, "editable": true, "unsupported": []}),
+        ),
     ]
 }
 
 #[test]
 fn every_object_kind_has_a_json_fixture() {
     let kinds: Vec<ObjectKind> = defs().into_iter().map(|(k, _)| k).collect();
-    assert_eq!(kinds.len(), 14);
-    for k in [ObjectKind::Function, ObjectKind::Procedure, ObjectKind::Trigger, ObjectKind::Type, ObjectKind::Domain] {
+    assert_eq!(kinds.len(), 16);
+    for k in [
+        ObjectKind::Function,
+        ObjectKind::Procedure,
+        ObjectKind::Trigger,
+        ObjectKind::Type,
+        ObjectKind::Domain,
+        ObjectKind::Policy,
+        ObjectKind::Tablespace,
+    ] {
         assert!(kinds.contains(&k), "{k:?}");
     }
 }
@@ -152,7 +172,7 @@ fn table_json() -> Value {
              "deferrable": false, "initiallyDeferred": false, "notValid": true}
         ],
         "partitionBy": null, "fillfactor": null, "comment": null,
-        "partitionText": null, "isPartition": false, "inherits": false, "unsupported": []
+        "partitionText": null, "isPartition": false, "inherits": false, "rowSecurity": {"enabled": true, "forced": false}, "unsupported": []
     })
 }
 

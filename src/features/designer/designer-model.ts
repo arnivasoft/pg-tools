@@ -58,6 +58,8 @@ const KIND_LABELS: Record<ObjectKind, string> = {
   trigger: "Trigger",
   type: "Type",
   domain: "Domain",
+  policy: "Politika",
+  tablespace: "Tablespace",
 };
 export function kindLabel(kind: ObjectKind): string {
   return KIND_LABELS[kind];
@@ -65,7 +67,7 @@ export function kindLabel(kind: ObjectKind): string {
 
 /** Plan 14: sunucu kapsamlı türler (bakım veritabanında; databaseOid her zaman null). */
 export function isServerScoped(kind: ObjectKind): boolean {
-  return kind === "database" || kind === "role";
+  return kind === "database" || kind === "role" || kind === "tablespace";
 }
 
 /** Planda gizlenmiş (parola) ifade var mı → Query Tool'a aktarılmaz/kopyalanmaz, uygulamada parola gerekir. */
@@ -106,6 +108,7 @@ export function defName(def: DesignerDef): string {
     case "domain":
       return `${def.schema}.${def.name}`;
     case "trigger":
+    case "policy":
       return `${def.schema}.${def.table}.${def.name}`;
     default:
       return def.name;

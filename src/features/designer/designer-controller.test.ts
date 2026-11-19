@@ -1009,7 +1009,8 @@ describe("designer-controller yerel engel (sequence sayıları)", () => {
 
 const tbl = (p: Partial<TableDef> = {}): ObjectDef => ({
   kind: "table", schema: "public", name: "orders", owner: null, tablespace: null, persistence: "permanent", columns: [], constraints: [],
-  partitionBy: null, fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false, unsupported: [], ...p,
+  partitionBy: null, fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false,
+  rowSecurity: { enabled: false, forced: false }, unsupported: [], ...p,
 });
 const TOBJ: ObjectRef = { kind: "table", oid: 500 };
 

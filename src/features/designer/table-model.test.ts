@@ -13,7 +13,8 @@ import {
 
 const T = (p: Partial<TableDef> = {}): TableDef => ({
   schema: "public", name: "t", owner: null, tablespace: null, persistence: "permanent", columns: [], constraints: [], partitionBy: null,
-  fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false, unsupported: [], ...p,
+  fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false,
+  rowSecurity: { enabled: false, forced: false }, unsupported: [], ...p,
 });
 const col = (name: string, attnum: number | null, p: Partial<ColumnDef> = {}): ColumnDef => ({ ...newColumn(), name, attnum, dataType: "integer", ...p });
 const uq = (columns: string[], oid: number | null, include: string[] = []): ConstraintDef => ({

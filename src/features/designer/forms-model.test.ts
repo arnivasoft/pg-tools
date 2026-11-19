@@ -561,14 +561,15 @@ describe("DOMAIN_PATHS (Plan 19 Task 6)", () => {
 });
 
 describe("FORM_PATHS tam eşleme (Plan 19 Task 6: Partial yok)", () => {
-  it("her ObjectKind (14 tür) için boş olmayan yol kümesi", () => {
+  it("her ObjectKind (16 tür) için yol kümesi; Policy/Tablespace formları gelene kadar boş (Plan 35)", () => {
     const all: Record<ObjectKind, true> = {
       schema: true, sequence: true, extension: true, index: true, table: true, view: true, materialized_view: true, database: true,
-      role: true, function: true, procedure: true, trigger: true, type: true, domain: true,
+      role: true, function: true, procedure: true, trigger: true, type: true, domain: true, policy: true, tablespace: true,
     };
     const kinds = Object.keys(all) as ObjectKind[];
-    expect(kinds).toHaveLength(14);
+    expect(kinds).toHaveLength(16);
     expect(Object.keys(FORM_PATHS).sort()).toEqual([...kinds].sort());
-    expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
+    expect(kinds.filter((k) => k !== "policy" && k !== "tablespace").every((k) => FORM_PATHS[k].size > 0)).toBe(true);
+    expect(FORM_PATHS.policy.size + FORM_PATHS.tablespace.size).toBe(0);
   });
 });

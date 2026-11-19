@@ -211,6 +211,8 @@ fn kind_label(k: ObjectKind) -> &'static str {
         ObjectKind::Extension => "Eklenti",
         ObjectKind::Database => "Veritabanı",
         ObjectKind::Role => "Rol",
+        ObjectKind::Policy => "Politika",
+        ObjectKind::Tablespace => "Tablespace",
     }
 }
 
@@ -231,6 +233,8 @@ fn kind_rank(k: ObjectKind) -> u8 {
         ObjectKind::Extension => 11,
         ObjectKind::Database => 12,
         ObjectKind::Role => 13,
+        ObjectKind::Policy => 14,
+        ObjectKind::Tablespace => 15,
     }
 }
 

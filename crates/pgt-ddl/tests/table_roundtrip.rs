@@ -102,6 +102,7 @@ fn table(schema: &str, name: &str, columns: Vec<ColumnDef>, constraints: Vec<Con
         partition_text: None,
         is_partition: false,
         inherits: false,
+        row_security: RowSecurity::default(),
         unsupported: vec![],
     }
 }

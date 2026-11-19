@@ -5,10 +5,12 @@ import type { ExtensionDef } from "./ExtensionDef";
 import type { FunctionDef } from "./FunctionDef";
 import type { IndexDef } from "./IndexDef";
 import type { MatViewDef } from "./MatViewDef";
+import type { PolicyDef } from "./PolicyDef";
 import type { RoleDef } from "./RoleDef";
 import type { SchemaDef } from "./SchemaDef";
 import type { SequenceDef } from "./SequenceDef";
 import type { TableDef } from "./TableDef";
+import type { TablespaceDef } from "./TablespaceDef";
 import type { TriggerDef } from "./TriggerDef";
 import type { TypeDef } from "./TypeDef";
 import type { ViewDef } from "./ViewDef";
@@ -16,4 +18,4 @@ import type { ViewDef } from "./ViewDef";
 /**
  * Arayüz ile arka uç arasındaki nesne tanımı (`kind` etiketi nesne türüdür).
  */
-export type ObjectDef = { "kind": "schema" } & SchemaDef | { "kind": "sequence" } & SequenceDef | { "kind": "extension" } & ExtensionDef | { "kind": "index" } & IndexDef | { "kind": "table" } & TableDef | { "kind": "view" } & ViewDef | { "kind": "materialized_view" } & MatViewDef | { "kind": "database" } & DatabaseDef | { "kind": "role" } & RoleDef | { "kind": "function" } & FunctionDef | { "kind": "procedure" } & FunctionDef | { "kind": "trigger" } & TriggerDef | { "kind": "type" } & TypeDef | { "kind": "domain" } & DomainDef;
+export type ObjectDef = { "kind": "schema" } & SchemaDef | { "kind": "sequence" } & SequenceDef | { "kind": "extension" } & ExtensionDef | { "kind": "index" } & IndexDef | { "kind": "table" } & TableDef | { "kind": "view" } & ViewDef | { "kind": "materialized_view" } & MatViewDef | { "kind": "database" } & DatabaseDef | { "kind": "role" } & RoleDef | { "kind": "function" } & FunctionDef | { "kind": "procedure" } & FunctionDef | { "kind": "trigger" } & TriggerDef | { "kind": "type" } & TypeDef | { "kind": "domain" } & DomainDef | { "kind": "policy" } & PolicyDef | { "kind": "tablespace" } & TablespaceDef;

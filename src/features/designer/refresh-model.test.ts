@@ -9,7 +9,7 @@ import { extraRefreshIds, titleAfterApply, type OpenContext } from "./refresh-mo
 
 const flags = { connected: true, partitioned: false, system: false, primaryKey: false, notNull: false, fromExtension: false, locked: false };
 const tbl = (p: Record<string, unknown> = {}): ObjectDef =>
-  ({ kind: "table", schema: "public", name: "orders", owner: null, tablespace: null, persistence: "permanent", columns: [], constraints: [], partitionBy: null, fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false, unsupported: [], ...p }) as ObjectDef;
+  ({ kind: "table", schema: "public", name: "orders", owner: null, tablespace: null, persistence: "permanent", columns: [], constraints: [], partitionBy: null, fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false, rowSecurity: { enabled: false, forced: false }, unsupported: [], ...p }) as ObjectDef;
 const seq = (p: Record<string, unknown> = {}): ObjectDef => ({ kind: "sequence", schema: "public", name: "s", ...p }) as unknown as ObjectDef;
 const info = (p: Partial<AppliedInfo> & Pick<AppliedInfo, "after">): AppliedInfo => ({
   tabId: "T", kind: p.after.kind, mode: "alter", before: null, object: { kind: p.after.kind, oid: 1 }, ...p,

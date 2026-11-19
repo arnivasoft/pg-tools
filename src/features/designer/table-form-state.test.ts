@@ -10,7 +10,8 @@ vi.mock("solid-js", async () => await import("solid-js/dist/solid.js" as string)
 
 const T = (p: Partial<TableDef> = {}): ObjectDef => ({
   kind: "table", schema: "public", name: "t", owner: null, tablespace: null, persistence: "permanent", columns: [], constraints: [],
-  partitionBy: null, fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false, unsupported: [], ...p,
+  partitionBy: null, fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false,
+  rowSecurity: { enabled: false, forced: false }, unsupported: [], ...p,
 });
 const col = (name: string, attnum: number | null) => ({
   attnum, name, dataType: "integer", notNull: false, default: null, identity: null, generated: null, collation: null, comment: null, using: null,

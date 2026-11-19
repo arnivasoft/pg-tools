@@ -53,6 +53,19 @@ describe("kindLabel / defName", () => {
       start: "1", cache: "1", cycle: false, ownedBy: null, comment: null,
     })).toBe("s.q");
   });
+  it("Plan 34 türleri: etiketler; politika tablo bağlamlı ad, tablespace yalnız ad", () => {
+    expect(kindLabel("policy")).toBe("Politika");
+    expect(kindLabel("tablespace")).toBe("Tablespace");
+    expect(defName({
+      kind: "policy", schema: "s", table: "t", name: "p", command: "all", permissive: true, roles: [], using: null, withCheck: null,
+      comment: null, editable: true, unsupported: [], tableRls: null,
+    })).toBe("s.t.p");
+    expect(defName({
+      kind: "tablespace", name: "fast", owner: null, location: "/x",
+      options: { seqPageCost: null, randomPageCost: null, effectiveIoConcurrency: null, maintenanceIoConcurrency: null },
+      comment: null, editable: true, unsupported: [],
+    })).toBe("fast");
+  });
   it("Plan 18 türleri: etiketler; function/procedure/type/domain şema nitelikli, trigger tablo bağlamıyla", () => {
     expect(["function", "procedure", "trigger", "type", "domain"].map((k) => kindLabel(k as ObjectKind))).toEqual([
       "Function", "Procedure", "Trigger", "Type", "Domain",
@@ -519,10 +532,11 @@ const redactedView = (p: Partial<PlanView> = {}): PlanView =>
   view({ statements: [stmt("CREATE ROLE r LOGIN"), { ...stmt("ALTER ROLE r PASSWORD ********"), redacted: true }], ...p });
 
 describe("Plan 15: sunucu kapsamı, gizlenmiş plan, parola kapısı", () => {
-  it("isServerScoped: yalnızca database ve role", () => {
+  it("isServerScoped: yalnızca database, role ve tablespace", () => {
     const table: Record<ObjectKind, boolean> = {
       schema: false, sequence: false, extension: false, index: false, table: false, view: false, materialized_view: false,
-      database: true, role: true, function: false, procedure: false, trigger: false, type: false, domain: false,
+      database: true, role: true, function: false, procedure: false, trigger: false, type: false, domain: false, policy: false,
+      tablespace: true,
     };
     for (const [k, v] of Object.entries(table)) expect(isServerScoped(k as ObjectKind)).toBe(v);
   });

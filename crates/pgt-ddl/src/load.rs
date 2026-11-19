@@ -193,6 +193,8 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into
         ObjectKind::Trigger => load_trigger(mgr, server, database_oid, obj.oid).await,
         ObjectKind::Type => load_type(mgr, server, database_oid, obj.oid).await,
         ObjectKind::Domain => load_domain(mgr, server, database_oid, obj.oid).await,
+        // Geçici: yükleyiciler sonraki görevlerde (Plan 34).
+        ObjectKind::Policy | ObjectKind::Tablespace => Err(Error::Invalid("henüz desteklenmiyor".to_string())),
     }
 }
 
@@ -217,6 +219,8 @@ pub async fn load_in(client: &Client, version_num: u32, obj: ObjectRef) -> Resul
         ObjectKind::Domain => parse_domain(fetch_domain(client, v, oid).await.map_err(q)?),
         // `in_scope` bunları zaten eledi.
         ObjectKind::Database | ObjectKind::Role => Err(Error::Invalid(SERVER_SCOPED_MSG.to_string())),
+        // Geçici: yükleyiciler sonraki görevlerde (Plan 34).
+        ObjectKind::Policy | ObjectKind::Tablespace => Err(Error::Invalid("henüz desteklenmiyor".to_string())),
     }
 }
 
@@ -638,6 +642,8 @@ fn parse_table((head, cols, cons): TableRows) -> Result<ObjectDef> {
         partition_text: h.get("partition_text"),
         is_partition: h.get("is_partition"),
         inherits: h.get("inherits"),
+        // Geçici: RLS bayrakları yükleyicide sonraki görevde okunur.
+        row_security: RowSecurity::default(),
         unsupported,
     }))
 }
