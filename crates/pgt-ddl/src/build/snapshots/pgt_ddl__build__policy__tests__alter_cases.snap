@@ -1,0 +1,58 @@
+---
+source: crates/pgt-ddl/src/build/policy.rs
+expression: out
+---
+# yalnız ad
+[Safe] ALTER POLICY pol ON public.t RENAME TO yeni
+
+# roller
+[Safe] ALTER POLICY pol ON public.t TO a, b
+
+# roller PUBLIC'e
+[Safe] ALTER POLICY pol ON public.t TO PUBLIC
+
+# using değişimi
+[Safe] ALTER POLICY pol ON public.t USING (a > 1
+)
+
+# ad + using
+[Safe] ALTER POLICY pol ON public.t RENAME TO yeni
+[Safe] ALTER POLICY yeni ON public.t USING (a > 1
+)
+
+# komut değişimi
+[Destructive] DROP POLICY pol ON public.t  -- Politika aynı transaction içinde yeniden kurulur.
+[Safe] CREATE POLICY pol ON public.t AS PERMISSIVE FOR SELECT TO PUBLIC USING (a > 0
+)
+[Safe] COMMENT ON POLICY pol ON public.t IS 'c'
+
+# permissive değişimi
+[Destructive] DROP POLICY pol ON public.t  -- Politika aynı transaction içinde yeniden kurulur.
+[Safe] CREATE POLICY pol ON public.t AS RESTRICTIVE FOR ALL TO PUBLIC USING (a > 0
+)
+
+# using kaldırma
+[Destructive] DROP POLICY pol ON public.t  -- Politika aynı transaction içinde yeniden kurulur.
+[Safe] CREATE POLICY pol ON public.t AS PERMISSIVE FOR ALL TO PUBLIC
+WARN: İfadesiz politika: PERMISSIVE tüm satırlara izin verir, RESTRICTIVE etkisizdir.
+
+# with check ekleme
+[Safe] ALTER POLICY pol ON public.t WITH CHECK (b > 0
+)
+
+# using ekleme
+[Safe] ALTER POLICY pol ON public.t USING (a > 0
+)
+
+# yorum
+[Safe] COMMENT ON POLICY pol ON public.t IS 'it''s'
+
+# yorum kaldırma
+[Safe] COMMENT ON POLICY pol ON public.t IS NULL
+
+# hepsi birden
+[Safe] ALTER POLICY pol ON public.t RENAME TO yeni
+[Safe] ALTER POLICY yeni ON public.t TO z USING (a > 2
+) WITH CHECK (b > 2
+)
+[Safe] COMMENT ON POLICY yeni ON public.t IS 'c'

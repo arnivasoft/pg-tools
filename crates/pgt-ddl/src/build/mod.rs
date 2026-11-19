@@ -17,6 +17,7 @@ pub mod index;
 pub mod maintenance;
 pub mod matview;
 pub mod pgtype;
+pub mod policy;
 pub mod role;
 pub mod routine;
 pub mod schema;
@@ -201,8 +202,9 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Trigger(d) => trigger::validate(ctx, d),
         ObjectDef::Type(d) => pgtype::validate(ctx, d),
         ObjectDef::Domain(d) => domain::validate(ctx, d),
+        ObjectDef::Policy(d) => policy::validate(ctx, d),
         // Geçici: üreticiler sonraki görevlerde (Plan 34).
-        ObjectDef::Policy(_) | ObjectDef::Tablespace(_) => vec![err("object", "henüz desteklenmiyor")],
+        ObjectDef::Tablespace(_) => vec![err("object", "henüz desteklenmiyor")],
     }
 }
 
@@ -351,8 +353,9 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Trigger(d) => trigger::create(ctx, d),
         ObjectDef::Type(d) => pgtype::create(ctx, d),
         ObjectDef::Domain(d) => domain::create(ctx, d),
+        ObjectDef::Policy(d) => policy::create(ctx, d),
         // Geçici: üreticiler sonraki görevlerde (Plan 34).
-        ObjectDef::Policy(_) | ObjectDef::Tablespace(_) => Err(vec![err("object", "henüz desteklenmiyor")]),
+        ObjectDef::Tablespace(_) => Err(vec![err("object", "henüz desteklenmiyor")]),
     }
 }
 
@@ -398,6 +401,9 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         // Trigger kendi doğrulamasını yapar: tablo değiştirilemez, yalnızca değişen/yazılan alanlar, salt okunur kapısı;
         // yapı değişimi PG 14+'da OR REPLACE, aksi hâlde aynı transaction'da yeniden kurma (Karar 5).
         (ObjectDef::Trigger(o), ObjectDef::Trigger(n)) => return trigger::alter(ctx, o, n),
+        // Policy kendi doğrulamasını yapar: tablo değiştirilemez, yalnızca değişen/yazılan alanlar, salt okunur kapısı;
+        // komut/permissive değişimi ve ifade kaldırma aynı transaction'da yeniden kurma (Karar 3).
+        (ObjectDef::Policy(o), ObjectDef::Policy(n)) => return policy::alter(ctx, o, n),
         // Type kendi doğrulamasını yapar: yalnızca değişen/yazılan alanlar, enum/composite `original` eşlemesi, range
         // gövdesi sabit, tür (variant) değişmez, salt okunur kapısı.
         (ObjectDef::Type(o), ObjectDef::Type(n)) => return pgtype::alter(ctx, o, n),
@@ -465,8 +471,10 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Trigger(d) => trigger::drop(d, cascade),
         ObjectDef::Type(d) => pgtype::drop(d, cascade),
         ObjectDef::Domain(d) => domain::drop(d, cascade),
+        // Politika CASCADE bilmez: `cascade` yok sayılır (Karar 3).
+        ObjectDef::Policy(d) => policy::drop(d),
         // Geçici: üreticiler sonraki görevlerde (Plan 34).
-        ObjectDef::Policy(_) | ObjectDef::Tablespace(_) => Err(vec![err("object", "henüz desteklenmiyor")]),
+        ObjectDef::Tablespace(_) => Err(vec![err("object", "henüz desteklenmiyor")]),
     }
 }
 

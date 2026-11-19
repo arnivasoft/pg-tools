@@ -1,0 +1,35 @@
+---
+source: crates/pgt-ddl/src/build/policy.rs
+expression: out
+---
+# all permissive public ifadesiz
+[Safe] CREATE POLICY pol ON public.t AS PERMISSIVE FOR ALL TO PUBLIC
+WARN: İfadesiz politika: PERMISSIVE tüm satırlara izin verir, RESTRICTIVE etkisizdir.
+
+# select restrictive iki rol using
+[Safe] CREATE POLICY pol ON public.t AS RESTRICTIVE FOR SELECT TO a, "Rol B" USING (owner = current_user
+)
+
+# insert with check
+[Safe] CREATE POLICY pol ON public.t AS PERMISSIVE FOR INSERT TO PUBLIC WITH CHECK (x > 0
+)
+
+# update her ikisi + yorum
+[Safe] CREATE POLICY pol ON public.t AS PERMISSIVE FOR UPDATE TO PUBLIC USING (x > 0 -- yorum
+
+) WITH CHECK (x < 9
+)
+[Safe] COMMENT ON POLICY pol ON public.t IS 'it''s'
+
+# delete using
+[Safe] CREATE POLICY pol ON public.t AS PERMISSIVE FOR DELETE TO PUBLIC USING (true
+)
+
+# tabloda rls kapalı
+[Safe] CREATE POLICY pol ON public.t AS PERMISSIVE FOR ALL TO PUBLIC USING (true
+)
+WARN: Tabloda satır güvenliği kapalı; politika etkili olmaz.
+
+# tabloda rls açık
+[Safe] CREATE POLICY pol ON public.t AS PERMISSIVE FOR ALL TO PUBLIC USING (true
+)
