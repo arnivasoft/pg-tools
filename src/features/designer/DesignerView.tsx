@@ -37,8 +37,8 @@ const FORMS: Record<ObjectKind, FormEntry> = {
   trigger: { view: lazy(() => import("./TriggerForm")), paths: FORM_PATHS.trigger },
   type: { view: lazy(() => import("./TypeForm")), paths: FORM_PATHS.type },
   domain: { view: lazy(() => import("./DomainForm")), paths: FORM_PATHS.domain },
-  // Geçici koruma (Plan 34): Policy/Tablespace formları Plan 35'te gelir; menüde de eylem yok.
-  policy: { view: formMissing, paths: FORM_PATHS.policy },
+  policy: { view: lazy(() => import("./PolicyForm")), paths: FORM_PATHS.policy },
+  // Geçici koruma: Tablespace formu Plan 35 Task 3'te gelir.
   tablespace: { view: formMissing, paths: FORM_PATHS.tablespace },
 };
 

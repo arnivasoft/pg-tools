@@ -86,8 +86,14 @@ export const TYPE_PATHS: ReadonlySet<string> = new Set(["schema", "name", "owner
 export const DOMAIN_PATHS: ReadonlySet<string> = new Set([
   "schema", "name", "owner", "comment", "baseType", "collation", "default", "constraints", "object",
 ]);
-/** Policy/Tablespace: formlar Plan 35'te; o zamana kadar boş küme (tüm hatalar genel şeride düşer). */
-export const POLICY_PATHS: ReadonlySet<string> = new Set();
+/**
+ * Policy (spec §9.2): `roles` kökü `roles[i]` alt yollarını kapsar; `old.*` genel şeride düşer. `schema`/`table`/`object`
+ * salt okunur bilgi olsa da kök listededir (formun üstünde gösterilir).
+ */
+export const POLICY_PATHS: ReadonlySet<string> = new Set([
+  "schema", "table", "name", "roles", "using", "withCheck", "comment", "object",
+]);
+/** Tablespace: formu Plan 35 Task 3'te; o zamana kadar boş küme (tüm hatalar genel şeride düşer). */
 export const TABLESPACE_PATHS: ReadonlySet<string> = new Set();
 /** Tür → bilinen yollar (testte denetlenir; her `ObjectKind` için tanımlı). */
 export const FORM_PATHS: Record<ObjectKind, ReadonlySet<string>> = {
