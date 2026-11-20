@@ -20,7 +20,7 @@ use super::type_syntax::validate_type;
 use super::{BuildCtx, check_ident, check_schema_ident, check_text, err, stmt};
 use crate::model::{
     ColumnDef, ConstraintDef, ConstraintKind, FieldError, FkAction, FkMatch, IdentityKind,
-    PartitionKey, PartitionStrategy, Persistence, TableDef,
+    PartitionByDef, PartitionKey, PartitionStrategy, Persistence, TableDef,
 };
 use crate::plan::{Plan, Risk};
 use crate::quote::{qualified, quote_ident, quote_literal};
@@ -176,6 +176,12 @@ fn strategy_sql(s: PartitionStrategy) -> &'static str {
     }
 }
 
+/// ` PARTITION BY <strateji> (<anahtarlar>)` (başında boşluk; Partition üreticisi de kullanır).
+pub(crate) fn partition_by_sql(p: &PartitionByDef) -> String {
+    let keys: Vec<String> = p.keys.iter().map(partition_key_sql).collect();
+    format!(" PARTITION BY {} ({})", strategy_sql(p.strategy), keys.join(", "))
+}
+
 /// Ana `CREATE TABLE` ifadesi.
 pub(crate) fn create_sql(d: &TableDef) -> String {
     let items: Vec<String> = d
@@ -195,12 +201,7 @@ pub(crate) fn create_sql(d: &TableDef) -> String {
         items.join(",\n  ")
     );
     if let Some(p) = &d.partition_by {
-        let keys: Vec<String> = p.keys.iter().map(partition_key_sql).collect();
-        sql.push_str(&format!(
-            " PARTITION BY {} ({})",
-            strategy_sql(p.strategy),
-            keys.join(", ")
-        ));
+        sql.push_str(&partition_by_sql(p));
     }
     if let Some(ff) = d.fillfactor {
         sql.push_str(&format!(" WITH (fillfactor = {ff})"));

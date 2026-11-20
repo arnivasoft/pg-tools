@@ -60,6 +60,11 @@ pub enum LookupRequest {
     /// `TriggerDef.function_schema/function_name`; ad noktalı olabilir, birleşik metin ayrıştırılmaz). `schema`: yalnız o
     /// şema; `None` → kullanıcı şemaları + `pg_catalog` (kullanıcı şemaları önce). En çok 5000.
     TriggerFunctions { schema: Option<String> },
+    /// `ATTACH PARTITION` için bağlanabilir tablolar (Plan 36): value = tablo adı, detail = şema adı. Veritabanı kapsamlı.
+    AttachableTables {
+        #[ts(type = "number")]
+        parent_oid: u32,
+    },
 }
 
 impl LookupRequest {
@@ -113,6 +118,8 @@ static SETTINGS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_set
 static LANGUAGES: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_languages.sql"))]);
 /// `prokind` (PG 11+) kullanılmaz: dönüş tipi `trigger` ve argümansızlık aggregate/procedure'ü zaten dışlar.
 static TRIGGER_FUNCTIONS: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_trigger_functions.sql"))]);
+/// Tek sürüm: yalnızca `pg_class`/`pg_inherits`/`pg_depend` (PG 10+ ortak).
+static ATTACHABLE_TABLES: VersionedSql = VersionedSql(&[(10, include_str!("sql/lookup_attachable_tables.sql"))]);
 
 /// Metin parametreleriyle (`$1`, `$2`…; `None` = NULL) çalıştırır.
 async fn fetch(mgr: &ConnectionManager, server: Uuid, target: Target, sql: &'static VersionedSql, params: Vec<Option<String>>) -> Result<Vec<Row>> {
@@ -217,6 +224,7 @@ pub(crate) async fn lookup_at(mgr: &ConnectionManager, server: Uuid, target: Tar
         LookupRequest::Settings => items(&fetch(mgr, server, db, &SETTINGS, vec![]).await?),
         LookupRequest::Languages => items(&fetch(mgr, server, db, &LANGUAGES, vec![]).await?),
         LookupRequest::TriggerFunctions { schema } => items(&fetch(mgr, server, db, &TRIGGER_FUNCTIONS, vec![schema]).await?),
+        LookupRequest::AttachableTables { parent_oid } => items(&fetch(mgr, server, db, &ATTACHABLE_TABLES, vec![Some(parent_oid.to_string())]).await?),
     })
 }
 
@@ -276,6 +284,7 @@ mod tests {
             LookupRequest::Languages,
             LookupRequest::TriggerFunctions { schema: None },
             LookupRequest::TriggerFunctions { schema: Some("app".into()) },
+            LookupRequest::AttachableTables { parent_oid: 5 },
         ];
         assert!(!per_db.iter().any(LookupRequest::server_wide));
     }
@@ -316,6 +325,15 @@ mod tests {
         assert!(langs.contains("'c'") && langs.contains("'internal'") && !langs.contains("$1"));
         let trig = TRIGGER_FUNCTIONS.pick(PgVersion(160000));
         assert!(trig.contains("$1::text") && trig.contains("'trigger'::regtype") && trig.contains("pronargs = 0"));
+    }
+
+    #[test]
+    fn attachable_tables_request_shape_and_sql() {
+        let v = serde_json::to_value(LookupRequest::AttachableTables { parent_oid: 42 }).unwrap();
+        assert_eq!(v, serde_json::json!({"kind": "attachable_tables", "parent_oid": 42}));
+        let sql = ATTACHABLE_TABLES.pick(PgVersion(100000));
+        assert!(crate::build::scan_semicolons(sql).is_clean() && !sql.contains("format("), "{sql}");
+        assert!(sql.contains("$1::text::oid") && sql.contains("LIMIT 5000") && sql.contains("relispartition"));
     }
 
     #[test]

@@ -1,0 +1,41 @@
+---
+source: crates/pgt-ddl/src/build/partition.rs
+expression: out
+---
+# range tek anahtar
+[Safe] CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES FROM (('2024-01-01'
+)) TO (('2025-01-01'
+))
+
+# range çok anahtar MINVALUE/MAXVALUE
+[Safe] CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES FROM ((1
+), MINVALUE) TO ((10
+), MAXVALUE)
+
+# list
+[Safe] CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES IN ((1
+), (2
+), (NULL
+))
+
+# hash
+[Safe] CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES WITH (MODULUS 4, REMAINDER 3)
+
+# default
+[Safe] CREATE TABLE public.m_2024 PARTITION OF public.measurement DEFAULT
+
+# alt bölümleme
+[Safe] CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES IN (('a'
+)) PARTITION BY LIST (region)
+
+# tablespace + sahip + yorum
+[Safe] CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES FROM (('2024-01-01'
+)) TO (('2025-01-01'
+)) TABLESPACE "fast ts"
+[Safe] COMMENT ON TABLE public.m_2024 IS 'it''s'
+[Safe] ALTER TABLE public.m_2024 OWNER TO "Bob"
+
+# farklı şemalar
+[Safe] CREATE TABLE arch."Old Part" PARTITION OF public.measurement FOR VALUES FROM (('2024-01-01'
+)) TO (('2025-01-01'
+))

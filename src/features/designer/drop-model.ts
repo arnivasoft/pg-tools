@@ -21,12 +21,12 @@ export function dropRequest(object: ObjectRef, def: ObjectDef, cascade: boolean,
 
 /**
  * Silme diyaloğunun sunduğu seçenekler (Plan 14 sözleşmesi): Database → yalnızca `WITH (FORCE)` (PG 13+; CASCADE alan
- * hatasıdır); Role → hiçbiri; diğer türler → yalnızca CASCADE. Diyalog yalnızca sunulan kutuları çizer, denetleyici de
+ * hatasıdır); Role/Policy/Tablespace/Partition → hiçbiri (Partition ayırma: CASCADE/FORCE yok, CONCURRENTLY ayrı seçenek); diğer türler → yalnızca CASCADE. Diyalog yalnızca sunulan kutuları çizer, denetleyici de
  * sunulmayanı değiştirmez.
  */
 export function dropOptionsFor(kind: ObjectKind): { cascade: boolean; force: boolean } {
   if (kind === "database") return { cascade: false, force: true };
-  if (kind === "role" || kind === "policy" || kind === "tablespace") return { cascade: false, force: false };
+  if (kind === "role" || kind === "policy" || kind === "tablespace" || kind === "partition") return { cascade: false, force: false };
   return { cascade: true, force: false };
 }
 

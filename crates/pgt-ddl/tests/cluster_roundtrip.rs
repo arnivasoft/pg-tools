@@ -541,7 +541,7 @@ async fn db_drop_body(ts: TestServer, tag: &str) {
     assert_eq!(build::drop(&od(&t), false, &cx.ctx()).unwrap_err()[0].path, "isTemplate");
     // WITH (FORCE): PG 13+ bağlı oturumu sonlandırır; öncesinde sürüm hatası.
     let f = db_create_and_check(&cx, &database(&cx.db("force"))).await;
-    let force = build::drop_with(&od(&f), DropOptions { cascade: false, force: true }, &cx.ctx());
+    let force = build::drop_with(&od(&f), DropOptions { cascade: false, force: true, concurrently: false }, &cx.ctx());
     if cx.version < 130000 {
         assert_eq!(force.unwrap_err()[0].path, "force");
         eprintln!("PG {}: DROP DATABASE … WITH (FORCE) atlandı (PG 13+)", cx.major());

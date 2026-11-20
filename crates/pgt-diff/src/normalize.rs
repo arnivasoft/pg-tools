@@ -199,8 +199,8 @@ pub fn normalize(def: &ObjectDef, side: SideTag, cx: &NormCtx) -> ObjectDef {
                 db.owner = None;
             }
         }
-        // Politika/Tablespace şema karşılaştırmasına girmez (backlog); dokunulmaz.
-        ObjectDef::Extension(_) | ObjectDef::Role(_) | ObjectDef::Policy(_) | ObjectDef::Tablespace(_) => {}
+        // Politika/Tablespace/Partition şema karşılaştırmasına girmez (bölüm üyeliği Table diff'inde de yoktur); dokunulmaz.
+        ObjectDef::Extension(_) | ObjectDef::Role(_) | ObjectDef::Policy(_) | ObjectDef::Tablespace(_) | ObjectDef::Partition(_) => {}
     }
     d
 }

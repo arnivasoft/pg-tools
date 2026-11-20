@@ -16,6 +16,7 @@ pub mod freesql;
 pub mod index;
 pub mod maintenance;
 pub mod matview;
+pub mod partition;
 pub mod pgtype;
 pub mod policy;
 pub mod role;
@@ -35,7 +36,7 @@ pub mod view;
 
 pub use sqlscan::{ScanResult, scan_semicolons};
 
-use crate::model::{DomainDef, FieldError, MatViewDef, ObjectDef, ObjectKind, PolicyDef, TableDef, TablespaceDef, TriggerDef, ViewDef};
+use crate::model::{DomainDef, FieldError, MatViewDef, ObjectDef, ObjectKind, PartitionDef, PolicyDef, TableDef, TablespaceDef, TriggerDef, ViewDef};
 use crate::plan::{Plan, Risk, Statement};
 
 /// PG tanımlayıcı üst sınırı (BAYT, UTF-8).
@@ -172,11 +173,13 @@ pub(crate) fn stmt_nt(sql: String, risk: Risk, note: Option<&str>) -> Statement 
     }
 }
 
-/// Silme seçenekleri: `force` yalnızca Database (`WITH (FORCE)`).
+/// Silme seçenekleri: `force` yalnızca Database (`WITH (FORCE)`), `concurrently` yalnızca Partition
+/// (`DETACH PARTITION … CONCURRENTLY`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DropOptions {
     pub cascade: bool,
     pub force: bool,
+    pub concurrently: bool,
 }
 
 fn mismatch(old: &ObjectDef, new: &ObjectDef) -> Vec<FieldError> {
@@ -205,6 +208,7 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Domain(d) => domain::validate(ctx, d),
         ObjectDef::Policy(d) => policy::validate(ctx, d),
         ObjectDef::Tablespace(d) => tablespace::validate(ctx, d),
+        ObjectDef::Partition(d) => partition::validate(ctx, d),
     }
 }
 
@@ -272,6 +276,13 @@ pub(crate) fn validate_identity(def: &ObjectDef) -> Vec<FieldError> {
             check_old_ident("name", &d.name, &mut e);
         }
         ObjectDef::Tablespace(d) => check_old_ident("name", &d.name, &mut e),
+        // Bölüm: üst tablo ve bölüm tablosu adları ifadeye girer.
+        ObjectDef::Partition(d) => {
+            check_old_schema_ident("parentSchema", &d.parent_schema, &mut e);
+            check_old_ident("parentTable", &d.parent_table, &mut e);
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("name", &d.name, &mut e);
+        }
     }
     e
 }
@@ -291,6 +302,7 @@ fn invalid_utf8_locked(d: &ObjectDef) -> bool {
         ObjectDef::Domain(d) => &d.unsupported,
         ObjectDef::Policy(d) => &d.unsupported,
         ObjectDef::Tablespace(d) => &d.unsupported,
+        ObjectDef::Partition(d) => &d.unsupported,
         _ => return false,
     };
     unsupported.iter().any(|u| u == crate::load::INVALID_UTF8_REASON)
@@ -320,6 +332,10 @@ fn droppable_despite_invalid_utf8(d: &ObjectDef) -> Option<ObjectDef> {
         }
         ObjectDef::Tablespace(x) if only_reason(&x.unsupported) => {
             ObjectDef::Tablespace(TablespaceDef { unsupported: vec![], editable: true, ..x.clone() })
+        }
+        // Bölüm: ayırma yalnız (geçerli UTF-8) şema/ad yazar; sınır metni ifadeye girmez.
+        ObjectDef::Partition(x) if only_reason(&x.unsupported) => {
+            ObjectDef::Partition(PartitionDef { unsupported: vec![], editable: true, ..x.clone() })
         }
         _ => return None,
     })
@@ -363,6 +379,7 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Domain(d) => domain::create(ctx, d),
         ObjectDef::Policy(d) => policy::create(ctx, d),
         ObjectDef::Tablespace(d) => tablespace::create(ctx, d),
+        ObjectDef::Partition(d) => partition::create(ctx, d),
     }
 }
 
@@ -413,6 +430,8 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         (ObjectDef::Policy(o), ObjectDef::Policy(n)) => return policy::alter(ctx, o, n),
         // Tablespace kendi doğrulamasını yapar: konum create-only, yalnızca değişen/yazılan alanlar, salt okunur kapısı.
         (ObjectDef::Tablespace(o), ObjectDef::Tablespace(n)) => return tablespace::alter(ctx, o, n),
+        // Partition kendi doğrulamasını yapar: kimlik/özellikler değiştirilemez, yalnızca sınır değişimi (DETACH + ATTACH).
+        (ObjectDef::Partition(o), ObjectDef::Partition(n)) => return partition::alter(ctx, o, n),
         // Type kendi doğrulamasını yapar: yalnızca değişen/yazılan alanlar, enum/composite `original` eşlemesi, range
         // gövdesi sabit, tür (variant) değişmez, salt okunur kapısı.
         (ObjectDef::Type(o), ObjectDef::Type(n)) => return pgtype::alter(ctx, o, n),
@@ -440,7 +459,7 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
 }
 
 pub fn drop(def: &ObjectDef, cascade: bool, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> {
-    drop_with(def, DropOptions { cascade, force: false }, ctx)
+    drop_with(def, DropOptions { cascade, force: false, concurrently: false }, ctx)
 }
 
 /// Silme; ortak kurallar: `force` yalnızca Database, `cascade` Database/Role'de yok.
@@ -456,8 +475,14 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
     if o.force && kind != ObjectKind::Database {
         errs.push(err("force", "WITH (FORCE) yalnızca veritabanı silmede kullanılır."));
     }
+    if o.concurrently && kind != ObjectKind::Partition {
+        errs.push(err("concurrently", "CONCURRENTLY yalnızca bölüm ayırmada kullanılır."));
+    }
     if o.cascade && matches!(kind, ObjectKind::Database | ObjectKind::Role) {
         errs.push(err("cascade", "Bu tür CASCADE ile silinemez."));
+    }
+    if o.cascade && kind == ObjectKind::Partition {
+        errs.push(err("cascade", "Bölüm ayırmada CASCADE yoktur."));
     }
     if !errs.is_empty() {
         return Err(errs);
@@ -484,6 +509,8 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Policy(d) => policy::drop(d),
         // Tablespace CASCADE bilmez: `cascade` yok sayılır (Karar 7).
         ObjectDef::Tablespace(d) => tablespace::drop(d),
+        // Bölüm silinmez, ayrılır (tablo kalır); CONCURRENTLY yalnız burada anlamlıdır.
+        ObjectDef::Partition(d) => partition::detach(ctx, d, o.concurrently),
     }
 }
 
@@ -798,21 +825,33 @@ mod tests {
     #[test]
     fn drop_with_common_rules() {
         let s = ObjectDef::Schema(SchemaDef { name: "a".into(), owner: None, comment: None });
-        let force = DropOptions { cascade: false, force: true };
+        let force = DropOptions { cascade: false, force: true, concurrently: false };
         assert_eq!(drop_with(&s, force, &ctx()).unwrap_err()[0].path, "force");
-        let cascade = DropOptions { cascade: true, force: false };
+        let cascade = DropOptions { cascade: true, force: false, concurrently: false };
         for d in [database(), role("r")] {
             let paths: Vec<String> = drop_with(&d, cascade, &ctx()).unwrap_err().into_iter().map(|e| e.path).collect();
             assert_eq!(paths, ["cascade"], "{d:?}");
         }
         // Role'de force da yasak; iki kural birlikte raporlanır.
-        let both = DropOptions { cascade: true, force: true };
+        let both = DropOptions { cascade: true, force: true, concurrently: false };
         let paths: Vec<String> = drop_with(&role("r"), both, &ctx()).unwrap_err().into_iter().map(|e| e.path).collect();
         assert_eq!(paths, ["force", "cascade"]);
         // `drop` = force'suz `drop_with`; mevcut türlerde CASCADE serbest.
         assert_eq!(drop(&s, true, &ctx()), drop_with(&s, cascade, &ctx()));
         assert!(drop(&s, true, &ctx()).is_ok());
-        assert_eq!(DropOptions::default(), DropOptions { cascade: false, force: false });
+        assert_eq!(DropOptions::default(), DropOptions { cascade: false, force: false, concurrently: false });
+    }
+
+    #[test]
+    fn drop_with_concurrently_only_for_partition() {
+        let conc = DropOptions { cascade: false, force: false, concurrently: true };
+        let s = ObjectDef::Schema(SchemaDef { name: "a".into(), owner: None, comment: None });
+        for d in [s, database(), role("r")] {
+            let paths: Vec<String> = drop_with(&d, conc, &ctx()).unwrap_err().into_iter().map(|e| e.path).collect();
+            assert_eq!(paths, ["concurrently"], "{d:?}");
+        }
+        let e = drop_with(&role("r"), conc, &ctx()).unwrap_err();
+        assert_eq!(e[0].message, "CONCURRENTLY yalnızca bölüm ayırmada kullanılır.");
     }
 
     #[test]
@@ -847,7 +886,7 @@ mod tests {
         let sys = ObjectDef::MaterializedView(sys);
         assert_eq!(alter(&sys, &mv, &ctx()).unwrap_err()[0].path, "old.schema");
         assert_eq!(drop(&sys, false, &ctx()).unwrap_err()[0].path, "schema");
-        assert_eq!(drop_with(&mv, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
+        assert_eq!(drop_with(&mv, DropOptions { cascade: false, force: true, concurrently: false }, &ctx()).unwrap_err()[0].path, "force");
         assert_eq!(alter(&mv, &view("public"), &ctx()).unwrap_err()[0].path, "kind");
     }
 
@@ -860,7 +899,7 @@ mod tests {
         assert!(!p.statements[0].transactional);
         assert!(alter(&d, &d, &ctx()).unwrap().statements.is_empty());
         assert_eq!(drop(&d, false, &ctx()).unwrap().statements[0].sql, "DROP DATABASE d");
-        let p = drop_with(&d, DropOptions { cascade: false, force: true }, &ctx()).unwrap();
+        let p = drop_with(&d, DropOptions { cascade: false, force: true, concurrently: false }, &ctx()).unwrap();
         assert_eq!(p.statements[0].sql, "DROP DATABASE d WITH (FORCE)");
         assert_eq!(p.risk(), Risk::DataLoss);
         let ObjectDef::Database(mut empty) = d.clone() else { unreachable!() };
@@ -882,7 +921,7 @@ mod tests {
         // Eski taraf kimliği `old.` önekiyle; drop'ta sistem şeması reddedilir.
         assert_eq!(alter(&view("pg_catalog"), &v, &ctx()).unwrap_err()[0].path, "old.schema");
         assert_eq!(drop(&view("pg_catalog"), false, &ctx()).unwrap_err()[0].path, "schema");
-        assert_eq!(drop_with(&v, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
+        assert_eq!(drop_with(&v, DropOptions { cascade: false, force: true, concurrently: false }, &ctx()).unwrap_err()[0].path, "force");
     }
 
     #[test]
@@ -999,7 +1038,7 @@ mod tests {
         assert_eq!(alter(sys, dom, &ctx()).unwrap_err()[0].path, "old.schema");
         assert_eq!(kind(create(sys, &ctx())), "schema");
         assert!(alter(dom, &defs[3], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
-        assert_eq!(drop_with(dom, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
+        assert_eq!(drop_with(dom, DropOptions { cascade: false, force: true, concurrently: false }, &ctx()).unwrap_err()[0].path, "force");
     }
 
     #[test]
@@ -1039,7 +1078,7 @@ mod tests {
         let sys = &new_kind_defs("pg_catalog")[3];
         assert_eq!(alter(sys, ty, &ctx()).unwrap_err()[0].path, "old.schema");
         assert!(alter(ty, &defs[4], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
-        assert_eq!(drop_with(ty, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
+        assert_eq!(drop_with(ty, DropOptions { cascade: false, force: true, concurrently: false }, &ctx()).unwrap_err()[0].path, "force");
     }
 
     #[test]
@@ -1060,7 +1099,7 @@ mod tests {
         let sys = &new_kind_defs("pg_catalog")[2];
         assert_eq!(alter(sys, trg, &ctx()).unwrap_err()[0].path, "old.schema");
         assert!(alter(trg, &defs[0], &ctx()).unwrap_err()[0].message.contains("uyuşmazlığı"));
-        assert_eq!(drop_with(trg, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
+        assert_eq!(drop_with(trg, DropOptions { cascade: false, force: true, concurrently: false }, &ctx()).unwrap_err()[0].path, "force");
     }
 
     #[test]
@@ -1083,7 +1122,7 @@ mod tests {
         let sys = &new_kind_defs("pg_catalog")[0];
         assert_eq!(alter(sys, func, &ctx()).unwrap_err()[0].path, "old.schema");
         assert_eq!(drop(sys, false, &ctx()).unwrap_err()[0].path, "schema");
-        assert_eq!(drop_with(func, DropOptions { cascade: false, force: true }, &ctx()).unwrap_err()[0].path, "force");
+        assert_eq!(drop_with(func, DropOptions { cascade: false, force: true, concurrently: false }, &ctx()).unwrap_err()[0].path, "force");
     }
 
     #[test]

@@ -360,7 +360,7 @@ async fn routine_logging_body(ts: TestServer) {
     let ObjectDef::Type(mut loaded) = dm.load(server, db, object).await.unwrap() else { panic!() };
     loaded.editable = false;
     loaded.unsupported = vec!["EXTENSION zr_gizli_eklenti (eklentiye ait)".into()];
-    let req = PlanRequest::Drop { object, def: ObjectDef::Type(loaded), cascade: false, force: false };
+    let req = PlanRequest::Drop { object, def: ObjectDef::Type(loaded), cascade: false, force: false, concurrently: false };
     let r = dm.apply(server, db, &req, opts("x")).await;
     assert!(matches!(&r, Err(pgt_core::Error::Invalid(m)) if !m.contains("zr_gizli")), "{r:?}");
 }
@@ -719,5 +719,73 @@ async fn policy_logging_body(ts: TestServer) {
     assert_eq!(sqlstate.as_deref(), Some("58P01"));
     let good = create(ObjectDef::Tablespace(tsdef(format!("{root}/ts8"))));
     let r = apply(&dm, server, db, &good).await;
+    assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
+}
+
+// ================================================================================================================
+// Plan 36: Partition — günlükte sınır değeri, ad ve SQL yok
+// ================================================================================================================
+
+#[tokio::test]
+async fn partition_logging_is_bound_name_free() {
+    let buf = capture();
+    for ts in servers() {
+        guarded(partition_logging_body(ts.clone()), cleanup(&ts, "m_logq")).await;
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        for marker in ["DDL uygulandı", "DDL uygulanamadı", "Partition", "23514"] {
+            assert!(out.contains(marker), "günlükte {marker:?} yok: {out}");
+        }
+        for secret in ["zp_gizli", "ATTACH", "DETACH", "PARTITION", "FOR VALUES", "violates"] {
+            assert!(!out.contains(secret), "günlükte {secret:?} var: {out}");
+        }
+        if let Some(p) = ts.password.as_deref().filter(|p| !p.is_empty()) {
+            assert!(!out.contains(p), "günlükte parola var");
+        }
+    }
+}
+
+async fn partition_logging_body(ts: TestServer) {
+    let env = setup(&ts, "m_logq").await;
+    let (dm, _dir) = manager(&ts.config, env.mgr.clone());
+    let (server, db) = (env.server, env.db_oid);
+    env.sql("CREATE TABLE zp_gizli_ust (id text) PARTITION BY LIST (id); CREATE TABLE zp_gizli_tablo (id text)").await;
+    let def = |mode, name: &str, value: &str| PartitionDef {
+        parent_schema: "public".into(),
+        parent_table: "zp_gizli_ust".into(),
+        strategy: PartitionStrategy::List,
+        key_count: 1,
+        mode,
+        schema: "public".into(),
+        name: name.into(),
+        bound: PartitionBound::List { values: vec![format!("'{value}'")] },
+        partition_by: None,
+        tablespace: None,
+        owner: None,
+        comment: Some("zp_gizli_yorum".into()),
+        detach_pending: false,
+        editable: true,
+        unsupported: vec![],
+    };
+    let confirmed = |hash: &str| ApplyOptions { confirmed: true, ..opts(hash) };
+    let run = |req: PlanRequest| {
+        let dm = &dm;
+        async move {
+            let hash = dm.preview(server, db, &req).await.unwrap().hash;
+            dm.apply(server, db, &req, confirmed(&hash)).await
+        }
+    };
+    // create (Safe) → bağlama (Destructive) → ihlal eden satırla başarısız bağlama → ayırma.
+    let r = run(create(ObjectDef::Partition(def(PartitionMode::Create, "zp_gizli_c1", "zp_gizli_deger")))).await;
+    assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
+    let r = run(create(ObjectDef::Partition(def(PartitionMode::Attach, "zp_gizli_tablo", "zp_gizli_deger2")))).await;
+    assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
+    env.sql("CREATE TABLE zp_gizli_ihlal (id text); INSERT INTO zp_gizli_ihlal VALUES ('zp_gizli_satir')").await;
+    let r = run(create(ObjectDef::Partition(def(PartitionMode::Attach, "zp_gizli_ihlal", "zp_gizli_baska")))).await;
+    let Ok(ApplyOutcome::Failed { sqlstate, .. }) = r else { panic!("{r:?}") };
+    assert_eq!(sqlstate.as_deref(), Some("23514"));
+    let child = env.class_oid("public", "zp_gizli_tablo").await;
+    let object = ObjectRef { kind: ObjectKind::Partition, oid: child };
+    let loaded = dm.load(server, db, object).await.unwrap();
+    let r = run(PlanRequest::Drop { object, def: loaded, cascade: false, force: false, concurrently: false }).await;
     assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
 }

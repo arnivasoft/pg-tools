@@ -475,12 +475,12 @@ mod tests {
         balter(&o(old.clone()), &o(new.clone()), &ctx()).unwrap_err()
     }
     fn drop_ok(d: DatabaseDef, force: bool, v: u32) -> Plan {
-        let p = drop_with(&o(d), DropOptions { cascade: false, force }, &ctx_v(v)).unwrap();
+        let p = drop_with(&o(d), DropOptions { cascade: false, force, concurrently: false }, &ctx_v(v)).unwrap();
         assert_single_statements(&p);
         p
     }
     fn drop_err(d: DatabaseDef, force: bool, v: u32) -> Vec<FieldError> {
-        drop_with(&o(d), DropOptions { cascade: false, force }, &ctx_v(v)).unwrap_err()
+        drop_with(&o(d), DropOptions { cascade: false, force, concurrently: false }, &ctx_v(v)).unwrap_err()
     }
 
     const TAIL: &str = "ALLOW_CONNECTIONS = true CONNECTION LIMIT = -1 IS_TEMPLATE = false";
@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(e[0].message, IS_TEMPLATE_DROP_MSG);
         assert_eq!(paths(drop_err(tpl, true, 120000)), ["isTemplate", "force"]);
         // FORCE + CASCADE: ortak kural (CASCADE yok).
-        let e = drop_with(&o(d()), DropOptions { cascade: true, force: true }, &ctx()).unwrap_err();
+        let e = drop_with(&o(d()), DropOptions { cascade: true, force: true, concurrently: false }, &ctx()).unwrap_err();
         assert_eq!(paths(e), ["cascade"]);
         // Yüklü alanlar ne olursa olsun silinebilir; eski ad gevşek (yalnızca boş/NUL reddedilir).
         let odd = DatabaseDef { name: "a\u{200b}\nb".into(), encoding: Some("x".into()), connection_limit: -9, ..d() };

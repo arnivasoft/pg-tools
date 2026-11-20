@@ -383,8 +383,10 @@ describe("alan yolu sözleşmesi (sequence/index)", () => {
 describe("FORM_PATHS (tür → form eşlemesi)", () => {
   it("her ObjectKind için yol kümesi var", () => {
     const kinds = Object.keys(FORM_PATHS) as (keyof typeof FORM_PATHS)[];
-    expect(kinds).toHaveLength(16);
-    expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
+    expect(kinds).toHaveLength(17);
+    // Partition formu Plan 37'de: o zamana kadar boş küme.
+    expect(kinds.filter((k) => k !== "partition").every((k) => FORM_PATHS[k].size > 0)).toBe(true);
+    expect(FORM_PATHS.partition.size).toBe(0);
     expect(FORM_PATHS.tablespace).toBe(TABLESPACE_PATHS);
     expect(FORM_PATHS.index).toBe(INDEX_PATHS);
     expect(FORM_PATHS.sequence).toBe(SEQUENCE_PATHS);
@@ -564,15 +566,17 @@ describe("DOMAIN_PATHS (Plan 19 Task 6)", () => {
 });
 
 describe("FORM_PATHS tam eşleme (Plan 19 Task 6: Partial yok)", () => {
-  it("her ObjectKind (16 tür) için yol kümesi", () => {
+  it("her ObjectKind (17 tür) için yol kümesi", () => {
     const all: Record<ObjectKind, true> = {
       schema: true, sequence: true, extension: true, index: true, table: true, view: true, materialized_view: true, database: true,
-      role: true, function: true, procedure: true, trigger: true, type: true, domain: true, policy: true, tablespace: true,
+      role: true, function: true, procedure: true, trigger: true, type: true, domain: true, policy: true, tablespace: true, partition: true,
     };
     const kinds = Object.keys(all) as ObjectKind[];
-    expect(kinds).toHaveLength(16);
+    expect(kinds).toHaveLength(17);
     expect(Object.keys(FORM_PATHS).sort()).toEqual([...kinds].sort());
-    expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
+    // Partition formu Plan 37'de: o zamana kadar boş küme.
+    expect(kinds.filter((k) => k !== "partition").every((k) => FORM_PATHS[k].size > 0)).toBe(true);
+    expect(FORM_PATHS.partition.size).toBe(0);
   });
 });
 

@@ -94,13 +94,15 @@ export const POLICY_PATHS: ReadonlySet<string> = new Set([
   "schema", "table", "name", "roles", "using", "withCheck", "comment", "object",
 ]);
 /** Tablespace: `options` kökü dört seçenek alanını kapsar; `old.*` genel şeride düşer. */
+/** Partition: form Plan 37'de; o zamana kadar boş küme (tüm hatalar genel şeride düşer). */
+export const PARTITION_PATHS: ReadonlySet<string> = new Set();
 export const TABLESPACE_PATHS: ReadonlySet<string> = new Set(["name", "owner", "location", "options", "comment", "object"]);
 /** Tür → bilinen yollar (testte denetlenir; her `ObjectKind` için tanımlı). */
 export const FORM_PATHS: Record<ObjectKind, ReadonlySet<string>> = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
   view: VIEW_PATHS, materialized_view: MATVIEW_PATHS, database: DATABASE_PATHS, role: ROLE_PATHS,
   function: ROUTINE_PATHS, procedure: ROUTINE_PATHS, trigger: TRIGGER_PATHS, type: TYPE_PATHS, domain: DOMAIN_PATHS,
-  policy: POLICY_PATHS, tablespace: TABLESPACE_PATHS,
+  policy: POLICY_PATHS, tablespace: TABLESPACE_PATHS, partition: PARTITION_PATHS,
 };
 
 /**

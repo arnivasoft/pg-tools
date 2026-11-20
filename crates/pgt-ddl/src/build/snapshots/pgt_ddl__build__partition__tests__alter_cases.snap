@@ -1,0 +1,13 @@
+---
+source: crates/pgt-ddl/src/build/partition.rs
+expression: out
+---
+# range → range
+[Destructive] ALTER TABLE public.measurement DETACH PARTITION public.m_2024  -- Bölüm aynı transaction içinde yeniden bağlanır; tablo yeniden taranır.
+[Destructive] ALTER TABLE public.measurement ATTACH PARTITION public.m_2024 FOR VALUES FROM (('2025-01-01'
+)) TO (('2026-01-01'
+))  -- Tablo taranır ve sınır doğrulanır; üst tabloda SHARE UPDATE EXCLUSIVE kilidi alınır.
+
+# range → default
+[Destructive] ALTER TABLE public.measurement DETACH PARTITION public.m_2024  -- Bölüm aynı transaction içinde yeniden bağlanır; tablo yeniden taranır.
+[Destructive] ALTER TABLE public.measurement ATTACH PARTITION public.m_2024 DEFAULT  -- Tablo taranır ve sınır doğrulanır; üst tabloda SHARE UPDATE EXCLUSIVE kilidi alınır.

@@ -1,0 +1,12 @@
+---
+source: crates/pgt-ddl/src/build/partition.rs
+expression: out
+---
+# normal
+[Destructive] ALTER TABLE public.measurement DETACH PARTITION public.m_2024  -- Satırlar üst tablodan görünmez olur; tablo silinmez.
+
+# concurrently
+[Destructive non-tx] ALTER TABLE public.measurement DETACH PARTITION public.m_2024 CONCURRENTLY  -- Satırlar üst tablodan görünmez olur; tablo silinmez.
+
+# finalize
+[Destructive non-tx] ALTER TABLE public.measurement DETACH PARTITION public.m_2024 FINALIZE  -- Satırlar üst tablodan görünmez olur; tablo silinmez.

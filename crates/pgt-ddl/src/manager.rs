@@ -53,6 +53,7 @@ use crate::model::*;
 use crate::plan::{PlanView, Risk, Statement};
 use crate::secret::Secret;
 use crate::target::CreatePreset;
+use pgt_core::pgtext::lossy;
 
 /// Arayüzün istediği değişiklik; plan arka uçta bu istekten üretilir.
 // Tek seferlik IPC yükü (saklanmaz); varyant boyut farkı önemsiz, `Box` JSON'u değiştirmeden yalnızca kullanımı zorlaştırır.
@@ -73,6 +74,10 @@ pub enum PlanRequest {
         cascade: bool,
         #[serde(default)]
         force: bool,
+        /// Yalnızca Partition: `DETACH PARTITION … CONCURRENTLY` (PG 14+). TS'de isteğe bağlı.
+        #[serde(default)]
+        #[ts(as = "Option<bool>", optional)]
+        concurrently: bool,
     },
     /// Nesne yetkileri (GRANT/REVOKE; Plan 20). `old` yüklenen etkin ACL'ye eşit olmalı (bkz. `Alter`).
     Privileges { object: ObjectRef, old: AclDef, new: AclDef, cascade: bool },
@@ -220,6 +225,9 @@ const FIND_MATVIEW_SQL: &str = "SELECT c.oid FROM pg_class c JOIN pg_namespace n
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'm'";
 const FIND_DATABASE_SQL: &str = "SELECT oid FROM pg_database WHERE datname = $1";
 const FIND_ROLE_SQL: &str = "SELECT oid FROM pg_roles WHERE rolname = $1";
+/// Partition: çocuk tablo (şema + ad, `relispartition`); `created` yeni/bağlanan bölümün oid'idir.
+const FIND_PARTITION_SQL: &str = "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relname = $2 AND c.relispartition";
 /// Tablespace (sunucu kapsamlı): ad.
 const FIND_TABLESPACE_SQL: &str = "SELECT oid FROM pg_tablespace WHERE spcname = $1";
 /// Policy: tablo (şema + ad → oid) + politika adı.
@@ -370,6 +378,14 @@ pub const TABLESPACE_SUPERUSER_HINT: &str =
     "Tablespace oluşturmak süper kullanıcı yetkisi ister; konum dizini de PostgreSQL hizmet kullanıcısına ait olmalı.";
 /// `CREATE TABLESPACE` konum hatası (58P01 dizin yok, 42P17 göreli yol). 22023 çoğunlukla WITH sınırlarından gelir: ipucu yok.
 pub const TABLESPACE_LOCATION_HINT: &str = "Konum sunucuda var olan, PostgreSQL hizmet kullanıcısına ait boş bir dizin olmalı.";
+/// Plan 36: `ATTACH PARTITION` — tabloda bölüm sınırının dışında satır var (23514).
+pub const PARTITION_ROWS_OUTSIDE_HINT: &str =
+    "Tablodaki bazı satırlar bölüm sınırının dışında; önce bu satırları taşıyın ya da sınırı genişletin.";
+/// Plan 36: `ATTACH PARTITION` — sınır başka bir bölümle çakışıyor (42P17).
+pub const PARTITION_OVERLAP_HINT: &str = "Sınır başka bir bölümün sınırıyla çakışıyor (ya da tablo bölüm sınırıyla uyumsuz).";
+/// Plan 36: `DETACH PARTITION … CONCURRENTLY` — üst tabloda DEFAULT bölüm var (55000).
+pub const PARTITION_DETACH_CONCURRENTLY_HINT: &str =
+    "CONCURRENTLY, üst tabloda DEFAULT bölüm varken kullanılamaz; normal ayırmayı seçin.";
 /// `CREATE TABLESPACE` konum başka bir tablespace tarafından kullanılıyor (55006).
 pub const TABLESPACE_IN_USE_HINT: &str = "Bu konum zaten bir tablespace tarafından kullanılıyor; boş ve kullanılmayan bir dizin seçin.";
 /// Plan 24: transaction bloğu içinde çalıştırılamaz (25001). Bakım ifadeleri transaction dışıdır; beklenmez, savunma.
@@ -421,6 +437,8 @@ fn identity_changed(old: &ObjectDef, new: &ObjectDef) -> bool {
         // oid üretir — açık tasarımcı sekmesi `created` ile yeni nesneye geçer, bu yüzden ad farkı YA DA yeniden kurma.
         (ObjectDef::Policy(a), ObjectDef::Policy(b)) => a.name != b.name || build::policy::needs_rebuild(a, b),
         (ObjectDef::Tablespace(a), ObjectDef::Tablespace(b)) => a.name != b.name,
+        // Bölüm tablosunun oid'i sınır değişiminde de (DETACH + ATTACH) korunur; kimlik değişmez, `created = None`.
+        (ObjectDef::Partition(_), ObjectDef::Partition(_)) => false,
         _ => false,
     }
 }
@@ -474,6 +492,7 @@ fn read_only_refusal(req: &PlanRequest) -> Option<String> {
         ObjectDef::Domain(d) => (d.editable, &d.unsupported),
         ObjectDef::Policy(d) => (d.editable, &d.unsupported),
         ObjectDef::Tablespace(d) => (d.editable, &d.unsupported),
+        ObjectDef::Partition(d) => (d.editable, &d.unsupported),
         _ => return None,
     };
     refuse(editable, unsupported.first())
@@ -485,7 +504,7 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
     const GENERIC: &str = "desteklenmeyen özellik";
     let Some(e) = entry else { return GENERIC };
     // (önek, gerekçe): ilk eşleşen kazanır; sabit girdiler kendi metniyle.
-    const PREFIXES: [(&str, &str); 44] = [
+    const PREFIXES: [(&str, &str); 46] = [
         ("LANGUAGE ", "desteklenmeyen dil (C/internal)"),
         ("BEGIN ATOMIC", "BEGIN ATOMIC (SQL standart gövde)"),
         ("AGGREGATE", "aggregate fonksiyonu"),
@@ -532,6 +551,9 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
         ("Sistem tablespace'i", "sistem tablespace'i"),
         ("komut '", "desteklenmeyen politika komutu"),
         ("seçenek ", "desteklenmeyen tablespace seçeneği"),
+        // Plan 36 bölüm yükleyicisi: bilinmeyen `partstrat`, ayrıştırılamayan sınır.
+        ("bölümleme stratejisi ", "desteklenmeyen bölümleme stratejisi"),
+        ("sınır ifadesi", "sınır ifadesi ayrıştırılamadı"),
         // Yükleyicinin `'<kod>' türü …` biçimleri (ilişki/tip/kısıt türü).
         ("'", ""),
     ];
@@ -715,6 +737,13 @@ fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> 
         ("42501", ObjectKind::Tablespace) if sql.starts_with("CREATE TABLESPACE ") => TABLESPACE_SUPERUSER_HINT,
         ("58P01" | "42P17", ObjectKind::Tablespace) if sql.starts_with("CREATE TABLESPACE ") => TABLESPACE_LOCATION_HINT,
         ("55006", ObjectKind::Tablespace) if sql.starts_with("CREATE TABLESPACE ") => TABLESPACE_IN_USE_HINT,
+        // Plan 36: bölüm bağlama/ayırma ipuçları (alter'daki yeniden bağlama da bir `ATTACH PARTITION` ifadesidir).
+        // 23514: ATTACH'te sınırı sağlamayan satır; 42P17: çakışan sınır; 55000: DEFAULT bölüm varken CONCURRENTLY.
+        ("23514", ObjectKind::Partition) if sql.contains(" ATTACH PARTITION ") => PARTITION_ROWS_OUTSIDE_HINT,
+        ("42P17", ObjectKind::Partition) if sql.contains(" ATTACH PARTITION ") => PARTITION_OVERLAP_HINT,
+        ("55000", ObjectKind::Partition) if sql.contains(" DETACH PARTITION ") && sql.ends_with(" CONCURRENTLY") => {
+            PARTITION_DETACH_CONCURRENTLY_HINT
+        }
         // Plan 20 Karar 15: yetki istekleri işleme (`op`) göre; genel 42501 kolundan önce.
         ("42501", _) if op == "privileges" => ACL_PRIVILEGE_HINT,
         ("42501", _) if op == "default_privileges" => DEFAULT_ACL_PRIVILEGE_HINT,
@@ -861,6 +890,12 @@ const TRIGGER_TABLE_SQL: &str = "SELECT n.nspname::text AS schema, c.relname::te
 const POLICY_TABLE_SQL: &str = "SELECT n.nspname::text AS schema, c.relname::text AS name, \
      c.relrowsecurity AS rls_enabled, c.relforcerowsecurity AS rls_forced \
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1 AND c.relkind IN ('r', 'p')";
+/// Bölüm üst tablosu: sıradan/bölümlenmiş tablo; bölümlü değilse `strat`/`natts` NULL (LEFT JOIN).
+const PARTITION_PARENT_SQL: &str = "SELECT n.nspname::text AS schema, c.relname::text AS name, \
+     pt.partstrat::text AS strat, pt.partnatts::int4 AS natts \
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+     LEFT JOIN pg_partitioned_table pt ON pt.partrelid = c.oid \
+     WHERE c.oid = $1 AND c.relkind IN ('r', 'p')";
 /// Yeni fonksiyon/procedure gövde şablonu (plpgsql).
 const FUNCTION_BODY: &str = "BEGIN\n\nEND;";
 /// Trigger fonksiyonu gövde şablonu.
@@ -1316,6 +1351,8 @@ impl DdlManager {
                 (ObjectKind::Type, FIND_TYPE_SQL.into(), text(&[&d.schema, &d.name, &typtype.to_string()]))
             }
             ObjectDef::Domain(d) => (ObjectKind::Domain, FIND_TYPE_SQL.into(), text(&[&d.schema, &d.name, &"d".to_string()])),
+            // Sınır değiştirme/ayırma `created = None` verir (çağıran aramaz); create/attach çocuk tabloyu adıyla bulur.
+            ObjectDef::Partition(d) => (ObjectKind::Partition, FIND_PARTITION_SQL.into(), text(&[&d.schema, &d.name])),
             ObjectDef::Policy(d) => (ObjectKind::Policy, FIND_POLICY_SQL.into(), text(&[&d.schema, &d.table, &d.name])),
             ObjectDef::Tablespace(d) => (ObjectKind::Tablespace, FIND_TABLESPACE_SQL.into(), text(&[&d.name])),
         };
@@ -1620,6 +1657,37 @@ impl DdlManager {
                     }),
                 }
             }
+            ObjectKind::Partition => {
+                let Some(table_oid) = ctx.table_oid else {
+                    return invalid("Bölüm yalnızca bir bölümlenmiş tablo altında oluşturulabilir.");
+                };
+                let (parent_schema, parent_table, strategy, key_count) = self.partition_parent(server, database_oid, table_oid).await?;
+                let bound = match strategy {
+                    PartitionStrategy::Range => {
+                        let blank = || vec![BoundValue::Value { sql: String::new() }; key_count as usize];
+                        PartitionBound::Range { from: blank(), to: blank() }
+                    }
+                    PartitionStrategy::List => PartitionBound::List { values: vec![] },
+                    PartitionStrategy::Hash => PartitionBound::Hash { modulus: 1, remainder: 0 },
+                };
+                ObjectDef::Partition(PartitionDef {
+                    schema: parent_schema.clone(),
+                    parent_schema,
+                    parent_table,
+                    strategy,
+                    key_count,
+                    mode: PartitionMode::Create,
+                    name: String::new(),
+                    bound,
+                    partition_by: None,
+                    tablespace: None,
+                    owner: None,
+                    comment: None,
+                    detach_pending: false,
+                    editable: true,
+                    unsupported: vec![],
+                })
+            }
             ObjectKind::Trigger => {
                 let Some(table_oid) = ctx.table_oid else {
                     return invalid("Trigger yalnızca bir tablo altında oluşturulabilir.");
@@ -1705,6 +1773,26 @@ impl DdlManager {
             .ok_or_else(|| Error::NotFound("tablo".into()))
     }
 
+    /// Bölümün üst tablosu: şema, ad, strateji, anahtar sayısı. Tablo bölümlü değilse `Invalid`; yoksa `NotFound`.
+    async fn partition_parent(&self, server: Uuid, database_oid: u32, oid: u32) -> Result<(String, String, PartitionStrategy, u32)> {
+        const NOT_PARTITIONED: &str = "Bölüm yalnızca bölümlenmiş bir tablo altında oluşturulabilir.";
+        let row = self
+            .mgr
+            .run(server, Target::Database(database_oid), move |c| async move { c.client.query_opt(PARTITION_PARENT_SQL, &[&oid]).await })
+            .await?;
+        let row = row.ok_or_else(|| Error::NotFound("tablo".into()))?;
+        let (Some(strat), Some(natts)) = (row.get::<_, Option<String>>("strat"), row.get::<_, Option<i32>>("natts")) else {
+            return Err(Error::Invalid(NOT_PARTITIONED.into()));
+        };
+        let strategy = match strat.as_str() {
+            "r" => PartitionStrategy::Range,
+            "l" => PartitionStrategy::List,
+            "h" => PartitionStrategy::Hash,
+            _ => return Err(Error::Invalid(NOT_PARTITIONED.into())),
+        };
+        Ok((lossy(&row, "schema"), lossy(&row, "name"), strategy, u32::try_from(natts).unwrap_or(0)))
+    }
+
     /// Trigger'ın tablosu: yalnızca sıradan ve bölümlenmiş tablo (görünüm/MV/yabancı tablo trigger'ı kapsam dışı).
     async fn trigger_table_name(&self, server: Uuid, database_oid: u32, oid: u32) -> Result<(String, String)> {
         let row = self
@@ -1757,9 +1845,11 @@ pub(crate) fn plan_view(req: &PlanRequest, version_num: u32) -> PlanView {
         PlanRequest::DefaultPrivileges { old, new, .. } => build::default_acl::default_privileges(&ctx(false), old, new),
         PlanRequest::Create { def, concurrently } => build::create(def, &ctx(*concurrently)),
         PlanRequest::Alter { old, new, .. } => build::alter(old, new, &ctx(false)),
-        PlanRequest::Drop { def, cascade, force, .. } => {
-            build::drop_with(def, build::DropOptions { cascade: *cascade, force: *force }, &ctx(false))
-        }
+        PlanRequest::Drop { def, cascade, force, concurrently, .. } => build::drop_with(
+            def,
+            build::DropOptions { cascade: *cascade, force: *force, concurrently: *concurrently },
+            &ctx(false),
+        ),
         // REINDEX CONCURRENTLY `ReindexOptions`'tan gelir (`ctx.concurrently` kullanılmaz).
         PlanRequest::Maintenance { target, op, .. } => build::maintenance::maintenance(&ctx(false), target, op),
     })
@@ -2055,7 +2145,7 @@ mod tests {
 
     #[test]
     fn request_and_outcome_json_shapes() {
-        let r = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid: 1 }, def: schema("a"), cascade: true, force: false };
+        let r = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid: 1 }, def: schema("a"), cascade: true, force: false, concurrently: false };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["op"], "drop");
         assert_eq!(v["def"]["kind"], "schema");
@@ -2183,10 +2273,10 @@ mod tests {
     #[test]
     fn plan_view_drop_passes_force() {
         let object = ObjectRef { kind: ObjectKind::Schema, oid: 1 };
-        let v = plan_view(&PlanRequest::Drop { object, def: schema("a"), cascade: false, force: true }, 160000);
+        let v = plan_view(&PlanRequest::Drop { object, def: schema("a"), cascade: false, force: true, concurrently: false }, 160000);
         assert!(v.empty);
         assert_eq!(v.errors[0].path, "force");
-        let v = plan_view(&PlanRequest::Drop { object, def: schema("a"), cascade: false, force: false }, 160000);
+        let v = plan_view(&PlanRequest::Drop { object, def: schema("a"), cascade: false, force: false, concurrently: false }, 160000);
         assert!(!v.empty && v.errors.is_empty());
     }
 
@@ -2215,6 +2305,7 @@ mod tests {
             ObjectKind::Type,
             ObjectKind::Domain,
             ObjectKind::Policy,
+            ObjectKind::Partition,
             ObjectKind::Tablespace,
         ];
         for k in kinds {
@@ -2252,6 +2343,7 @@ mod tests {
             ObjectKind::Type,
             ObjectKind::Domain,
             ObjectKind::Policy,
+            ObjectKind::Partition,
         ] {
             assert_eq!(target_for(k, Some(5)).unwrap(), Target::Database(5), "{k:?}");
             assert!(matches!(target_for(k, None), Err(Error::Invalid(m)) if m == NEEDS_DATABASE), "{k:?}");
@@ -2635,7 +2727,7 @@ mod tests {
         let mut new = ro.clone();
         new.comment = Some("x".into());
         let alter = PlanRequest::Alter { object, old: ObjectDef::Function(ro.clone()), new: ObjectDef::Function(new) };
-        let drop = PlanRequest::Drop { object, def: ObjectDef::Function(ro.clone()), cascade: false, force: false };
+        let drop = PlanRequest::Drop { object, def: ObjectDef::Function(ro.clone()), cascade: false, force: false, concurrently: false };
         for req in [&alter, &drop] {
             let m = read_only_refusal(req).expect("salt okunur reddedilmeli");
             assert!(m.starts_with(READ_ONLY_PREFIX), "{m}");
@@ -2646,7 +2738,7 @@ mod tests {
         // Gerekçe ilk girdiden, genel biçimde.
         assert_eq!(read_only_refusal(&drop).unwrap(), format!("{READ_ONLY_PREFIX}{}", read_only_reason(Some("LANGUAGE c"))));
         // Düzenlenebilir nesne ve create geçer.
-        let ok = PlanRequest::Drop { object, def: ObjectDef::Function(func("f", &[])), cascade: false, force: false };
+        let ok = PlanRequest::Drop { object, def: ObjectDef::Function(func("f", &[])), cascade: false, force: false, concurrently: false };
         assert_eq!(read_only_refusal(&ok), None);
         assert_eq!(read_only_refusal(&PlanRequest::Create { def: ObjectDef::Function(ro.clone()), concurrently: false }), None);
         // Beş türün her biri.
@@ -2658,11 +2750,11 @@ mod tests {
         (dm.editable, dm.unsupported) = (false, vec![]);
         let p = ObjectDef::Procedure(FunctionDef { returns: None, ..ro.clone() });
         for def in [p, ObjectDef::Trigger(t), ObjectDef::Type(ty), ObjectDef::Domain(dm)] {
-            let req = PlanRequest::Drop { object: ObjectRef { kind: def.kind(), oid: 1 }, def, cascade: true, force: false };
+            let req = PlanRequest::Drop { object: ObjectRef { kind: def.kind(), oid: 1 }, def, cascade: true, force: false, concurrently: false };
             assert!(read_only_refusal(&req).is_some_and(|m| m.starts_with(READ_ONLY_PREFIX)), "{req:?}");
         }
         // Eski türler bu kapıdan etkilenmez.
-        assert_eq!(read_only_refusal(&PlanRequest::Drop { object, def: schema("s"), cascade: false, force: false }), None);
+        assert_eq!(read_only_refusal(&PlanRequest::Drop { object, def: schema("s"), cascade: false, force: false, concurrently: false }), None);
     }
 
     fn policy(name: &str) -> PolicyDef {
@@ -2718,7 +2810,7 @@ mod tests {
         let ro_pol = PolicyDef { editable: false, unsupported: vec!["komut 'zz_gizli'".into()], ..policy("zz_gizli") };
         for def in [t(ro_ts), p(ro_pol)] {
             let object = ObjectRef { kind: def.kind(), oid: 1 };
-            let drop = PlanRequest::Drop { object, def: def.clone(), cascade: false, force: false };
+            let drop = PlanRequest::Drop { object, def: def.clone(), cascade: false, force: false, concurrently: false };
             let alter = PlanRequest::Alter { object, old: def.clone(), new: def.clone() };
             for r in [&drop, &alter] {
                 let m = read_only_refusal(r).expect("salt okunur reddedilmeli");
@@ -2726,14 +2818,97 @@ mod tests {
             }
             assert_eq!(read_only_refusal(&PlanRequest::Create { def, concurrently: false }), None);
         }
-        let ok = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Policy, oid: 1 }, def: p(policy("p")), cascade: false, force: false };
+        let ok = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Policy, oid: 1 }, def: p(policy("p")), cascade: false, force: false, concurrently: false };
         assert_eq!(read_only_refusal(&ok), None);
         // Nesne denetimi: iki tür de yeniden yükleme eşitliği ister.
         assert!(matches!(object_check(&ok), Some(Expected::Def(o, d)) if o.kind == ObjectKind::Policy && *d == p(policy("p"))));
-        let drop_ts = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Tablespace, oid: 2 }, def: t(tablespace("a")), cascade: false, force: false };
+        let drop_ts = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Tablespace, oid: 2 }, def: t(tablespace("a")), cascade: false, force: false, concurrently: false };
         assert!(matches!(object_check(&drop_ts), Some(Expected::Def(o, _)) if o.kind == ObjectKind::Tablespace));
         // Tablespace sunucu kapsamlıdır: `database_oid` gerekmez.
         assert_eq!(apply_target(&drop_ts, None).unwrap(), Target::Maintenance);
+    }
+
+    fn partition(name: &str) -> PartitionDef {
+        PartitionDef {
+            parent_schema: "public".into(),
+            parent_table: "p".into(),
+            strategy: PartitionStrategy::Range,
+            key_count: 1,
+            mode: PartitionMode::Create,
+            schema: "public".into(),
+            name: name.into(),
+            bound: PartitionBound::Range {
+                from: vec![BoundValue::Value { sql: "1".into() }],
+                to: vec![BoundValue::Value { sql: "10".into() }],
+            },
+            partition_by: None,
+            tablespace: None,
+            owner: None,
+            comment: None,
+            detach_pending: false,
+            editable: true,
+            unsupported: vec![],
+        }
+    }
+
+    #[test]
+    fn partition_gates_identity_and_drop_options() {
+        let pt = ObjectDef::Partition;
+        // Kimlik: sınır değişimi (DETACH + ATTACH) tablonun oid'ini korur → asla değişmiş sayılmaz.
+        let mut moved = partition("c");
+        moved.bound = PartitionBound::Default;
+        assert!(!identity_changed(&pt(partition("c")), &pt(moved)));
+        // Salt okunur kapısı: alter ve drop, gerekçe genel ve adsız; create geçer.
+        let ro = PartitionDef { editable: false, unsupported: vec!["sınır ifadesi ayrıştırılamadı".into()], ..partition("zz_gizli") };
+        let object = ObjectRef { kind: ObjectKind::Partition, oid: 1 };
+        let drop = PlanRequest::Drop { object, def: pt(ro.clone()), cascade: false, force: false, concurrently: false };
+        let alter = PlanRequest::Alter { object, old: pt(ro.clone()), new: pt(ro.clone()) };
+        for r in [&drop, &alter] {
+            let m = read_only_refusal(r).expect("salt okunur reddedilmeli");
+            assert!(m.starts_with(READ_ONLY_PREFIX) && !m.contains("zz_gizli"), "{m}");
+        }
+        assert_eq!(read_only_reason(Some("bölümleme stratejisi 'x'")), "desteklenmeyen bölümleme stratejisi");
+        assert_eq!(read_only_reason(Some("sınır ifadesi ayrıştırılamadı")), "sınır ifadesi ayrıştırılamadı");
+        assert_eq!(read_only_refusal(&PlanRequest::Create { def: pt(ro), concurrently: false }), None);
+        let ok = PlanRequest::Drop { object, def: pt(partition("c")), cascade: false, force: false, concurrently: false };
+        assert_eq!(read_only_refusal(&ok), None);
+        // Nesne denetimi yeniden yükleme eşitliği ister; bölüm veritabanı kapsamlıdır.
+        assert!(matches!(object_check(&ok), Some(Expected::Def(o, d)) if o.kind == ObjectKind::Partition && *d == pt(partition("c"))));
+        assert_eq!(apply_target(&ok, Some(7)).unwrap(), Target::Database(7));
+        // `concurrently` Drop'tan plana geçer: PG 14+'da CONCURRENTLY, normal ayırmada yok; PG 13'te alan hatası.
+        let drop = |concurrently| PlanRequest::Drop { object, def: pt(partition("c")), cascade: false, force: false, concurrently };
+        let v = plan_view(&drop(true), 160000);
+        assert!(v.errors.is_empty() && v.statements.len() == 1 && !v.statements[0].transactional, "{v:?}");
+        assert!(v.statements[0].sql.ends_with(" CONCURRENTLY"), "{}", v.statements[0].sql);
+        let v = plan_view(&drop(false), 160000);
+        assert!(v.statements[0].transactional && !v.statements[0].sql.contains("CONCURRENTLY"), "{v:?}");
+        assert_eq!(plan_view(&drop(true), 130000).errors[0].path, "concurrently");
+        // Diğer türlerde `concurrently` alan hatasıdır.
+        let o = ObjectRef { kind: ObjectKind::Schema, oid: 1 };
+        let v = plan_view(&PlanRequest::Drop { object: o, def: schema("a"), cascade: false, force: false, concurrently: true }, 160000);
+        assert_eq!(v.errors[0].path, "concurrently");
+    }
+
+    #[test]
+    fn partition_hints_follow_code_and_statement() {
+        let none = HintCtx::default();
+        let h = |sql: &str, code: &str| hint_for(ObjectKind::Partition, "alter", none, sql, code);
+        let attach = "ALTER TABLE public.p ATTACH PARTITION public.c FOR VALUES FROM (1) TO (10)";
+        let detach = "ALTER TABLE public.p DETACH PARTITION public.c CONCURRENTLY";
+        assert_eq!(h(attach, "23514"), Some(PARTITION_ROWS_OUTSIDE_HINT));
+        assert_eq!(h(attach, "42P17"), Some(PARTITION_OVERLAP_HINT));
+        assert_eq!(h(detach, "55000"), Some(PARTITION_DETACH_CONCURRENTLY_HINT));
+        // Kod tek başına yetmez: ifade eşleşmeli.
+        assert_eq!(h("ALTER TABLE public.p DETACH PARTITION public.c", "55000"), None);
+        assert_eq!(h("ALTER TABLE public.p DETACH PARTITION public.c", "42P17"), None);
+        assert_eq!(h("CREATE TABLE public.c PARTITION OF public.p DEFAULT", "42P17"), None);
+        assert_eq!(h(attach, "42809"), None);
+        // Başka türler bu ipuçlarını almaz.
+        assert_eq!(hint_for(ObjectKind::Table, "alter", none, attach, "42P17"), None);
+        // Metinler ad/değer taşımaz.
+        for t in [PARTITION_ROWS_OUTSIDE_HINT, PARTITION_OVERLAP_HINT, PARTITION_DETACH_CONCURRENTLY_HINT] {
+            assert!(!t.contains("public"));
+        }
     }
 
     #[test]
@@ -2920,7 +3095,7 @@ mod tests {
         let object = ObjectRef { kind: ObjectKind::Function, oid: 1 };
         let alter = PlanRequest::Alter { object, old: ObjectDef::Function(f.clone()), new: ObjectDef::Function(l.clone()) };
         assert!(HintCtx::of(&alter).leakproof);
-        let drop = PlanRequest::Drop { object, def: ObjectDef::Function(l), cascade: false, force: false };
+        let drop = PlanRequest::Drop { object, def: ObjectDef::Function(l), cascade: false, force: false, concurrently: false };
         assert!(!HintCtx::of(&drop).leakproof);
     }
 
@@ -2973,7 +3148,7 @@ mod tests {
         let comment = alter(&|n| n.comment = Some("c".into()));
         let limit = alter(&|n| n.connection_limit = 5);
         let no_conn = alter(&|n| n.connection_limit = 0);
-        let drop = PlanRequest::Drop { object, def: ObjectDef::Database(d("postgres")), cascade: false, force: false };
+        let drop = PlanRequest::Drop { object, def: ObjectDef::Database(d("postgres")), cascade: false, force: false, concurrently: false };
         for r in [&rename, &move_ts, &close, &no_conn, &drop] {
             assert!(touches_maintenance(r, "postgres"), "{r:?}");
             assert!(!touches_maintenance(r, "other"), "{r:?}");

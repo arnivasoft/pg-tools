@@ -194,7 +194,7 @@ mod tests {
             // Sunucu istemcinin tanımına güvenmez: tahrifli `def` ile silme `plan_changed` olur, şema yerinde kalır.
             let ObjectDef::Schema(mut tampered) = loaded.clone() else { panic!() };
             tampered.comment = Some("sahte".into());
-            let drop = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid }, def: ObjectDef::Schema(tampered), cascade: false, force: false };
+            let drop = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid }, def: ObjectDef::Schema(tampered), cascade: false, force: false, concurrently: false };
             let hash = Box::pin(ddl.preview(sid, Some(db), &drop)).await.map_err(|e| ddl_payload(&e)).unwrap().hash;
             let mut o = opts(&hash);
             o.confirmed = true;

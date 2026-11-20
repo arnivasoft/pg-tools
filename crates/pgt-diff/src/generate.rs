@@ -260,6 +260,7 @@ impl Acc {
         let o = DropOptions {
             cascade: false,
             force: false,
+            concurrently: false,
         };
         self.plan(phase, build::drop_with(def, o, ctx));
         match def {

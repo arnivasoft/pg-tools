@@ -44,6 +44,8 @@ export const tdes = {
     disconnected: "Sunucu bağlantısı kesildi; sekme salt okunur. Sunucuyu yeniden bağlayıp Yeniden yükle'ye basın.",
     done: "Nesne oluşturuldu, ancak ağaçta bulunamadı. Sekmeyi kapatabilirsiniz.",
     readOnly: "Salt okunur",
+    /** Plan 36 geçici koruması: Partition formu Plan 37'de gelir. */
+    formMissing: "Bu tür için form henüz yok.",
   },
   preview: {
     title: "SQL önizleme",

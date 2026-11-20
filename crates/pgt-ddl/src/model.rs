@@ -88,6 +88,8 @@ pub enum ObjectKind {
     Policy,
     /// Sunucu kapsamlı (küme düzeyi).
     Tablespace,
+    /// Bölümlenmiş tablonun bölümü; `ObjectRef.oid` bölüm tablosunun (çocuk) oid'i.
+    Partition,
 }
 
 impl ObjectKind {
@@ -957,6 +959,7 @@ pub enum ObjectDef {
     Domain(DomainDef),
     Policy(PolicyDef),
     Tablespace(TablespaceDef),
+    Partition(PartitionDef),
 }
 
 impl ObjectDef {
@@ -978,6 +981,7 @@ impl ObjectDef {
             ObjectDef::Domain(_) => ObjectKind::Domain,
             ObjectDef::Policy(_) => ObjectKind::Policy,
             ObjectDef::Tablespace(_) => ObjectKind::Tablespace,
+            ObjectDef::Partition(_) => ObjectKind::Partition,
         }
     }
 
@@ -999,8 +1003,74 @@ impl ObjectDef {
             ObjectDef::Domain(d) => &d.name,
             ObjectDef::Policy(d) => &d.name,
             ObjectDef::Tablespace(d) => &d.name,
+            ObjectDef::Partition(d) => &d.name,
         }
     }
+}
+
+/// Bölüm oluşturma modu: yeni tablo (`PARTITION OF`) ya da var olan tabloyu bağlama (`ATTACH PARTITION`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PartitionMode {
+    Create,
+    Attach,
+}
+
+/// Range sınırının bir kolon değeri: serbest SQL ya da `MINVALUE`/`MAXVALUE`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export)]
+pub enum BoundValue {
+    Value { sql: String },
+    Minvalue,
+    Maxvalue,
+}
+
+/// Bölüm sınırı (`pg_get_expr(relpartbound)` karşılığı).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export)]
+pub enum PartitionBound {
+    Range { from: Vec<BoundValue>, to: Vec<BoundValue> },
+    /// Öğeler serbest SQL (sabit ifade; `NULL` serbest).
+    List { values: Vec<String> },
+    Hash {
+        #[ts(type = "number")]
+        modulus: u32,
+        #[ts(type = "number")]
+        remainder: u32,
+    },
+    Default,
+}
+
+/// Bölüm (veritabanı kapsamlı; `ObjectRef.oid` = çocuk tablonun oid'i). `strategy`/`key_count`/`detach_pending` üst
+/// tablodan gelir ve salt okunurdur.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PartitionDef {
+    pub parent_schema: String,
+    pub parent_table: String,
+    pub strategy: PartitionStrategy,
+    #[ts(type = "number")]
+    pub key_count: u32,
+    /// Yalnızca oluşturmada anlamlı; yükleyici `create` yazar.
+    pub mode: PartitionMode,
+    /// `create`: yeni tablo; `attach`: var olan tablo.
+    pub schema: String,
+    pub name: String,
+    pub bound: PartitionBound,
+    /// Yalnızca oluşturma + `create` modu (alt bölümleme).
+    pub partition_by: Option<PartitionByDef>,
+    pub tablespace: Option<String>,
+    pub owner: Option<String>,
+    pub comment: Option<String>,
+    /// PG 14+ `pg_inherits.inhdetachpending` (yarım kalmış ayırma); salt okunur.
+    #[serde(default)]
+    pub detach_pending: bool,
+    pub editable: bool,
+    pub unsupported: Vec<String>,
 }
 
 /// Alan düzeyi doğrulama hatası; `path` arayüzdeki alanı gösterir (ör. `columns[1].key`).
@@ -1205,6 +1275,56 @@ mod tests {
         assert_eq!(TablespaceOptions::default().seq_page_cost, None);
         assert_eq!(serde_json::to_value(ObjectKind::Policy).unwrap(), "policy");
         assert_eq!(serde_json::to_value(ObjectKind::Tablespace).unwrap(), "tablespace");
+    }
+
+    fn partition_json() -> serde_json::Value {
+        json!({
+            "kind": "partition", "parentSchema": "public", "parentTable": "m", "strategy": "range", "keyCount": 2,
+            "mode": "create", "schema": "public", "name": "m_1",
+            "bound": {"kind": "range", "from": [{"kind": "value", "sql": "1"}, {"kind": "minvalue"}],
+                      "to": [{"kind": "value", "sql": "10"}, {"kind": "maxvalue"}]},
+            "partitionBy": null, "tablespace": null, "owner": null, "comment": null,
+            "detachPending": false, "editable": true, "unsupported": []
+        })
+    }
+
+    #[test]
+    fn partition_def_round_trips_camel_case() {
+        let v = partition_json();
+        let d: ObjectDef = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&d).unwrap(), v);
+        let ObjectDef::Partition(p) = &d else { panic!() };
+        assert_eq!((d.kind(), d.name()), (ObjectKind::Partition, "m_1"));
+        assert_eq!((p.key_count, p.mode, p.strategy), (2, PartitionMode::Create, PartitionStrategy::Range));
+        assert_eq!(serde_json::to_value(ObjectKind::Partition).unwrap(), "partition");
+        assert_eq!(serde_json::to_value(PartitionMode::Attach).unwrap(), "attach");
+        // `detachPending` eksikse `false`.
+        let mut v = partition_json();
+        v.as_object_mut().unwrap().remove("detachPending");
+        let ObjectDef::Partition(p) = serde_json::from_value(v).unwrap() else { panic!() };
+        assert!(!p.detach_pending);
+        // `editable`/`unsupported` varsayılansızdır (R5).
+        for k in ["editable", "unsupported"] {
+            let mut v = partition_json();
+            v.as_object_mut().unwrap().remove(k);
+            assert!(serde_json::from_value::<ObjectDef>(v).is_err(), "{k}");
+        }
+    }
+
+    #[test]
+    fn partition_bound_variants_json() {
+        let cases = [
+            json!({"kind": "range", "from": [{"kind": "value", "sql": "1"}, {"kind": "minvalue"}], "to": [{"kind": "value", "sql": "2"}, {"kind": "maxvalue"}]}),
+            json!({"kind": "list", "values": ["'a'", "NULL"]}),
+            json!({"kind": "hash", "modulus": 4, "remainder": 1}),
+            json!({"kind": "default"}),
+        ];
+        for v in cases {
+            let b: PartitionBound = serde_json::from_value(v.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&b).unwrap(), v);
+        }
+        let b: PartitionBound = serde_json::from_value(json!({"kind": "hash", "modulus": 4, "remainder": 1})).unwrap();
+        assert_eq!(b, PartitionBound::Hash { modulus: 4, remainder: 1 });
     }
 
     #[test]
@@ -1583,6 +1703,7 @@ mod tests {
             (ObjectKind::Domain, false),
             (ObjectKind::Policy, false),
             (ObjectKind::Tablespace, true),
+            (ObjectKind::Partition, false),
         ] {
             assert_eq!(k.server_scoped(), scoped, "{k:?}");
         }

@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 5c: Kalan Nesne Diyalogları Tasarımı (Policy, Tablespace, Bölümler, FDW, Publication, Subscription)
 
 - **Tarih:** 2026-11-19
-- **Durum:** Plan 34–35 uygulandı (Grup A: Policy ve Tablespace); Grup B–C kalan
+- **Durum:** Plan 34–35 uygulandı (Grup A: Policy ve Tablespace); Plan 36 arka ucu uygulandı (Grup B: Bölümler), Plan 37 ön yüzü kalan; Grup C kalan
 - **Kapsam:** Explorer'da bulunup diyaloğu olmayan **RLS politikası** ve **tablespace**; bölümlü tabloya **bölüm oluşturma / bağlama / ayırma**; ağaçta henüz bulunmayan **Foreign Data Wrapper, Foreign Server, User Mapping, Foreign Table, Publication, Subscription** (önce Explorer düğümleri, sonra diyaloglar).
 - **Temel:** `docs/superpowers/specs/2026-10-06-object-dialogs-design.md` (mimari §2, risk modeli §3, arayüz §4, güvenlik §6, test §7 ve tüm sözleşme notları) ile `docs/superpowers/specs/2026-10-16-object-dialogs-routines-types-design.md` (R5 salt okunur kuralı, `editable`/`unsupported`, eklentiye ait nesneler, `OWNER TO` en sonda) **aynen geçerlidir**. Bu belge yalnızca yeni türleri, kurallarını ve kararlarını ekler; ana spec'in §1.3 "kapsam dışı" listesinden RLS politikaları, FDW/publication/subscription diyalogları, partition oluşturma/bağlama ve tablespace oluşturma çıkarılır.
 - **Kullanıcı kararı (2026-11-19):** dört grubun tamamı kapsamda. Plan 33 CSV içe aktarmaya ayrılmıştır; bu alt proje Plan 34'ten başlar.
@@ -179,6 +179,7 @@ Yeni `NodeKind` / `Seg` / `Coll` (etiketler):
 - Subscription'da bağlantı dizgesinin parça parça (ana makine/port/kullanıcı) düzenlenmesi; `ALTER SUBSCRIPTION … SKIP` (PG 15+); çoğaltma durum izleme (Dashboard işi).
 - Yerinde tablespace (`allow_in_place_tablespaces`); tablespace'teki nesneleri toplu taşıma (`ALTER … SET TABLESPACE` / `ALTER TABLESPACE … MOVE` yoktur, PG'de `ALTER TABLE ALL IN TABLESPACE … SET TABLESPACE`).
 - Bölüm bölme/birleştirme (`SPLIT/MERGE PARTITION`; PG 17 geliştirme sürecinde geri çekildi); kalıtım (`INHERITS`) düzenleme; EXCLUDE kısıtları.
+- Partition (Plan 36 sonrası, ileride açılabilir): ayrıştırılamayan sınırlı ya da bilinmeyen stratejili bölüm salt okunurdur ve ayırma da kapalıdır (gerekçede yalnız ad yazdığı hâlde); foreign table ve bölümü olan bölümlü tablo `attachable_tables` listesinde yer almaz; ATTACH/DETACH ipucu eşleşmesi ifade metni alt dizgesiyledir (tırnaklı adda yanlış ipucu çıkabilir, kozmetik).
 - Event trigger, rule, collation, cast, operator, FTS nesneleri, language, aggregate (Explorer'da yok).
 
 ---
@@ -253,3 +254,66 @@ Aşağıdaki maddeler **gönderilen** davranışı anlatır (kod ve Docker PG 10
 - **FORCE notu:** FORCE açılırken taslakta RLS kapalıysa (ve ENABLE açılmıyorsa) Yıkıcı notu yerine bilgi notu "FORCE yalnız satır güvenliği açıkken etkilidir." (`forceWithoutEnable`) gösterilir; arka uç risk sınıflaması değişmez.
 - **Biçim uyarıları engellemez:** tablespace seçenek uyarıları (sayı değil, negatif, 0–1000 dışı) gönderimi durdurmaz; yetkili doğrulama arka uç alan hatasıdır. Konum yalnız create'te düzenlenir.
 - **Backlog:** politika ifadeleri için CodeMirror (şimdilik `textarea`); şema karşılaştırmada politikalar.
+
+---
+
+## 11. Plan 36 sözleşme notları (Plan 37 için)
+
+Aşağıdaki maddeler **gönderilen** davranışı anlatır (kod ve Docker PG 10–18 testleriyle doğrulandı); §3'teki taslaktan ayrıldığı yerde bu bölüm geçerlidir.
+
+### 11.1 Model alanları (camelCase) ve salt okunurluk
+
+- `ObjectDef` etiketi `kind`: `partition`. `PartitionDef`: `parentSchema, parentTable, strategy (range|list|hash), keyCount, mode (create|attach), schema, name, bound, partitionBy, tablespace, owner, comment, detachPending, editable, unsupported`.
+- **Salt okunurlar:** `strategy`, `keyCount`, `detachPending` üst tablodan/katalogdan gelir; istemcinin gönderdiği değerler yetkili değildir (alter, sınırı **yüklü (`old`)** `strategy`/`keyCount` ile doğrular). `detachPending` için `#[serde(default)]` vardır.
+- **`editable` ve `unsupported` için serde varsayılanı YOKTUR:** yeni tanım `editable: true, unsupported: []` ile gönderilmelidir (`ddl_defaults` doldurur; arayüz alanları düşürmemeli).
+- `PartitionBound` (etiket `kind`): `range { from: BoundValue[], to: BoundValue[] }`, `list { values: string[] }`, `hash { modulus, remainder }`, `default`. `BoundValue` (etiket `kind`): `value { sql }` | `minvalue` | `maxvalue`.
+- **R5:** yükleyici `unsupported` doluysa `editable = false` döndürür: eklentiye ait tablo (`EXTENSION … (eklentiye ait)`), bilinmeyen bölümleme stratejisi, ayrıştırılamayan sınır ifadesi, geçersiz UTF-8. Salt okunur kapısı `alter`/`drop`'u bağlantıdan önce reddeder (kodsuz `invalid`, ad/sınır içermeyen sabit gerekçe). **Yükleyici `mode = create` ve `partitionBy`/`tablespace`/`owner`/`comment = null` döndürür** (bu özellikler Tablo diyaloğundadır); alter'da bunlar **yazılamaz**.
+- `detachPending` (PG 14+ `pg_inherits.inhdetachpending`) `unsupported` **değildir**; ayırma yalnız `FINALIZE` olarak yapılır.
+- Hedef eşlemesi bölüm düğümünü hâlâ `Table` olarak verir (`object`); `Partition` yalnız `partition` alanındadır (§11.4).
+
+### 11.2 Alan yolları (`FieldError.path`)
+
+- `parentSchema`, `parentTable`, `schema`, `name` (geçerli ad), `bound`, `bound.from`, `bound.to` (uzunluk ≠ `keyCount`), `bound.from[i]`, `bound.to[i]`, `bound.values`, `bound.values[i]`, `bound.modulus`, `bound.remainder`, `partitionBy.strategy`, `partitionBy.keys`, `partitionBy.keys[j]`, `tablespace`, `owner`, `comment`, `concurrently`, `cascade`, `object` (salt okunur, yarım kalmış ayırma, sürüm kapısı), `old.*` (bayat/geçersiz yüklü tanım: `old.parentSchema`, `old.parentTable`, `old.schema`, `old.name`).
+- **Sınır kuralları:** `range` için `from`/`to` uzunluğu = `keyCount`; `MINVALUE`/`MAXVALUE` sonrasında aynı tarafta yalnız aynı anahtar sözcük (`bound.<taraf>[i]`); `list` en az bir değer (`NULL` serbest); `hash` `modulus ≥ 1`, `remainder < modulus`; strateji–sınır uyuşmazlığı `bound` yolunda. **HASH üst tabloda `default` sınırı da `bound` uyuşmazlığıdır** (§3.1 taslağında yazılı değildi; PG zaten reddeder). `default` PG < 11 → `bound` sürüm hatası; `hash` PG < 11 → `bound` sürüm hatası; `partitionBy` HASH PG < 11 → `partitionBy.strategy`; PG < 10 → `object` sürüm hatası. Serbest SQL değerler `check_free_sql` ve nihai sınır metni `composed_is_clean` kapısından geçer.
+- **PG 10–11 sınır değerleri ham yazılır:** bu sürümlerin sınır dilbilgisi yalnız sabit kabul eder (parantezli ifade yok). PG ≥ 12'de değer `(<sql>\n)` ile sarılır; PG < 12'de kırpılmış ham metin yazılır ve değer **üst düzeyde virgül içeremez** (`bound.from[i]` / `bound.to[i]` / `bound.values[i]`: "PG 12 öncesinde sınır değeri tek bir sabit olmalı."). `--` ile biten değer her sürümde reddedilir. **PG < 12'de değer yorum da içeremez** (`--` ve `/*`; tırnak içindeki `--` serbest): "PG 12 öncesinde sınır değeri yorum içeremez." (yorum, sonraki değeri ya da `)`'i yutabilir). Doğrulama, yazılacak kırpılmış (`trim()`) metne yapılır; doğrulanan ve yazılan metin birebir aynıdır. Nihai denetim sınır metninde değil **tam CREATE/ATTACH ifadesinde** yapılır (`composed_is_clean` + satır yorumuyla bitmeme; yol `bound`). **`MINVALUE`/`MAXVALUE`** (kırpılmış, büyük/küçük harf duyarsız) serbest SQL değeri olarak verilemez, o değerin yolunda alan hatası: range'de "MINVALUE/MAXVALUE için anahtar sözcük seçeneğini kullanın.", list'te "MINVALUE/MAXVALUE yalnız RANGE sınırında kullanılır.". `alter(loaded, loaded)` her sürümde boş plandır (sabit nokta).
+- **Alter yasakları:** kimlik (`parentSchema`, `parentTable`, `schema`, `name`) değişimi → o yolda alan hatası ("Bölümün adı, şeması ve üst tablosu değiştirilemez; yeniden adlandırma Tablo diyaloğundadır."); `owner`, `comment`, `tablespace`, `partitionBy` dolu ya da değişmişse → o yolda alan hatası ("Bölüm tablosunun özellikleri Tablo diyaloğunda düzenlenir."). Yani **alter'a bu dört alan `null` gönderilmelidir**; arayüz Partition sekmesinde bunları alter'da göstermemeli.
+
+### 11.3 Kurallar: eylemler, risk, kapılar
+
+- **create (`mode = create`):** `CREATE TABLE s.n PARTITION OF ps.pt FOR VALUES … | DEFAULT [PARTITION BY …] [TABLESPACE …]` (Safe), sonra `COMMENT ON TABLE` (`Some("")` yorumsuz sayılır), `ALTER TABLE … OWNER TO` (**en sonda**). `partitionBy`/`tablespace`/`owner`/`comment` yalnız `create` modunda doğrulanır ve yazılır; `attach`'te yok sayılır.
+- **attach (`mode = attach`):** tek `ALTER TABLE ps.pt ATTACH PARTITION s.n …` (**Destructive**). Not sürüme göre: PG ≥ 12 "Tablo taranır ve sınır doğrulanır; üst tabloda SHARE UPDATE EXCLUSIVE kilidi alınır.", PG < 12 aynı metin `ACCESS EXCLUSIVE` ile. `name` **var olan** tablodur; `schema` onun şemasıdır.
+- **alter (sınır değiştirme):** yalnız `bound` farkı → aynı transaction'da `DETACH PARTITION` (Destructive, not "Bölüm aynı transaction içinde yeniden bağlanır; tablo yeniden taranır.") + `ATTACH PARTITION` (Destructive, sürüme göre kilit notu). Sınır aynıysa **boş plan** — **yalnız üretici düzeyinde** (salt okunur ya da `detachPending` eski tanımda da). Yönetici üzerinden: `editable = false` eski tanımda Alter/Drop salt okunur kapısında reddedilir (boş plan dönmez); boş plan yönetici üzerinden yalnız `detachPending` (düzenlenebilir) eski tanım için geçerlidir. Salt okunur eski tanım → `object` hatası ("Bu bölüm salt okunurdur; değiştirilemez ve ayrılamaz."); `detachPending` → `object` hatası ("Yarım kalmış ayırma var; önce ayırmayı tamamlayın (FINALIZE).").
+- **drop (= ayırma; tablo silinmez):** `PlanRequest::Drop`'un partition anlamıdır. **`PlanRequest::Drop.concurrently`** (`serde(default)`, TS'de isteğe bağlı) yalnız Partition'da geçerlidir; diğer türlerde `concurrently` alan hatası ("CONCURRENTLY yalnızca bölüm ayırmada kullanılır."). `cascade` Partition'da `cascade` alan hatası ("Bölüm ayırmada CASCADE yoktur."); `force` `force` alan hatası. Normal ayırma: `ALTER TABLE ps.pt DETACH PARTITION s.n` (transaction içinde, Destructive, not "Satırlar üst tablodan görünmez olur; tablo silinmez."). `concurrently = true`: `… CONCURRENTLY` (**transaction dışı**; PG < 14 → `concurrently` sürüm hatası). `detachPending = true`: `… FINALIZE` (transaction dışı; `concurrently` yok sayılır; PG < 14 → `object` sürüm hatası). Tablo ve satırlar korunur; DataLoss yoktur.
+- **Onay kapısı:** tüm Partition planları en çok Destructive'dir → yalnız `confirmation_required`; **üretimde ek ad onayı yoktur** (`production_confirmation_required` yalnız DataLoss içindir). Arayüz yalnız onay kutusunu göstermelidir.
+- **Bayat denetimi:** alter/drop `old` tanımın **tamamını** karşılaştırır (`plan_changed`); `identity_changed(Partition, Partition) = false` (alter ad/şema değiştirmez).
+- **`created`:** create ve attach `created = Some(çocuk tablonun oid'i)` döndürür (`find_created`: şema + ad, `relispartition`); alter ve drop `created` döndürmez.
+- **Transaction dışı ifadeler** (`CONCURRENTLY`/`FINALIZE`) tek ifadedir; hata verirse `committed = 0`, hiçbir şey değişmemiştir.
+- **Uyarılar:** Partition planları uyarı üretmez (`warnings` boş).
+
+### 11.4 `defaults(kind)`, hedefler ve yenileme
+
+- `defaults(Partition)`: bağlam `tableOid` (üst tablo) ister; yoksa kodsuz `invalid`; tablo yoksa `not_found`; bölümlenmemiş tabloda `invalid` ("Bölüm yalnızca bölümlenmiş bir tablo altında oluşturulabilir."). Dönen: `parentSchema`/`parentTable`, `schema = parentSchema`, `name = ""`, `mode = create`, `strategy`/`keyCount` üst tablodan, `bound` boş iskelet (`range` → `keyCount` adet boş `value`; `list` → `[]`; `hash` → `modulus 1, remainder 0`), `partitionBy/tablespace/owner/comment = null`, `detachPending = false`, `editable = true`, `unsupported = []`.
+- **Hedef:** `…/tbl:P/partitions` → `create(Partition, schemaOid, tableOid = P)`, `refreshNodeId = …/tbl:P/partitions`. Bölüm düğümü `…/tbl:P/tbl:C` → `object = Table C` (Düzenle Tablo'yu açmaya devam eder) **ve** yeni `DdlTarget.partition = { kind: partition, oid: C }` ("Bölüm sınırı…" ve "Bölümü ayır…" eylemleri bunu kullanır); `refreshNodeId = …/tbl:P/partitions`. `partition` alanı yalnız gerçek bölüm düğümünde yazılır (aksi hâlde JSON'da yoktur; TS'de isteğe bağlı). Alt bölümde üst tablo o bölümdür. Arayüz kimlik ayrıştırmaz.
+- **İkinci yenileme hedefi `tablesRefreshNodeId`** (isteğe bağlı): bölüm düğümünde ve `partitions` koleksiyonunda yoldaki en yakın şemanın `tables` koleksiyonudur. **Yenileme kuralı:** create/attach/detach sonrası `refreshNodeId` (üst tablonun `partitions` koleksiyonu) **ve** `tablesRefreshNodeId` yenilenir. **Bilinen sınır:** üst tablodan farklı şemaya bağlanan/ayrılan tablonun şema koleksiyonu yenilenmez (hedef yalnız üst tablonun şemasını bilir; kimlik ayrıştırma yasaktır).
+- **`AttachableTables`:** `LookupRequest::AttachableTables { parent_oid }` (JSON `{"kind":"attachable_tables","parent_oid":N}`; `server_wide = false`). Dönüş `LookupItem` listesidir: `value` = tablo adı, `detail` = şema adı; şema ve ada göre sıralı, en çok 5000. Dahil: bölüm olmayan, kalıtım ilişkisi olmayan, sıradan ya da bölümlü tablolar (bölümsüz bölümlü tablo dahil). Hariç: üst tablonun kendisi ve ataları (alt bölümlemede), bölümler, `pg_inherits`'te çocuk ya da üst olanlar, `pg_*`/`information_schema` şemaları, eklentiye ait tablolar.
+- **Yükleme:** sınır `pg_get_expr(relpartbound)` metninden ayrıştırılır (`FROM … TO …`, `IN (…)`, `WITH (modulus m, remainder r)`, `DEFAULT`); değerler `sqlscan` ile üst düzey virgüllerden bölünür. Yüklenen değerler **sunucunun kanonik sabit metnidir** (`pg_get_expr`; ör. `1`, `'2024-01-01'`), `wrap`'lı DEĞİL; Plan 37 wrap soymaya çalışmamalıdır. `wrap` yalnız üretilen ifadededir (PG ≥ 12: `(<sql>\n)`); MINVALUE/MAXVALUE, hash ve default tam sabit noktadır.
+
+### 11.5 İpuçları (SQLSTATE → ipucu)
+
+Sabitler `crates/pgt-ddl/src/manager.rs`'tedir (`PARTITION_*_HINT`); SQLSTATE'ler Docker'da PG 10–18'de gözlenip testte sabitlendi (tahmin yok).
+
+- `23514` + ifadede ` ATTACH PARTITION ` (bağlanan tabloda sınır dışı satır; sınır değiştirmenin yeniden bağlamasında da): "Tablodaki bazı satırlar bölüm sınırının dışında; önce bu satırları taşıyın ya da sınırı genişletin."
+- `42P17` + ` ATTACH PARTITION ` (çakışan sınır): "Sınır başka bir bölümün sınırıyla çakışıyor (ya da tablo bölüm sınırıyla uyumsuz)."
+- `55000` + ` DETACH PARTITION ` ve ifade ` CONCURRENTLY` ile biter (üst tabloda DEFAULT bölüm varken): "CONCURRENTLY, üst tabloda DEFAULT bölüm varken kullanılamaz; normal ayırmayı seçin." Hiçbir şey değişmez.
+- `42809`/`42P16` için özel ipucu **yoktur**; PG iletisi olduğu gibi kalır. Kural ipuçları yalnız PG kendi ipucunu vermediyse uygulanır. İpucu yalnız ATTACH ifadesine bağlıdır (`PARTITION OF` çakışması PG iletisiyle kalır).
+
+### 11.6 Güvenlik, günlük ve test notları
+
+- Sınır değeri, tablo adı, yorum ve SQL `tracing`'e, hata iletisine ya da diske yazılmaz (yakalama testi: `crates/pgt-ddl/tests/logging.rs`, `partition_logging_is_bound_name_free`; yalnız `23514` kodu günlükte). `build/partition.rs` içinde `tracing::` yoktur. Salt okunur gerekçeleri ad/sınır içermez.
+- Docker testleri: `crates/pgt-ddl/tests/partition_roundtrip.rs` (5 test; ayrı `pgt_ddl_pt…` veritabanı), `tests/manager.rs` (`partition_defaults_created_gates_and_stale_old`), `tests/logging.rs`. `detachPending` testi katalogda `pg_inherits.inhdetachpending` elle kurularak yapılır (atılabilir veritabanı); eklentiye ait tablo yolu yalnız SQL'dedir (Docker testi yok).
+- `pgt-diff` Bölüm türünü `normalize/script`'te tanır (kind_rank 16, etiket "Bölüm").
+
+### 11.7 Ön yüz bütçe notu
+
+- Plan 36 sonunda ana paket **126,553 B**, başlangıç **154,226 B** (tavanlarla birebir, değişmedi). Plan 37'nin `ddl-kinds.ts` ve Explorer menü/ikon kancası ek bayt getirir; **adı konmuş bir telafi gerekir** (tavanlar yükseltilmez). `PlanRequest.Drop.concurrently` TS'de isteğe bağlı olduğundan ana paket etkilenmez.
+- Plan 36'da yalnızca tembel dosyalar uyum için değişti (`src/features/schema-diff` **değişmedi**): `DesignerView.tsx` geçici `formMissing` koruması (metin `tdes.view.formMissing`), `KIND_LABELS.partition`, boş `FORM_PATHS.partition` (Plan 37 yeni yollarla tamamlamalı; bütünlük denetimi 17 tür), `drop-model.ts` (Partition: `cascade`/`force` yok; `concurrently` seçeneğini Plan 37 ekler).

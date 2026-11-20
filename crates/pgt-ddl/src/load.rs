@@ -114,6 +114,11 @@ const DOMAIN_SQL: &str = include_str!("sql/load_domain.sql");
 const DOMAIN_CHECKS_SQL: &str = include_str!("sql/load_domain_checks.sql");
 static POLICY_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_policy.sql"))]);
 static TABLESPACE_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_tablespace.sql"))]);
+/// PG 14: `inhdetachpending` (yarım kalmış `DETACH … CONCURRENTLY`).
+static PARTITION_SQL: VersionedSql = VersionedSql(&[
+    (10, include_str!("sql/load_partition.sql")),
+    (14, include_str!("sql/load_partition.pg14.sql")),
+]);
 
 const SYSTEM_ERROR: &str = "sistem nesnesi düzenlenemez";
 
@@ -198,6 +203,7 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into
         ObjectKind::Policy => load_policy(mgr, server, database_oid, obj.oid).await,
         // Sunucu kapsamlı: bakım veritabanında (veritabanı oid'i yok sayılır).
         ObjectKind::Tablespace => load_tablespace(mgr, server, Target::Maintenance, obj.oid).await,
+        ObjectKind::Partition => load_partition(mgr, server, database_oid, obj.oid).await,
     }
 }
 
@@ -223,6 +229,7 @@ pub async fn load_in(client: &Client, version_num: u32, obj: ObjectRef) -> Resul
         // `in_scope` bunları zaten eledi.
         ObjectKind::Database | ObjectKind::Role | ObjectKind::Tablespace => Err(Error::Invalid(SERVER_SCOPED_MSG.to_string())),
         ObjectKind::Policy => parse_policy(fetch_policy(client, v, oid).await.map_err(q)?),
+        ObjectKind::Partition => parse_partition(fetch_partition(client, v, oid).await.map_err(q)?),
     }
 }
 
@@ -1733,6 +1740,66 @@ fn parse_policy(rows: Vec<Row>) -> Result<ObjectDef> {
     }))
 }
 
+async fn fetch_partition(c: &Client, v: PgVersion, oid: u32) -> QueryResult<Vec<Row>> {
+    query_oid(c, v, &PARTITION_SQL, oid).await
+}
+
+/// Bölüm yükleyicisi (`ObjectRef.oid` = çocuk tablo). Normalleştirme: `mode = create`; `partition_by`/`tablespace`/
+/// `owner`/`comment` her zaman `None` (bu özellikler Tablo diyaloğundadır); `strategy`/`key_count` üst tablodan,
+/// `bound` = `pg_get_expr(relpartbound)` metninin `parse_bound` sonucu (alter(yüklü, yüklü) boştur). `unsupported`
+/// (R5; doluysa `editable = false`): eklentiye ait çocuk/üst tablo, bilinmeyen `partstrat`, ayrıştırılamayan sınır,
+/// geçersiz UTF-8 (adlar kayıplı çözülür; yalnızca gösterim). Bölüm olmayan oid → `NotFound`.
+async fn load_partition(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
+    parse_partition(run_oid(mgr, server, db, &PARTITION_SQL, oid).await?)
+}
+
+/// Bölüm sınıflandırması (saf): eklentiye ait, bilinmeyen `partstrat` ya da ayrıştırılamayan sınır → `unsupported`
+/// dolar (bölüm salt okunur olur); panik yok. Bilinmeyen strateji `Range`, ayrıştırılamayan sınır `Default` yer tutucudur.
+fn classify_partition(partstrat: &str, bound_text: &str, extension: Option<&str>) -> (PartitionStrategy, PartitionBound, Vec<String>) {
+    let mut unsupported = vec![];
+    if let Some(e) = extension {
+        unsupported.push(format!("EXTENSION {e} (eklentiye ait)"));
+    }
+    let strategy = match partstrat {
+        "r" => PartitionStrategy::Range,
+        "l" => PartitionStrategy::List,
+        "h" => PartitionStrategy::Hash,
+        _ => {
+            unsupported.push(format!("bölümleme stratejisi '{partstrat}'"));
+            PartitionStrategy::Range
+        }
+    };
+    let bound = crate::build::partition::parse_bound(bound_text).unwrap_or_else(|| {
+        unsupported.push("sınır ifadesi ayrıştırılamadı".to_string());
+        PartitionBound::Default
+    });
+    (strategy, bound, unsupported)
+}
+
+fn parse_partition(rows: Vec<Row>) -> Result<ObjectDef> {
+    let r = rows.first().ok_or_else(|| not_found("bölüm"))?;
+    let (strategy, bound, mut unsupported) =
+        classify_partition(&lossy(r, "strat"), &lossy(r, "bound"), lossy_opt(r, "extension").as_deref());
+    note_invalid_utf8(&[&rows], &mut unsupported);
+    Ok(ObjectDef::Partition(PartitionDef {
+        parent_schema: lossy(r, "parent_schema"),
+        parent_table: lossy(r, "parent_table"),
+        strategy,
+        key_count: u32::try_from(r.get::<_, i32>("key_count")).unwrap_or(0),
+        mode: PartitionMode::Create,
+        schema: lossy(r, "schema"),
+        name: lossy(r, "name"),
+        bound,
+        partition_by: None,
+        tablespace: None,
+        owner: None,
+        comment: None,
+        detach_pending: r.get("detach_pending"),
+        editable: unsupported.is_empty(),
+        unsupported,
+    }))
+}
+
 /// `spcoptions` öğeleri (`ad=değer`) → seçenekler (değer sunucunun sakladığı metin, olduğu gibi). Yalnızca bilinmeyen anahtar
 /// `unsupported`'a gider (yalnızca anahtar adı); bilinen anahtar `=`'siz gelirse değer boş dizge olur (PG böyle öğe saklamaz).
 fn tablespace_options(items: &[String], unsupported: &mut Vec<String>) -> TablespaceOptions {
@@ -1786,6 +1853,30 @@ async fn load_tablespace(mgr: &ConnectionManager, server: Uuid, target: Target, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_partition_flags_unsupported_without_panic() {
+        // Desteklenen: unsupported boş.
+        let (s, b, u) = classify_partition("l", "FOR VALUES IN (1, 2)", None);
+        assert_eq!(s, PartitionStrategy::List);
+        assert_eq!(b, PartitionBound::List { values: vec!["1".into(), "2".into()] });
+        assert!(u.is_empty());
+        // Bilinmeyen partstrat.
+        let (_, _, u) = classify_partition("x", "DEFAULT", None);
+        assert_eq!(u, ["bölümleme stratejisi 'x'"]);
+        let (_, _, u) = classify_partition("", "DEFAULT", None);
+        assert_eq!(u.len(), 1);
+        // Ayrıştırılamayan sınır.
+        let (_, b, u) = classify_partition("r", "FOR VALUES BOGUS", None);
+        assert_eq!(b, PartitionBound::Default);
+        assert_eq!(u, ["sınır ifadesi ayrıştırılamadı"]);
+        // Eklentiye ait.
+        let (_, _, u) = classify_partition("r", "DEFAULT", Some("timescaledb"));
+        assert_eq!(u, ["EXTENSION timescaledb (eklentiye ait)"]);
+        // Hepsi birden: üç neden, sırayla.
+        let (_, _, u) = classify_partition("z", "???", Some("e"));
+        assert_eq!(u.len(), 3);
+    }
 
     #[test]
     fn in_scope_rejects_only_server_scoped_kinds() {
