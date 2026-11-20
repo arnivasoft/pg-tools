@@ -69,7 +69,8 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
       const [target, list] = await Promise.all([deps.api.ddlTargetOf(nodeId), deps.refreshServers()]);
       const { refreshNodeId } = target;
       const create = mode === "create" ? target.create : null;
-      const object = mode === "create" ? null : target.object;
+      // Bölüm sınırı / Bölümü ayır: nesne `target.partition`'dır (gerçek bölüm düğümü dışında yok → açılmaz).
+      const object = mode === "create" ? null : mode === "bound" || mode === "detach" ? (target.partition ?? null) : target.object;
       const kind = create?.kind ?? object?.kind;
       // Kolon/kısıt odağı olan hedef (tablo diyaloğu) hiçbir zaman DROP TABLE/yeniden adlandırma diyaloğu açmaz.
       if (target.focus && (mode === "drop" || mode === "rename")) {
@@ -102,8 +103,9 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
       const database = serverScoped ? null : (ancestorOfKind(deps.tree(), nodeId, ["database"])?.label ?? null);
       if (database !== null && databaseOid !== null) dbNames.set(`${serverId}|${databaseOid}`, database);
       const where = database === null ? config.name : `${config.name}/${database}`;
-      if (object && mode === "drop") {
-        deps.openDrop({ serverId, databaseOid, object, refreshNodeId, name: node.label });
+      if (object && (mode === "drop" || mode === "detach")) {
+        const extraRefreshNodeIds = mode === "detach" && target.tablesRefreshNodeId ? [target.tablesRefreshNodeId] : undefined;
+        deps.openDrop({ serverId, databaseOid, object, refreshNodeId, name: node.label, ...(extraRefreshNodeIds && { extraRefreshNodeIds }) });
         return;
       }
       if (create) {
@@ -113,6 +115,7 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
         if (r.created) void designer.openCreate({ tabId: r.id, serverId, databaseOid, create, refreshNodeId });
         remember(r.id, {
           databaseNodeId: ancestorOfKind(deps.tree(), nodeId, ["database"])?.id ?? null, tableNodeId: null, collectionNodeId: refreshNodeId,
+          ...(target.tablesRefreshNodeId && { tablesNodeId: target.tablesRefreshNodeId }),
         });
         return;
       }
@@ -152,7 +155,10 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
         else if (target.focus) designer.requestFocus(id, focusFieldOf(target.focus));
       };
       const tableNode = object.kind === "table" ? (node.kind === "table" ? node : ancestorOfKind(deps.tree(), nodeId, ["table"])) : null;
-      const ctx: OpenContext = { databaseNodeId: ancestorOfKind(deps.tree(), nodeId, ["database"])?.id ?? null, tableNodeId: tableNode?.id ?? null };
+      const ctx: OpenContext = {
+        databaseNodeId: ancestorOfKind(deps.tree(), nodeId, ["database"])?.id ?? null, tableNodeId: tableNode?.id ?? null,
+        ...(target.tablesRefreshNodeId && { tablesNodeId: target.tablesRefreshNodeId }),
+      };
       // Create'ten dönüşen ya da kimliği değişen sekme de eşlenir (sekme anahtarı değişmez).
       const existing = designer.findAlter(serverId, databaseOid, object);
       if (existing !== null) {

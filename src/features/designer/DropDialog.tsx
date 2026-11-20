@@ -17,12 +17,20 @@ export default function DropDialog(props: { drop: DropController }) {
   const b = tdes.bar;
   const nameId = createUniqueId();
   const cascadeHintId = createUniqueId();
+  const concurrentlyHintId = createUniqueId();
   const forceHintId = createUniqueId();
   let cancelEl: HTMLButtonElement | undefined;
   const s = () => props.drop.state();
   const gate = () => props.drop.gate();
   const applying = () => s()?.phase === "applying";
   const locked = () => s()?.locked ?? false;
+  /** Bölümü ayır biçimi (Partition türü): başlık/düğme/açıklama/CONCURRENTLY/FINALIZE notu. */
+  const detach = () => s()?.input.object.kind === "partition";
+  /** Yüklü tanım yarım kalmış ayırma taşıyor (FINALIZE; CONCURRENTLY seçilemez). */
+  const finalizing = () => {
+    const def = s()?.def;
+    return def?.kind === "partition" && def.detachPending;
+  };
   const view = () => s()?.view ?? null;
   const needsConfirm = () => gate().kind === "needsConfirm" || gate().kind === "needsProductionName";
   /**
@@ -51,6 +59,7 @@ export default function DropDialog(props: { drop: DropController }) {
     const g = gate();
     if (g.kind === "blocked") return g.reason === "password" ? tdes.gate.password : b.blocked[g.reason];
     if (submittable()) return undefined;
+    if (detach()) return g.kind === "needsProductionName" ? d.detach.needsName : d.detach.needsConfirm;
     return g.kind === "needsProductionName" ? d.needsName : d.needsConfirm;
   };
 
@@ -59,7 +68,7 @@ export default function DropDialog(props: { drop: DropController }) {
       open={s() !== null}
       // Uygulama uçuştayken Escape/kapat yok sayılır (İptal düğmesi `ddl_cancel` ister).
       onOpenChange={(open) => !open && !applying() && props.drop.close()}
-      title={s() ? d.title(kindLabel(s()!.input.object.kind), s()!.input.name) : ""}
+      title={s() ? (detach() ? d.detach.title(s()!.input.name) : d.title(kindLabel(s()!.input.object.kind), s()!.input.name)) : ""}
       width="560px"
       onOpenAutoFocus={(e) => {
         e.preventDefault();
@@ -85,7 +94,7 @@ export default function DropDialog(props: { drop: DropController }) {
               if (submittable()) void props.drop.apply();
             }}
           >
-            {applying() ? d.submitting : d.submit}
+            {applying() ? (detach() ? d.detach.submitting : d.submitting) : detach() ? d.detach.submit : d.submit}
           </Button>
         </>
       }
@@ -95,6 +104,9 @@ export default function DropDialog(props: { drop: DropController }) {
           <div class="flex flex-col gap-3 text-[13px]">
             <Show when={cur().locked}>
               <p class="text-muted">{tdes.gate.locked}</p>
+            </Show>
+            <Show when={detach()}>
+              <p class="text-muted">{d.detach.description}</p>
             </Show>
             <Show when={cur().phase === "loading"}>
               <p class="text-muted" role="status">
@@ -200,6 +212,32 @@ export default function DropDialog(props: { drop: DropController }) {
                     {d.forceHint}
                   </p>
                 </div>
+              </Show>
+              <Show when={props.drop.options().concurrently}>
+                <Show
+                  when={!finalizing()}
+                  fallback={
+                    <p class="text-[12px] text-muted" role="note">
+                      {d.detach.finalize}
+                    </p>
+                  }
+                >
+                  <div class="flex flex-col gap-1">
+                    <label class="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={cur().concurrently}
+                        disabled={cur().phase !== "ready"}
+                        aria-describedby={concurrentlyHintId}
+                        onChange={(ev) => props.drop.setConcurrently(ev.currentTarget.checked)}
+                      />
+                      {d.detach.concurrently}
+                    </label>
+                    <p id={concurrentlyHintId} class="pl-6 text-[12px] text-muted">
+                      {d.detach.concurrentlyHint}
+                    </p>
+                  </div>
+                </Show>
               </Show>
               <Show when={showConfirm() && !cur().locked}>
                 <div class="flex flex-col gap-1.5 border-t border-border pt-2">

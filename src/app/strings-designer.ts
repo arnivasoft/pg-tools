@@ -163,6 +163,19 @@ export const tdes = {
     close: "Kapat",
     reload: "Yeniden yükle",
     done: (name: string) => `${name} silindi.`,
+    /** Bölümü ayır (Partition türü; silme diyaloğunun bölüm biçimi). */
+    detach: {
+      title: (name: string) => `Bölümü ayır: ${name}`,
+      submit: "Ayır",
+      submitting: "Ayrılıyor…",
+      description: "Tablo silinmez; satırlar üst tablodan görünmez olur.",
+      concurrently: "CONCURRENTLY ile ayır",
+      concurrentlyHint: "PG 14+; üst tablo kısa kilitlenir, transaction dışında çalışır; DEFAULT bölüm varken kullanılamaz.",
+      finalize: "Yarım kalmış ayırma tamamlanacak (FINALIZE).",
+      needsConfirm: "Ayırmak için 'Etkisini anladım'ı işaretleyin",
+      needsName: "Ayırmak için sunucu adını yazın",
+      done: (name: string) => `‘${name}’ ayrıldı.`,
+    },
   },
   status: {
     gone: "Nesne artık yok.",

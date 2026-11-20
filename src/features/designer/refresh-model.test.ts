@@ -162,3 +162,22 @@ describe("refresh-model", () => {
     expect(extraRefreshIds(t, null, info({ mode: "create", before: null, after: db() }), null)).toEqual([]);
   });
 });
+
+describe("refresh-model: partition tablesNodeId", () => {
+  const pdef = (): ObjectDef => ({ kind: "partition", schema: "public", name: "p1" }) as unknown as ObjectDef;
+  const pinfo = (mode: "create" | "alter") => info({ mode, before: mode === "alter" ? pdef() : null, after: pdef() });
+  const ctx = (tablesNodeId: string | null): OpenContext => ({ databaseNodeId: "db", tableNodeId: null, tablesNodeId });
+
+  it("yüklüyse eklenir; yüklü değilse eklenmez; primary ile aynıysa eklenmez", () => {
+    for (const mode of ["create", "alter"] as const) {
+      expect(extraRefreshIds(tree(["oth-t"]), ctx("oth-t"), pinfo(mode), null)).toEqual(["oth-t"]);
+      expect(extraRefreshIds(tree(), ctx("oth-t"), pinfo(mode), null)).toEqual([]);
+      expect(extraRefreshIds(tree(["oth-t"]), ctx("oth-t"), pinfo(mode), "oth-t")).toEqual([]);
+    }
+    expect(extraRefreshIds(tree(["oth-t"]), ctx(null), pinfo("alter"), null)).toEqual([]);
+  });
+
+  it("başka türde tablesNodeId eklenmez", () => {
+    expect(extraRefreshIds(tree(["oth-t"]), { ...CTX, tablesNodeId: "oth-t" }, info({ before: seq(), after: seq({ comment: "c" }) }), null)).toEqual([]);
+  });
+});

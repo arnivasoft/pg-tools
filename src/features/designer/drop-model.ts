@@ -15,19 +15,25 @@ import { classifyError, designerErrorText, failedText, isConnectionCode } from "
  * `Drop` isteğinin TEK tanımı (designer `planRequest(m, "drop")` de bunu kullanır): `def` `ddl_load`'un döndürdüğü
  * tanımdır ve olduğu gibi (derin kopya) gider; `object` de kopyalanır (istek modelle nesne paylaşmaz).
  */
-export function dropRequest(object: ObjectRef, def: ObjectDef, cascade: boolean, force = false): Extract<PlanRequest, { op: "drop" }> {
-  return { op: "drop", object: { ...object }, def: cloneDef(def), cascade, force };
+export function dropRequest(
+  object: ObjectRef, def: ObjectDef, cascade: boolean, force = false, concurrently = false,
+): Extract<PlanRequest, { op: "drop" }> {
+  const req: Extract<PlanRequest, { op: "drop" }> = { op: "drop", object: { ...object }, def: cloneDef(def), cascade, force };
+  // `concurrently` yalnızca Partition ayırmada geçerlidir; diğer türlerde alan hiç yazılmaz (JSON geriye uyumlu).
+  if (object.kind === "partition") req.concurrently = concurrently;
+  return req;
 }
 
 /**
  * Silme diyaloğunun sunduğu seçenekler (Plan 14 sözleşmesi): Database → yalnızca `WITH (FORCE)` (PG 13+; CASCADE alan
- * hatasıdır); Role/Policy/Tablespace/Partition → hiçbiri (Partition ayırma: CASCADE/FORCE yok, CONCURRENTLY ayrı seçenek); diğer türler → yalnızca CASCADE. Diyalog yalnızca sunulan kutuları çizer, denetleyici de
+ * hatasıdır); Role/Policy/Tablespace/Partition → yalnızca CONCURRENTLY (ayırma: CASCADE/FORCE yok); diğer türler → yalnızca CASCADE. Diyalog yalnızca sunulan kutuları çizer, denetleyici de
  * sunulmayanı değiştirmez.
  */
-export function dropOptionsFor(kind: ObjectKind): { cascade: boolean; force: boolean } {
-  if (kind === "database") return { cascade: false, force: true };
-  if (kind === "role" || kind === "policy" || kind === "tablespace" || kind === "partition") return { cascade: false, force: false };
-  return { cascade: true, force: false };
+export function dropOptionsFor(kind: ObjectKind): { cascade: boolean; force: boolean; concurrently: boolean } {
+  if (kind === "database") return { cascade: false, force: true, concurrently: false };
+  if (kind === "partition") return { cascade: false, force: false, concurrently: true };
+  if (kind === "role" || kind === "policy" || kind === "tablespace") return { cascade: false, force: false, concurrently: false };
+  return { cascade: true, force: false, concurrently: false };
 }
 
 /** PostgreSQL `dependent_objects_still_exist`: CASCADE olmadan silinemeyen nesne. */
