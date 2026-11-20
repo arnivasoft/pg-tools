@@ -6,6 +6,8 @@ import type { IndexColumn } from "../../ipc/bindings/IndexColumn";
 import type { IndexDef } from "../../ipc/bindings/IndexDef";
 import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
+import type { PolicyDef } from "../../ipc/bindings/PolicyDef";
+import type { TableDef } from "../../ipc/bindings/TableDef";
 import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { Risk } from "../../ipc/bindings/Risk";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
@@ -14,7 +16,7 @@ import {
   addColumn, addInclude, focusFieldOf, parseFocusField, applyGate, applyOptionsFor, canSubmit, cloneDef, confirmFlags, defName, defsEqual, groupIssues,
   isSafeIntegerString, issuesFor, kindLabel, localBlock, moveColumn, previewEmptyState, removeColumn, removeInclude, scriptWithRanges,
   statementRangesToLineRanges, updateColumn, isServerScoped, planHasRedacted, scriptActionsEnabled, designerTabKey,
-  aclTabKey, defaultAclTabKey, isObjectDef,
+  aclTabKey, defaultAclTabKey, isObjectDef, policyTabsForTable, type PolicyTabProbe,
   type ApplyGate, type ConfirmState, type GateInput,
 } from "./designer-model";
 
@@ -647,5 +649,49 @@ describe("Plan 22: yetki tanımları (defName / anahtarlar / eşitlik)", () => {
     expect(aclTabKey("database", "S1", null, 7)).toBe("acl:database:S1:null:7");
     expect(defaultAclTabKey("S1", 5, null)).toBe("defacl:S1:5:0");
     expect(defaultAclTabKey("S1", 5, 2200)).toBe("defacl:S1:5:2200");
+  });
+});
+
+describe("policyTabsForTable (Karar 9)", () => {
+  const tdef = (p: Partial<TableDef> = {}): TableDef => ({
+    schema: "public", name: "orders", owner: null, tablespace: null, persistence: "permanent", columns: [], constraints: [], partitionBy: null,
+    fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false,
+    rowSecurity: { enabled: false, forced: false }, unsupported: [], ...p,
+  });
+  const pol = (p: Partial<PolicyDef> = {}): ObjectDef => ({
+    kind: "policy",
+    schema: "public", table: "orders", name: "p", command: "all", permissive: true, roles: [], using: null, withCheck: null, comment: null,
+    editable: true, unsupported: [], tableRls: null, ...p,
+  });
+  const probe = (p: Partial<PolicyTabProbe> = {}): PolicyTabProbe => ({
+    tabId: "P1", serverId: "S1", databaseOid: 5, kind: "policy", variant: "object", original: pol(), ...p,
+  });
+  const before = tdef();
+  const rls = tdef({ rowSecurity: { enabled: true, forced: false } });
+  it("RLS değişimi eşleşen sekmeyi döndürür", () => {
+    expect(policyTabsForTable([probe()], "S1", 5, before, rls)).toEqual(["P1"]);
+    expect(policyTabsForTable([probe()], "S1", 5, before, tdef({ rowSecurity: { enabled: false, forced: true } }))).toEqual(["P1"]);
+  });
+  it("farklı tablo/şema/sunucu/veritabanı/tür/varyant dönmez", () => {
+    const tabs = [
+      probe({ tabId: "a", original: pol({ table: "x" }) }),
+      probe({ tabId: "b", original: pol({ schema: "s" }) }),
+      probe({ tabId: "c", serverId: "S2" }),
+      probe({ tabId: "d", databaseOid: 6 }),
+      probe({ tabId: "e", kind: "table" }),
+      probe({ tabId: "f", variant: "acl" }),
+      probe({ tabId: "g", original: null }),
+      probe({ tabId: "h", original: { kind: "schema", name: "a", owner: null, comment: null } }),
+      probe({ tabId: "ok" }),
+    ];
+    expect(policyTabsForTable(tabs, "S1", 5, before, rls)).toEqual(["ok"]);
+  });
+  it("ad/şema değişimi eski adla eşleşir", () => {
+    expect(policyTabsForTable([probe()], "S1", 5, before, tdef({ name: "orders2" }))).toEqual(["P1"]);
+    expect(policyTabsForTable([probe()], "S1", 5, before, tdef({ schema: "other" }))).toEqual(["P1"]);
+    expect(policyTabsForTable([probe({ original: pol({ table: "orders2" }) })], "S1", 5, before, tdef({ name: "orders2" }))).toEqual([]);
+  });
+  it("yalnız yorum değişimi → []", () => {
+    expect(policyTabsForTable([probe()], "S1", 5, before, tdef({ comment: "x" }))).toEqual([]);
   });
 });

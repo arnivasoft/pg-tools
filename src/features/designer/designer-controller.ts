@@ -43,7 +43,7 @@ import type { DdlApi } from "../../ipc/ddl-commands";
 import type { DesignerApi } from "./designer-commands";
 import { errorText, toPayload } from "../../ipc/errors";
 import {
-  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, isAclDef, isDefaultAclDef, isObjectDef, isServerScoped, localBlock, planHasRedacted,
+  applyGate, applyOptionsFor, canSubmit, cloneDef, defsEqual, isAclDef, isDefaultAclDef, isObjectDef, isServerScoped, localBlock, planHasRedacted, policyTabsForTable,
   type ApplyGate, type ConfirmState, type DesignerDef, type DesignerVariant,
 } from "./designer-model";
 import { createDropController } from "./drop-controller";
@@ -677,6 +677,29 @@ export function createDesignerController(deps: DesignerControllerDeps) {
         deps.onApplied?.({ tabId, kind: m.kind, mode, before, after: cloneDef(m.draft), object: out.created ?? m.object });
       } catch {
         /* başlık/ek yenileme hatası uygulama sonucunu etkilemez */
+      }
+    }
+    // Karar 9 (spec §9.3): tablo RLS/ad/şema değişimi aynı tablonun politika sekmelerini bayatlatır. Kirli olmayan sekme
+    // yeniden yüklenir; kirli sekmenin taslağı ezilmez (`needsReload`). Hata uygulama sonucunu etkilemez.
+    if (mode === "alter" && m.kind === "table" && m.original && m.draft) {
+      try {
+        const before = m.original;
+        const after = m.draft;
+        if (isObjectDef(before) && before.kind === "table" && isObjectDef(after) && after.kind === "table") {
+          const probes = [...entries.entries()].map(([id, x]) => {
+            const pm = x.model();
+            return { tabId: id, serverId: pm.serverId, databaseOid: pm.databaseOid, kind: pm.kind, variant: pm.variant, original: pm.original };
+          });
+          for (const id of policyTabsForTable(probes, m.serverId, m.databaseOid, before, after)) {
+            const pe = entries.get(id);
+            const pm = pe?.model();
+            if (!pe || !pm) continue;
+            if (!pm.dirty && !pm.applying) void reload(id).catch(() => undefined);
+            else patch(pe, { needsReload: true });
+          }
+        }
+      } catch {
+        /* politika sekmesi yenilemesi uygulama sonucunu etkilemez */
       }
     }
     if (mode === "create") {
