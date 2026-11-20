@@ -986,7 +986,7 @@ Bilinen sınırlar:
 
 ## Nesne diyalogları: Bölüm arka ucu (Plan 36)
 
-Plan 36 yalnızca arka uçtur; **GUI maddeleri Plan 37'de eklenir** (menü kancası, Bölüm oluştur/bağla/sınır/ayır diyalogları henüz yoktur). Arka uç elle sınanmaz; Docker testleriyle (`scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`; kapsayıcılar sonda silinir) kapsanan maddelerin özeti:
+Plan 36 yalnızca arka uçtur; **GUI maddeleri "Nesne diyalogları: Bölüm arayüzü (Plan 37)" bölümündedir**. Arka uç elle sınanmaz; Docker testleriyle (`scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`; kapsayıcılar sonda silinir) kapsanan maddelerin özeti:
 
 - Bölüm create / attach / sınır değiştirme / ayırma (normal, `CONCURRENTLY`, `FINALIZE`) ve yükleme PG 10–18'de (`partition_roundtrip`, `manager`, `logging`): range, list, hash ve default sınırları, `MINVALUE`/`MAXVALUE`, çok anahtarlı range; `create → load → eşit`, `alter(loaded, loaded)` boş plan (sabit nokta), `alter(old, new) → load → new`.
 - Sınır ayrıştırma sabit noktası her stratejide; PG 10–11'de sınır değerleri ham yazılır (üst düzey virgül içeren değer `bound.*[i]` alan hatası), PG 12+'da `wrap`'lı.
@@ -1005,7 +1005,25 @@ Bilinen sınırlar:
 - Eklentiye ait bölüm tablosu ve ayrıştırılamayan sınır salt okunur açılır (eklentiye ait yol yalnız SQL'de, Docker testi yok).
 - Şema karşılaştırması bölüm sınırlarını ayrıca karşılaştırmaz.
 
-Elle kontrol (arayüz Plan 37'de):
+Elle kontrol (arayüz Plan 37 bölümünde):
 - [ ] Bölüm oluştur / bağla / sınır değiştir / ayır diyalogları, menü kancası ve `partitions` koleksiyonu yenilemesi (üst tablo + şema `tables`). **[—]**
 - [ ] Bölüm bağla açılır listesi (`attachable_tables`) ve `CONCURRENTLY` / `FINALIZE` seçenekleri ile 23514 / 42P17 / 55000 ipuçlarının arayüzde görünmesi. **[—]**
 - [ ] Ölçüm: ana paket 126,553 B, başlangıç 154,226 B (Plan 36'da değişmedi; Plan 37 telafi ister). **[—]**
+
+## Nesne diyalogları: Bölüm arayüzü (Plan 37)
+
+Ön koşul: Docker PG 10, 11, 13 ve 14+; RANGE (iki anahtarlı), LIST ve HASH bölümlü tablolar; bağlanabilir sıradan bir tablo; üretim etiketli bir sunucu.
+
+- [ ] Menü: Partitions koleksiyonunda "Oluştur…"; bölüm düğümünde Düzenle / Yeniden adlandır / Yetkiler / Bölüm sınırı… / Bölümü ayır… / Sil görünür; şema altındaki (bölüm olmayan) tabloda Bölüm sınırı ve Bölümü ayır yoktur; kilitli sunucuda eylemler kapalıdır. **[—]**
+- [ ] Bölüm oluştur: RANGE iki anahtarda MINVALUE/MAXVALUE seçilir; LIST'te NULL dahil değerler girilir; HASH (PG 11+) modulus/remainder; DEFAULT bölüm (PG 11+); alt bölümleme (strateji + anahtarlar); tablespace, sahip ve yorum yazılır; uygulama sonrası hem Partitions hem şemanın Tables koleksiyonu yenilenir ve sekme alter kipine döner. **[—]**
+- [ ] Var olan tabloyu bağla ("Oluştur…" içindeki kip radio grubu): liste yalnız uygun tabloları gösterir; Yıkıcı onay istenir, üretimde ad yazma istenmez; sınır dışı satır varsa 23514 ipucu, çakışan sınırda 42P17 ipucu görünür. **[—]**
+- [ ] Bölüm sınırı…: sınır değişince "ayrılıp yeniden bağlanır" notu + Yıkıcı onay; yeni sınır çakışırsa bölüm eski sınırıyla kalır (aynı transaction); değişiklik yoksa plan boştur. **[—]**
+- [ ] PG 10–11'de ifade ya da yorumlu (üst düzey virgüllü) sınır değeri ilgili alanda hata verir. **[—]**
+- [ ] Bölümü ayır…: normal ayırma; CONCURRENTLY (PG 14+); DEFAULT bölüm varken CONCURRENTLY → 55000 ipucu ve hiçbir şey değişmez; PG 13'te CONCURRENTLY alan hatası; ayrılan tablo şemanın Tables listesinde görünür (aynı şema). **[—]**
+- [ ] Yarım kalmış ayırma (`detachPending`): ayırma diyaloğunda yalnız FINALIZE notu görünür, Bölüm sınırı formu kapalıdır. **[—]**
+- [ ] Salt okunur bölüm (ayrıştırılamayan sınır ya da eklentiye ait): form gerekçeli salt okunur açılır, ayırma kapalıdır. **[—]**
+- [ ] Bilinen sınır: farklı şemaya bağlanan/ayrılan tablonun şema listesi elle yenilenir (hedef yalnız üst tablonun şemasını bilir). **[—]**
+- [ ] Klavye/erişilebilirlik/tema: RANGE satır etiketleri okunur, LIST satırı klavyeyle silinir, kip radio grubu klavyeyle gezilir, açık ve koyu temada okunur, dar pencerede (≈1100 px) taşma yoktur. **[—]**
+- [ ] Telafi (`qtRun`, `ddlTargetOf`, `settingsGet` tembel modüllere taşındı) sonrası önceki gibi çalışır: Query Tool çalıştırma, Tablo/Veri/Bakım/Yedek/Şema karşılaştırma açılışları, Yedekleme ayarları; hata kartında "Tekrar dene" / "Üst düğümü yenile" metinleri. **[—]**
+
+Ölçümler (Plan 37 sonu): index-*.js = 126415 B (taban 126553 B; tavan 126415 B), başlangıç kümesi 154088 B (taban 154226 B; tavan 154088 B; yalnız düşürüldü). Telafi: `qtRun` → `src/ipc/qt-more-commands.ts`, `ddlTargetOf` → `src/ipc/ddl-commands.ts`, `settingsGet` → yeni `src/ipc/settings-commands.ts`, hata kartı metinleri (`gone`/`retry`/`refreshParent`) → `src/features/explorer/error-badge-card-text.ts`. PartitionForm-*.js = 22712 B; DropDialog-*.js = 7827 B; DesignerView-*.js = 28599 B; TableForm-*.js = 65483 B. Ana pakette yok: `ddl_target_of`, `settings_get`, `qt_run`, "Tekrar dene", bölüm ayırma metinleri.

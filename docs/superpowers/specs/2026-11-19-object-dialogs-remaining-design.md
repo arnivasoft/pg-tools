@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 5c: Kalan Nesne Diyalogları Tasarımı (Policy, Tablespace, Bölümler, FDW, Publication, Subscription)
 
 - **Tarih:** 2026-11-19
-- **Durum:** Plan 34–35 uygulandı (Grup A: Policy ve Tablespace); Plan 36 arka ucu uygulandı (Grup B: Bölümler), Plan 37 ön yüzü kalan; Grup C kalan
+- **Durum:** Plan 34–37 uygulandı (Grup A–B: Policy, Tablespace ve Bölümler); Grup C kalan
 - **Kapsam:** Explorer'da bulunup diyaloğu olmayan **RLS politikası** ve **tablespace**; bölümlü tabloya **bölüm oluşturma / bağlama / ayırma**; ağaçta henüz bulunmayan **Foreign Data Wrapper, Foreign Server, User Mapping, Foreign Table, Publication, Subscription** (önce Explorer düğümleri, sonra diyaloglar).
 - **Temel:** `docs/superpowers/specs/2026-10-06-object-dialogs-design.md` (mimari §2, risk modeli §3, arayüz §4, güvenlik §6, test §7 ve tüm sözleşme notları) ile `docs/superpowers/specs/2026-10-16-object-dialogs-routines-types-design.md` (R5 salt okunur kuralı, `editable`/`unsupported`, eklentiye ait nesneler, `OWNER TO` en sonda) **aynen geçerlidir**. Bu belge yalnızca yeni türleri, kurallarını ve kararlarını ekler; ana spec'in §1.3 "kapsam dışı" listesinden RLS politikaları, FDW/publication/subscription diyalogları, partition oluşturma/bağlama ve tablespace oluşturma çıkarılır.
 - **Kullanıcı kararı (2026-11-19):** dört grubun tamamı kapsamda. Plan 33 CSV içe aktarmaya ayrılmıştır; bu alt proje Plan 34'ten başlar.
@@ -317,3 +317,16 @@ Sabitler `crates/pgt-ddl/src/manager.rs`'tedir (`PARTITION_*_HINT`); SQLSTATE'le
 
 - Plan 36 sonunda ana paket **126,553 B**, başlangıç **154,226 B** (tavanlarla birebir, değişmedi). Plan 37'nin `ddl-kinds.ts` ve Explorer menü/ikon kancası ek bayt getirir; **adı konmuş bir telafi gerekir** (tavanlar yükseltilmez). `PlanRequest.Drop.concurrently` TS'de isteğe bağlı olduğundan ana paket etkilenmez.
 - Plan 36'da yalnızca tembel dosyalar uyum için değişti (`src/features/schema-diff` **değişmedi**): `DesignerView.tsx` geçici `formMissing` koruması (metin `tdes.view.formMissing`), `KIND_LABELS.partition`, boş `FORM_PATHS.partition` (Plan 37 yeni yollarla tamamlamalı; bütünlük denetimi 17 tür), `drop-model.ts` (Partition: `cascade`/`force` yok; `concurrently` seçeneğini Plan 37 ekler).
+
+---
+
+## 12. Plan 37 notları (Grup B ön yüzü)
+
+- **Bütçe telafisi ve ölçümler:** Plan 37 menü kancası ana pakete bayt ekledi; adı konmuş telafi: `qtRun` → `src/ipc/qt-more-commands.ts`, `ddlTargetOf` → `src/ipc/ddl-commands.ts`, `settingsGet` → yeni `src/ipc/settings-commands.ts` (hepsi yalnız tembel tüketicili), hata kartı metinleri (`gone`/`retry`/`refreshParent`) → `src/features/explorer/error-badge-card-text.ts` (ErrorBadgeCard başlık/etiketi kendi hesaplar). `boundObject`/`detachObject` koşulu mevcut `underPartitions()` ile yazıldı. Tavanlar yalnız düştü: ana paket 126553 → 126415 B, başlangıç 154226 → 154088 B. PartitionForm 22712 B, DropDialog 7827 B.
+- **Tek "Oluştur…" + kip seçimi (bilinçli sapma):** ayrı "Bölüm bağla…" menü öğesi yoktur; Partitions koleksiyonundaki "Oluştur…" formunda yeni oluştur / var olan tabloyu bağla radio grubu vardır (ana paket baytı gerekçesi). Bağlanabilir tablo listesi `attachable_tables` lookup'ındandır.
+- **Eylemler:** `boundObject` (Bölüm sınırı…) `bound` kipiyle alter sekmesini açar (`findAlter` tekilliği); `detachObject` (Bölümü ayır…) `detach` kipiyle drop diyaloğunu açar. İkisi de `DdlTarget.partition` yoksa `tdes.open.none` döner; Düzenle Table'ı açmaya devam eder.
+- **`createContext`:** designer-controller, create kipinde üst tablo/şema bağlamını (`schemaOid` + `tableOid`) formun attach lookup'ına ve oluşturma isteğine taşır.
+- **İkinci yenileme:** uygulama sonrası Partitions koleksiyonuna ek olarak `tablesRefreshNodeId` (şemanın Tables koleksiyonu) yenilenir (`OpenContext.tablesNodeId`, drop'ta `extraRefreshNodeIds`; her biri ayrı, hata yutulur). Farklı şemaya bağlanan tablonun şema listesi yenilenmez (bilinen sınır).
+- **Ayırma diyaloğu:** `concurrently` seçeneği yalnız Partition drop isteğinde yazılır (`dropRequest(..., concurrently)`; kind kapısı, `detachPending` iken no-op); `FINALIZE` notu; Yıkıcı onay mevcut kapıdan gelir; ayırma metinleri ana pakette yoktur.
+- **Alt bölümleme:** form Tablo düzenleyicisine bağlı olmadığından minimal bağımsız strateji/anahtar düzenleyicisi vardır (`partition-model.ts`).
+- **Backlog:** DropDialog bileşen testi; `PartitionForm` erişilebilirlik ince ayarları (`aria-describedby` kimlikleri, ListEditor `listAdd`/`listRemove` kullanımı, hash 007 imleç); `ErrorBadgeCard` başlık yorumu; şema karşılaştırmada bölüm sınırları; farklı şemaya bağlanan tablonun şema listesi yenilemesi.
