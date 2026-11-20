@@ -19,6 +19,7 @@ export const ttbl = {
       forceHint: "FORCE yalnız RLS açıkken etkilidir.",
       enableDestructive: "Politikası olmayan tabloda sahibi dışındakiler hiçbir satır görmez (Yıkıcı).",
       disableWarning: "Tablonun politikaları devre dışı kalır.",
+      forceWithoutEnable: "FORCE yalnız satır güvenliği açıkken etkilidir.",
     },
     tablespace: "Tablespace",
     tablespaceUnset: "Belirtilmemiş (veritabanı varsayılanı)",

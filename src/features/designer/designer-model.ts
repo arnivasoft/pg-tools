@@ -445,9 +445,10 @@ export function policyTabsForTable(
   before: TableDef,
   after: TableDef,
 ): string[] {
+  const rsOf = (t: TableDef) => t.rowSecurity ?? { enabled: false, forced: false };
   const triggered =
-    before.rowSecurity.enabled !== after.rowSecurity.enabled ||
-    before.rowSecurity.forced !== after.rowSecurity.forced ||
+    rsOf(before).enabled !== rsOf(after).enabled ||
+    rsOf(before).forced !== rsOf(after).forced ||
     before.name !== after.name ||
     before.schema !== after.schema;
   if (!triggered) return [];

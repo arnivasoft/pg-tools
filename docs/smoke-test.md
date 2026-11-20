@@ -970,15 +970,16 @@ Bilinen sınırlar:
 - [ ] Politika düzenle: yalnız ifade/rol değişimi → Güvenli tek `ALTER POLICY`; komut/tür değişimi ya da ifade kaldırma → "yeniden kurulur" notu + Yıkıcı onay; üretim etiketli sunucuda ad yazma **istenmez**; yeniden adlandırma sonrası sekme başlığı ve ağaç güncellenir. **[—]**
 - [ ] Politika sil: Yıkıcı onay istenir, CASCADE kutusu yoktur. **[—]**
 - [ ] Hatalı ifade (ör. `USING (`): alan hatası `USING` alanının altında görünür. **[—]**
-- [ ] Tablo diyaloğunda RLS: "Satır güvenliği (RLS)" bölümünde aç/zorla işaretlenince Yıkıcı notu, kapatılınca "politikaları devre dışı kalır" uyarısı görünür; create'te not yoktur. **[—]**
+- [ ] Tablo diyaloğunda RLS: "Satır güvenliği (RLS)" bölümünde aç/zorla işaretlenince Yıkıcı notu, kapatılınca "politikaları devre dışı kalır" uyarısı görünür; RLS kapalıyken yalnız FORCE işaretlenirse Yıkıcı notu yerine bilgi notu "FORCE yalnız satır güvenliği açıkken etkilidir." çıkar; create'te not yoktur. **[—]**
 - [ ] Açık politika sekmesi, tablonun RLS/ad/şema değişiminden sonra yenilenir; sekme kirliyse taslak ezilmez ve "yeniden yükle" ipucu görünür; başka tablonun politika sekmesi etkilenmez. **[—]**
 - [ ] Tablespace oluştur: süper kullanıcıyla başarılı + yorum yazılır; süper kullanıcı olmayanla 42501 ipucu; olmayan dizin → konum ipucu; kullanılan dizin → 55006 ipucu; `pg_` önekli ad alan hatası; göreli yol alan hatası. **[—]**
-- [ ] Tablespace düzenle: ad, sahip, seçenek SET/RESET ve yorum değişir; konum salt okunurdur; PG 10–12'de `maintenance_io_concurrency` alan hatası verir; biçim uyarıları (sayı değil, negatif, 0–1000 dışı) gönderimi engellemez. **[—]**
+- [ ] Tablespace düzenle: ad, sahip, seçenek SET/RESET ve yorum değişir; konum salt okunurdur; PG 10–12'de `maintenance_io_concurrency` alan hatası verir; biçim uyarıları (sayı değil, tamsayı değil, negatif, 0–1000 dışı) gönderimi engellemez. **[—]**
 - [ ] `pg_default` / `pg_global`: form salt okunur ve gerekçeler listelenir; Yeniden adlandır ve Sil açık ret iletisi verir. **[—]**
 - [ ] Boş olmayan tablespace silme → 55000 ipucu, hiçbir şey değişmez. **[—]**
 - [ ] Tablespace yetkileri: CREATE ver / geri al; `pg_global` salt okunurdur. **[—]**
 - [ ] Tablespace hata toast'unda konum görünmez; PG iletisi yalnız sekmedeki hata alanında görünür. **[—]**
 - [ ] Klavye/erişilebilirlik/tema: çip kaldırma klavyeyle yapılır, radio grupları klavyeyle gezilir, açık ve koyu temada okunur, dar pencerede (≈1100 px) taşma yoktur. **[—]**
-- [ ] Telafi (`qtMore` ve `qtCancel` tembel modüle taşındı) sonrası önceki gibi çalışır: Query Tool "daha fazla satır" ve iptal, veri düzenleyicisi sayfalaması. **[—]**
+- [ ] Uzantıya ait tablonun (ya da sistem şemasındaki tablonun) politikası salt okunur açılır ve gerekçeler listelenir; yeniden adlandırma ve silme açık iletiyle reddedilir. **[—]**
+- [ ] Telafi (`qtMore` ve `qtCancel` tembel modüle taşındı) sonrası önceki gibi çalışır: Query Tool "daha fazla satır" ve iptal, CSV dışa aktarma iptali (ExportUi `qtCancel` kullanır), veri düzenleyicisi sayfalaması. **[—]**
 
 Ölçümler (Plan 35 sonu): index-*.js = 126553 B (taban 126582 B; tavan 126553 B), başlangıç kümesi 154226 B (taban 154255 B; tavan 154226 B; yalnız düşürüldü), mapDeps = 43 girdi; index.html yalnızca solid/web önyükler. Telafi: `qtMore` + `qtCancel` → tembel `src/ipc/qt-more-commands.ts` (yalnız `qtMore` 10 B yetmedi). PolicyForm-*.js = 12514 B; TablespaceForm-*.js = 6147 B; TableForm-*.js = 65483 B; TypeInput-*.js = 20275 B (tablo RLS metinleri bu ortak tembel parçada). Ana pakette yok: "Politika aynı transaction içinde yeniden kurulur" (PolicyForm-*.js'te).

@@ -10,16 +10,17 @@ import type { DataSource } from "../../ipc/bindings/DataSource";
 import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { SelectRequest } from "../../ipc/bindings/SelectRequest";
-import { qtCancel, qtMore } from "../../ipc/qt-more-commands";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { SessionOptions } from "../../ipc/bindings/SessionOptions";
 import { invoke } from "@tauri-apps/api/core";
 import type { Api } from "../../ipc/commands";
 import { toPayload } from "../../ipc/errors";
+import { qtCancel, qtMore } from "../../ipc/qt-more-commands";
 
 /**
  * commands.ts'teki `call`'ın yerel karşılığı (Plan 17 R1): `call` ya da `IpcError` içe aktarılsaydı ana paketin dışa
- * aktarma listesi büyürdü (ölçüldü: IpcError +1 B tavan aşımı). Hata, yükün alanlarını taşıyan bir `Error`'dır;
+ * aktarma listesi büyürdü (ölçüldü: IpcError +1 B tavan aşımı). `qtMore`/`qtCancel` ise ana pakette değil, Plan 35'te
+ * taşındıkları tembel `src/ipc/qt-more-commands.ts`'ten gelir. Hata, yükün alanlarını taşıyan bir `Error`'dır;
  * `toPayload` onu aynı `ErrorPayload`'a çevirir (davranış yalnızca `code`'a bakar). `invoke` ana pakette zaten dışa
  * aktarılır.
  */

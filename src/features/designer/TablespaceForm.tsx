@@ -7,6 +7,7 @@ import { ttsp } from "../../app/strings-tablespace";
 import type { TablespaceDef } from "../../ipc/bindings/TablespaceDef";
 import { inputClass } from "../../ui/Field";
 import { CommentField, FieldRow, OwnerSelect, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
+import { issuesFor } from "./designer-model";
 import { normalizeEmpty } from "./forms-model";
 import { ReadOnlyReasons } from "./ReadOnlyReasons";
 import {
@@ -56,6 +57,11 @@ export default function TablespaceForm(props: FormProps) {
         return (
           <form class="flex max-w-xl flex-col gap-5" onSubmit={(ev) => ev.preventDefault()}>
             <ReadOnlyReasons def={d()} />
+            <Show when={issuesFor(props.issues, "object").length > 0}>
+              <p role="alert" class="text-xs text-danger">
+                {issuesFor(props.issues, "object").join(" ")}
+              </p>
+            </Show>
             <Show when={!alter()}>
               <p role="note" class="text-xs text-muted">
                 {ttsp.createNote}

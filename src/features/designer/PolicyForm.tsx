@@ -57,7 +57,7 @@ export default function PolicyForm(props: FormProps) {
     });
 
   const typeName = createUniqueId();
-  const typeErrId = createUniqueId();
+  const commandId = createUniqueId();
   const rolesErrId = createUniqueId();
   const rolesHintId = createUniqueId();
   const rolePickId = createUniqueId();
@@ -142,13 +142,13 @@ export default function PolicyForm(props: FormProps) {
             </Section>
 
             <Section title={tpol.sections.command}>
-              <FieldRow label={tpol.command.label} path="command" issues={props.issues}>
-                {(f) => (
-                  <select
-                    id={f.id}
-                    class={inputClass + invalidClass(f.invalid)}
-                    aria-describedby={f.describedBy}
-                    aria-invalid={f.invalid}
+              <div class="flex flex-col gap-1">
+                <label for={commandId} class="text-xs text-muted">
+                  {tpol.command.label}
+                </label>
+                <select
+                    id={commandId}
+                    class={inputClass}
                     disabled={locked()}
                     value={d().command}
                     onChange={(ev) => {
@@ -163,10 +163,9 @@ export default function PolicyForm(props: FormProps) {
                         </option>
                       )}
                     </For>
-                  </select>
-                )}
-              </FieldRow>
-              <fieldset class="flex flex-col gap-1" aria-describedby={issuesFor(props.issues, "permissive").length > 0 ? typeErrId : undefined}>
+                </select>
+              </div>
+              <fieldset class="flex flex-col gap-1">
                 <legend class="text-xs text-muted">{tpol.command.kind}</legend>
                 <label class="flex items-center gap-2 text-[13px]" classList={{ "text-muted": locked() }}>
                   <input
@@ -192,12 +191,12 @@ export default function PolicyForm(props: FormProps) {
                     <span class="font-mono">{tpol.command.restrictive}</span> — {tpol.command.restrictiveHint}
                   </span>
                 </label>
-                <ListErrors id={typeErrId} messages={issuesFor(props.issues, "permissive")} />
               </fieldset>
             </Section>
 
             <Section title={tpol.sections.roles}>
-              <div class="flex flex-col gap-2" role="group" aria-label={tpol.roles.label} aria-describedby={rolesHintId}>
+              <div class="flex flex-col gap-2" role="group" aria-label={tpol.roles.label}
+                aria-describedby={roleErrors().length > 0 ? `${rolesHintId} ${rolesErrId}` : rolesHintId}>
                 <Show
                   when={d().roles.length > 0}
                   fallback={<p class="text-[13px] text-muted">{tpol.roles.publicNote}</p>}
@@ -252,7 +251,7 @@ export default function PolicyForm(props: FormProps) {
             </Section>
 
             <Section title={tpol.sections.expressions}>
-              <FieldRow label={tpol.expr.using} path="using" issues={props.issues} hint={a().using ? tpol.expr.hint : undefined}>
+              <FieldRow label={tpol.expr.using} path="using" issues={props.issues} hint={a().using || a().withCheck ? tpol.expr.hint : undefined}>
                 {(f) => (
                   <textarea
                     id={f.id}
@@ -278,7 +277,7 @@ export default function PolicyForm(props: FormProps) {
               >
                 <FreeSqlNote id={usingNoteId} />
               </Show>
-              <FieldRow label={tpol.expr.withCheck} path="withCheck" issues={props.issues}>
+              <FieldRow label={tpol.expr.withCheck} path="withCheck" issues={props.issues} hint={!a().using && a().withCheck ? tpol.expr.hint : undefined}>
                 {(f) => (
                   <textarea
                     id={f.id}

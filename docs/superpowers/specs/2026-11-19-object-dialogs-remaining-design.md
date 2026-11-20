@@ -250,5 +250,6 @@ Aşağıdaki maddeler **gönderilen** davranışı anlatır (kod ve Docker PG 10
 - **Komut kuralı aynalaması:** `insert` → USING kapalı, `select`/`delete` → WITH CHECK kapalı; komut değişince yasak hâle gelen ifade temizlenir. Diğer kurallar arka ucun alan hatasıyla gösterilir.
 - **Yeniden kurma notu:** komut/tür değişimi ya da ifade kaldırma istemcide hesaplanır ve yalnız bilgi notu olarak gösterilir; seçim kutusu yoktur (arka uç otomatik yeniden kurar, Yıkıcı onay mevcut kapıdan gelir).
 - **Politika sekmesi yenileme:** tablo alter'ı RLS/ad/şemayı değiştirirse aynı sunucu + veritabanındaki o tablonun politika sekmeleri yenilenir; kirli ya da uygulamadaki sekmede taslak ezilmez, `needsReload` işaretlenir.
+- **FORCE notu:** FORCE açılırken taslakta RLS kapalıysa (ve ENABLE açılmıyorsa) Yıkıcı notu yerine bilgi notu "FORCE yalnız satır güvenliği açıkken etkilidir." (`forceWithoutEnable`) gösterilir; arka uç risk sınıflaması değişmez.
 - **Biçim uyarıları engellemez:** tablespace seçenek uyarıları (sayı değil, negatif, 0–1000 dışı) gönderimi durdurmaz; yetkili doğrulama arka uç alan hatasıdır. Konum yalnız create'te düzenlenir.
 - **Backlog:** politika ifadeleri için CodeMirror (şimdilik `textarea`); şema karşılaştırmada politikalar.

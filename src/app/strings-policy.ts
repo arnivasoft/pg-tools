@@ -1,4 +1,4 @@
-// Policy formu metinleri. Yalnızca PolicyForm.tsx ve policy-model.ts içe aktarır (tembel parça);
+// Policy formu metinleri. Yalnızca PolicyForm.tsx içe aktarır (tembel parça);
 // strings-designer.ts'e eklenmez. PostgreSQL terimleri İngilizce kalır.
 export const tpol = {
   sections: {
@@ -47,11 +47,6 @@ export const tpol = {
     hint: "USING mevcut satırları, WITH CHECK yazılan satırları sınar. Boş bırakılan ifade yok sayılır.",
   },
   rls: {
-    title: "Tablo satır güvenliği",
-    enabled: "açık",
-    disabled: "kapalı",
-    forced: "zorlanmış",
-    notForced: "zorlanmamış",
     line: (enabled: boolean, forced: boolean) =>
       `Tablo satır güvenliği: ${enabled ? "açık" : "kapalı"}, ${forced ? "zorlanmış" : "zorlanmamış"}`,
     offWarning: "Tabloda satır güvenliği kapalı; politika etkili olmaz.",

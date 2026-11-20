@@ -439,13 +439,14 @@ describe("rowSecurityNotes (Karar 8)", () => {
   });
   it("enable false→true ya da forced false→true → enableDestructive (bir kez)", () => {
     expect(rowSecurityNotes(rs(false, false), rs(true, false))).toEqual(["enableDestructive"]);
-    expect(rowSecurityNotes(rs(false, false), rs(false, true))).toEqual(["enableDestructive"]);
+    expect(rowSecurityNotes(rs(false, false), rs(false, true))).toEqual(["forceWithoutEnable"]);
+    expect(rowSecurityNotes(rs(true, false), rs(true, true))).toEqual(["enableDestructive"]);
     expect(rowSecurityNotes(rs(false, false), rs(true, true))).toEqual(["enableDestructive"]);
   });
   it("enabled true→false → disableWarning", () => {
     expect(rowSecurityNotes(rs(true, false), rs(false, false))).toEqual(["disableWarning"]);
   });
   it("biri açılıp biri kapanınca iki not", () => {
-    expect(rowSecurityNotes(rs(true, false), rs(false, true))).toEqual(["enableDestructive", "disableWarning"]);
+    expect(rowSecurityNotes(rs(true, false), rs(false, true))).toEqual(["forceWithoutEnable", "disableWarning"]);
   });
 });
