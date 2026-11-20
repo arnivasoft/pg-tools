@@ -166,7 +166,7 @@ pub fn create(ctx: &BuildCtx, d: &PolicyDef) -> Result<Plan, Vec<FieldError>> {
 }
 
 /// `ALTER POLICY` ile yapılamayan değişiklik var mı (Karar 3): komut/permissive değişimi ya da ifade kaldırma.
-fn needs_rebuild(old: &PolicyDef, new: &PolicyDef) -> bool {
+pub(crate) fn needs_rebuild(old: &PolicyDef, new: &PolicyDef) -> bool {
     old.command != new.command
         || old.permissive != new.permissive
         || (old.using.is_some() && new.using.is_none())

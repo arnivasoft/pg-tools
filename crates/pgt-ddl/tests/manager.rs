@@ -3104,8 +3104,11 @@ async fn policy_body(ts: TestServer) {
     assert_eq!(f.preview(&recreate).await.risk, Risk::Destructive);
     assert_eq!(code(&f.apply(&recreate).await), "confirmation_required");
     assert_eq!(code(&prod.apply(&recreate).await), "confirmation_required");
-    applied(prod.apply_with(&recreate, |o| o.confirmed = true).await);
+    // Yeniden kurma (DROP + CREATE) yeni oid üretir: `created` yeni oid'i taşır (açık sekme nesneyi değiştirir).
+    let created = created_of(prod.apply_with(&recreate, |o| o.confirmed = true).await);
     let recreated = ObjectRef { kind: ObjectKind::Policy, oid: policy_oid(&env, t, "mp_p2").await.unwrap() };
+    assert_eq!(created, Some(recreated));
+    assert_ne!(recreated, object, "yeniden kurma oid'i değiştirir");
     let ObjectDef::Policy(after) = f.load_def(recreated).await else { panic!("policy") };
     assert_eq!(after.command, PolicyCommand::Select);
 

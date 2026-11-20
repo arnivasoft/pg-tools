@@ -415,8 +415,8 @@ fn identity_changed(old: &ObjectDef, new: &ObjectDef) -> bool {
         (ObjectDef::Type(a), ObjectDef::Type(b)) => (&a.schema, &a.name) != (&b.schema, &b.name),
         (ObjectDef::Domain(a), ObjectDef::Domain(b)) => (&a.schema, &a.name) != (&b.schema, &b.name),
         // Plan 34: yeniden adlandırma oid'i korur (yeni adla arama aynı oid'i bulur); yeniden kurma (DROP + CREATE) yeni
-        // oid üretir ama ad aynı kalır — bu yüzden yalnız ad farkı yeniden aratır (kurma sonrası oid arayüzde yüklenir).
-        (ObjectDef::Policy(a), ObjectDef::Policy(b)) => a.name != b.name,
+        // oid üretir — açık tasarımcı sekmesi `created` ile yeni nesneye geçer, bu yüzden ad farkı YA DA yeniden kurma.
+        (ObjectDef::Policy(a), ObjectDef::Policy(b)) => a.name != b.name || build::policy::needs_rebuild(a, b),
         (ObjectDef::Tablespace(a), ObjectDef::Tablespace(b)) => a.name != b.name,
         _ => false,
     }
@@ -2696,8 +2696,16 @@ mod tests {
         let (p, t) = (ObjectDef::Policy, ObjectDef::Tablespace);
         let mut other = policy("p");
         other.using = Some("false".into());
-        other.command = PolicyCommand::Select;
-        assert!(!identity_changed(&p(policy("p")), &p(other)));
+        assert!(!identity_changed(&p(policy("p")), &p(other)), "yalnız ifade değişimi oid'i korur");
+        // Yeniden kurma (DROP + CREATE) yeni oid üretir: komut/permissive değişimi, ifadenin kaldırılması.
+        let rebuilt = |f: fn(&mut PolicyDef)| {
+            let mut n = policy("p");
+            f(&mut n);
+            identity_changed(&p(policy("p")), &p(n))
+        };
+        assert!(rebuilt(|n| n.command = PolicyCommand::Select));
+        assert!(rebuilt(|n| n.permissive = false));
+        assert!(rebuilt(|n| n.using = None));
         assert!(identity_changed(&p(policy("p")), &p(policy("q"))));
         assert!(!identity_changed(&t(tablespace("a")), &t(TablespaceDef { comment: None, ..tablespace("a") })));
         assert!(identity_changed(&t(tablespace("a")), &t(tablespace("b"))));
