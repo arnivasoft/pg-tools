@@ -21,7 +21,6 @@ import SqlPreview from "./SqlPreview";
 const viewForm = lazy(() => import("./ViewForm"));
 // Function ve Procedure aynı parçayı paylaşır (RoutineForm-*.js; `model.kind`'e göre).
 const routineForm = lazy(() => import("./RoutineForm"));
-const formMissing: Component = () => <p class="p-3 text-muted">{tdes.view.formMissing}</p>;
 const FORMS: Record<ObjectKind, FormEntry> = {
   schema: { view: lazy(() => import("./SchemaForm")), paths: FORM_PATHS.schema },
   extension: { view: lazy(() => import("./ExtensionForm")), paths: FORM_PATHS.extension },
@@ -38,8 +37,7 @@ const FORMS: Record<ObjectKind, FormEntry> = {
   type: { view: lazy(() => import("./TypeForm")), paths: FORM_PATHS.type },
   domain: { view: lazy(() => import("./DomainForm")), paths: FORM_PATHS.domain },
   policy: { view: lazy(() => import("./PolicyForm")), paths: FORM_PATHS.policy },
-  // Geçici koruma: Tablespace formu Plan 35 Task 3'te gelir.
-  tablespace: { view: formMissing, paths: FORM_PATHS.tablespace },
+  tablespace: { view: lazy(() => import("./TablespaceForm")), paths: FORM_PATHS.tablespace },
 };
 
 // Plan 22: yetki sekmelerinin formları (`variant !== "object"`; ayrı tembel parçalar, kendi prop tipleriyle). Hata yolları

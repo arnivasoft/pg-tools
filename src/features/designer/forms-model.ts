@@ -93,8 +93,8 @@ export const DOMAIN_PATHS: ReadonlySet<string> = new Set([
 export const POLICY_PATHS: ReadonlySet<string> = new Set([
   "schema", "table", "name", "roles", "using", "withCheck", "comment", "object",
 ]);
-/** Tablespace: formu Plan 35 Task 3'te; o zamana kadar boş küme (tüm hatalar genel şeride düşer). */
-export const TABLESPACE_PATHS: ReadonlySet<string> = new Set();
+/** Tablespace: `options` kökü dört seçenek alanını kapsar; `old.*` genel şeride düşer. */
+export const TABLESPACE_PATHS: ReadonlySet<string> = new Set(["name", "owner", "location", "options", "comment", "object"]);
 /** Tür → bilinen yollar (testte denetlenir; her `ObjectKind` için tanımlı). */
 export const FORM_PATHS: Record<ObjectKind, ReadonlySet<string>> = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,

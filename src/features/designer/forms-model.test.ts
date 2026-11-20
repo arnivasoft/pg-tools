@@ -9,7 +9,7 @@ import type { SchemaDef } from "../../ipc/bindings/SchemaDef";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
 import { addColumn, groupIssues, issuesFor, moveColumn, removeColumn, updateColumn } from "./designer-model";
 import {
-  DATABASE_PATHS, DOMAIN_PATHS, EXTENSION_PATHS, FORM_PATHS, POLICY_PATHS, ROLE_PATHS, ROUTINE_PATHS, TRIGGER_PATHS, TYPE_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
+  DATABASE_PATHS, DOMAIN_PATHS, EXTENSION_PATHS, FORM_PATHS, POLICY_PATHS, TABLESPACE_PATHS, ROLE_PATHS, ROUTINE_PATHS, TRIGGER_PATHS, TYPE_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
   columnKeyLabel, exactIssues, extensionEditPatch, extensionOptionLabel, extensionVersionNote, fillfactorEnabled,
   fillfactorFromInput, findExtension, incrementEditPatch, incrementSign, indexEditPatch, indexMethodPatch, indexReadOnlyReason,
   newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect, orphanRowIssues, ownedByHint, restrictedControlDisabled, schemaEditPatch, sequenceSchemaPatch, tablespaceChoices,
@@ -382,7 +382,10 @@ describe("alan yolu sözleşmesi (sequence/index)", () => {
 
 describe("FORM_PATHS (tür → form eşlemesi)", () => {
   it("her ObjectKind için yol kümesi var", () => {
-    expect((["schema", "sequence", "extension", "index", "table"] as const).every((k) => FORM_PATHS[k].size > 0)).toBe(true);
+    const kinds = Object.keys(FORM_PATHS) as (keyof typeof FORM_PATHS)[];
+    expect(kinds).toHaveLength(16);
+    expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
+    expect(FORM_PATHS.tablespace).toBe(TABLESPACE_PATHS);
     expect(FORM_PATHS.index).toBe(INDEX_PATHS);
     expect(FORM_PATHS.sequence).toBe(SEQUENCE_PATHS);
     expect(FORM_PATHS.table).toBe(TABLE_PATHS);
@@ -561,7 +564,7 @@ describe("DOMAIN_PATHS (Plan 19 Task 6)", () => {
 });
 
 describe("FORM_PATHS tam eşleme (Plan 19 Task 6: Partial yok)", () => {
-  it("her ObjectKind (16 tür) için yol kümesi; Tablespace formu gelene kadar boş (Plan 35 Task 3)", () => {
+  it("her ObjectKind (16 tür) için yol kümesi", () => {
     const all: Record<ObjectKind, true> = {
       schema: true, sequence: true, extension: true, index: true, table: true, view: true, materialized_view: true, database: true,
       role: true, function: true, procedure: true, trigger: true, type: true, domain: true, policy: true, tablespace: true,
@@ -569,8 +572,7 @@ describe("FORM_PATHS tam eşleme (Plan 19 Task 6: Partial yok)", () => {
     const kinds = Object.keys(all) as ObjectKind[];
     expect(kinds).toHaveLength(16);
     expect(Object.keys(FORM_PATHS).sort()).toEqual([...kinds].sort());
-    expect(kinds.filter((k) => k !== "tablespace").every((k) => FORM_PATHS[k].size > 0)).toBe(true);
-    expect(FORM_PATHS.tablespace.size).toBe(0);
+    expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
   });
 });
 
@@ -589,5 +591,17 @@ describe("POLICY_PATHS (Plan 35)", () => {
     expect(issuesFor(g, "roles")).toEqual(["r"]);
     expect(exactIssues(g, "withCheck")).toEqual(["w"]);
     expect(g.general).toEqual(["o"]);
+  });
+});
+
+describe("TABLESPACE_PATHS", () => {
+  it("options.* alana, old.location genel şeride", () => {
+    const g = groupIssues(
+      [{ path: "options.maintenanceIoConcurrency", message: "a" }, { path: "old.location", message: "b" }, { path: "location", message: "c" }] as never,
+      TABLESPACE_PATHS,
+    );
+    expect(g.byPath.get("options.maintenanceIoConcurrency")).toEqual(["a"]);
+    expect(g.byPath.get("location")).toEqual(["c"]);
+    expect(g.general).toEqual(["b"]);
   });
 });
