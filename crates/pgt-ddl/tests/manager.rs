@@ -1888,6 +1888,8 @@ async fn locked_new_body(ts: TestServer) {
         ObjectDef::MaterializedView(mv),
         ObjectDef::Database(database_def(&db)),
         ObjectDef::Role(r),
+        ObjectDef::Policy(rpolicy("ml_t", "ml_p")),
+        ObjectDef::Tablespace(rtablespace(&common::ts_name("mlocked"), "/nonexistent/pgt_locked")),
     ] {
         let req = create(def.clone());
         let r = f
@@ -1901,6 +1903,7 @@ async fn locked_new_body(ts: TestServer) {
     }
     assert!(!exists(&env, "public.ml_v").await && !exists(&env, "public.ml_m").await);
     assert_eq!((role_oid(maint, &role).await, database_oid(maint, &db).await), (None, None));
+    assert_eq!(tablespace_oid(maint, &common::ts_name("mlocked")).await, None);
     // Yükleme ve açılır listeler serbest.
     let moid = database_oid(maint, &ts.config.maintenance_db).await.unwrap();
     assert_eq!(f.load_database(moid).await.name, ts.config.maintenance_db);
@@ -3001,4 +3004,254 @@ async fn acl_non_owner_body(ts: TestServer) {
     let (sqlstate, hint) = acl_hint_of(u.apply(&req).await);
     assert_eq!((sqlstate.as_str(), hint.as_deref()), ("42501", Some(DEFAULT_ACL_PRIVILEGE_HINT)));
     mgr.disconnect(config.id);
+}
+
+// ---- Plan 34: Policy / Tablespace ----
+
+fn rpolicy(table: &str, name: &str) -> PolicyDef {
+    PolicyDef {
+        schema: "public".into(),
+        table: table.into(),
+        name: name.into(),
+        command: PolicyCommand::All,
+        permissive: true,
+        roles: vec![],
+        using: Some("true".into()),
+        with_check: None,
+        comment: None,
+        editable: true,
+        unsupported: vec![],
+        table_rls: None,
+    }
+}
+
+async fn policy_oid(env: &Env, table_oid: u32, name: &str) -> Option<u32> {
+    env.admin.query_opt("SELECT oid FROM pg_policy WHERE polrelid = $1 AND polname = $2::text", &[&table_oid, &name]).await.unwrap().map(|r| r.get(0))
+}
+
+async fn tablespace_oid(admin: &tokio_postgres::Client, name: &str) -> Option<u32> {
+    admin.query_opt("SELECT oid FROM pg_tablespace WHERE spcname = $1::text", &[&name]).await.unwrap().map(|r| r.get(0))
+}
+
+#[tokio::test]
+async fn policy_defaults_created_gates_and_stale() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(policy_body(ts.clone()), cleanup(&ts, "m_pol")).await;
+    }
+}
+
+async fn policy_body(ts: TestServer) {
+    let env = setup(&ts, "m_pol").await;
+    let f = fx(&env, &ts, false, None);
+    let prod = fx(&env, &ts, false, Some("Üretim"));
+    env.sql("CREATE TABLE public.mp_t (id int, who text); CREATE VIEW public.mp_v AS SELECT 1 AS x").await;
+    let t = env.class_oid("public", "mp_t").await;
+    let v = env.class_oid("public", "mp_v").await;
+    let ctx = |table_oid| CreateContext { schema_oid: None, table_oid };
+    let dflt = |c| f.dm.defaults(f.server, f.db, ObjectKind::Policy, c, None);
+
+    // Varsayılanlar: bağlam tablosunun adları + güncel RLS bayrakları.
+    let Ok(ObjectDef::Policy(d)) = dflt(ctx(Some(t))).await else { panic!("policy varsayılanları") };
+    assert_eq!((d.schema.as_str(), d.table.as_str(), d.name.as_str()), ("public", "mp_t", ""));
+    assert_eq!((d.command, d.permissive, d.roles.is_empty(), d.using.is_none(), d.with_check.is_none()), (PolicyCommand::All, true, true, true, true));
+    assert_eq!((d.editable, d.unsupported.len(), d.comment), (true, 0, None));
+    assert_eq!(d.table_rls, Some(RowSecurity { enabled: false, forced: false }));
+    // Tablo bağlamı şart: yok → Invalid; görünüm → NotFound; tablo yok → NotFound; veritabanı yok → Invalid.
+    assert!(matches!(dflt(ctx(None)).await, Err(Error::Invalid(_))));
+    assert!(matches!(dflt(CreateContext { schema_oid: Some(env.schema_oid("public").await), table_oid: None }).await, Err(Error::Invalid(_))));
+    assert!(matches!(dflt(ctx(Some(v))).await, Err(Error::NotFound(_))));
+    assert!(matches!(dflt(ctx(Some(u32::MAX - 7))).await, Err(Error::NotFound(_))));
+    assert!(matches!(f.dm.defaults(f.server, None, ObjectKind::Policy, ctx(Some(t)), None).await, Err(Error::Invalid(_))));
+
+    // Create: `created` doğru oid; RLS kapalıyken yalnız uyarı.
+    let def = rpolicy("mp_t", "mp_p");
+    let r = f.apply(&create(ObjectDef::Policy(def.clone()))).await;
+    let poid = policy_oid(&env, t, "mp_p").await.expect("politika kurulmalıydı");
+    let object = ObjectRef { kind: ObjectKind::Policy, oid: poid };
+    assert_eq!(created_of(r), Some(object));
+    let ObjectDef::Policy(loaded) = f.load_def(object).await else { panic!("policy") };
+    assert!(loaded.editable && loaded.table_rls == Some(RowSecurity::default()), "{loaded:?}");
+    assert!(f.preview(&f.alter_loaded(object, |_| {}).await).await.empty, "yüklenen tanımla alter boş plan");
+
+    // Yeniden adlandırma: `created` yeni adla aynı oid; yorum: kimlik değişmedi → None.
+    let rename = f
+        .alter_loaded(object, |d| {
+            if let ObjectDef::Policy(p) = d {
+                p.name = "mp_p2".into()
+            }
+        })
+        .await;
+    assert_eq!(created_of(f.apply(&rename).await), Some(object));
+    assert_eq!(policy_oid(&env, t, "mp_p2").await, Some(poid));
+    let comment = f.alter_loaded(object, |d| set_policy_comment(d, "c")).await;
+    assert_eq!(created_of(f.apply(&comment).await), None);
+
+    // Bayat `old`: başka oturum yorumu değiştirdi → plan_changed.
+    let stale = f.alter_loaded(object, |d| set_policy_comment(d, "benim")).await;
+    let hash = f.preview(&stale).await.hash;
+    env.sql("COMMENT ON POLICY mp_p2 ON public.mp_t IS 'başka'").await;
+    assert_eq!(code(&f.dm.apply(f.server, f.db, &stale, opts(&hash)).await), "plan_changed");
+
+    // Yeniden kurma (komut değişimi) Destructive: onay ister; üretimde ek (veri kaybı) onayı istenmez.
+    let recreate = f
+        .alter_loaded(object, |d| {
+            if let ObjectDef::Policy(p) = d {
+                p.command = PolicyCommand::Select
+            }
+        })
+        .await;
+    assert_eq!(f.preview(&recreate).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&recreate).await), "confirmation_required");
+    assert_eq!(code(&prod.apply(&recreate).await), "confirmation_required");
+    applied(prod.apply_with(&recreate, |o| o.confirmed = true).await);
+    let recreated = ObjectRef { kind: ObjectKind::Policy, oid: policy_oid(&env, t, "mp_p2").await.unwrap() };
+    let ObjectDef::Policy(after) = f.load_def(recreated).await else { panic!("policy") };
+    assert_eq!(after.command, PolicyCommand::Select);
+
+    // RLS ENABLE (tablo alter) Destructive: onay; sonra varsayılanlar güncel bayrağı gösterir.
+    let tobj = ObjectRef { kind: ObjectKind::Table, oid: t };
+    let old = f.load_def(tobj).await;
+    let mut new = old.clone();
+    match &mut new {
+        ObjectDef::Table(d) => d.row_security.enabled = true,
+        other => panic!("{other:?}"),
+    }
+    let enable = PlanRequest::Alter { object: tobj, old, new };
+    assert_eq!(f.preview(&enable).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&enable).await), "confirmation_required");
+    applied(f.apply_with(&enable, |o| o.confirmed = true).await);
+    let Ok(ObjectDef::Policy(d)) = dflt(ctx(Some(t))).await else { panic!("policy varsayılanları") };
+    assert_eq!(d.table_rls, Some(RowSecurity { enabled: true, forced: false }));
+
+    // Yinelenen ad: 42710, özel ipucu yok (PG iletisi).
+    let dup = create(ObjectDef::Policy(rpolicy("mp_t", "mp_p2")));
+    let (_, committed, sqlstate, error) = failed(f.apply(&dup).await);
+    assert_eq!((committed, sqlstate.as_deref()), (0, Some("42710")));
+    assert_eq!(error.hint, None);
+
+    // Drop Destructive; üretimde yalnız genel onay.
+    let drop = f.drop_loaded(recreated, false).await;
+    assert_eq!(f.preview(&drop).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&drop).await), "confirmation_required");
+    applied(prod.apply_with(&drop, |o| o.confirmed = true).await);
+    assert_eq!(policy_oid(&env, t, "mp_p2").await, None);
+    assert!(matches!(f.dm.load(f.server, f.db, recreated).await, Err(Error::NotFound(_))));
+}
+
+fn set_policy_comment(d: &mut ObjectDef, c: &str) {
+    match d {
+        ObjectDef::Policy(x) => x.comment = Some(c.into()),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn rtablespace(name: &str, location: &str) -> TablespaceDef {
+    TablespaceDef {
+        name: name.into(),
+        owner: None,
+        location: location.into(),
+        options: TablespaceOptions::default(),
+        comment: None,
+        editable: true,
+        unsupported: vec![],
+    }
+}
+
+fn set_ts(d: &mut ObjectDef, edit: impl FnOnce(&mut TablespaceDef)) {
+    match d {
+        ObjectDef::Tablespace(x) => edit(x),
+        other => panic!("{other:?}"),
+    }
+}
+
+async fn ts_cleanup(ts: &TestServer, tag: &str, ts_tag: &str) {
+    cleanup(ts, tag).await;
+    common::drop_test_tablespaces(ts, ts_tag).await;
+}
+
+#[tokio::test]
+async fn tablespace_manager_flow() {
+    let _serial = SERIAL.lock().await;
+    for ts in servers() {
+        guarded(tablespace_body(ts.clone()), ts_cleanup(&ts, "m_ts", "mts7")).await;
+    }
+}
+
+async fn tablespace_body(ts: TestServer) {
+    let Some(root) = common::ts_root() else { return };
+    let env = setup(&ts, "m_ts").await;
+    let f = fx(&env, &ts, false, None);
+    let prod = fx(&env, &ts, false, Some("Üretim"));
+    let name = common::ts_name("mts7");
+    let dflt = |c| f.dm.defaults(f.server, None, ObjectKind::Tablespace, c, None);
+
+    // Varsayılanlar: sunucu kapsamlı (`database_oid` yok); bağlam verilirse Invalid.
+    let Ok(ObjectDef::Tablespace(d)) = dflt(CreateContext::default()).await else { panic!("tablespace varsayılanları") };
+    assert_eq!((d.name.as_str(), d.owner, d.location.as_str(), d.comment), ("", None, "", None));
+    assert_eq!((d.options, d.editable, d.unsupported.len()), (TablespaceOptions::default(), true, 0));
+    assert!(matches!(dflt(CreateContext { schema_oid: Some(1), table_oid: None }).await, Err(Error::Invalid(_))));
+    assert!(matches!(dflt(CreateContext { schema_oid: None, table_oid: Some(1) }).await, Err(Error::Invalid(_))));
+
+    // Konum hatası: dizin yok (58P01) → PG iletisi + konum ipucu; hiçbir ifade kalıcı değil → `created` yok.
+    let bad = create(ObjectDef::Tablespace(rtablespace(&name, &format!("{root}/pgt_yok_dizin"))));
+    let r = f.apply(&bad).await;
+    let Ok(ApplyOutcome::Failed { failed_index, committed, sqlstate, error, created, .. }) = r else { panic!("Failed bekleniyordu: {r:?}") };
+    assert_eq!((failed_index, committed, created), (0, 0, None));
+    assert_eq!(sqlstate.as_deref(), Some("58P01"));
+    assert_eq!(error.hint.as_deref(), Some("Konum sunucuda var olan, PostgreSQL hizmet kullanıcısına ait boş bir dizin olmalı."));
+    assert_eq!(tablespace_oid(&env.admin, &name).await, None);
+
+    // Create (mutlu yol): `created` doğru oid; seçenek + yorum.
+    let mut def = rtablespace(&name, &format!("{root}/ts7"));
+    def.comment = Some("c".into());
+    def.options.seq_page_cost = Some("1.5".into());
+    let r = f.apply(&create(ObjectDef::Tablespace(def.clone()))).await;
+    let oid = tablespace_oid(&env.admin, &name).await.expect("tablespace kurulmalıydı");
+    let object = ObjectRef { kind: ObjectKind::Tablespace, oid };
+    assert_eq!(created_of(r), Some(object));
+    let loaded = f.dm.load(f.server, None, object).await.unwrap();
+    assert!(matches!(&loaded, ObjectDef::Tablespace(l) if l.location == def.location && l.comment == def.comment && l.options == def.options && l.editable));
+    assert!(f.preview(&f.alter_loaded(object, |_| {}).await).await.empty, "yüklenen tanımla alter boş plan");
+
+    // Yeniden adlandırma: `created` yeni adla aynı oid; yorum: None.
+    let renamed = format!("{name}_r");
+    let rename = f.alter_loaded(object, |d| set_ts(d, |t| t.name = renamed.clone())).await;
+    assert_eq!(created_of(f.apply(&rename).await), Some(object));
+    assert_eq!(tablespace_oid(&env.admin, &renamed).await, Some(oid));
+    let comment = f.alter_loaded(object, |d| set_ts(d, |t| t.comment = Some("d".into()))).await;
+    assert_eq!(created_of(f.apply(&comment).await), None);
+
+    // Bayat `old`.
+    let stale = f.alter_loaded(object, |d| set_ts(d, |t| t.comment = Some("benim".into()))).await;
+    let hash = f.preview(&stale).await.hash;
+    env.sql(&format!("COMMENT ON TABLESPACE {renamed} IS 'başka'")).await;
+    assert_eq!(code(&f.dm.apply(f.server, f.db, &stale, opts(&hash)).await), "plan_changed");
+
+    // Sistem tablespace'i: alter/drop reddi (salt okunur kapısı; ileti adsız).
+    let pg_default = tablespace_oid(&env.admin, "pg_default").await.unwrap();
+    let sys = ObjectRef { kind: ObjectKind::Tablespace, oid: pg_default };
+    let alter = f.alter_loaded(sys, |d| set_ts(d, |t| t.comment = Some("x".into()))).await;
+    let drop = f.drop_loaded(sys, false).await;
+    for req in [&alter, &drop] {
+        let r = f.apply_with(req, |o| (o.confirmed, o.confirmed_production) = (true, true)).await;
+        assert_eq!(code(&r), "invalid");
+        let m = invalid_message(&r);
+        assert!(m.starts_with(READ_ONLY_PREFIX) && !m.contains("pg_default"), "{m}");
+    }
+
+    // Drop: Destructive (üretimde ek onay yok); boş değilken 55000 + ipucu, hiçbir şey değişmez.
+    env.sql(&format!("CREATE TABLE public.mts_t (id int) TABLESPACE {renamed}")).await;
+    let drop = f.drop_loaded(object, false).await;
+    assert_eq!(f.preview(&drop).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&drop).await), "confirmation_required");
+    let r = prod.apply_with(&drop, |o| o.confirmed = true).await;
+    let (index, committed, sqlstate, error) = failed(r);
+    assert_eq!((index, committed, sqlstate.as_deref()), (0, 0, Some("55000")));
+    assert_eq!(error.hint.as_deref(), Some("Tablespace boş değil; önce içindeki nesneleri başka tablespace'e taşıyın (başka veritabanlarındaki nesneler de sayılır)."));
+    assert_eq!(tablespace_oid(&env.admin, &renamed).await, Some(oid));
+    env.sql("DROP TABLE public.mts_t").await;
+    applied(prod.apply_with(&drop, |o| o.confirmed = true).await);
+    assert_eq!(tablespace_oid(&env.admin, &renamed).await, None);
+    assert!(matches!(f.dm.load(f.server, None, object).await, Err(Error::NotFound(_))));
 }

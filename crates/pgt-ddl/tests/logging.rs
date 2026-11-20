@@ -633,3 +633,91 @@ async fn maintenance_logging_body(ts: TestServer) {
     assert_eq!(sqlstate.as_deref(), Some("55P03"));
     locker.batch_execute("COMMIT").await.unwrap();
 }
+
+// ================================================================================================================
+// Plan 34: Policy / Tablespace — günlükte ifade (USING), ad, yorum ve konum yok
+// ================================================================================================================
+
+/// Ayırt edici sırlar: USING ifadesinde, politika/tablespace adında, yorumda ve konum yolunda.
+const POL_SECRETS: [&str; 4] = ["zp_gizli_ifade", "zp_gizli_politika", "zp_gizli_tablo", "zp_gizli_yorum"];
+const TS_SECRET_LOCATION: &str = "zp_gizli_konum";
+
+#[tokio::test]
+async fn policy_tablespace_logging_is_expression_name_and_location_free() {
+    let buf = capture();
+    for ts in servers() {
+        let t = ts.clone();
+        let clean = async move {
+            cleanup(&t, "m_logp").await;
+            common::drop_test_tablespaces(&t, "logts").await;
+        };
+        guarded(policy_logging_body(ts.clone()), clean).await;
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        for marker in ["DDL uygulandı", "DDL uygulanamadı", "Policy", "42710"] {
+            assert!(out.contains(marker), "günlükte {marker:?} yok: {out}");
+        }
+        let root = common::ts_root();
+        if root.is_some() {
+            assert!(out.contains("Tablespace") && out.contains("58P01"), "tablespace olayları günlükte olmalı: {out}");
+        }
+        let ts_name = common::ts_name("logts");
+        let mut secrets: Vec<&str> = POL_SECRETS.to_vec();
+        secrets.extend([TS_SECRET_LOCATION, "POLICY", "TABLESPACE", "USING", "already exists", "does not exist", ts_name.as_str()]);
+        if let Some(r) = root.as_deref() {
+            secrets.push(r);
+        }
+        for secret in secrets {
+            assert!(!out.contains(secret), "günlükte {secret:?} var: {out}");
+        }
+        if let Some(p) = ts.password.as_deref().filter(|p| !p.is_empty()) {
+            assert!(!out.contains(p), "günlükte parola var");
+        }
+    }
+}
+
+async fn policy_logging_body(ts: TestServer) {
+    let env = setup(&ts, "m_logp").await;
+    let (dm, _dir) = manager(&ts.config, env.mgr.clone());
+    let (server, db) = (env.server, env.db_oid);
+    env.sql("CREATE TABLE public.zp_gizli_tablo (id int)").await;
+    let def = PolicyDef {
+        schema: "public".into(),
+        table: "zp_gizli_tablo".into(),
+        name: "zp_gizli_politika".into(),
+        command: PolicyCommand::All,
+        permissive: true,
+        roles: vec![],
+        using: Some("(id::text <> 'zp_gizli_ifade')".into()),
+        with_check: None,
+        comment: Some("zp_gizli_yorum".into()),
+        editable: true,
+        unsupported: vec![],
+        table_rls: None,
+    };
+    let r = apply(&dm, server, db, &create(ObjectDef::Policy(def.clone()))).await;
+    assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
+    // Aynı ad: 42710 → Failed (PG iletisi adı içerir ama günlüğe yalnızca kod gider).
+    let r = apply(&dm, server, db, &create(ObjectDef::Policy(def))).await;
+    let Ok(ApplyOutcome::Failed { sqlstate, .. }) = r else { panic!("{r:?}") };
+    assert_eq!(sqlstate.as_deref(), Some("42710"));
+
+    // Tablespace: var olmayan konum (58P01; PG iletisi konumu içerir) ve mutlu yol (ts8); ifade/ad/konum günlükte yok.
+    let Some(root) = common::ts_root() else { return };
+    let name = common::ts_name("logts");
+    let tsdef = |loc: String| TablespaceDef {
+        name: name.clone(),
+        owner: None,
+        location: loc,
+        options: TablespaceOptions::default(),
+        comment: Some("zp_gizli_yorum".into()),
+        editable: true,
+        unsupported: vec![],
+    };
+    let bad = create(ObjectDef::Tablespace(tsdef(format!("{root}/{TS_SECRET_LOCATION}"))));
+    let r = apply(&dm, server, db, &bad).await;
+    let Ok(ApplyOutcome::Failed { sqlstate, .. }) = r else { panic!("{r:?}") };
+    assert_eq!(sqlstate.as_deref(), Some("58P01"));
+    let good = create(ObjectDef::Tablespace(tsdef(format!("{root}/ts8"))));
+    let r = apply(&dm, server, db, &good).await;
+    assert!(matches!(r, Ok(ApplyOutcome::Applied { .. })), "{r:?}");
+}
