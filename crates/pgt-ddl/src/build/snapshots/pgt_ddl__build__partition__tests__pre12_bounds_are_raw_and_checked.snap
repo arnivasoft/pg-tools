@@ -1,0 +1,19 @@
+---
+source: crates/pgt-ddl/src/build/partition.rs
+expression: out
+---
+# PG 110000 range
+[Safe] CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')
+
+# PG 110000 list
+[Safe] CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES IN (1, NULL)
+
+# PG 160000 range
+[Safe] CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES FROM (( '2024-01-01' 
+)) TO (('2025-01-01'
+))
+
+# PG 160000 list
+[Safe] CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES IN ((1
+), (NULL
+))

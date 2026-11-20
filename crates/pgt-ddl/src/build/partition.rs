@@ -36,34 +36,42 @@ fn child_sql(d: &PartitionDef) -> String {
     qualified(&d.schema, &d.name)
 }
 
-fn value_sql(v: &BoundValue) -> String {
+/// Serbest SQL değerin yerleşimi: PG 12+ `wrap()` (parantezli ifade); PG 10–11 sınır dilbilgisi yalnız sabit kabul
+/// eder (parantezli ifade yok) → değer kırpılmış ham yazılır (`validate_bound` tek sabit olmasını ve `--` ile
+/// bitmemesini doğrular).
+fn place(ver: u32, sql: &str) -> String {
+    if ver >= 120000 { wrap(sql) } else { sql.trim().to_string() }
+}
+
+fn value_sql(ver: u32, v: &BoundValue) -> String {
     match v {
-        BoundValue::Value { sql } => wrap(sql),
+        BoundValue::Value { sql } => place(ver, sql),
         BoundValue::Minvalue => "MINVALUE".into(),
         BoundValue::Maxvalue => "MAXVALUE".into(),
     }
 }
 
-fn join_values(v: &[BoundValue]) -> String {
-    v.iter().map(value_sql).collect::<Vec<_>>().join(", ")
+fn join_values(ver: u32, v: &[BoundValue]) -> String {
+    v.iter().map(|x| value_sql(ver, x)).collect::<Vec<_>>().join(", ")
 }
 
 /// Sınır metni: `FOR VALUES FROM (…) TO (…)`, `FOR VALUES IN (…)`, `FOR VALUES WITH (MODULUS m, REMAINDER r)`, `DEFAULT`.
-/// Serbest SQL değerler `wrap()` ile yerleşir (`(<sql>\n)`), bu yüzden `parse_bound(bound_sql(b))` değerleri `wrap`'lı
-/// metin olarak geri verir; gerçek sabit nokta yükleyicinin ürettiği metinle sınanır (Task 3).
-pub(crate) fn bound_sql(b: &PartitionBound) -> String {
+/// Serbest SQL değerler PG 12+ `wrap()` ile yerleşir (`(<sql>\n)`), bu yüzden `parse_bound(bound_sql(ver, b))` değerleri
+/// `wrap`'lı metin olarak geri verir; PG 10–11'de ham yazılır ve düz değerlerde aynen döner. Gerçek sabit nokta
+/// yükleyicinin ürettiği metinle sınanır (Task 3).
+pub(crate) fn bound_sql(ver: u32, b: &PartitionBound) -> String {
     match b {
-        PartitionBound::Range { from, to } => format!("FOR VALUES FROM ({}) TO ({})", join_values(from), join_values(to)),
+        PartitionBound::Range { from, to } => format!("FOR VALUES FROM ({}) TO ({})", join_values(ver, from), join_values(ver, to)),
         PartitionBound::List { values } => {
-            format!("FOR VALUES IN ({})", values.iter().map(|v| wrap(v)).collect::<Vec<_>>().join(", "))
+            format!("FOR VALUES IN ({})", values.iter().map(|v| place(ver, v)).collect::<Vec<_>>().join(", "))
         }
         PartitionBound::Hash { modulus, remainder } => format!("FOR VALUES WITH (MODULUS {modulus}, REMAINDER {remainder})"),
         PartitionBound::Default => "DEFAULT".into(),
     }
 }
 
-fn attach_sql(d: &PartitionDef, b: &PartitionBound) -> String {
-    format!("ALTER TABLE {} ATTACH PARTITION {} {}", parent_sql(d), child_sql(d), bound_sql(b))
+fn attach_sql(ver: u32, d: &PartitionDef, b: &PartitionBound) -> String {
+    format!("ALTER TABLE {} ATTACH PARTITION {} {}", parent_sql(d), child_sql(d), bound_sql(ver, b))
 }
 
 fn detach_sql(d: &PartitionDef) -> String {
@@ -72,7 +80,7 @@ fn detach_sql(d: &PartitionDef) -> String {
 
 fn attach_stmt(ctx: &BuildCtx, d: &PartitionDef, b: &PartitionBound) -> crate::plan::Statement {
     let note = if ctx.version_num >= 120000 { ATTACH_NOTE } else { ATTACH_NOTE_OLD };
-    stmt(attach_sql(d, b), Risk::Destructive, Some(note))
+    stmt(attach_sql(ctx.version_num, d, b), Risk::Destructive, Some(note))
 }
 
 /// Yorum normalleştirme: `Some("")` yorumsuz sayılır (Policy/Table ile tutarlı).
@@ -80,8 +88,8 @@ fn norm_comment(c: &Option<String>) -> Option<&str> {
     c.as_deref().filter(|s| !s.is_empty())
 }
 
-fn create_sql(d: &PartitionDef) -> String {
-    let mut s = format!("CREATE TABLE {} PARTITION OF {} {}", child_sql(d), parent_sql(d), bound_sql(&d.bound));
+fn create_sql(ver: u32, d: &PartitionDef) -> String {
+    let mut s = format!("CREATE TABLE {} PARTITION OF {} {}", child_sql(d), parent_sql(d), bound_sql(ver, &d.bound));
     if let Some(p) = &d.partition_by {
         s.push_str(&partition_by_sql(p));
     }
@@ -89,6 +97,16 @@ fn create_sql(d: &PartitionDef) -> String {
         s.push_str(&format!(" TABLESPACE {}", quote_ident(ts)));
     }
     s
+}
+
+/// PG 10–11: sınır değeri tek sabit olmalı (ham yerleşir); üst düzey virgül listeyi bozar.
+fn check_pre12_literal(ctx: &BuildCtx, path: &str, sql: &str, e: &mut Vec<FieldError>) {
+    if ctx.version_num >= 120000 || e.iter().any(|x| x.path == path) {
+        return;
+    }
+    if split_top_level_commas(sql).is_none_or(|p| p.len() > 1) {
+        e.push(err(path, "PG 12 öncesinde sınır değeri tek bir sabit olmalı."));
+    }
 }
 
 /// Sınır doğrulaması: strateji uyumu, sayılar, MINVALUE/MAXVALUE kuralı, serbest SQL kapısı, sürüm kapıları.
@@ -112,6 +130,7 @@ fn validate_bound(ctx: &BuildCtx, d: &PartitionDef, b: &PartitionBound, e: &mut 
                                 e.push(err(&path, "MINVALUE/MAXVALUE'dan sonraki değerler de aynı anahtar sözcük olmalı."));
                             } else {
                                 check_free_sql(&path, sql, e);
+                                check_pre12_literal(ctx, &path, sql, e);
                             }
                         }
                         kw => match keyword {
@@ -130,7 +149,9 @@ fn validate_bound(ctx: &BuildCtx, d: &PartitionDef, b: &PartitionBound, e: &mut 
                 e.push(err("bound.values", "En az bir değer gerekli."));
             }
             for (i, v) in values.iter().enumerate() {
-                check_free_sql(&format!("bound.values[{i}]"), v, e);
+                let path = format!("bound.values[{i}]");
+                check_free_sql(&path, v, e);
+                check_pre12_literal(ctx, &path, v, e);
             }
         }
         (PartitionStrategy::Hash, PartitionBound::Hash { modulus, remainder }) => {
@@ -159,7 +180,7 @@ fn validate_bound(ctx: &BuildCtx, d: &PartitionDef, b: &PartitionBound, e: &mut 
         }
     }
     // Nihai sınır metni (alan sınırlarında bölge/parantez kayması).
-    if e.len() == before && !composed_is_clean(&bound_sql(b)) {
+    if e.len() == before && !composed_is_clean(&bound_sql(ctx.version_num, b)) {
         e.push(err("bound", COMPOSED_BROKEN));
     }
 }
@@ -224,7 +245,7 @@ pub fn create(ctx: &BuildCtx, d: &PartitionDef) -> Result<Plan, Vec<FieldError>>
     let statements = match d.mode {
         PartitionMode::Attach => vec![attach_stmt(ctx, d, &d.bound)],
         PartitionMode::Create => {
-            let mut v = vec![stmt(create_sql(d), Risk::Safe, None)];
+            let mut v = vec![stmt(create_sql(ctx.version_num, d), Risk::Safe, None)];
             if let Some(c) = norm_comment(&d.comment) {
                 v.push(stmt(format!("COMMENT ON TABLE {} IS {}", child_sql(d), quote_literal(c)), Risk::Safe, None));
             }
@@ -272,6 +293,7 @@ pub fn alter(ctx: &BuildCtx, old: &PartitionDef, new: &PartitionDef) -> Result<P
     if !e.is_empty() {
         return Err(e);
     }
+    // Sınır aynıysa hiçbir şey yazılmaz: salt okunur / yarım kalmış ayırmalı eski tanımda da boş plan (sabit nokta).
     if old.bound == new.bound {
         return Ok(Plan::default());
     }
@@ -281,17 +303,14 @@ pub fn alter(ctx: &BuildCtx, old: &PartitionDef, new: &PartitionDef) -> Result<P
     if old.detach_pending {
         return Err(vec![err("object", PENDING_MSG)]);
     }
-    validate_bound(ctx, new, &new.bound, &mut e);
+    // Strateji/anahtar sayısı yüklü (eski) tanımdan okunur: istemcinin gönderdiği değerler yetkili değildir.
+    validate_bound(ctx, old, &new.bound, &mut e);
     if !e.is_empty() {
         return Err(e);
     }
     let statements = vec![
         stmt(detach_sql(new), Risk::Destructive, Some(REATTACH_NOTE)),
-        {
-            let mut s = attach_stmt(ctx, new, &new.bound);
-            s.note = Some(REATTACH_NOTE.to_string());
-            s
-        },
+        attach_stmt(ctx, new, &new.bound),
     ];
     Ok(Plan { statements, warnings: vec![] })
 }
@@ -831,13 +850,16 @@ mod tests {
 
     #[test]
     fn bound_sql_shapes() {
-        assert_eq!(bound_sql(&PartitionBound::Default), "DEFAULT");
-        assert_eq!(bound_sql(&PartitionBound::Hash { modulus: 4, remainder: 3 }), "FOR VALUES WITH (MODULUS 4, REMAINDER 3)");
-        assert_eq!(
-            bound_sql(&PartitionBound::Range { from: vec![BoundValue::Minvalue], to: vec![val("1")] }),
-            "FOR VALUES FROM (MINVALUE) TO ((1\n))"
-        );
-        assert_eq!(bound_sql(&PartitionBound::List { values: vec!["1".into(), "NULL".into()] }), "FOR VALUES IN ((1\n), (NULL\n))");
+        assert_eq!(bound_sql(160000, &PartitionBound::Default), "DEFAULT");
+        assert_eq!(bound_sql(160000, &PartitionBound::Hash { modulus: 4, remainder: 3 }), "FOR VALUES WITH (MODULUS 4, REMAINDER 3)");
+        let r = PartitionBound::Range { from: vec![BoundValue::Minvalue], to: vec![val(" 1 ")] };
+        assert_eq!(bound_sql(160000, &r), "FOR VALUES FROM (MINVALUE) TO (( 1 \n))");
+        assert_eq!(bound_sql(110000, &r), "FOR VALUES FROM (MINVALUE) TO (1)");
+        let l = PartitionBound::List { values: vec!["1".into(), "NULL".into()] };
+        assert_eq!(bound_sql(160000, &l), "FOR VALUES IN ((1\n), (NULL\n))");
+        assert_eq!(bound_sql(110000, &l), "FOR VALUES IN (1, NULL)");
+        assert_eq!(bound_sql(119999, &l), bound_sql(110000, &l));
+        assert_eq!(bound_sql(120000, &l), bound_sql(160000, &l));
     }
 
     /// Sabit nokta: anahtar sözcük/sayı içeren sınırlar `bound_sql` → `parse_bound` ile aynen döner. Serbest SQL değerler
@@ -853,20 +875,101 @@ mod tests {
                 to: vec![BoundValue::Maxvalue, BoundValue::Maxvalue],
             },
         ] {
-            assert_eq!(parse_bound(&bound_sql(&b)), Some(b.clone()), "{b:?}");
+            assert_eq!(parse_bound(&bound_sql(160000, &b)), Some(b.clone()), "{b:?}");
         }
         // `wrap` etkisi: değerler parantezli + satır sonlu döner (sunucu çıktısında olmayan biçim).
         let b = range1("1", "2");
-        assert_eq!(parse_bound(&bound_sql(&b)), Some(range1("(1\n)", "(2\n)")));
+        assert_eq!(parse_bound(&bound_sql(160000, &b)), Some(range1("(1\n)", "(2\n)")));
+        // PG 10–11: ham yazım → düz değerlerde tam sabit nokta.
+        assert_eq!(parse_bound(&bound_sql(110000, &b)), Some(b.clone()));
         let l = PartitionBound::List { values: vec!["'a,b'".into(), "NULL".into()] };
-        assert_eq!(parse_bound(&bound_sql(&l)), Some(PartitionBound::List { values: vec!["('a,b'\n)".into(), "(NULL\n)".into()] }));
+        assert_eq!(parse_bound(&bound_sql(160000, &l)), Some(PartitionBound::List { values: vec!["('a,b'\n)".into(), "(NULL\n)".into()] }));
+        assert_eq!(parse_bound(&bound_sql(110000, &l)), Some(l.clone()));
         // Yükleyici biçimi (parantezsiz) bir kez yazılıp okununca değer sayısı ve sıra korunur.
         let loaded = parse_bound("FOR VALUES IN ('a,b', NULL)").unwrap();
         let PartitionBound::List { values } = &loaded else { panic!() };
         assert_eq!(values.len(), 2);
-        assert_eq!(parse_bound(&bound_sql(&loaded)).map(|p| match p {
+        assert_eq!(parse_bound(&bound_sql(160000, &loaded)).map(|p| match p {
             PartitionBound::List { values } => values.len(),
             _ => 0,
         }), Some(2));
+    }
+
+    #[test]
+    fn pre12_bounds_are_raw_and_checked() {
+        let range = PartitionDef { bound: range1(" '2024-01-01' ", "'2025-01-01'"), ..pd() };
+        let list = list_pd(&["1", "NULL"]);
+        let mut out = String::new();
+        for v in [110000, 160000] {
+            out.push_str(&format!("# PG {v} range\n{}\n# PG {v} list\n{}\n", render(&create_ok(&range, v)), render(&create_ok(&list, v))));
+        }
+        insta::assert_snapshot!(out);
+        // PG 11: ham sabit; PG 16: wrap.
+        assert_eq!(
+            create_ok(&list, 110000).statements[0].sql,
+            "CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES IN (1, NULL)"
+        );
+        // Üst düzey virgül listeyi bozar (PG 12 öncesi); PG 12+ ifade olarak kabul.
+        assert_eq!(create_err(&list_pd(&["1, 2"]), 110000), ["bound.values[0]"]);
+        assert_eq!(create_err(&PartitionDef { bound: range1("1, 2", "3"), ..pd() }, 110000), ["bound.from[0]"]);
+        assert!(bcreate(&o(&list_pd(&["1, 2"])), &ctx(160000)).is_ok());
+        // Virgül tırnak/parantez içindeyse tek sabittir.
+        assert!(bcreate(&o(&list_pd(&["'a,b'", "ARRAY[1,2]"])), &ctx(110000)).is_ok());
+        // Satır yorumuyla biten değer her sürümde tek hata verir; birleşik ifade temiz kalır.
+        for v in [110000, 160000] {
+            for bad in ["1 -- ", "'a' --"] {
+                assert_eq!(create_err(&list_pd(&[bad]), v), ["bound.values[0]"], "{bad} PG {v}");
+                assert_eq!(create_err(&PartitionDef { bound: range1(bad, "'z'"), ..pd() }, v), ["bound.from[0]"], "{bad} PG {v}");
+            }
+            let ok = create_ok(&list_pd(&["1 /* c */", "'x'"]), v);
+            assert!(composed_is_clean(&ok.statements[0].sql));
+        }
+    }
+
+    #[test]
+    fn alter_uses_loaded_strategy_and_notes() {
+        // Strateji/anahtar sayısı yüklü (eski) tanımdan okunur; istemci değerleri yetkili değil.
+        let old = pd();
+        let new = PartitionDef { strategy: PartitionStrategy::List, key_count: 2, bound: range1("1", "2"), ..pd() };
+        assert!(alter_ok(&old, &new, 160000).statements.len() == 2);
+        let bad = PartitionDef { bound: PartitionBound::List { values: vec!["1".into()] }, ..pd() };
+        assert_eq!(alter_err(&old, &bad, 160000), ["bound"]);
+        // Notlar: DETACH yeniden bağlama notu, ATTACH sürüme göre kilit notu.
+        let new = PartitionDef { bound: range1("1", "2"), ..pd() };
+        let p16 = alter_ok(&old, &new, 160000);
+        assert_eq!(p16.statements[0].note.as_deref(), Some(REATTACH_NOTE));
+        assert_eq!(p16.statements[1].note.as_deref(), Some(ATTACH_NOTE));
+        let p11 = alter_ok(&old, &new, 110000);
+        assert_eq!(p11.statements[1].note.as_deref(), Some(ATTACH_NOTE_OLD));
+        // Sınır aynıysa salt okunur / yarım kalmış eski tanımda da boş plan.
+        let pending = PartitionDef { detach_pending: true, editable: false, ..pd() };
+        assert!(alter_ok(&pending, &pending, 160000).statements.is_empty());
+    }
+
+    #[test]
+    fn multibyte_and_crlf_values() {
+        assert_eq!(
+            split_top_level_commas("'ç,ö', 'ş'"),
+            Some(vec!["'ç,ö'".to_string(), " 'ş'".to_string()])
+        );
+        assert_eq!(
+            parse_bound("FOR VALUES IN ('ç,ö', 'ş')"),
+            Some(PartitionBound::List { values: vec!["'ç,ö'".into(), "'ş'".into()] })
+        );
+        assert_eq!(
+            parse_bound("FOR VALUES IN ('a\r\nb,c', 'd')"),
+            Some(PartitionBound::List { values: vec!["'a\r\nb,c'".into(), "'d'".into()] })
+        );
+        assert_eq!(
+            parse_bound("FOR VALUES FROM ('ğ\r\n1') TO ('ü\n2')"),
+            Some(range1("'ğ\r\n1'", "'ü\n2'"))
+        );
+        // Çok baytlı değerler üretici yoluyla da geçer (PG 11 ham, PG 16 wrap).
+        for v in [110000, 160000] {
+            create_ok(&list_pd(&["'ç,ö'", "'a\r\nb'"]), v);
+        }
+        // Anahtar sözcük karşılaştırması çok baytlı metinde panik atmaz.
+        assert_eq!(parse_bound("FOR VALUES İN (1)"), None);
+        assert_eq!(parse_bound("ÇÇ"), None);
     }
 }
