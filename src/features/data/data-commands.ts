@@ -10,6 +10,7 @@ import type { DataSource } from "../../ipc/bindings/DataSource";
 import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { PlanView } from "../../ipc/bindings/PlanView";
 import type { SelectRequest } from "../../ipc/bindings/SelectRequest";
+import { qtCancel, qtMore } from "../../ipc/qt-more-commands";
 import type { ServerConfig } from "../../ipc/bindings/ServerConfig";
 import type { SessionOptions } from "../../ipc/bindings/SessionOptions";
 import { invoke } from "@tauri-apps/api/core";
@@ -45,10 +46,12 @@ export const qtOpenReadonly = (serverId: string, databaseOid: number | null, opt
   call<string>("qt_open_readonly", { serverId, databaseOid, options });
 
 /** commands.ts'ten devralınan üyeler (imzalar aynen). */
-export type DataBaseApi = Pick<Api, "ddlTargetOf" | "qtRun" | "qtMore" | "qtCancel" | "qtClose">;
+export type DataBaseApi = Pick<Api, "ddlTargetOf" | "qtRun" | "qtClose">;
 
 /** Denetleyicinin tüm dış bağımlılığı (testlerde sahtelenir). */
 export interface DataApi extends DataBaseApi {
+  qtMore: typeof qtMore;
+  qtCancel: typeof qtCancel;
   dataLoad: typeof dataLoad;
   dataSelect: typeof dataSelect;
   dataPreview: typeof dataPreview;
@@ -67,8 +70,8 @@ export function createDataApi(
   return {
     ddlTargetOf: api.ddlTargetOf,
     qtRun: api.qtRun,
-    qtMore: api.qtMore,
-    qtCancel: api.qtCancel,
+    qtMore,
+    qtCancel,
     qtClose: api.qtClose,
     dataLoad,
     dataSelect,

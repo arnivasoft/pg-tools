@@ -73,7 +73,7 @@ describe("data-commands", () => {
     const refreshServers = vi.fn(async () => []);
     const connect = vi.fn(async () => true);
     const api = createDataApi(
-      { ddlTargetOf: fake.ddlTargetOf, qtRun: fake.qtRun, qtMore: fake.qtMore, qtCancel: fake.qtCancel, qtClose: fake.qtClose },
+      { ddlTargetOf: fake.ddlTargetOf, qtRun: fake.qtRun, qtClose: fake.qtClose },
       refreshServers,
       connect,
     );

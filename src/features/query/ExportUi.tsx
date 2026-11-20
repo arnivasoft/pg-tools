@@ -5,8 +5,8 @@ import { texp } from "./strings-export";
 import { toast } from "../../app/toast";
 import type { CsvDelimiter } from "../../ipc/bindings/CsvDelimiter";
 import type { CsvOptions } from "../../ipc/bindings/CsvOptions";
-import { commands } from "../../ipc/commands";
 import { tabCommands } from "./tab-commands";
+import { qtCancel } from "../../ipc/qt-more-commands";
 import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
 import { Dialog } from "../../ui/Dialog";
@@ -68,7 +68,7 @@ export function createExportUi() {
   }
 
   const cancel = () => {
-    if (session) void commands.qtCancel(session).catch((err) => toast.show(toPayload(err).message, "error"));
+    if (session) void qtCancel(session).catch((err) => toast.show(toPayload(err).message, "error"));
   };
 
   const View = () => (

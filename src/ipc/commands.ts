@@ -55,9 +55,6 @@ export const commands = {
     call<string>("qt_open", { serverId, databaseOid, options }),
   qtRun: (session: string, sql: string, scope: Scope, limit: number, confirmed: boolean, onEvent: (ev: QueryEvent) => void) =>
     call<null>("qt_run", { session, sql, scope, limit, confirmed, onEvent: channel(onEvent) }),
-  qtMore: (session: string, stmtIndex: number, onEvent: (ev: QueryEvent) => void) =>
-    call<null>("qt_more", { session, stmtIndex, onEvent: channel(onEvent) }),
-  qtCancel: (session: string) => call<null>("qt_cancel", { session }),
   qtTxState: (session: string) => call<TxState>("qt_tx_state", { session }),
   qtSetOptions: (session: string, options: SessionOptions) => call<null>("qt_set_options", { session, options }),
   qtClose: (session: string, policy: ClosePolicy) => call<null>("qt_close", { session, policy }),
