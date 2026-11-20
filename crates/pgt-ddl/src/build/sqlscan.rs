@@ -41,6 +41,8 @@ pub struct ScanResult {
     /// `standard_conforming_strings = on` varsayar; uygulama sırasında çalışan bir ifade ayarı kapatırsa sonraki
     /// ifadelerde `\` kaçış olur ve bölge sınırları kayar. Çağıran bunu RED sayar (kaçış gerekiyorsa `E'…'`).
     pub backslash_in_plain_string: bool,
+    /// Bölge dışında en az bir `--` ya da `/*` yorumu var (kapalı olsun olmasın).
+    pub has_comment: bool,
 }
 
 impl ScanResult {
@@ -70,6 +72,7 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
     let mut ends_in_comment = false;
     let mut digit_quote = false;
     let mut plain_backslash = false;
+    let mut has_comment = false;
     while i < n {
         if (b[i] == b'\'' || b[i] == b'$') && i > 0 {
             // `1'x'` ve `1e'x'` (üstel gibi görünen E dizesi öneki) de dahil.
@@ -173,12 +176,14 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
                 None => i += 1,
             },
             b'-' if i + 1 < n && b[i + 1] == b'-' => {
+                has_comment = true;
                 while i < n && b[i] != b'\n' && b[i] != b'\r' {
                     i += 1;
                 }
                 ends_in_comment = i >= n;
             }
             b'/' if i + 1 < n && b[i + 1] == b'*' => {
+                has_comment = true;
                 let mut depth = 1;
                 i += 2;
                 while i < n && depth > 0 {
@@ -205,6 +210,7 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
         ends_in_line_comment: ends_in_comment,
         digit_adjacent_quote: digit_quote,
         backslash_in_plain_string: plain_backslash,
+        has_comment,
     }
 }
 
@@ -499,6 +505,17 @@ mod tests {
         assert!(!e("a"));
         assert!(!e("'--'"));
         assert!(!e("/* -- */"));
+    }
+
+    #[test]
+    fn has_comment_is_reported() {
+        let h = |s: &str| scan_semicolons(s).has_comment;
+        for s in ["a --", "a -- x\n", "/* x */", "a /* x", "1 -- c\n"] {
+            assert!(h(s), "{s}");
+        }
+        for s in ["a", "'--'", "'/*'", "\"--\"", "$$--$$", "a - -b", "1 / 2"] {
+            assert!(!h(s), "{s}");
+        }
     }
 
     #[test]

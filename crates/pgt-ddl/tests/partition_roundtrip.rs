@@ -290,7 +290,6 @@ async fn attach_body(ts: TestServer) {
     let c2l = pload(&env, "public", "c2").await;
     let overlapping = PartitionDef { bound: range1("10", "25"), ..c2l.clone() };
     let plan = build::alter(&pd(&c2l), &pd(&overlapping), &env.ctx(false)).unwrap();
-    assert!(env.try_exec_tx(&plan).await.is_err());
     let code = tx_code(&env, &plan).await;
     assert_eq!(code.as_deref(), Some("42P17"), "yeniden bağlamada çakışan sınır SQLSTATE");
     let after = pload(&env, "public", "c2").await;

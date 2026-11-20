@@ -3,14 +3,16 @@
 //!
 //! - **Kapsam:** veritabanı kapsamlı tür; `parent_*` bağlamdan gelir, `strategy`/`key_count`/`detach_pending` üst
 //!   tablodan gelen salt okunur bilgilerdir (üretici yalnız doğrulamada okur).
-//! - **Sınır değerleri** serbest SQL'dir: `check_free_sql` + `wrap` + nihai sınır metninde `composed_is_clean`
-//!   (`wrap` kapanıştan önce `\n` ekler; bkz. `bound_sql`/`parse_bound` notu).
+//! - **Sınır değerleri** serbest SQL'dir: `check_free_sql` + `wrap` (PG 12+); PG 10–11'de yorumsuz tek sabit, kırpılmış
+//!   hâliyle hem doğrulanır hem yazılır. Nihai denetim **tam** CREATE/ATTACH metninde (`composed_is_clean` ve satır
+//!   yorumuyla bitmeme) yapılır (`wrap` kapanıştan önce `\n` ekler; bkz. `bound_sql`/`parse_bound` notu).
 //! - **Riskler:** create (+ sahip/yorum) Safe; attach, sınır değiştirme ve ayırma Destructive (`confirmation_required`).
 //! - **Transaction:** `DETACH … CONCURRENTLY` ve `DETACH … FINALIZE` transaction dışıdır (`stmt_nt`).
 //! - **Alter:** yalnız sınır değişimi anlamlıdır; kimlik ve tablo özellikleri (sahip/yorum/tablespace/alt bölümleme)
 //!   Tablo diyaloğundadır → alan hatası. Sınır aynıysa boş plan.
 
 use super::freesql::{check_free_sql, composed_is_clean, wrap};
+use super::scan_semicolons;
 use super::sqlscan::{paren_group, split_top_level_commas};
 use super::table::{partition_by_sql, version_err};
 use super::{BuildCtx, check_ident, check_old_ident, check_old_schema_ident, check_schema_ident, check_text, err, stmt, stmt_nt};
@@ -27,6 +29,8 @@ pub const DETACH_NOTE: &str = "Satırlar üst tablodan görünmez olur; tablo si
 pub const ATTACH_NOTE: &str = "Tablo taranır ve sınır doğrulanır; üst tabloda SHARE UPDATE EXCLUSIVE kilidi alınır.";
 pub const ATTACH_NOTE_OLD: &str = "Tablo taranır ve sınır doğrulanır; üst tabloda ACCESS EXCLUSIVE kilidi alınır.";
 const COMPOSED_BROKEN: &str = "İfade, yerleştirildiği ifadeyi bozuyor";
+const RANGE_KEYWORD_MSG: &str = "MINVALUE/MAXVALUE için anahtar sözcük seçeneğini kullanın.";
+const LIST_KEYWORD_MSG: &str = "MINVALUE/MAXVALUE yalnız RANGE sınırında kullanılır.";
 
 fn parent_sql(d: &PartitionDef) -> String {
     qualified(&d.parent_schema, &d.parent_table)
@@ -37,8 +41,8 @@ fn child_sql(d: &PartitionDef) -> String {
 }
 
 /// Serbest SQL değerin yerleşimi: PG 12+ `wrap()` (parantezli ifade); PG 10–11 sınır dilbilgisi yalnız sabit kabul
-/// eder (parantezli ifade yok) → değer kırpılmış ham yazılır (`validate_bound` tek sabit olmasını ve `--` ile
-/// bitmemesini doğrular).
+/// eder (parantezli ifade yok) → değer `trim()` edilmiş ham yazılır. Doğrulama (`check_pre12_literal`) AYNI kırpılmış
+/// metne yapılır ve PG < 12'de yorum tümüyle reddedilir; böylece yerleşen metin doğrulananla birebir aynıdır.
 fn place(ver: u32, sql: &str) -> String {
     if ver >= 120000 { wrap(sql) } else { sql.trim().to_string() }
 }
@@ -99,19 +103,43 @@ fn create_sql(ver: u32, d: &PartitionDef) -> String {
     s
 }
 
-/// PG 10–11: sınır değeri tek sabit olmalı (ham yerleşir); üst düzey virgül listeyi bozar.
+/// PG 10–11: sınır değeri tek ve yorumsuz sabit olmalı (kırpılmış ham yerleşir, bkz. `place`); yorum sonraki değeri ya
+/// da `)`'i yutabilir, üst düzey virgül listeyi bozar. Denetim `place`'in yazacağı kırpılmış metne yapılır.
 fn check_pre12_literal(ctx: &BuildCtx, path: &str, sql: &str, e: &mut Vec<FieldError>) {
     if ctx.version_num >= 120000 || e.iter().any(|x| x.path == path) {
         return;
     }
-    if split_top_level_commas(sql).is_none_or(|p| p.len() > 1) {
+    let placed = sql.trim();
+    if scan_semicolons(placed).has_comment {
+        e.push(err(path, "PG 12 öncesinde sınır değeri yorum içeremez."));
+    } else if split_top_level_commas(placed).is_none_or(|p| p.len() > 1) {
         e.push(err(path, "PG 12 öncesinde sınır değeri tek bir sabit olmalı."));
     }
 }
 
-/// Sınır doğrulaması: strateji uyumu, sayılar, MINVALUE/MAXVALUE kuralı, serbest SQL kapısı, sürüm kapıları.
+/// Değer, `MINVALUE`/`MAXVALUE` sözcüğünün kendisiyse (kırpılmış, büyük/küçük harf duyarsız) `msg` ile alan hatası:
+/// sunucu bunu sabit değil anahtar sözcük sayar. Aynı yolda önceki hata varsa dokunmaz.
+fn check_keyword_value(path: &str, sql: &str, msg: &str, e: &mut Vec<FieldError>) {
+    if e.iter().any(|x| x.path == path) {
+        return;
+    }
+    let t = sql.trim();
+    if t.eq_ignore_ascii_case("MINVALUE") || t.eq_ignore_ascii_case("MAXVALUE") {
+        e.push(err(path, msg));
+    }
+}
+
+/// Nihai ifade denetimi: tam CREATE/ATTACH metni temiz olmalı (dış `;`, kapanmamış bölge, dengesiz parantez yok) ve
+/// satır yorumuyla bitmemeli. Alan düzeyi denetimlerin kaçırabileceği sınır kaymalarına karşı derinlemesine savunma.
+fn check_full_statement(sql: &str, e: &mut Vec<FieldError>) {
+    if !composed_is_clean(sql) || scan_semicolons(sql).ends_in_line_comment {
+        e.push(err("bound", COMPOSED_BROKEN));
+    }
+}
+
+/// Sınır doğrulaması: strateji uyumu, sayılar, MINVALUE/MAXVALUE kuralı, serbest SQL kapısı, sürüm kapıları. Tam ifade
+/// denetimi (`check_full_statement`) çağıranda yapılır.
 fn validate_bound(ctx: &BuildCtx, d: &PartitionDef, b: &PartitionBound, e: &mut Vec<FieldError>) {
-    let before = e.len();
     match (d.strategy, b) {
         (PartitionStrategy::Range, PartitionBound::Range { from, to }) => {
             for (side, vals) in [("from", from), ("to", to)] {
@@ -130,6 +158,7 @@ fn validate_bound(ctx: &BuildCtx, d: &PartitionDef, b: &PartitionBound, e: &mut 
                                 e.push(err(&path, "MINVALUE/MAXVALUE'dan sonraki değerler de aynı anahtar sözcük olmalı."));
                             } else {
                                 check_free_sql(&path, sql, e);
+                                check_keyword_value(&path, sql, RANGE_KEYWORD_MSG, e);
                                 check_pre12_literal(ctx, &path, sql, e);
                             }
                         }
@@ -151,6 +180,7 @@ fn validate_bound(ctx: &BuildCtx, d: &PartitionDef, b: &PartitionBound, e: &mut 
             for (i, v) in values.iter().enumerate() {
                 let path = format!("bound.values[{i}]");
                 check_free_sql(&path, v, e);
+                check_keyword_value(&path, v, LIST_KEYWORD_MSG, e);
                 check_pre12_literal(ctx, &path, v, e);
             }
         }
@@ -178,10 +208,6 @@ fn validate_bound(ctx: &BuildCtx, d: &PartitionDef, b: &PartitionBound, e: &mut 
             };
             e.push(err("bound", msg));
         }
-    }
-    // Nihai sınır metni (alan sınırlarında bölge/parantez kayması).
-    if e.len() == before && !composed_is_clean(&bound_sql(ctx.version_num, b)) {
-        e.push(err("bound", COMPOSED_BROKEN));
     }
 }
 
@@ -232,6 +258,14 @@ pub fn validate(ctx: &BuildCtx, d: &PartitionDef) -> Vec<FieldError> {
         if let Some(c) = &d.comment {
             check_text("comment", c, &mut e);
         }
+    }
+    // Nihai denetim: yerleşecek TAM ifade (alanlar temizse).
+    if e.is_empty() {
+        let sql = match d.mode {
+            PartitionMode::Attach => attach_sql(ctx.version_num, d, &d.bound),
+            PartitionMode::Create => create_sql(ctx.version_num, d),
+        };
+        check_full_statement(&sql, &mut e);
     }
     e
 }
@@ -305,6 +339,9 @@ pub fn alter(ctx: &BuildCtx, old: &PartitionDef, new: &PartitionDef) -> Result<P
     }
     // Strateji/anahtar sayısı yüklü (eski) tanımdan okunur: istemcinin gönderdiği değerler yetkili değildir.
     validate_bound(ctx, old, &new.bound, &mut e);
+    if e.is_empty() {
+        check_full_statement(&attach_sql(ctx.version_num, new, &new.bound), &mut e);
+    }
     if !e.is_empty() {
         return Err(e);
     }
@@ -919,8 +956,68 @@ mod tests {
                 assert_eq!(create_err(&list_pd(&[bad]), v), ["bound.values[0]"], "{bad} PG {v}");
                 assert_eq!(create_err(&PartitionDef { bound: range1(bad, "'z'"), ..pd() }, v), ["bound.from[0]"], "{bad} PG {v}");
             }
-            let ok = create_ok(&list_pd(&["1 /* c */", "'x'"]), v);
-            assert!(composed_is_clean(&ok.statements[0].sql));
+        }
+        // Yorum: PG 12+ wrap içinde kabul (temiz kalır); PG 10–11'de tümüyle reddedilir.
+        let commented = list_pd(&["1 /* c */", "'x'"]);
+        assert!(composed_is_clean(&create_ok(&commented, 160000).statements[0].sql));
+        assert_eq!(create_err(&commented, 110000), ["bound.values[0]"]);
+        let e = bcreate(&o(&commented), &ctx(110000)).unwrap_err();
+        assert_eq!(e[0].message, "PG 12 öncesinde sınır değeri yorum içeremez.");
+        // Tırnak içindeki `--` ve `/*` yorum değildir.
+        create_ok(&list_pd(&["'a -- b'", "'/* x */'"]), 110000);
+    }
+
+    /// I1: PG < 12'de yorum alan sınırını yutamaz (`1 -- c\n` kırpılınca `1 -- c` olurdu).
+    const SWALLOW_A: &str = "1 -- c\n";
+    const SWALLOW_B: &str = "/*\n) TABLESPACE pg_default --*/ 2";
+
+    #[test]
+    fn pre12_comment_swallow_is_rejected_on_all_paths() {
+        // create + attach (LIST).
+        let list = list_pd(&[SWALLOW_A, SWALLOW_B]);
+        assert_eq!(create_err(&list, 110000), ["bound.values[0]", "bound.values[1]"]);
+        let attach = PartitionDef { mode: PartitionMode::Attach, ..list.clone() };
+        assert_eq!(create_err(&attach, 110000), ["bound.values[0]", "bound.values[1]"]);
+        // alter (yeniden bağlama).
+        let old = list_pd(&["1"]);
+        assert_eq!(alter_err(&old, &list, 110000), ["bound.values[0]", "bound.values[1]"]);
+        // RANGE FROM/TO varyantı.
+        let range = PartitionDef { bound: range1(SWALLOW_A, SWALLOW_B), ..pd() };
+        assert_eq!(create_err(&range, 110000), ["bound.from[0]", "bound.to[0]"]);
+        assert_eq!(create_err(&PartitionDef { mode: PartitionMode::Attach, ..range.clone() }, 110000), ["bound.from[0]", "bound.to[0]"]);
+        assert_eq!(alter_err(&pd(), &range, 110000), ["bound.from[0]", "bound.to[0]"]);
+        // Kırpılan değer yazılan metinle aynıdır (yorumsuz): ham yazım doğrulananla birebir.
+        let sql = &create_ok(&list_pd(&["  1  ", "\t2\n"]), 110000).statements[0].sql;
+        assert!(sql.ends_with("FOR VALUES IN (1, 2)"), "{sql}");
+        // PG 16: wrap'lı hâl yapıyı değiştirmez (yorumlar kapanış parantezini yutamaz); tam ifade temiz kalır.
+        for pl in [create_ok(&list, 160000), alter_ok(&old, &list, 160000)] {
+            for st in &pl.statements {
+                assert!(composed_is_clean(&st.sql) && !scan_semicolons(&st.sql).ends_in_line_comment, "{}", st.sql);
+            }
+        }
+        let sql = &create_ok(&list, 160000).statements[0].sql;
+        assert_eq!(
+            sql,
+            "CREATE TABLE public.m_2024 PARTITION OF public.measurement FOR VALUES IN ((1 -- c\n\n), (/*\n) TABLESPACE pg_default --*/ 2\n))"
+        );
+    }
+
+    #[test]
+    fn keyword_as_value_is_rejected() {
+        for v in [110000, 160000] {
+            for kw in ["MINVALUE", " maxvalue ", "MaxValue\n"] {
+                let r = PartitionDef { bound: range1(kw, "'z'"), ..pd() };
+                let e = bcreate(&o(&r), &ctx(v)).unwrap_err();
+                assert_eq!((e[0].path.as_str(), e[0].message.as_str()), ("bound.from[0]", RANGE_KEYWORD_MSG), "{kw:?} PG {v}");
+                let r = PartitionDef { bound: range1("'a'", kw), ..pd() };
+                assert_eq!(create_err(&r, v), ["bound.to[0]"]);
+                let l = list_pd(&["1", kw]);
+                let e = bcreate(&o(&l), &ctx(v)).unwrap_err();
+                assert_eq!((e[0].path.as_str(), e[0].message.as_str()), ("bound.values[1]", LIST_KEYWORD_MSG), "{kw:?} PG {v}");
+                assert_eq!(alter_err(&pd(), &PartitionDef { bound: range1(kw, "'z'"), ..pd() }, v), ["bound.from[0]"]);
+            }
+            // Dize içindeki sözcük anahtar sözcük değildir.
+            create_ok(&PartitionDef { bound: range1("'MINVALUE'", "'z'"), ..pd() }, v);
         }
     }
 

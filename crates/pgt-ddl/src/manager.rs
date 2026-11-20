@@ -53,6 +53,7 @@ use crate::model::*;
 use crate::plan::{PlanView, Risk, Statement};
 use crate::secret::Secret;
 use crate::target::CreatePreset;
+use pgt_core::pgtext::lossy;
 
 /// Arayüzün istediği değişiklik; plan arka uçta bu istekten üretilir.
 // Tek seferlik IPC yükü (saklanmaz); varyant boyut farkı önemsiz, `Box` JSON'u değiştirmeden yalnızca kullanımı zorlaştırır.
@@ -376,12 +377,15 @@ pub const TABLESPACE_NOT_EMPTY_HINT: &str =
 pub const TABLESPACE_SUPERUSER_HINT: &str =
     "Tablespace oluşturmak süper kullanıcı yetkisi ister; konum dizini de PostgreSQL hizmet kullanıcısına ait olmalı.";
 /// `CREATE TABLESPACE` konum hatası (58P01 dizin yok, 42P17 göreli yol). 22023 çoğunlukla WITH sınırlarından gelir: ipucu yok.
+pub const TABLESPACE_LOCATION_HINT: &str = "Konum sunucuda var olan, PostgreSQL hizmet kullanıcısına ait boş bir dizin olmalı.";
+/// Plan 36: `ATTACH PARTITION` — tabloda bölüm sınırının dışında satır var (23514).
 pub const PARTITION_ROWS_OUTSIDE_HINT: &str =
     "Tablodaki bazı satırlar bölüm sınırının dışında; önce bu satırları taşıyın ya da sınırı genişletin.";
+/// Plan 36: `ATTACH PARTITION` — sınır başka bir bölümle çakışıyor (42P17).
 pub const PARTITION_OVERLAP_HINT: &str = "Sınır başka bir bölümün sınırıyla çakışıyor (ya da tablo bölüm sınırıyla uyumsuz).";
+/// Plan 36: `DETACH PARTITION … CONCURRENTLY` — üst tabloda DEFAULT bölüm var (55000).
 pub const PARTITION_DETACH_CONCURRENTLY_HINT: &str =
     "CONCURRENTLY, üst tabloda DEFAULT bölüm varken kullanılamaz; normal ayırmayı seçin.";
-pub const TABLESPACE_LOCATION_HINT: &str = "Konum sunucuda var olan, PostgreSQL hizmet kullanıcısına ait boş bir dizin olmalı.";
 /// `CREATE TABLESPACE` konum başka bir tablespace tarafından kullanılıyor (55006).
 pub const TABLESPACE_IN_USE_HINT: &str = "Bu konum zaten bir tablespace tarafından kullanılıyor; boş ve kullanılmayan bir dizin seçin.";
 /// Plan 24: transaction bloğu içinde çalıştırılamaz (25001). Bakım ifadeleri transaction dışıdır; beklenmez, savunma.
@@ -1786,7 +1790,7 @@ impl DdlManager {
             "h" => PartitionStrategy::Hash,
             _ => return Err(Error::Invalid(NOT_PARTITIONED.into())),
         };
-        Ok((row.get("schema"), row.get("name"), strategy, u32::try_from(natts).unwrap_or(0)))
+        Ok((lossy(&row, "schema"), lossy(&row, "name"), strategy, u32::try_from(natts).unwrap_or(0)))
     }
 
     /// Trigger'ın tablosu: yalnızca sıradan ve bölümlenmiş tablo (görünüm/MV/yabancı tablo trigger'ı kapsam dışı).

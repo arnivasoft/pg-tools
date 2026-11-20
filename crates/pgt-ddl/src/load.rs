@@ -1753,26 +1753,33 @@ async fn load_partition(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32
     parse_partition(run_oid(mgr, server, db, &PARTITION_SQL, oid).await?)
 }
 
-fn parse_partition(rows: Vec<Row>) -> Result<ObjectDef> {
-    let r = rows.first().ok_or_else(|| not_found("bölüm"))?;
+/// Bölüm sınıflandırması (saf): eklentiye ait, bilinmeyen `partstrat` ya da ayrıştırılamayan sınır → `unsupported`
+/// dolar (bölüm salt okunur olur); panik yok. Bilinmeyen strateji `Range`, ayrıştırılamayan sınır `Default` yer tutucudur.
+fn classify_partition(partstrat: &str, bound_text: &str, extension: Option<&str>) -> (PartitionStrategy, PartitionBound, Vec<String>) {
     let mut unsupported = vec![];
-    if let Some(e) = lossy_opt(r, "extension") {
+    if let Some(e) = extension {
         unsupported.push(format!("EXTENSION {e} (eklentiye ait)"));
     }
-    let code = lossy(r, "strat");
-    let strategy = match code.as_str() {
+    let strategy = match partstrat {
         "r" => PartitionStrategy::Range,
         "l" => PartitionStrategy::List,
         "h" => PartitionStrategy::Hash,
         _ => {
-            unsupported.push(format!("bölümleme stratejisi '{code}'"));
+            unsupported.push(format!("bölümleme stratejisi '{partstrat}'"));
             PartitionStrategy::Range
         }
     };
-    let bound = crate::build::partition::parse_bound(&lossy(r, "bound")).unwrap_or_else(|| {
+    let bound = crate::build::partition::parse_bound(bound_text).unwrap_or_else(|| {
         unsupported.push("sınır ifadesi ayrıştırılamadı".to_string());
         PartitionBound::Default
     });
+    (strategy, bound, unsupported)
+}
+
+fn parse_partition(rows: Vec<Row>) -> Result<ObjectDef> {
+    let r = rows.first().ok_or_else(|| not_found("bölüm"))?;
+    let (strategy, bound, mut unsupported) =
+        classify_partition(&lossy(r, "strat"), &lossy(r, "bound"), lossy_opt(r, "extension").as_deref());
     note_invalid_utf8(&[&rows], &mut unsupported);
     Ok(ObjectDef::Partition(PartitionDef {
         parent_schema: lossy(r, "parent_schema"),
@@ -1846,6 +1853,30 @@ async fn load_tablespace(mgr: &ConnectionManager, server: Uuid, target: Target, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_partition_flags_unsupported_without_panic() {
+        // Desteklenen: unsupported boş.
+        let (s, b, u) = classify_partition("l", "FOR VALUES IN (1, 2)", None);
+        assert_eq!(s, PartitionStrategy::List);
+        assert_eq!(b, PartitionBound::List { values: vec!["1".into(), "2".into()] });
+        assert!(u.is_empty());
+        // Bilinmeyen partstrat.
+        let (_, _, u) = classify_partition("x", "DEFAULT", None);
+        assert_eq!(u, ["bölümleme stratejisi 'x'"]);
+        let (_, _, u) = classify_partition("", "DEFAULT", None);
+        assert_eq!(u.len(), 1);
+        // Ayrıştırılamayan sınır.
+        let (_, b, u) = classify_partition("r", "FOR VALUES BOGUS", None);
+        assert_eq!(b, PartitionBound::Default);
+        assert_eq!(u, ["sınır ifadesi ayrıştırılamadı"]);
+        // Eklentiye ait.
+        let (_, _, u) = classify_partition("r", "DEFAULT", Some("timescaledb"));
+        assert_eq!(u, ["EXTENSION timescaledb (eklentiye ait)"]);
+        // Hepsi birden: üç neden, sırayla.
+        let (_, _, u) = classify_partition("z", "???", Some("e"));
+        assert_eq!(u.len(), 3);
+    }
 
     #[test]
     fn in_scope_rejects_only_server_scoped_kinds() {

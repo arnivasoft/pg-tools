@@ -1,6 +1,7 @@
 -- ATTACH PARTITION için bağlanabilir tablolar. $1 = üst tablonun oid'i (metin olarak gelir). Hariç: üst tablonun kendisi
 -- ve ataları (alt bölümlemede), bölümler, kalıtım üyeleri/üstleri (pg_inherits'te çocuk ya da üst olanlar), sistem
 -- şemaları ve eklentiye ait tablolar. Bölümlü ama bölümsüz tablo listelenir. value = tablo adı, detail = şema; en çok 5000.
+-- anc CTE'si derinlemesine savunmadır; NOT EXISTS (inhparent) koşulu zaten üst tabloyu ve atalarını kapsar.
 WITH RECURSIVE anc(oid) AS (
     SELECT $1::text::oid
     UNION
