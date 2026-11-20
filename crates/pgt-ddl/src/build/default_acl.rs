@@ -3,7 +3,7 @@
 //! yetkileriyle ortaktır (`build::acl`); sahip burada `role`'dür, `CASCADE` yoktur, tüm ifadeler Safe'tir.
 
 use crate::acl::{DefaultAclDef, DefaultAclObjectType, default_privileges_for, default_sections};
-use crate::model::{FieldError, ObjectKind};
+use crate::model::FieldError;
 use crate::plan::{Plan, Risk};
 use crate::quote::quote_ident;
 
@@ -18,14 +18,7 @@ const IDENTITY_MSG: &str = "Varsayılan yetki kimliği (rol, şema, bağlı rol)
 const READ_ONLY_MSG: &str = "Bu varsayılan yetkiler salt okunurdur; değiştirilemez.";
 const SECTIONS_MSG: &str = "Bölümler sabit sırada ve uygun türlerin tamamıyla olmalıdır.";
 const BASELINE_MSG: &str = "Genel kapsamdan gelen değer buradan değiştirilemez.";
-const KIND_MSG: &str = "Tablespace için varsayılan yetki tanımlanamaz.";
 const COMPOSED_BROKEN: &str = "İfade güvenli biçimde oluşturulamadı.";
-
-/// Varsayılan yetkiler yalnız tablo/sequence/fonksiyon/tip/şema bölümlerini bilir; tablespace (ve diğer sunucu kapsamlı
-/// türler) için istek alan hatasıdır (Plan 34 Karar 11): PG `ALTER DEFAULT PRIVILEGES`'ta tablespace yoktur.
-pub fn check_kind(kind: ObjectKind) -> Result<(), Vec<FieldError>> {
-    if matches!(kind, ObjectKind::Tablespace) { Err(vec![err("kind", KIND_MSG)]) } else { Ok(()) }
-}
 
 /// `ON <TÜR>` parçası.
 fn on_clause(t: DefaultAclObjectType) -> &'static str {
@@ -299,13 +292,6 @@ mod tests {
             }
         }
         assert!(ok(&old, &new).statements.is_empty());
-    }
-
-    #[test]
-    fn tablespace_kind_is_rejected() {
-        let e = check_kind(ObjectKind::Tablespace).unwrap_err();
-        assert_eq!(e.iter().map(|x| x.path.as_str()).collect::<Vec<_>>(), ["kind"]);
-        assert!(check_kind(ObjectKind::Schema).is_ok());
     }
 
     #[test]

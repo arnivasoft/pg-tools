@@ -10,8 +10,6 @@ expression: out
 
 [Safe non-tx] CREATE TABLESPACE ts LOCATION 'd:/pgdata/ts'
 
-[Safe non-tx] CREATE TABLESPACE ts LOCATION '/data/o''brien'
-
 [Safe non-tx] CREATE TABLESPACE ts LOCATION E'/data/a\\b'
 
 [Safe non-tx] CREATE TABLESPACE ts OWNER o LOCATION '/data/ts1' WITH (effective_io_concurrency = '200', maintenance_io_concurrency = '10', random_page_cost = '1.1', seq_page_cost = '1.5')

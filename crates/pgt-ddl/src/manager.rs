@@ -365,10 +365,13 @@ pub const MAINTENANCE_UNSUPPORTED_HINT: &str = "Bu nesnede bu seçenek desteklen
 /// Plan 34: `DROP TABLESPACE` boş olmayan tablespace'te (55000).
 pub const TABLESPACE_NOT_EMPTY_HINT: &str =
     "Tablespace boş değil; önce içindeki nesneleri başka tablespace'e taşıyın (başka veritabanlarındaki nesneler de sayılır).";
-/// `CREATE TABLESPACE` süper kullanıcı ister (42501; genel yetki ipucunun yerine).
-pub const TABLESPACE_SUPERUSER_HINT: &str = "Tablespace oluşturmak süper kullanıcı yetkisi ister.";
-/// `CREATE TABLESPACE` konum hatası (58P01 dizin yok, 42P17 göreli yol, 22023 dizin boş değil).
+/// `CREATE TABLESPACE` süper kullanıcı ister (42501; genel yetki ipucunun yerine). 42501 dizin sahipliğinden de gelebilir.
+pub const TABLESPACE_SUPERUSER_HINT: &str =
+    "Tablespace oluşturmak süper kullanıcı yetkisi ister; konum dizini de PostgreSQL hizmet kullanıcısına ait olmalı.";
+/// `CREATE TABLESPACE` konum hatası (58P01 dizin yok, 42P17 göreli yol). 22023 çoğunlukla WITH sınırlarından gelir: ipucu yok.
 pub const TABLESPACE_LOCATION_HINT: &str = "Konum sunucuda var olan, PostgreSQL hizmet kullanıcısına ait boş bir dizin olmalı.";
+/// `CREATE TABLESPACE` konum başka bir tablespace tarafından kullanılıyor (55006).
+pub const TABLESPACE_IN_USE_HINT: &str = "Bu konum zaten bir tablespace tarafından kullanılıyor; boş ve kullanılmayan bir dizin seçin.";
 /// Plan 24: transaction bloğu içinde çalıştırılamaz (25001). Bakım ifadeleri transaction dışıdır; beklenmez, savunma.
 pub const MAINTENANCE_TX_HINT: &str = "Bu bakım işlemi transaction bloğu içinde çalıştırılamaz; yeniden deneyin.";
 
@@ -710,7 +713,8 @@ fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> 
         // Plan 34: Tablespace ipuçları (genel 42501 kolundan önce). 42710 + CREATE POLICY özel ipucu almaz (PG iletisi).
         ("55000", ObjectKind::Tablespace) if sql.starts_with("DROP TABLESPACE ") => TABLESPACE_NOT_EMPTY_HINT,
         ("42501", ObjectKind::Tablespace) if sql.starts_with("CREATE TABLESPACE ") => TABLESPACE_SUPERUSER_HINT,
-        ("58P01" | "42P17" | "22023", ObjectKind::Tablespace) if sql.starts_with("CREATE TABLESPACE ") => TABLESPACE_LOCATION_HINT,
+        ("58P01" | "42P17", ObjectKind::Tablespace) if sql.starts_with("CREATE TABLESPACE ") => TABLESPACE_LOCATION_HINT,
+        ("55006", ObjectKind::Tablespace) if sql.starts_with("CREATE TABLESPACE ") => TABLESPACE_IN_USE_HINT,
         // Plan 20 Karar 15: yetki istekleri işleme (`op`) göre; genel 42501 kolundan önce.
         ("42501", _) if op == "privileges" => ACL_PRIVILEGE_HINT,
         ("42501", _) if op == "default_privileges" => DEFAULT_ACL_PRIVILEGE_HINT,
@@ -2740,16 +2744,20 @@ mod tests {
         assert_eq!(h(ts, "drop", "DROP TABLESPACE t", "55000"), Some(TABLESPACE_NOT_EMPTY_HINT));
         assert_eq!(h(ts, "drop", "ALTER TABLESPACE t RENAME TO u", "55000"), None);
         assert_eq!(h(ts, "create", "CREATE TABLESPACE t LOCATION 'x'", "42501"), Some(TABLESPACE_SUPERUSER_HINT));
-        for code in ["58P01", "42P17", "22023"] {
+        for code in ["58P01", "42P17"] {
             assert_eq!(h(ts, "create", "CREATE TABLESPACE t LOCATION 'x'", code), Some(TABLESPACE_LOCATION_HINT), "{code}");
             assert_eq!(h(ts, "alter", "ALTER TABLESPACE t SET (seq_page_cost = '1')", code), None, "{code}");
         }
+        assert_eq!(h(ts, "create", "CREATE TABLESPACE t LOCATION 'x'", "55006"), Some(TABLESPACE_IN_USE_HINT));
+        assert_eq!(h(ts, "alter", "ALTER TABLESPACE t RENAME TO u", "55006"), None);
+        // 22023 (WITH seçenek sınırları) kural ipucu almaz.
+        assert_eq!(h(ts, "create", "CREATE TABLESPACE t LOCATION 'x' WITH (effective_io_concurrency = '4')", "22023"), None);
         // Diğer tablespace ifadelerinde 42501 genel yetki ipucunu alır.
         assert_eq!(h(ts, "alter", "ALTER TABLESPACE t OWNER TO r", "42501"), Some(PRIVILEGE_HINT));
         // Politika yinelenen ad (42710): özel ipucu yok (PG iletisi yeter).
         assert_eq!(h(ObjectKind::Policy, "create", "CREATE POLICY p ON public.t", "42710"), None);
         // Metinler ad/konum taşımaz.
-        for t in [TABLESPACE_NOT_EMPTY_HINT, TABLESPACE_SUPERUSER_HINT, TABLESPACE_LOCATION_HINT] {
+        for t in [TABLESPACE_NOT_EMPTY_HINT, TABLESPACE_SUPERUSER_HINT, TABLESPACE_LOCATION_HINT, TABLESPACE_IN_USE_HINT] {
             assert!(!t.contains('/'));
         }
     }

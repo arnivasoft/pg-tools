@@ -1121,6 +1121,40 @@ mod tests {
         assert!(generate(&p, &ctx(160000), "app").is_ok());
     }
 
+    /// Plan 34: satır güvenliği bayrakları farkı diff'e girer (bilinçli); aynı bayraklar fark üretmez.
+    #[test]
+    fn rls_bayrak_farki_enable_force_uretir() {
+        let rls = |enabled, forced| {
+            ObjectDef::Table(TableDef {
+                row_security: pgt_ddl::RowSecurity { enabled, forced },
+                ..table("a", id_cols(), vec![])
+            })
+        };
+        let all = |g: &Generated| -> Vec<String> {
+            g.parts.iter().flat_map(|(_, sts)| sts.iter().map(|s| s.sql.clone())).collect()
+        };
+        let g = gen_ok(
+            &prep(ItemStatus::Different, Some(rls(true, true)), Some(rls(false, false))),
+            160000,
+        );
+        let sqls = all(&g);
+        assert_eq!(sqls.len(), 2, "{sqls:?}");
+        assert!(sqls[0].ends_with("ENABLE ROW LEVEL SECURITY"), "{sqls:?}");
+        assert!(sqls[1].ends_with("FORCE ROW LEVEL SECURITY"), "{sqls:?}");
+        // Tersi: kapatma.
+        let g = gen_ok(
+            &prep(ItemStatus::Different, Some(rls(false, false)), Some(rls(true, true))),
+            160000,
+        );
+        let sqls = all(&g);
+        assert_eq!(sqls.len(), 2, "{sqls:?}");
+        assert!(sqls.iter().any(|s| s.ends_with("DISABLE ROW LEVEL SECURITY")));
+        assert!(sqls.iter().any(|s| s.ends_with("NO FORCE ROW LEVEL SECURITY")));
+        // Aynı bayraklar: ifade yok (boş birleşik plan → Manual).
+        let p = prep(ItemStatus::Different, Some(rls(true, false)), Some(rls(true, false)));
+        assert_eq!(generate(&p, &ctx(160000), "app").unwrap_err().problem, ItemProblem::Manual);
+    }
+
     #[test]
     fn yalniz_hedefte_tablo_drop() {
         let g = gen_ok(

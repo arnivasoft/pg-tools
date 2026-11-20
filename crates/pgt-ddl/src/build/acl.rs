@@ -612,6 +612,7 @@ mod tests {
             ObjectKind::Procedure,
             ObjectKind::Schema,
             ObjectKind::Database,
+            ObjectKind::Tablespace,
             ObjectKind::Type,
             ObjectKind::Domain,
         ] {
@@ -630,6 +631,20 @@ mod tests {
         // Salt okunur tanım: değişiklik yoksa boş plan.
         let ro = AclDef { editable: false, unsupported: vec!["yetki SET".into()], ..old.clone() };
         assert!(ok(&ro, &ro, false).statements.is_empty());
+    }
+
+    #[test]
+    fn tablespace_acl_errors() {
+        // Tablespace yalnız CREATE kabul eder; USAGE alan hatasıdır.
+        let base = def(ObjectKind::Tablespace);
+        let good = with(&base, vec![row(Some("r"), &plain(&[Create]))]);
+        assert!(privileges(&ctx(), &base, &good, false).is_ok());
+        let bad = with(&base, vec![row(Some("r"), &plain(&[Usage]))]);
+        let e = privileges(&ctx(), &base, &bad, false).unwrap_err();
+        assert_eq!(paths(e), ["grants[1].privileges[0].privilege"]);
+        // Tablespace şema taşımaz.
+        let with_schema = AclDef { schema: Some("s".into()), ..base.clone() };
+        assert_eq!(paths(object_target(&with_schema).unwrap_err()), ["schema"]);
     }
 
     #[test]

@@ -11,8 +11,8 @@
 //!   `partition_text` ile salt okunur gösterilir; modellenmeyen kısıt/özellikler `unsupported` listesindedir).
 //! - View/MatView: bkz. `load_view`/`load_matview` (`query` = `pg_get_viewdef` sondaki `;` soyulmuş; MV `refresh`
 //!   her zaman `None`; yeniden kurmada kaybolacak ekler `unsupported` listesinde).
-//! - Database/Role (sunucu kapsamlı): bakım bağlantısında okunur (`Target::Maintenance`, `database_oid` yok sayılır);
-//!   bkz. `load_database`/`load_role` (ayar adları küçük harf, ada göre sıralı; rol parolası hiç okunmaz).
+//! - Database/Role/Tablespace (sunucu kapsamlı): bakım bağlantısında okunur (`Target::Maintenance`, `database_oid` yok sayılır);
+//!   bkz. `load_database`/`load_role`/`load_tablespace` (ayar adları küçük harf, ada göre sıralı; rol parolası hiç okunmaz).
 //! - Function/Procedure: bkz. `load_function` (tipler `format_type`, varsayılanlar `pg_get_function_arg_default`, gövde
 //!   `prosrc` baytı baytına, COST/ROWS üstelsiz ondalık metin; salt okunurluk `unsupported` doluysa `editable = false`).
 //!
@@ -122,10 +122,10 @@ pub async fn server_version(mgr: &ConnectionManager, server: Uuid) -> Result<u32
     mgr.info(server).map(|i| i.version_num).ok_or(Error::NotConnected)
 }
 
-/// Sunucu kapsamlı türlerin (Database/Role) istemci alan yoldan yüklenmesinde döndürülen ileti.
+/// Sunucu kapsamlı türlerin (Database/Role/Tablespace) istemci alan yoldan yüklenmesinde döndürülen ileti.
 pub const SERVER_SCOPED_MSG: &str = "Veritabanı, rol ve tablespace bu yolla yüklenmez (bakım bağlantısı gerekir).";
 
-/// İstemci alan yolun kapsam denetimi: sunucu kapsamlı türler (Database/Role) bakım bağlantısı ister → `Invalid`.
+/// İstemci alan yolun kapsam denetimi: sunucu kapsamlı türler (Database/Role/Tablespace) bakım bağlantısı ister → `Invalid`.
 pub(crate) fn in_scope(kind: ObjectKind) -> Result<()> {
     if kind.server_scoped() { Err(Error::Invalid(SERVER_SCOPED_MSG.to_string())) } else { Ok(()) }
 }
@@ -161,7 +161,7 @@ fn not_found(what: &str) -> Error {
 }
 
 /// Yükleme/uygulama hedefi (tek kural; `DdlManager::apply` de bunu kullanır, inceleme G-13): sunucu kapsamlı türler
-/// (Database/Role) bakım veritabanında (`database_oid` yok sayılır); diğerleri verilen veritabanında, yoksa
+/// (Database/Role/Tablespace) bakım veritabanında (`database_oid` yok sayılır); diğerleri verilen veritabanında, yoksa
 /// `Invalid(NEEDS_DATABASE)`.
 pub(crate) fn target_for(kind: ObjectKind, database_oid: Option<u32>) -> Result<Target> {
     match (kind.server_scoped(), database_oid) {
@@ -202,8 +202,8 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into
 }
 
 /// Şema kapsamlı türleri (Schema, Sequence, Extension, Index, Table, View, MaterializedView, Function, Procedure,
-/// Trigger, Type, Domain) verilen istemcide yükler. Sorgular, sıra ve normalleştirme `load` ile aynıdır.
-/// Database/Role → `Error::Invalid(SERVER_SCOPED_MSG)`. Sorgu hatası `Error::from_query` ile eşlenir.
+/// Trigger, Type, Domain, Policy) verilen istemcide yükler. Sorgular, sıra ve normalleştirme `load` ile aynıdır.
+/// Database/Role/Tablespace → `Error::Invalid(SERVER_SCOPED_MSG)`. Sorgu hatası `Error::from_query` ile eşlenir.
 pub async fn load_in(client: &Client, version_num: u32, obj: ObjectRef) -> Result<ObjectDef> {
     in_scope(obj.kind)?;
     let (v, oid) = (PgVersion(version_num), obj.oid);
@@ -1733,8 +1733,8 @@ fn parse_policy(rows: Vec<Row>) -> Result<ObjectDef> {
     }))
 }
 
-/// `spcoptions` öğeleri (`ad=değer`) → seçenekler (değer sunucunun sakladığı metin, olduğu gibi). Bilinmeyen anahtar ya da
-/// `=`'siz öğe `unsupported`'a (yalnızca anahtar adı).
+/// `spcoptions` öğeleri (`ad=değer`) → seçenekler (değer sunucunun sakladığı metin, olduğu gibi). Yalnızca bilinmeyen anahtar
+/// `unsupported`'a gider (yalnızca anahtar adı); bilinen anahtar `=`'siz gelirse değer boş dizge olur (PG böyle öğe saklamaz).
 fn tablespace_options(items: &[String], unsupported: &mut Vec<String>) -> TablespaceOptions {
     let mut o = TablespaceOptions::default();
     for i in items {

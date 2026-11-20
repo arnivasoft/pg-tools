@@ -177,13 +177,9 @@ async fn create_body(ts: TestServer) {
     pcreate_and_check(&env, &d).await;
     pcreate_and_check(&env, &pol("t", "bare")).await;
 
-    // Bölümlenmiş üst tablo ve bölümünde politika (PG 10'da bölümlenmiş tablo politikası denenmez).
+    // Bölümlenmiş üst tablo ve bölümünde politika (PG 10–18).
     env.sql("CREATE TABLE pp (id int, n int) PARTITION BY RANGE (id); CREATE TABLE pp1 PARTITION OF pp FOR VALUES FROM (0) TO (10)").await;
     for tbl in ["pp", "pp1"] {
-        if env.version < 110000 && tbl == "pp" {
-            eprintln!("PG {}: bölümlenmiş tabloda politika denenmiyor", env.version / 10_000);
-            continue;
-        }
         let mut x = pol(tbl, "px");
         x.using = Some("n >= 0".into());
         pcreate_and_check(&env, &x).await;

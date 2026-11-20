@@ -959,5 +959,4 @@ Bilinen sınırlar:
 - Tablespace `location` create-only; değiştirmek alan hatasıdır. `pg_default`/`pg_global` DDL için salt okunurdur (ACL'de yalnız `pg_global`).
 - Şema karşılaştırması tablo RLS bayraklarını karşılaştırır ama **politikaları karşılaştırmaz** (backlog).
 - Varsayılan yetkiler (`ALTER DEFAULT PRIVILEGES`) tablespace'i hedefleyemez (PG desteklemez).
-- PG 10'da bölümlenmiş üst tabloda politika testi yoktur (belirsiz destek); bölümün kendisinde denenir.
 - Politika yüklenen ifadesi düz `\` içeriyorsa yalnız o ifadenin düzenlenmesi reddedilir (kaçış için `E'…'`).

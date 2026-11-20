@@ -199,14 +199,15 @@ Aşağıdaki maddeler **gönderilen** davranışı anlatır (kod ve Docker PG 10
 
 ### 9.2 Alan yolları (`FieldError.path`)
 
-- **Policy:** `name`, `schema`, `table` (alter'da tablo değişimi), `command`, `roles`, `roles[i]`, `using`, `withCheck`, `comment`, `object` (salt okunur), `old.*` (bayat/geçersiz yüklü tanım). Kurallar: `insert` → `using` yasak; `select`/`delete` → `withCheck` yasak; rol öğeleri geçerli ad, yinelenen yok, `public` öğe olarak reddedilir ("PUBLIC için listeyi boş bırakın"); `cascade` yok sayılır (drop modeli `cascade: false`, Plan 35 kutuyu göstermez).
-- **Tablespace:** `name` (`pg_` öneki dahil), `location` (boş değil, NUL yok, mutlak yol, ≤ 1024 bayt; alter'da değişim), `options.seqPageCost`, `options.randomPageCost` (sonlu ondalık ≥ 0), `options.effectiveIoConcurrency`, `options.maintenanceIoConcurrency` (0–1000 tamsayı; maintenance PG < 13'te sürüm kapısı alan hatası), `owner`, `comment`, `object`, `old.*`.
-- **Tablo RLS:** `rowSecurity.enabled`, `rowSecurity.forced` yalnız tablo diyaloğunda; Plan 35 tablo formu yollarına eklemelidir.
+- **Policy:** `name`, `schema`, `table` (alter'da tablo değişimi), `roles[i]` (çıplak `roles` ve `command` yolu üretilmez; kural ihlalleri `using`/`withCheck` yoluna düşer), `using`, `withCheck`, `comment`, `object` (salt okunur), `old.*` (bayat/geçersiz yüklü tanım). Kurallar: `insert` → `using` yasak; `select`/`delete` → `withCheck` yasak; rol öğeleri geçerli ad, yinelenen yok, `public` öğe olarak reddedilir ("PUBLIC için listeyi boş bırakın"); `cascade` yok sayılır (drop modeli `cascade: false`, Plan 35 kutuyu göstermez).
+- **Tablespace:** `name` (`pg_` öneki dahil), `location` (boş değil, NUL ve tek tırnak (`'`) yok, mutlak yol, ≤ 1024 bayt; alter'da değişim; PG tek tırnağı her zaman reddeder), `options.seqPageCost`, `options.randomPageCost` (sonlu ondalık ≥ 0), `options.effectiveIoConcurrency`, `options.maintenanceIoConcurrency` (0–1000 tamsayı; maintenance PG < 13'te sürüm kapısı alan hatası), `owner`, `comment`, `object`, `old.*`.
+- **Tablo RLS:** `rowSecurity.enabled`/`rowSecurity.forced` iki boolean'dır ve doğrulanmaz; bu yollarda alan hatası **üretilmez** (Plan 35 tablo formu yollarına eklemesi gerekmez).
 - **ACL (Tablespace):** ayrıcalık kümesi yalnız `{Create}`, nesne ifadesi `GRANT … ON TABLESPACE <ad>`; şema alanı yok. **Varsayılan yetkiler yapısal olarak tablespace'i hedefleyemez** (istek biçimi tür taşımaz; Plan 35 menüde göstermemeli).
 
 ### 9.3 Kurallar: yeniden kurma, risk, kapılar
 
-- **Politika alter:** (1) ad değiştiyse `ALTER POLICY … RENAME TO`; (2) `command`/`permissive` değişti **ya da** `using`/`withCheck` `Some → None` oldu → aynı transaction'da `DROP POLICY` + `CREATE POLICY` (**Destructive**, not "Politika aynı transaction içinde yeniden kurulur.", yorum yeniden yazılır), aksi hâlde tek `ALTER POLICY … [TO] [USING] [WITH CHECK]` (Safe); (3) `COMMENT ON POLICY`. Yalnız ad değişimi tek `RENAME`; rol sırası farkı boş plan.
+- **Politika alter:** (1) ad değiştiyse `ALTER POLICY … RENAME TO`; (2) `command`/`permissive` değişti **ya da** `using`/`withCheck` `Some → None` oldu → aynı transaction'da `DROP POLICY` + `CREATE POLICY` (**Destructive**, not "Politika aynı transaction içinde yeniden kurulur.", yorum yeniden yazılır), aksi hâlde tek `ALTER POLICY … [TO] [USING] [WITH CHECK]` (Safe); (3) `COMMENT ON POLICY`. Yalnız ad değişimi tek `RENAME`; rol sırası farkı boş plan. `comment: Some("")` yorumsuz sayılır (`None` ile eşdeğer; Tablespace/Table ile tutarlı).
+- **Bayat denetimi (policy):** nesne denetimi (`plan_changed`) yüklü tanımın **tamamını** karşılaştırır; salt okunur `tableRls` dahildir. Tablonun RLS bayrakları değişirse (ör. tablo sekmesinden `ENABLE`/`DISABLE`/`FORCE`) o tablonun açık policy sekmelerinin sonraki alter/drop'u `plan_changed` döner; **Plan 35 tablo RLS değişiminden sonra policy sekmesini yeniden yüklemelidir.**
 - **Oid:** yeniden kurma yeni oid üretir; `created` yeni `pg_policy` oid'iyle döner (sekme `object`'i güncellenmeli). **Yeniden adlandırma da `created` döndürür.** Yalnız yorum/ifade değişimi `created` döndürmez.
 - **Risk:** Safe: create, `ALTER POLICY`, rename, comment, tablespace create/rename/owner/SET/RESET/comment, tablo `DISABLE`/`NO FORCE ROW LEVEL SECURITY`. **Destructive:** policy drop ve yeniden kurma, tablo `ENABLE`/`FORCE ROW LEVEL SECURITY` (+ not "Politikası olmayan tabloda sahibi dışındakiler hiçbir satır görmez."), `DROP TABLESPACE`. DataLoss yok.
 - **Onay kapısı (ledger kararı):** Destructive planlar yalnız `confirmation_required` ister. **Üretimde ek ad onayı yoktur**; `production_confirmation_required` mevcut kapıda yalnız DataLoss içindir (Policy/RLS/Tablespace hiçbiri DataLoss değil). Arayüz Destructive için yalnız onay kutusunu göstermelidir.
@@ -222,8 +223,10 @@ Aşağıdaki maddeler **gönderilen** davranışı anlatır (kod ve Docker PG 10
 ### 9.5 İpuçları (SQLSTATE → ipucu)
 
 - `55000` + `DROP TABLESPACE`: "Tablespace boş değil; önce içindeki nesneleri başka tablespace'e taşıyın (başka veritabanlarındaki nesneler de sayılır)." Hiçbir şey değişmez.
-- `42501` + `CREATE TABLESPACE`: "Tablespace oluşturmak süper kullanıcı yetkisi ister." (genel yetki ipucunun yerine).
-- `58P01`, `42P17`, `22023` + `CREATE TABLESPACE`: "Konum sunucuda var olan, PostgreSQL hizmet kullanıcısına ait boş bir dizin olmalı."
+- `42501` + `CREATE TABLESPACE`: "Tablespace oluşturmak süper kullanıcı yetkisi ister; konum dizini de PostgreSQL hizmet kullanıcısına ait olmalı." (genel yetki ipucunun yerine; 42501 dizin sahipliğinden de gelebilir).
+- `58P01`, `42P17` + `CREATE TABLESPACE`: "Konum sunucuda var olan, PostgreSQL hizmet kullanıcısına ait boş bir dizin olmalı."
+- `55006` + `CREATE TABLESPACE`: "Bu konum zaten bir tablespace tarafından kullanılıyor; boş ve kullanılmayan bir dizin seçin."
+- `22023` + `CREATE TABLESPACE` (çoğunlukla `WITH` seçenek sınırları): kural ipucu **yoktur**, PG iletisi olduğu gibi kalır.
 - `42710` + `CREATE POLICY` (aynı ad): özel ipucu yoktur, PG iletisi geçerlidir.
 - **Kural ipuçları yalnız PG kendi ipucunu vermediyse uygulanır**; PG ipucu varsa olduğu gibi kalır. Transaction dışı ifadelerden sonra hata → kısmi uygulama ipucu (yalnız başka ipucu yoksa).
 
@@ -237,4 +240,4 @@ Aşağıdaki maddeler **gönderilen** davranışı anlatır (kod ve Docker PG 10
 ### 9.7 Ön yüz bütçe notu
 
 - Plan 34 sonunda ana paket **126,582 B**, başlangıç **154,255 B** (tavanlarla birebir, değişmedi). Plan 35'in `ddl-kinds.ts` ve Explorer menü/ikon kancası ek bayt getirir; **adı konmuş bir telafi gerekir** (yalnız tembel kullanılan komutları `src/ipc/commands.ts`'ten tembel modüle taşımak). Tavanlar yükseltilmez.
-- Plan 34'te `src/features/designer` ve `schema-diff` altında yalnızca tembel dosyalar uyum için değişti: geçici `formMissing` bileşeni (`DesignerView.tsx`; Plan 35 gerçek formlarla değiştirir), boş `POLICY_PATHS`/`TABLESPACE_PATHS` (`forms-model.ts`; FORM_PATHS bütünlük denetimi Plan 35'te yeni yollarla tamamlanmalı), `drop-model.ts` (`cascade=false`, `force=false`).
+- Plan 34'te yalnızca tembel dosyalar uyum için değişti (`src/features/schema-diff` **değişmedi**): geçici `formMissing` bileşeni (`DesignerView.tsx`) ve metni (`src/app/strings-designer.ts`; Plan 35 gerçek formlarla değiştirir), boş `POLICY_PATHS`/`TABLESPACE_PATHS` (`forms-model.ts`; FORM_PATHS bütünlük denetimi Plan 35'te yeni yollarla tamamlanmalı), `drop-model.ts` (`cascade=false`, `force=false`), `designer-model.ts` (`KIND_LABELS`, `isServerScoped` Tablespace'i de kapsar, `defName`).

@@ -56,6 +56,9 @@ fn check_location(value: &str, e: &mut Vec<FieldError>) {
         e.push(err("location", "Konum boş olamaz."));
     } else if value.contains('\0') {
         e.push(err("location", "Konum NUL karakteri içeremez."));
+    } else if value.contains('\'') {
+        // PG CreateTableSpace tek tırnağı her zaman reddeder (42602).
+        e.push(err("location", "Konum tek tırnak içeremez."));
     } else if value.len() > MAX_LOCATION_BYTES {
         e.push(err("location", format!("Konum en çok {MAX_LOCATION_BYTES} bayt olabilir.")));
     } else if !(b[0] == b'/' || (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))) {
@@ -296,7 +299,6 @@ mod tests {
             TablespaceDef { owner: s("Bob Sahip"), ..t() },
             TablespaceDef { location: "C:\\pgdata\\ts".into(), ..t() },
             TablespaceDef { location: "d:/pgdata/ts".into(), ..t() },
-            TablespaceDef { location: "/data/o'brien".into(), ..t() },
             TablespaceDef { location: "/data/a\\b".into(), ..t() },
             TablespaceDef {
                 owner: s("o"),
@@ -328,7 +330,7 @@ mod tests {
         assert!(create_err(&TablespaceDef { name: "PG_x".into(), ..t() }, 160000).is_empty());
         assert_eq!(create_err(&TablespaceDef { owner: s("a\nb"), ..t() }, 160000), ["owner"]);
         let long = format!("/{}", "a".repeat(1024));
-        for loc in ["", "rel/path", "./x", "C:", "C:x", "1:\\x", "/a\0b", long.as_str()] {
+        for loc in ["", "rel/path", "./x", "C:", "C:x", "1:\\x", "/a\0b", "/data/o'brien", long.as_str()] {
             assert_eq!(create_err(&TablespaceDef { location: loc.into(), ..t() }, 160000), ["location"], "{loc:?}");
         }
         assert!(create_err(&TablespaceDef { location: format!("/{}", "a".repeat(1023)), ..t() }, 160000).is_empty());

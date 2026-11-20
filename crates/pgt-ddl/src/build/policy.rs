@@ -76,8 +76,13 @@ fn create_sql(d: &PolicyDef) -> String {
     s
 }
 
+/// Yorum normalleştirme: `Some("")` yorumsuz sayılır (Tablespace/Table ile tutarlı; yükleyici boş yorumu `None` döndürür).
+fn norm_comment(c: &Option<String>) -> Option<&str> {
+    c.as_deref().filter(|s| !s.is_empty())
+}
+
 fn comment_sql(d: &PolicyDef) -> String {
-    let value = d.comment.as_deref().map(quote_literal).unwrap_or_else(|| "NULL".into());
+    let value = norm_comment(&d.comment).map(quote_literal).unwrap_or_else(|| "NULL".into());
     format!("COMMENT ON POLICY {} ON {} IS {value}", quote_ident(&d.name), table_sql(d))
 }
 
@@ -159,7 +164,7 @@ pub fn create(ctx: &BuildCtx, d: &PolicyDef) -> Result<Plan, Vec<FieldError>> {
         return Err(errs);
     }
     let mut statements = vec![stmt(create_sql(d), Risk::Safe, None)];
-    if d.comment.is_some() {
+    if norm_comment(&d.comment).is_some() {
         statements.push(stmt(comment_sql(d), Risk::Safe, None));
     }
     Ok(Plan { statements, warnings: warnings(d) })
@@ -197,12 +202,12 @@ pub fn alter(_ctx: &BuildCtx, old: &PolicyDef, new: &PolicyDef) -> Result<Plan, 
     let roles_changed = !same_roles(&old.roles, &new.roles);
     let using_changed = old.using != new.using;
     let check_changed = old.with_check != new.with_check;
-    let comment_changed = old.comment != new.comment;
+    let comment_changed = norm_comment(&old.comment) != norm_comment(&new.comment);
     if !old.editable && (rebuild || name_changed || roles_changed || using_changed || check_changed || comment_changed) {
         return Err(vec![err("object", READ_ONLY_MSG)]);
     }
     // DROP + CREATE yorumu zaten siler: yeniden kurmada yalnız (varsa) yeni yorum yazılır.
-    let write_comment = if rebuild { new.comment.is_some() } else { comment_changed };
+    let write_comment = if rebuild { norm_comment(&new.comment).is_some() } else { comment_changed };
 
     // Ad aynıysa yüklü ad `old.name` olarak zaten (gevşek) denetlendi.
     if name_changed {
@@ -531,6 +536,20 @@ mod tests {
         // Yüklü ifade düz `\` içeriyorsa yalnız o ifadeyi yazan düzenleme reddedilir.
         assert_eq!(alter_err(&loaded, &PolicyDef { using: s("a = 'z\\y'"), ..loaded.clone() }), ["using"]);
         assert!(!alter_ok(&loaded, &PolicyDef { comment: s("d"), ..loaded.clone() }).statements.is_empty());
+    }
+
+    #[test]
+    fn empty_comment_is_no_comment() {
+        // None → Some("") boş plan (yükleyici boş yorumu None döndürür: sabit nokta).
+        let none = PolicyDef { comment: None, ..p() };
+        assert!(alter_ok(&none, &PolicyDef { comment: s(""), ..none.clone() }).statements.is_empty());
+        // Create'te boş yorum COMMENT ifadesi üretmez.
+        assert_eq!(create_ok(&PolicyDef { comment: s(""), ..p() }).statements.len(), 1);
+        // Some("x") → Some("") yorumu siler (IS NULL).
+        let had = PolicyDef { comment: s("x"), ..p() };
+        let p2 = alter_ok(&had, &PolicyDef { comment: s(""), ..had.clone() });
+        assert_eq!(p2.statements.len(), 1);
+        assert!(p2.statements[0].sql.ends_with("IS NULL"));
     }
 
     #[test]
