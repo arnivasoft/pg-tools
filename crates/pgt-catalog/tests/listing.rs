@@ -118,7 +118,7 @@ async fn schema_collections_depend_on_version() {
     for fx in fixtures().await {
         let schema = fx.schema("app").await;
         let kids = fx.catalog.list_children(&schema).await.unwrap();
-        let mut expected = vec!["Tables", "Views", "Materialized Views", "Functions"];
+        let mut expected = vec!["Tables", "Views", "Materialized Views", "Foreign Tables", "Functions"];
         if fx.major().await >= 11 {
             expected.push("Procedures");
         }
@@ -170,7 +170,7 @@ async fn roles_and_tablespaces_hide_system_by_default() {
 async fn database_children_and_extensions() {
     for fx in fixtures().await {
         let kids = fx.catalog.list_children(&fx.db()).await.unwrap();
-        assert_eq!(labels(&kids), ["Schemas", "Extensions"]);
+        assert_eq!(labels(&kids), ["Schemas", "Extensions", "Foreign Data Wrappers", "Publications", "Subscriptions"]);
         let ext = fx.labels_of(&fx.db(), Coll::Extensions).await;
         assert_eq!(ext, ["pg_trgm", "plpgsql"]);
         let nodes = fx.nodes_of(&fx.db(), Coll::Extensions).await;

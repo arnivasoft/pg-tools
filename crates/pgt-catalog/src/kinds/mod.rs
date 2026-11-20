@@ -62,6 +62,9 @@ pub(crate) async fn list_children(cat: &Catalog, id: &NodeId) -> Result<Vec<Tree
         Some(Seg::Db(_)) => Ok(vec![
             collection(id, Coll::Schemas, NodeKind::SchemaCollection, "Schemas"),
             engine::collection_node(id, &registry::EXTENSIONS),
+            engine::collection_node(id, &registry::FDWS),
+            engine::collection_node(id, &registry::PUBLICATIONS),
+            engine::collection_node(id, &registry::SUBSCRIPTIONS),
         ]),
         Some(Seg::Schema(_)) => {
             let mut out = vec![collection(id, Coll::Tables, NodeKind::TableCollection, "Tables")];
@@ -77,12 +80,15 @@ pub(crate) async fn list_children(cat: &Catalog, id: &NodeId) -> Result<Vec<Tree
             out.extend(defs.into_iter().map(|d| engine::collection_node(id, d)));
             Ok(out)
         }
-        Some(Seg::View(_)) => Ok(vec![collection(id, Coll::Columns, NodeKind::ColumnCollection, "Columns")]),
+        Some(Seg::ForeignDataWrapper(_)) => Ok(vec![engine::collection_node(id, &registry::FOREIGN_SERVERS)]),
+        Some(Seg::ForeignServer(_)) => Ok(vec![engine::collection_node(id, &registry::USER_MAPPINGS)]),
+        Some(Seg::View(_) | Seg::ForeignTable(_)) => Ok(vec![collection(id, Coll::Columns, NodeKind::ColumnCollection, "Columns")]),
         Some(Seg::MatView(_)) => Ok(vec![
             collection(id, Coll::Columns, NodeKind::ColumnCollection, "Columns"),
             engine::collection_node(id, &registry::INDEXES),
         ]),
-        // Yapraklar: kolon, constraint, index, trigger, policy, sequence, fonksiyonlar, tip, domain, extension, rol, tablespace
+        // Yapraklar: kolon, constraint, index, trigger, policy, sequence, fonksiyonlar, tip, domain, extension, rol, tablespace,
+        // user mapping, publication, subscription
         Some(_) => Ok(Vec::new()),
     }
 }
@@ -104,6 +110,21 @@ async fn list_collection(
         (None, Coll::Tablespaces) => engine::list(cat, server, None, &registry::TABLESPACES, &parent, None).await,
         (Some(Seg::Db(_)), Coll::Schemas) => schema::list(cat, server, db_req(db)?).await,
         (Some(Seg::Db(_)), Coll::Extensions) => engine::list(cat, server, db, &registry::EXTENSIONS, &parent, None).await,
+        (Some(Seg::Db(_)), Coll::ForeignDataWrappers) => engine::list(cat, server, db, &registry::FDWS, &parent, None).await,
+        (Some(Seg::Db(_)), Coll::Publications) => engine::list(cat, server, db, &registry::PUBLICATIONS, &parent, None).await,
+        // pg_subscription okunamazsa (42501) liste boş döner; hata göstermek yerine düğüm boş kalır.
+        (Some(Seg::Db(_)), Coll::Subscriptions) => {
+            match engine::list(cat, server, db, &registry::SUBSCRIPTIONS, &parent, None).await {
+                Err(Error::Query { sqlstate: Some(code), .. }) if code == "42501" => Ok(Vec::new()),
+                other => other,
+            }
+        }
+        (Some(Seg::ForeignDataWrapper(fdw)), Coll::ForeignServers) => {
+            engine::list(cat, server, db, &registry::FOREIGN_SERVERS, &parent, Some(fdw)).await
+        }
+        (Some(Seg::ForeignServer(srv)), Coll::UserMappings) => {
+            engine::list(cat, server, db, &registry::USER_MAPPINGS, &parent, Some(srv)).await
+        }
         (Some(Seg::Schema(schema)), Coll::Tables) => table::list(cat, server, db_req(db)?, schema).await,
         (Some(Seg::Schema(schema)), c) => match registry::coll_def(c) {
             Some(def) if registry::schema_collections(version).iter().any(|d| d.coll == c) => {
@@ -111,7 +132,7 @@ async fn list_collection(
             }
             _ => Err(invalid(id)),
         },
-        (Some(Seg::Table(rel) | Seg::View(rel) | Seg::MatView(rel)), Coll::Columns) => {
+        (Some(Seg::Table(rel) | Seg::View(rel) | Seg::MatView(rel) | Seg::ForeignTable(rel)), Coll::Columns) => {
             column::list(cat, server, db_req(db)?, &parent, rel).await
         }
         (Some(Seg::Table(rel)), c @ (Coll::Constraints | Coll::Indexes | Coll::Triggers | Coll::Policies | Coll::Partitions)) => {

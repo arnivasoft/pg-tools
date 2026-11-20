@@ -1,6 +1,7 @@
 import type { NodeKind } from "../../ipc/bindings/NodeKind";
 
-const LABELS: Record<NodeKind, string> = {
+// Yeni FDW/replikasyon türlerinin etiketleri Plan 38 Task 4'te eklenir; o zamana dek bu türlerde etiket tanımsızdır.
+const LABELS: Partial<Record<NodeKind, string>> = {
   serverGroup: "Server Group",
   server: "Server",
   databaseCollection: "Databases",
@@ -45,5 +46,5 @@ const LABELS: Record<NodeKind, string> = {
 };
 
 export function kindLabel(kind: NodeKind): string {
-  return LABELS[kind];
+  return LABELS[kind] as string;
 }
