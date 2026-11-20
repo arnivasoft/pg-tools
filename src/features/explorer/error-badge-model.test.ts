@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { t } from "../../app/strings";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
-import { createBadgeCardLoader, badgeLabel, cardActionLabel, cardTitle, isGone } from "./error-badge-model";
+import { createBadgeCardLoader, badgeLabel, isGone } from "./error-badge-model";
+import { cardActionLabel, cardTitle, terr } from "./error-badge-card-text";
 
 const err = (over: Partial<ErrorPayload>): ErrorPayload => ({ code: "x", message: "boom", detail: null, hint: null, ...over }) as ErrorPayload;
 
@@ -13,14 +14,14 @@ describe("error-badge-model", () => {
   it("not_found: kayıp metni ve üst düğümü yenile", () => {
     const e = err({ code: "not_found" });
     expect(isGone(e)).toBe(true);
-    expect(cardTitle(e)).toBe(t.error.gone);
-    expect(cardActionLabel(e)).toBe(t.error.refreshParent);
+    expect(cardTitle(e)).toBe(terr.gone);
+    expect(cardActionLabel(e)).toBe(terr.refreshParent);
   });
   it("diğer hatalar: ileti ve tekrar dene", () => {
     const e = err({});
     expect(isGone(e)).toBe(false);
     expect(cardTitle(e)).toBe("boom");
-    expect(cardActionLabel(e)).toBe(t.error.retry);
+    expect(cardActionLabel(e)).toBe(terr.retry);
   });
 });
 

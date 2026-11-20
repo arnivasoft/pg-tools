@@ -58,6 +58,8 @@ export const t = {
     editObject: "Düzenle…",
     renameObject: "Yeniden adlandır…",
     privilegesObject: "Yetkiler…",
+    boundObject: "Bölüm sınırı…",
+    detachObject: "Bölümü ayır…",
     defaultPrivilegesObject: "Varsayılan yetkiler…",
     maintenance: "Bakım…",
     backup: "Yedekle…",
@@ -77,9 +79,6 @@ export const t = {
   },
   error: {
     badge: "Hata ayrıntısı",
-    retry: "Tekrar dene",
-    refreshParent: "Üst düğümü yenile",
-    gone: "Nesne artık mevcut değil.",
   },
   toast: { dismiss: "Kapat" },
   query: {

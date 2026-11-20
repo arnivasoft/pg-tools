@@ -1,17 +1,13 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type { ClosePolicy } from "./bindings/ClosePolicy";
-import type { AppSettings } from "./bindings/AppSettings";
 import type { DraftTab } from "./bindings/DraftTab";
 import type { PropertySection } from "./bindings/PropertySection";
 import type { QueryTarget } from "./bindings/QueryTarget";
-import type { QueryEvent } from "./bindings/QueryEvent";
-import type { Scope } from "./bindings/Scope";
 import type { ServerConfig } from "./bindings/ServerConfig";
 import type { ServerInfo } from "./bindings/ServerInfo";
 import type { SessionOptions } from "./bindings/SessionOptions";
 import type { TreeNode } from "./bindings/TreeNode";
 import type { TxState } from "./bindings/TxState";
-import type { DdlTarget } from "./bindings/DdlTarget";
 import { IpcError, toPayload } from "./errors";
 
 export async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
@@ -53,8 +49,6 @@ export const commands = {
   qtTargetOf: (nodeId: string) => call<QueryTarget>("qt_target_of", { nodeId }),
   qtOpen: (serverId: string, databaseOid: number | null, options: SessionOptions) =>
     call<string>("qt_open", { serverId, databaseOid, options }),
-  qtRun: (session: string, sql: string, scope: Scope, limit: number, confirmed: boolean, onEvent: (ev: QueryEvent) => void) =>
-    call<null>("qt_run", { session, sql, scope, limit, confirmed, onEvent: channel(onEvent) }),
   qtTxState: (session: string) => call<TxState>("qt_tx_state", { session }),
   qtSetOptions: (session: string, options: SessionOptions) => call<null>("qt_set_options", { session, options }),
   qtClose: (session: string, policy: ClosePolicy) => call<null>("qt_close", { session, policy }),
@@ -64,11 +58,9 @@ export const commands = {
   qtDraftsSave: (tab: DraftTab, sql: string) => call<null>("qt_drafts_save", { tab, sql }),
   qtDraftsRemove: (id: string) => call<null>("qt_drafts_remove", { id }),
   qtDraftsLoad: () => call<[DraftTab, string][]>("qt_drafts_load"),
-  settingsGet: () => call<AppSettings>("settings_get"),
 
   // Nesne diyalogları (ddl_*): Tauri parametre adları src-tauri/src/ddl.rs ile birebir (camelCase). Yalnız tembel
   // parçaların kullandığı ddl_* komutları features/*/…-commands.ts ve ddl-commands.ts'tedir (Plan 32 telafisi).
-  ddlTargetOf: (nodeId: string) => call<DdlTarget>("ddl_target_of", { nodeId }),
 };
 
 export type Api = typeof commands;

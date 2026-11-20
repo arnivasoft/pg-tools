@@ -272,7 +272,7 @@ describe("designer eylemleri (Oluştur/Düzenle/Yeniden adlandır/Sil)", () => {
     }
   });
   it("görünüm kolonu ve koleksiyon düğümleri (Columns/Constraints/Partitions) designer eylemi almaz", () => {
-    for (const id of ["vcol-1", "coll-cols", "coll-con", "coll-part"]) {
+    for (const id of ["vcol-1", "coll-cols", "coll-con"]) {
       expect(actionsFor(s, node(s, id)).filter((x) => DES.includes(x))).toEqual([]);
     }
   });
@@ -718,5 +718,55 @@ describe("searchObjects (Plan 32)", () => {
   });
   it("menü metni", () => {
     expect(t.menu.searchObjects).toBe("Nesne ara…");
+  });
+});
+
+describe("Plan 37: bölüm menüsü", () => {
+  const s = (() => {
+    const tree = sampleTree();
+    const add = (id: string, parent: string, kind: NodeKind, label: string, extra: Partial<TreeNode> = {}) => {
+      tree.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, color: null, tag: null, ...extra });
+      tree.parent.set(id, parent);
+      tree.children.set(parent, [...(tree.children.get(parent) ?? []), id]);
+    };
+    add("coll-subpart", "tbl-partition", "partitionCollection", "Partitions", { hasChildren: true });
+    add("tbl-sub", "coll-subpart", "table", "orders_2024_q1");
+    return tree;
+  })();
+  const all = (id: string) => actionsFor(s, node(s, id));
+  const PART: ActionId[] = ["editObject", "renameObject", "privilegesObject", "boundObject", "detachObject", "maintenance", "dropObject"];
+
+  it("partitionCollection'da Oluştur… var", () => {
+    expect(all("coll-part")).toContain("createObject");
+  });
+  it("bölüm tablosunda sınır ve ayırma, privileges'ten sonra maintenance'tan önce; alt bölümde de var", () => {
+    for (const id of ["tbl-partition", "tbl-sub"]) expect(all(id).filter((x) => PART.includes(x)), id).toEqual(PART);
+  });
+  it("şema altındaki tabloda ve bölüm tablosunun kolonunda yok", () => {
+    for (const id of ["tbl-orders", "col-part", "col-id"]) {
+      expect(all(id), id).not.toContain("boundObject");
+      expect(all(id), id).not.toContain("detachObject");
+    }
+  });
+  it("kilitli sunucuda kapalı; grup 3", () => {
+    const locked = sampleTree();
+    const srv = locked.nodes.get("srv-up")!;
+    locked.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
+    const viaTree = { state: () => locked } as unknown as ActionDeps;
+    for (const a of ["boundObject", "detachObject"] as ActionId[]) {
+      expect(disabledReason(a, viaTree, "tbl-partition")).toBe(t.query.hint.locked);
+      expect(disabledReason(a, { state: () => s } as unknown as ActionDeps, "tbl-partition")).toBeNull();
+      expect(groupOf(a)).toBe(3);
+    }
+  });
+  it("executeAction kipleri bound / detach", async () => {
+    const d = { ...deps(s), openDesigner: vi.fn(), serverLocked: vi.fn(() => false) };
+    await executeAction(d as unknown as ActionDeps, "boundObject", "tbl-partition");
+    await executeAction(d as unknown as ActionDeps, "detachObject", "tbl-partition");
+    expect(d.openDesigner.mock.calls).toEqual([["tbl-partition", "bound"], ["tbl-partition", "detach"]]);
+  });
+  it("menü metinleri", () => {
+    expect(t.menu.boundObject).toBe("Bölüm sınırı…");
+    expect(t.menu.detachObject).toBe("Bölümü ayır…");
   });
 });

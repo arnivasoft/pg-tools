@@ -45,7 +45,7 @@ export const DETAIL_DELAY_MS = 120;
 export type Picker = { save(o: { defaultPath: string; filters: { name: string; extensions: string[] }[] }): Promise<string | null> };
 
 export interface DiffControllerDeps {
-  api: DiffApi & Pick<Api, "ddlTargetOf"> & Pick<DdlApi, "ddlLookup">;
+  api: DiffApi & Pick<DdlApi, "ddlTargetOf" | "ddlLookup">;
   servers: () => ServerConfig[];
   /** `deps.tree().nodes.get(nodeId)?.label ?? null` */
   nodeLabel: (nodeId: string) => string | null;

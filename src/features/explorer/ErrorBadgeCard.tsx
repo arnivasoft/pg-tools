@@ -1,16 +1,17 @@
 // HoverCard'lı tam rozet (Kobalte HoverCard'ı çeker): ana pakette statik içe aktarılmaz, `loadErrorBadgeCard` ile tembel iner.
-// Metinler ve eylemler ana paketten prop olarak gelir (ana paket modülleri bu parçaya taşınmasın diye).
+// Eylemler ana paketten prop olarak gelir; başlık/eylem metinleri bu parçadadır (error-badge-card-text.ts; Plan 37 telafisi) (ana paket modülleri bu parçaya taşınmasın diye).
 import { HoverCard } from "@kobalte/core/hover-card";
 import { CircleAlert } from "lucide-solid";
 import { Show } from "solid-js";
+import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
+import { cardActionLabel, cardTitle } from "./error-badge-card-text";
 
 export type ErrorBadgeCardProps = {
   label: string;
   badgeClass: string;
-  title: string;
+  error: ErrorPayload;
   detail: string | null;
   hint: string | null;
-  actionLabel: string;
   onActivate: (trigger: HTMLElement | undefined) => void;
   onAction: (trigger: HTMLElement | undefined) => void;
 };
@@ -35,7 +36,7 @@ export default function ErrorBadgeCard(props: ErrorBadgeCardProps) {
       </HoverCard.Trigger>
       <HoverCard.Portal>
         <HoverCard.Content class="z-50 max-w-[360px] rounded-md border border-border bg-bg p-3 text-sm shadow-xl">
-          <p class="font-semibold">{props.title}</p>
+          <p class="font-semibold">{cardTitle(props.error)}</p>
           <Show when={props.detail}>
             <p class="mt-1 select-text break-words">{props.detail}</p>
           </Show>
@@ -47,7 +48,7 @@ export default function ErrorBadgeCard(props: ErrorBadgeCardProps) {
             class="mt-2 rounded border border-border px-2 py-0.5 hover:bg-hover"
             onClick={() => props.onAction(trigger)}
           >
-            {props.actionLabel}
+            {cardActionLabel(props.error)}
           </button>
         </HoverCard.Content>
       </HoverCard.Portal>

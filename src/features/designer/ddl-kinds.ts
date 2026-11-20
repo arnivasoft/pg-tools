@@ -12,7 +12,8 @@ export const DDL_OBJECT_KINDS: NodeKind[] = [
   "policy", "tablespace",
 ];
 /** …Collection: yukarıdaki her tür (ör. functionCollection, triggerFunctionCollection, triggerCollection). */
-export const DDL_CREATE_COLLECTIONS = DDL_OBJECT_KINDS.map((k) => `${k}Collection` as NodeKind);
+// Plan 37: bölüm oluştur/bağla (`partition` bir NodeKind değildir; düğüm türü tablodur).
+export const DDL_CREATE_COLLECTIONS = [...DDL_OBJECT_KINDS.map((k) => `${k}Collection` as NodeKind), "partitionCollection" as NodeKind];
 
 /** "Oluştur…" bu koleksiyonda gösterilir mi? */
 export const canCreateIn = (kind: NodeKind) => DDL_CREATE_COLLECTIONS.includes(kind);

@@ -25,13 +25,13 @@ function ownedByTable(s: TreeState, id: string): boolean {
 export type ActionId =
   | "refresh" | "connect" | "disconnect" | "editServer" | "deleteServer"
   | "copyName" | "copyQualifiedName" | "copyDdl" | "openQueryTool" | "openDashboard" | "openData"
-  | "createObject" | "editObject" | "renameObject" | "privilegesObject" | "defaultPrivilegesObject" | "maintenance" | "backup" | "restore" | "schemaDiff" | "searchObjects" | "dropObject";
+  | "createObject" | "editObject" | "renameObject" | "privilegesObject" | "boundObject" | "detachObject" | "defaultPrivilegesObject" | "maintenance" | "backup" | "restore" | "schemaDiff" | "searchObjects" | "dropObject";
 
 /**
  * Nesne diyaloğu (designer) eylemleri: adı `Object` ile biten eylemler (ana paket bütçesi için liste yerine sonek);
  * kip, adın `Object` öncesidir (`createObject` → `create`, `privilegesObject` → `privileges`). Yeni bir eylem adı bu soneki kullanmamalıdır.
  */
-export type DesignerOpenMode = "create" | "edit" | "rename" | "drop" | "privileges" | "defaultPrivileges";
+export type DesignerOpenMode = "create" | "edit" | "rename" | "drop" | "privileges" | "bound" | "detach" | "defaultPrivileges";
 
 export interface ActionDeps {
   state: () => TreeState;
@@ -123,6 +123,8 @@ export function actionsFor(s: TreeState, node: TreeNode): ActionId[] {
     // Plan 22: yetkiler düzenlemenin yanında (spec §8 türleri; salt okunur kararını arka uç verir).
     out.push("editObject", "renameObject");
     if (ACL_KINDS.includes(node.kind)) out.push("privilegesObject");
+    // Plan 37: partitionCollection atası olan tablo = bölüm/alt bölüm (doğrudan üst denetimiyle eşdeğer; bayt için underPartitions); sınır ve ayırma.
+    if (node.kind === "table" && underPartitions(s, node.id)) out.push("boundObject", "detachObject");
     if (DEFAULT_ACL_KINDS.includes(node.kind)) out.push("defaultPrivilegesObject");
     // Plan 25: bakım (VACUUM/ANALYZE/REINDEX/CLUSTER) düzenleme grubunda, silmeden önce.
     if (MAINTENANCE_KINDS.has(node.kind)) out.push("maintenance");
@@ -185,6 +187,8 @@ export async function executeAction(deps: ActionDeps, action: ActionId, id: stri
       case "editObject":
       case "renameObject":
       case "privilegesObject":
+      case "boundObject":
+      case "detachObject":
       case "defaultPrivilegesObject":
       case "dropObject":
         // Savunma: menü kilitli sunucuda bu öğeleri gerekçesiyle zaten kapatır (açıcı da kaydı yeniden denetler).

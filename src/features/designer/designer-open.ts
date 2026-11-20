@@ -36,7 +36,7 @@ export type { DropInput };
 export interface DesignerOpenDeps {
   designer: Pick<DesignerController, "openCreate" | "openAlter" | "openAcl" | "openDefaultAcl" | "requestFocus" | "findAlter" | "ids">;
   tabs: Pick<TabsStore, "state" | "openDesigner" | "activate" | "rename">;
-  api: Pick<Api, "ddlTargetOf">;
+  api: Pick<DdlApi, "ddlTargetOf">;
   tree: () => TreeState;
   /** Güncel sunucu kayıtları (kilit, ad). */
   refreshServers: () => Promise<ServerConfig[]>;
@@ -185,9 +185,9 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
   };
 }
 
-export interface DesignerDeps extends Omit<DesignerOpenDeps, "designer" | "openDrop"> {
+export interface DesignerDeps extends Omit<DesignerOpenDeps, "designer" | "openDrop" | "api"> {
   /** Designer'a özgü komutlar bu parçada (designer-commands.ts); tembel parçaların ortak `ddl_*` komutları ddl-commands.ts'te. */
-  api: Omit<DesignerControllerDeps["api"], keyof DesignerApi | keyof DdlApi> & DesignerOpenDeps["api"];
+  api: Omit<DesignerControllerDeps["api"], keyof DesignerApi | keyof DdlApi>;
   /**
    * `servers`: sunucu listesi (tepkisel; kayıt değişince açık sekmelerin ad/kilit/üretim bilgisi yenilenir);
    * `openScript`: "Query Tool'da aç" (ApplyBar) — betik yeni sorgu sekmesinde, çalıştırılmadan.
@@ -224,6 +224,7 @@ export function createDesigner(deps: DesignerDeps) {
   createRoot(() => createEffect(on(deps.query.servers, (list) => list.forEach((s) => ctl.serverChanged(s.id)), { defer: true })));
   const opener: ReturnType<typeof createDesignerOpener> = createDesignerOpener({
     ...deps,
+    api: ddlCommands,
     designer: ctl,
     openDrop: deps.openDrop ?? ctl.drop.open,
   });

@@ -12,6 +12,8 @@ import type { DataChangeSet } from "../../ipc/bindings/DataChangeSet";
 import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { SessionOptions } from "../../ipc/bindings/SessionOptions";
 import { IpcError, toPayload } from "../../ipc/errors";
+import { ddlCommands } from "../../ipc/ddl-commands";
+import { qtRun } from "../../ipc/qt-more-commands";
 import { createDataApi, dataApply, dataCancel, dataLoad, dataPreview, dataSelect, qtOpenReadonly } from "./data-commands";
 import type { DataApi } from "./data-commands";
 
@@ -73,12 +75,13 @@ describe("data-commands", () => {
     const refreshServers = vi.fn(async () => []);
     const connect = vi.fn(async () => true);
     const api = createDataApi(
-      { ddlTargetOf: fake.ddlTargetOf, qtRun: fake.qtRun, qtClose: fake.qtClose },
+      { qtClose: fake.qtClose },
       refreshServers,
       connect,
     );
     expect(Object.keys(api).sort()).toEqual(Object.keys(fake).sort());
-    expect(api.qtRun).toBe(fake.qtRun);
+    expect(api.qtRun).toBe(qtRun);
+    expect(api.ddlTargetOf).toBe(ddlCommands.ddlTargetOf);
     expect(api.connect).toBe(connect);
     expect(api.dataLoad).toBe(dataLoad);
   });
