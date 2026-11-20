@@ -1009,7 +1009,8 @@ describe("designer-controller yerel engel (sequence sayıları)", () => {
 
 const tbl = (p: Partial<TableDef> = {}): ObjectDef => ({
   kind: "table", schema: "public", name: "orders", owner: null, tablespace: null, persistence: "permanent", columns: [], constraints: [],
-  partitionBy: null, fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false, unsupported: [], ...p,
+  partitionBy: null, fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false,
+  rowSecurity: { enabled: false, forced: false }, unsupported: [], ...p,
 });
 const TOBJ: ObjectRef = { kind: "table", oid: 500 };
 
@@ -1929,5 +1930,96 @@ describe("inspectorShouldRefresh", () => {
     expect(inspectorShouldRefresh({ variant: "object", object: OBJ }, "alter", { kind: "index", oid: 10 })).toBe(true);
     expect(inspectorShouldRefresh({ variant: "object", object: OBJ }, "alter", { kind: "index", oid: 11 })).toBe(false);
     expect(inspectorShouldRefresh({ variant: "object", object: null }, "create", { kind: "schema", oid: 9 })).toBe(false);
+  });
+});
+
+describe("designer-controller Plan 35 Task 4: tablo alter sonrası politika sekmeleri", () => {
+  const POBJ = (oid: number): ObjectRef => ({ kind: "policy", oid });
+  const pdef = (table = "orders"): ObjectDef => ({
+    kind: "policy", schema: "public", table, name: "p", command: "all", permissive: true, roles: [], using: null, withCheck: null,
+    comment: null, editable: true, unsupported: [], tableRls: null,
+  });
+  /** ddlLoad: tür etiketine göre tablo ya da politika (politikanın tablosu `policies` haritasından). */
+  function wire(s: S, policies: Record<number, string>) {
+    s.api.ddlLoad.mockImplementation(async (_s, _db, o) => (o.kind === "policy" ? pdef(policies[o.oid]) : tbl()));
+  }
+  const setRls = (enabled: boolean) => (d: ObjectDef) => {
+    if (d.kind === "table") d.rowSecurity = { enabled, forced: false };
+  };
+  const setComment = (d: ObjectDef) => {
+    if (d.kind === "table") d.comment = "yeni";
+  };
+  async function applyTable(s: S, edit: (d: ObjectDef) => void) {
+    const t = await openAlter(s, "TT", "S1", TOBJ);
+    s.ctl.edit(t, edit);
+    await settle();
+    s.ctl.setConfirm(t, { checked: true });
+    await s.ctl.apply(t);
+    await flush();
+  }
+  const policyLoads = (s: S) => s.api.ddlLoad.mock.calls.filter((c) => c[2].kind === "policy").length;
+
+  it("RLS değişimi: kirli olmayan politika sekmesi yeniden yüklenir; başka tablonunki dokunulmaz", async () => {
+    const s = setup();
+    wire(s, { 1: "orders", 2: "other" });
+    await openAlter(s, "P1", "S1", POBJ(1));
+    await openAlter(s, "P2", "S1", POBJ(2));
+    const before = policyLoads(s);
+    await applyTable(s, setRls(true));
+    expect(policyLoads(s)).toBe(before + 1);
+    expect(s.api.ddlLoad.mock.calls.filter((c) => c[2].oid === 2)).toHaveLength(1);
+  });
+  it("kirli politika sekmesi yeniden yüklenmez, needsReload = true", async () => {
+    const s = setup();
+    wire(s, { 1: "orders" });
+    await openAlter(s, "P1", "S1", POBJ(1));
+    s.ctl.edit("P1", (d) => {
+      if (d.kind === "policy") d.name = "q";
+    });
+    const before = policyLoads(s);
+    await applyTable(s, setRls(true));
+    expect(policyLoads(s)).toBe(before);
+    expect(s.ctl.model("P1")!).toMatchObject({ needsReload: true, dirty: true });
+    expect((s.ctl.model("P1")!.draft as { name: string }).name).toBe("q");
+  });
+  it("uygulanmakta (applying) olan politika sekmesi yeniden yüklenmez, needsReload = true", async () => {
+    const s = setup();
+    wire(s, { 1: "orders" });
+    await openAlter(s, "P1", "S1", POBJ(1));
+    s.ctl.edit("P1", (d) => {
+      if (d.kind === "policy") d.name = "q";
+    });
+    await settle();
+    s.ctl.setConfirm("P1", { checked: true });
+    const d = deferred<ApplyOutcome>();
+    s.api.ddlApply.mockReturnValueOnce(d.promise);
+    const p1 = s.ctl.apply("P1");
+    expect(s.ctl.model("P1")!.applying).toBe(true);
+    const before = policyLoads(s);
+    await applyTable(s, setRls(true));
+    expect(policyLoads(s)).toBe(before);
+    expect(s.ctl.model("P1")!).toMatchObject({ needsReload: true, applying: true });
+    d.resolve(applied());
+    await p1;
+  });
+  it("tablo yeniden adlandırma (yalnız ad): kirli olmayan eşleşen politika sekmesi yeniden yüklenir", async () => {
+    const s = setup();
+    wire(s, { 1: "orders", 2: "other" });
+    await openAlter(s, "P1", "S1", POBJ(1));
+    await openAlter(s, "P2", "S1", POBJ(2));
+    const before = policyLoads(s);
+    await applyTable(s, (d) => {
+      if (d.kind === "table") d.name = "orders2";
+    });
+    expect(policyLoads(s)).toBe(before + 1);
+    expect(s.api.ddlLoad.mock.calls.filter((c) => c[2].oid === 2)).toHaveLength(1);
+  });
+  it("RLS değişmeyen tablo alter'ı hiçbir politika sekmesini yüklemez", async () => {
+    const s = setup();
+    wire(s, { 1: "orders" });
+    await openAlter(s, "P1", "S1", POBJ(1));
+    const before = policyLoads(s);
+    await applyTable(s, setComment);
+    expect(policyLoads(s)).toBe(before);
   });
 });

@@ -42,6 +42,7 @@ static PROC_SQL: VersionedSql = VersionedSql(&[
 ]);
 static NAMESPACE_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_acl_namespace.sql"))]);
 static DATABASE_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_acl_database.sql"))]);
+static TABLESPACE_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_acl_tablespace.sql"))]);
 static TYPE_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_acl_type.sql"))]);
 const COLUMNS_SQL: &str = include_str!("sql/load_acl_columns.sql");
 
@@ -49,6 +50,8 @@ const COLUMNS_SQL: &str = include_str!("sql/load_acl_columns.sql");
 pub const UNSUPPORTED_KIND_MSG: &str = "Bu nesne türünün yetkileri yoktur.";
 /// Karar 11 gerekçeleri (sabit metin; ad içermez).
 pub const SYSTEM_SCHEMA_REASON: &str = "sistem şeması";
+/// `pg_global` yetkileri salt okunur (PG tarafında anlamsız); `pg_default` düzenlenebilir (Plan 34 Karar 11).
+pub const SYSTEM_TABLESPACE_REASON: &str = "Sistem tablespace'i";
 pub const SIGNATURE_REASON: &str = "imza";
 pub const ARRAY_REASON: &str = "dizi tipi (yetkiler öğe tipinden yönetilir)";
 pub const MULTIRANGE_REASON: &str = "MULTIRANGE (yetkiler range tipinden yönetilir)";
@@ -145,7 +148,7 @@ fn kind_matches(kind: ObjectKind, subkind: &str) -> bool {
         ObjectKind::Procedure => subkind == "p",
         ObjectKind::Type => subkind != "d",
         ObjectKind::Domain => subkind == "d",
-        ObjectKind::Schema | ObjectKind::Database => true,
+        ObjectKind::Schema | ObjectKind::Database | ObjectKind::Tablespace => true,
         _ => false,
     }
 }
@@ -178,6 +181,7 @@ fn acl_sql(kind: ObjectKind) -> &'static VersionedSql {
         ObjectKind::Function | ObjectKind::Procedure => &PROC_SQL,
         ObjectKind::Schema => &NAMESPACE_SQL,
         ObjectKind::Database => &DATABASE_SQL,
+        ObjectKind::Tablespace => &TABLESPACE_SQL,
         ObjectKind::Type | ObjectKind::Domain => &TYPE_SQL,
         _ => &RELATION_SQL,
     }
@@ -235,7 +239,8 @@ fn parse_acl(kind: ObjectKind, head: Vec<Row>, cols: Vec<Row>, version_num: u32)
     let mut unsupported = vec![];
     note_invalid_utf8(&[&head, &cols], &mut unsupported);
     if h.get::<_, bool>("is_system") {
-        unsupported.push(SYSTEM_SCHEMA_REASON.to_string());
+        let reason = if kind == ObjectKind::Tablespace { SYSTEM_TABLESPACE_REASON } else { SYSTEM_SCHEMA_REASON };
+        unsupported.push(reason.to_string());
     }
     if kind == ObjectKind::Function
         && let Some(r) = routine_reason(&subkind)

@@ -11,8 +11,8 @@
 //!   `partition_text` ile salt okunur gösterilir; modellenmeyen kısıt/özellikler `unsupported` listesindedir).
 //! - View/MatView: bkz. `load_view`/`load_matview` (`query` = `pg_get_viewdef` sondaki `;` soyulmuş; MV `refresh`
 //!   her zaman `None`; yeniden kurmada kaybolacak ekler `unsupported` listesinde).
-//! - Database/Role (sunucu kapsamlı): bakım bağlantısında okunur (`Target::Maintenance`, `database_oid` yok sayılır);
-//!   bkz. `load_database`/`load_role` (ayar adları küçük harf, ada göre sıralı; rol parolası hiç okunmaz).
+//! - Database/Role/Tablespace (sunucu kapsamlı): bakım bağlantısında okunur (`Target::Maintenance`, `database_oid` yok sayılır);
+//!   bkz. `load_database`/`load_role`/`load_tablespace` (ayar adları küçük harf, ada göre sıralı; rol parolası hiç okunmaz).
 //! - Function/Procedure: bkz. `load_function` (tipler `format_type`, varsayılanlar `pg_get_function_arg_default`, gövde
 //!   `prosrc` baytı baytına, COST/ROWS üstelsiz ondalık metin; salt okunurluk `unsupported` doluysa `editable = false`).
 //!
@@ -112,6 +112,8 @@ static RANGE_SQL: VersionedSql = VersionedSql(&[
 ]);
 const DOMAIN_SQL: &str = include_str!("sql/load_domain.sql");
 const DOMAIN_CHECKS_SQL: &str = include_str!("sql/load_domain_checks.sql");
+static POLICY_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_policy.sql"))]);
+static TABLESPACE_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_tablespace.sql"))]);
 
 const SYSTEM_ERROR: &str = "sistem nesnesi düzenlenemez";
 
@@ -120,10 +122,10 @@ pub async fn server_version(mgr: &ConnectionManager, server: Uuid) -> Result<u32
     mgr.info(server).map(|i| i.version_num).ok_or(Error::NotConnected)
 }
 
-/// Sunucu kapsamlı türlerin (Database/Role) istemci alan yoldan yüklenmesinde döndürülen ileti.
-pub const SERVER_SCOPED_MSG: &str = "Veritabanı ve rol bu yolla yüklenmez (bakım bağlantısı gerekir).";
+/// Sunucu kapsamlı türlerin (Database/Role/Tablespace) istemci alan yoldan yüklenmesinde döndürülen ileti.
+pub const SERVER_SCOPED_MSG: &str = "Veritabanı, rol ve tablespace bu yolla yüklenmez (bakım bağlantısı gerekir).";
 
-/// İstemci alan yolun kapsam denetimi: sunucu kapsamlı türler (Database/Role) bakım bağlantısı ister → `Invalid`.
+/// İstemci alan yolun kapsam denetimi: sunucu kapsamlı türler (Database/Role/Tablespace) bakım bağlantısı ister → `Invalid`.
 pub(crate) fn in_scope(kind: ObjectKind) -> Result<()> {
     if kind.server_scoped() { Err(Error::Invalid(SERVER_SCOPED_MSG.to_string())) } else { Ok(()) }
 }
@@ -159,7 +161,7 @@ fn not_found(what: &str) -> Error {
 }
 
 /// Yükleme/uygulama hedefi (tek kural; `DdlManager::apply` de bunu kullanır, inceleme G-13): sunucu kapsamlı türler
-/// (Database/Role) bakım veritabanında (`database_oid` yok sayılır); diğerleri verilen veritabanında, yoksa
+/// (Database/Role/Tablespace) bakım veritabanında (`database_oid` yok sayılır); diğerleri verilen veritabanında, yoksa
 /// `Invalid(NEEDS_DATABASE)`.
 pub(crate) fn target_for(kind: ObjectKind, database_oid: Option<u32>) -> Result<Target> {
     match (kind.server_scoped(), database_oid) {
@@ -193,12 +195,15 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into
         ObjectKind::Trigger => load_trigger(mgr, server, database_oid, obj.oid).await,
         ObjectKind::Type => load_type(mgr, server, database_oid, obj.oid).await,
         ObjectKind::Domain => load_domain(mgr, server, database_oid, obj.oid).await,
+        ObjectKind::Policy => load_policy(mgr, server, database_oid, obj.oid).await,
+        // Sunucu kapsamlı: bakım veritabanında (veritabanı oid'i yok sayılır).
+        ObjectKind::Tablespace => load_tablespace(mgr, server, Target::Maintenance, obj.oid).await,
     }
 }
 
 /// Şema kapsamlı türleri (Schema, Sequence, Extension, Index, Table, View, MaterializedView, Function, Procedure,
-/// Trigger, Type, Domain) verilen istemcide yükler. Sorgular, sıra ve normalleştirme `load` ile aynıdır.
-/// Database/Role → `Error::Invalid(SERVER_SCOPED_MSG)`. Sorgu hatası `Error::from_query` ile eşlenir.
+/// Trigger, Type, Domain, Policy) verilen istemcide yükler. Sorgular, sıra ve normalleştirme `load` ile aynıdır.
+/// Database/Role/Tablespace → `Error::Invalid(SERVER_SCOPED_MSG)`. Sorgu hatası `Error::from_query` ile eşlenir.
 pub async fn load_in(client: &Client, version_num: u32, obj: ObjectRef) -> Result<ObjectDef> {
     in_scope(obj.kind)?;
     let (v, oid) = (PgVersion(version_num), obj.oid);
@@ -216,7 +221,8 @@ pub async fn load_in(client: &Client, version_num: u32, obj: ObjectRef) -> Resul
         ObjectKind::Type => parse_type(fetch_type(client, v, oid).await.map_err(q)?),
         ObjectKind::Domain => parse_domain(fetch_domain(client, v, oid).await.map_err(q)?),
         // `in_scope` bunları zaten eledi.
-        ObjectKind::Database | ObjectKind::Role => Err(Error::Invalid(SERVER_SCOPED_MSG.to_string())),
+        ObjectKind::Database | ObjectKind::Role | ObjectKind::Tablespace => Err(Error::Invalid(SERVER_SCOPED_MSG.to_string())),
+        ObjectKind::Policy => parse_policy(fetch_policy(client, v, oid).await.map_err(q)?),
     }
 }
 
@@ -638,6 +644,7 @@ fn parse_table((head, cols, cons): TableRows) -> Result<ObjectDef> {
         partition_text: h.get("partition_text"),
         is_partition: h.get("is_partition"),
         inherits: h.get("inherits"),
+        row_security: RowSecurity { enabled: h.get("rls_enabled"), forced: h.get("rls_forced") },
         unsupported,
     }))
 }
@@ -1660,13 +1667,129 @@ fn parse_domain((head, cons): (Vec<Row>, Vec<Row>)) -> Result<ObjectDef> {
     }))
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Policy / Tablespace
+// ---------------------------------------------------------------------------------------------------------------
+
+fn policy_command(c: &str) -> Option<PolicyCommand> {
+    match c {
+        "*" => Some(PolicyCommand::All),
+        "r" => Some(PolicyCommand::Select),
+        "a" => Some(PolicyCommand::Insert),
+        "w" => Some(PolicyCommand::Update),
+        "d" => Some(PolicyCommand::Delete),
+        _ => None,
+    }
+}
+
+async fn fetch_policy(c: &Client, v: PgVersion, oid: u32) -> QueryResult<Vec<Row>> {
+    query_oid(c, v, &POLICY_SQL, oid).await
+}
+
+/// Policy yükleyicisi. Normalleştirme (üreticiyle gidiş-dönüşün ve `alter(yüklü, yüklü)` boş planının dayanağı):
+/// - `command` `polcmd`'den; `permissive = polpermissive`; `roles` ada göre `COLLATE "C"` sıralı rol adları
+///   (`polroles = {0}` = PUBLIC → boş liste).
+/// - `using`/`with_check` = `pg_get_expr(polqual/polwithcheck, polrelid)` metni olduğu gibi (üretici de bu metni
+///   karşılaştırır; PG ifadeyi yeniden yazdırdığından yüklü metin sabit noktadır). Boş yorum `None`.
+/// - `table_rls` = tablonun güncel `relrowsecurity`/`relforcerowsecurity` değerleri (yalnızca uyarı için).
+/// - `unsupported` (R5; doluysa `editable = false`): eklentiye ait tablo, sistem şeması, tablo olmayan ilişki,
+///   bilinmeyen komut kodu, geçersiz UTF-8 (ifade kayıplı çözülür; yalnızca gösterim).
+async fn load_policy(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
+    parse_policy(run_oid(mgr, server, db, &POLICY_SQL, oid).await?)
+}
+
+fn parse_policy(rows: Vec<Row>) -> Result<ObjectDef> {
+    let r = rows.first().ok_or_else(|| not_found("politika"))?;
+    let mut unsupported = vec![];
+    if let Some(e) = r.get::<_, Option<String>>("extension") {
+        unsupported.push(format!("EXTENSION {e} (eklentiye ait tablo)"));
+    }
+    if r.get::<_, bool>("is_system") {
+        unsupported.push("sistem şeması".to_string());
+    }
+    match r.get::<_, String>("relkind").as_str() {
+        "r" | "p" => {}
+        other => unsupported.push(format!("'{other}' türü ilişkinin politikası")),
+    }
+    let code: String = r.get("command");
+    let command = policy_command(&code).unwrap_or_else(|| {
+        unsupported.push(format!("komut '{code}'"));
+        PolicyCommand::All
+    });
+    note_invalid_utf8(&[&rows], &mut unsupported);
+    Ok(ObjectDef::Policy(PolicyDef {
+        schema: r.get("schema"),
+        table: r.get("table_name"),
+        name: r.get("name"),
+        command,
+        permissive: r.get("permissive"),
+        roles: r.get("roles"),
+        using: lossy_opt(r, "using_expr"),
+        with_check: lossy_opt(r, "check_expr"),
+        comment: lossy_opt(r, "comment").filter(|c| !c.is_empty()),
+        editable: unsupported.is_empty(),
+        unsupported,
+        table_rls: Some(RowSecurity { enabled: r.get("rls_enabled"), forced: r.get("rls_forced") }),
+    }))
+}
+
+/// `spcoptions` öğeleri (`ad=değer`) → seçenekler (değer sunucunun sakladığı metin, olduğu gibi). Yalnızca bilinmeyen anahtar
+/// `unsupported`'a gider (yalnızca anahtar adı); bilinen anahtar `=`'siz gelirse değer boş dizge olur (PG böyle öğe saklamaz).
+fn tablespace_options(items: &[String], unsupported: &mut Vec<String>) -> TablespaceOptions {
+    let mut o = TablespaceOptions::default();
+    for i in items {
+        let (k, v) = i.split_once('=').unwrap_or((i.as_str(), ""));
+        let slot = match k {
+            "seq_page_cost" => &mut o.seq_page_cost,
+            "random_page_cost" => &mut o.random_page_cost,
+            "effective_io_concurrency" => &mut o.effective_io_concurrency,
+            "maintenance_io_concurrency" => &mut o.maintenance_io_concurrency,
+            _ => {
+                unsupported.push(format!("seçenek {k}"));
+                continue;
+            }
+        };
+        *slot = Some(v.to_string());
+    }
+    o
+}
+
+/// Tablespace yükleyicisi (`target` = bakım bağlantısı). Normalleştirme: sahip `Some`; `location` =
+/// `pg_tablespace_location` (sistem tablespace'lerinde `""`); seçenekler `spcoptions` metni olduğu gibi (üretici de
+/// doğrulanan metnin kendisini yazar → `alter(yüklü, yüklü)` boş); boş yorum `None`. `pg_default`/`pg_global` →
+/// `unsupported = ["Sistem tablespace'i"]`, `editable = false`; bilinmeyen seçenek anahtarı da salt okunur yapar.
+async fn load_tablespace(mgr: &ConnectionManager, server: Uuid, target: Target, oid: u32) -> Result<ObjectDef> {
+    let rows = mgr
+        .run(server, target, move |c| async move {
+            let params: [&(dyn ToSql + Sync); 1] = [&oid];
+            c.client.query(TABLESPACE_SQL.pick(PgVersion(c.version_num())), &params).await
+        })
+        .await?;
+    let r = rows.first().ok_or_else(|| not_found("tablespace"))?;
+    let mut unsupported = vec![];
+    if r.get::<_, bool>("is_system") {
+        unsupported.push("Sistem tablespace'i".to_string());
+    }
+    let options = tablespace_options(&lossy_vec(r, "options"), &mut unsupported);
+    note_invalid_utf8(&[&rows], &mut unsupported);
+    Ok(ObjectDef::Tablespace(TablespaceDef {
+        name: r.get("name"),
+        owner: Some(r.get("owner")),
+        location: lossy(r, "location"),
+        options,
+        comment: lossy_opt(r, "comment").filter(|c| !c.is_empty()),
+        editable: unsupported.is_empty(),
+        unsupported,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn in_scope_rejects_only_server_scoped_kinds() {
-        for k in [ObjectKind::Database, ObjectKind::Role] {
+        for k in [ObjectKind::Database, ObjectKind::Role, ObjectKind::Tablespace] {
             assert!(matches!(in_scope(k), Err(Error::Invalid(m)) if m == SERVER_SCOPED_MSG), "{k:?}");
         }
         let scoped = [
@@ -1682,6 +1805,7 @@ mod tests {
             ObjectKind::Trigger,
             ObjectKind::Type,
             ObjectKind::Domain,
+            ObjectKind::Policy,
         ];
         for k in scoped {
             assert!(in_scope(k).is_ok(), "{k:?}");

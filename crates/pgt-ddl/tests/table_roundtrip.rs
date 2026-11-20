@@ -102,6 +102,7 @@ fn table(schema: &str, name: &str, columns: Vec<ColumnDef>, constraints: Vec<Con
         partition_text: None,
         is_partition: false,
         inherits: false,
+        row_security: RowSecurity::default(),
         unsupported: vec![],
     }
 }
@@ -1736,4 +1737,52 @@ async fn zero_body(ts: TestServer) {
     // Tablo yeniden adlandırma serial varsayılanını bozmaz (regclass oid ile izlenir).
     let ser2 = alter_and_check(&env, &ser, &with(&ser, |d| d.name = "ser2".into())).await;
     assert_eq!(ser2.columns[0].default.as_deref(), Some("nextval('public.ser_id_seq'::regclass)"));
+}
+
+// ================================================================================================================
+// Satır güvenliği (RLS) bayrakları: create / alter gidiş-dönüşü
+// ================================================================================================================
+
+#[tokio::test]
+async fn row_security_flags_roundtrip() {
+    for ts in servers() {
+        guarded(rls_body(ts.clone()), cleanup_in(&ts, PFX, "rls")).await;
+    }
+}
+
+async fn rls_body(ts: TestServer) {
+    let env = setup_in(&ts, PFX, "rls").await;
+    let ctx = env.ctx(false);
+    let rs = |enabled, forced| RowSecurity { enabled, forced };
+
+    // create: ENABLE + FORCE (boş yeni tablo; Safe).
+    let d = with(&table("public", "r", vec![nn(c("id", "integer"))], vec![]), |d| d.row_security = rs(true, true));
+    let plan = build::create(&t(&d), &ctx).unwrap();
+    assert!(plan.statements.iter().all(|s| s.risk == Risk::Safe), "{:?}", sqls(&plan));
+    let l = create_and_check(&env, &d).await;
+    assert_eq!(l.row_security, rs(true, true));
+
+    // alter: FORCE kaldırma (Safe + uyarı), DISABLE (Safe + uyarı), yeniden ENABLE + FORCE (Destructive + not).
+    let no_force = alter_and_check(&env, &l, &with(&l, |d| d.row_security = rs(true, false))).await;
+    assert_eq!(no_force.row_security, rs(true, false));
+    let off_plan = alter_plan(&env, &no_force, &with(&no_force, |d| d.row_security = rs(false, false)));
+    assert!(off_plan.statements.iter().all(|s| s.risk == Risk::Safe) && !off_plan.warnings.is_empty(), "{:?}", sqls(&off_plan));
+    let off = alter_and_check(&env, &no_force, &with(&no_force, |d| d.row_security = rs(false, false))).await;
+    let on_plan = alter_plan(&env, &off, &with(&off, |d| d.row_security = rs(true, true)));
+    assert!(on_plan.statements.iter().any(|s| s.risk == Risk::Destructive), "{:?}", sqls(&on_plan));
+    let on = alter_and_check(&env, &off, &with(&off, |d| d.row_security = rs(true, true))).await;
+    assert_eq!(on.row_security, rs(true, true));
+
+    // Bölüm tablosu ve INHERITS çocuğunda da düzenlenebilir.
+    env.sql(
+        "CREATE TABLE pt (id int, k int) PARTITION BY LIST (k); CREATE TABLE pt1 PARTITION OF pt FOR VALUES IN (1);
+         CREATE TABLE base (a int); CREATE TABLE kid (b int) INHERITS (base);",
+    )
+    .await;
+    for name in ["pt", "pt1", "kid"] {
+        let l = tload(&env, "public", name).await;
+        assert_eq!(l.row_security, rs(false, false), "{name}");
+        let on = alter_and_check(&env, &l, &with(&l, |d| d.row_security = rs(true, false))).await;
+        assert_eq!(on.row_security, rs(true, false), "{name}");
+    }
 }

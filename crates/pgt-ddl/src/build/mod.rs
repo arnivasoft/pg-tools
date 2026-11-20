@@ -17,6 +17,7 @@ pub mod index;
 pub mod maintenance;
 pub mod matview;
 pub mod pgtype;
+pub mod policy;
 pub mod role;
 pub mod routine;
 pub mod schema;
@@ -26,6 +27,7 @@ mod sqlscan;
 pub mod table;
 pub mod table_alter;
 pub mod table_constraint;
+pub mod tablespace;
 pub mod trigger;
 pub mod type_canon;
 pub mod type_syntax;
@@ -33,7 +35,7 @@ pub mod view;
 
 pub use sqlscan::{ScanResult, scan_semicolons};
 
-use crate::model::{DomainDef, FieldError, MatViewDef, ObjectDef, ObjectKind, TableDef, TriggerDef, ViewDef};
+use crate::model::{DomainDef, FieldError, MatViewDef, ObjectDef, ObjectKind, PolicyDef, TableDef, TablespaceDef, TriggerDef, ViewDef};
 use crate::plan::{Plan, Risk, Statement};
 
 /// PG tanımlayıcı üst sınırı (BAYT, UTF-8).
@@ -201,6 +203,8 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Trigger(d) => trigger::validate(ctx, d),
         ObjectDef::Type(d) => pgtype::validate(ctx, d),
         ObjectDef::Domain(d) => domain::validate(ctx, d),
+        ObjectDef::Policy(d) => policy::validate(ctx, d),
+        ObjectDef::Tablespace(d) => tablespace::validate(ctx, d),
     }
 }
 
@@ -261,6 +265,13 @@ pub(crate) fn validate_identity(def: &ObjectDef) -> Vec<FieldError> {
             check_old_schema_ident("schema", &d.schema, &mut e);
             check_old_ident("name", &d.name, &mut e);
         }
+        // Politika: tablo kapsamlı (Trigger gibi); tablo adı da ifadeye girer.
+        ObjectDef::Policy(d) => {
+            check_old_schema_ident("schema", &d.schema, &mut e);
+            check_old_ident("table", &d.table, &mut e);
+            check_old_ident("name", &d.name, &mut e);
+        }
+        ObjectDef::Tablespace(d) => check_old_ident("name", &d.name, &mut e),
     }
     e
 }
@@ -278,6 +289,8 @@ fn invalid_utf8_locked(d: &ObjectDef) -> bool {
         ObjectDef::Trigger(d) => &d.unsupported,
         ObjectDef::Type(d) => &d.unsupported,
         ObjectDef::Domain(d) => &d.unsupported,
+        ObjectDef::Policy(d) => &d.unsupported,
+        ObjectDef::Tablespace(d) => &d.unsupported,
         _ => return false,
     };
     unsupported.iter().any(|u| u == crate::load::INVALID_UTF8_REASON)
@@ -301,6 +314,12 @@ fn droppable_despite_invalid_utf8(d: &ObjectDef) -> Option<ObjectDef> {
         }
         ObjectDef::Trigger(x) if only_reason(&x.unsupported) => {
             ObjectDef::Trigger(TriggerDef { unsupported: vec![], editable: true, ..x.clone() })
+        }
+        ObjectDef::Policy(x) if only_reason(&x.unsupported) => {
+            ObjectDef::Policy(PolicyDef { unsupported: vec![], editable: true, ..x.clone() })
+        }
+        ObjectDef::Tablespace(x) if only_reason(&x.unsupported) => {
+            ObjectDef::Tablespace(TablespaceDef { unsupported: vec![], editable: true, ..x.clone() })
         }
         _ => return None,
     })
@@ -342,6 +361,8 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Trigger(d) => trigger::create(ctx, d),
         ObjectDef::Type(d) => pgtype::create(ctx, d),
         ObjectDef::Domain(d) => domain::create(ctx, d),
+        ObjectDef::Policy(d) => policy::create(ctx, d),
+        ObjectDef::Tablespace(d) => tablespace::create(ctx, d),
     }
 }
 
@@ -387,6 +408,11 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         // Trigger kendi doğrulamasını yapar: tablo değiştirilemez, yalnızca değişen/yazılan alanlar, salt okunur kapısı;
         // yapı değişimi PG 14+'da OR REPLACE, aksi hâlde aynı transaction'da yeniden kurma (Karar 5).
         (ObjectDef::Trigger(o), ObjectDef::Trigger(n)) => return trigger::alter(ctx, o, n),
+        // Policy kendi doğrulamasını yapar: tablo değiştirilemez, yalnızca değişen/yazılan alanlar, salt okunur kapısı;
+        // komut/permissive değişimi ve ifade kaldırma aynı transaction'da yeniden kurma (Karar 3).
+        (ObjectDef::Policy(o), ObjectDef::Policy(n)) => return policy::alter(ctx, o, n),
+        // Tablespace kendi doğrulamasını yapar: konum create-only, yalnızca değişen/yazılan alanlar, salt okunur kapısı.
+        (ObjectDef::Tablespace(o), ObjectDef::Tablespace(n)) => return tablespace::alter(ctx, o, n),
         // Type kendi doğrulamasını yapar: yalnızca değişen/yazılan alanlar, enum/composite `original` eşlemesi, range
         // gövdesi sabit, tür (variant) değişmez, salt okunur kapısı.
         (ObjectDef::Type(o), ObjectDef::Type(n)) => return pgtype::alter(ctx, o, n),
@@ -454,6 +480,10 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Trigger(d) => trigger::drop(d, cascade),
         ObjectDef::Type(d) => pgtype::drop(d, cascade),
         ObjectDef::Domain(d) => domain::drop(d, cascade),
+        // Politika CASCADE bilmez: `cascade` yok sayılır (Karar 3).
+        ObjectDef::Policy(d) => policy::drop(d),
+        // Tablespace CASCADE bilmez: `cascade` yok sayılır (Karar 7).
+        ObjectDef::Tablespace(d) => tablespace::drop(d),
     }
 }
 
@@ -602,6 +632,53 @@ mod tests {
         assert_eq!(paths(alter(&dom, &changed, &ctx()).unwrap_err()), ro, "drop dışı kilitli kalır");
     }
 
+    #[test]
+    fn invalid_utf8_policy_and_tablespace_stay_droppable_but_locked() {
+        let reason = vec![crate::load::INVALID_UTF8_REASON.to_string()];
+        let ro = vec![("object".to_string(), routine::READ_ONLY_MSG.to_string())];
+        let paths = |e: Vec<FieldError>| e.into_iter().map(|e| (e.path, e.message)).collect::<Vec<_>>();
+        let pol = ObjectDef::Policy(PolicyDef {
+            schema: "s".into(),
+            table: "t".into(),
+            name: "p".into(),
+            command: PolicyCommand::All,
+            permissive: true,
+            roles: vec![],
+            using: Some("x = 'a\u{FFFD}'::s.\"a\u{FFFD}_multirange\"".into()),
+            with_check: None,
+            comment: None,
+            editable: false,
+            unsupported: reason.clone(),
+            table_rls: None,
+        });
+        assert!(invalid_utf8_locked(&pol));
+        let p = drop(&pol, false, &ctx()).unwrap();
+        assert!(p.statements[0].sql.starts_with("DROP POLICY") && !p.statements[0].sql.contains('\u{FFFD}'), "{p:?}");
+        let ObjectDef::Policy(d) = &pol else { unreachable!() };
+        let changed = ObjectDef::Policy(PolicyDef { comment: Some("x".into()), ..d.clone() });
+        assert_eq!(paths(alter(&pol, &changed, &ctx()).unwrap_err()), ro, "drop dışı kilitli kalır");
+        assert_eq!(paths(create(&pol, &ctx()).unwrap_err()), ro);
+        // Başka gerekçe de varsa drop kilitli kalır.
+        let both = ObjectDef::Policy(PolicyDef { unsupported: vec![reason[0].clone(), "komut 'x'".into()], ..d.clone() });
+        assert_eq!(paths(drop(&both, false, &ctx()).unwrap_err()), ro);
+
+        let ts = ObjectDef::Tablespace(TablespaceDef {
+            name: "ts".into(),
+            owner: None,
+            location: "/a\u{FFFD}".into(),
+            options: TablespaceOptions::default(),
+            comment: None,
+            editable: false,
+            unsupported: reason,
+        });
+        assert!(invalid_utf8_locked(&ts));
+        let p = drop(&ts, false, &ctx()).unwrap();
+        assert!(p.statements[0].sql.starts_with("DROP TABLESPACE") && !p.statements[0].sql.contains('\u{FFFD}'), "{p:?}");
+        let ObjectDef::Tablespace(d) = &ts else { unreachable!() };
+        let changed = ObjectDef::Tablespace(TablespaceDef { comment: Some("x".into()), ..d.clone() });
+        assert_eq!(paths(alter(&ts, &changed, &ctx()).unwrap_err()), ro);
+    }
+
     fn table() -> ObjectDef {
         ObjectDef::Table(TableDef {
             schema: "public".into(),
@@ -617,6 +694,7 @@ mod tests {
             partition_text: None,
             is_partition: false,
             inherits: false,
+            row_security: RowSecurity::default(),
             unsupported: vec![],
         })
     }

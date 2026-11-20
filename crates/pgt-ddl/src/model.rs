@@ -84,12 +84,16 @@ pub enum ObjectKind {
     /// Enum / composite / range.
     Type,
     Domain,
+    /// Tablo kapsamlı satır güvenliği (RLS) politikası.
+    Policy,
+    /// Sunucu kapsamlı (küme düzeyi).
+    Tablespace,
 }
 
 impl ObjectKind {
     /// Sunucu kapsamlı (küme düzeyi) nesne: yükleme/uygulama bakım veritabanında; `database_oid` yok sayılır.
     pub fn server_scoped(self) -> bool {
-        matches!(self, ObjectKind::Database | ObjectKind::Role)
+        matches!(self, ObjectKind::Database | ObjectKind::Role | ObjectKind::Tablespace)
     }
 }
 
@@ -378,9 +382,21 @@ pub struct TableDef {
     /// Yalnızca yüklemede dolar: tablo kalıtımla bir üst tabloya bağlıdır.
     #[serde(default)]
     pub inherits: bool,
+    /// Satır güvenliği bayrakları (`relrowsecurity`/`relforcerowsecurity`); eksikse kapalı (geri uyum).
+    #[serde(default)]
+    pub row_security: RowSecurity,
     /// Yalnızca yüklemede dolar: modellenmeyen ve alter'ın dokunmadığı kısıt/özelliklerin insan okunur listesi.
     #[serde(default)]
     pub unsupported: Vec<String>,
+}
+
+/// Tablo satır güvenliği bayrakları: `ENABLE`/`FORCE ROW LEVEL SECURITY`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RowSecurity {
+    pub enabled: bool,
+    pub forced: bool,
 }
 
 /// `WITH [LOCAL | CASCADED] CHECK OPTION`.
@@ -853,6 +869,73 @@ pub struct DomainDef {
     pub unsupported: Vec<String>,
 }
 
+/// Politika komutu (`FOR …`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PolicyCommand {
+    All,
+    Select,
+    Insert,
+    Update,
+    Delete,
+}
+
+/// Satır güvenliği politikası (tablo kapsamlı).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PolicyDef {
+    pub schema: String,
+    /// Bağlamdan gelir; alter'da değişimi alan hatasıdır.
+    pub table: String,
+    pub name: String,
+    pub command: PolicyCommand,
+    /// `false` = `AS RESTRICTIVE`.
+    pub permissive: bool,
+    /// Boş liste = `PUBLIC`; yükleyici ada göre sıralı yazar.
+    pub roles: Vec<String>,
+    /// Serbest SQL.
+    pub using: Option<String>,
+    /// Serbest SQL.
+    pub with_check: Option<String>,
+    pub comment: Option<String>,
+    /// Yükleyici: salt okunur gerekçesi varsa `false`.
+    pub editable: bool,
+    pub unsupported: Vec<String>,
+    /// Yalnızca yükleme/varsayılan: tablonun güncel RLS durumu (üretici yalnız uyarı için okur).
+    #[serde(default)]
+    pub table_rls: Option<RowSecurity>,
+}
+
+/// Tablespace seçenekleri; her değer sayısal METİN (kanonik biçimde ifadeye yazılır).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TablespaceOptions {
+    pub seq_page_cost: Option<String>,
+    pub random_page_cost: Option<String>,
+    pub effective_io_concurrency: Option<String>,
+    /// PG 13+.
+    pub maintenance_io_concurrency: Option<String>,
+}
+
+/// Tablespace (sunucu kapsamlı).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TablespaceDef {
+    pub name: String,
+    pub owner: Option<String>,
+    /// Yalnızca create; alter'da değişimi alan hatasıdır.
+    pub location: String,
+    pub options: TablespaceOptions,
+    pub comment: Option<String>,
+    /// Yükleyici: sistem tablespace'i → `false`.
+    pub editable: bool,
+    pub unsupported: Vec<String>,
+}
+
 /// Arayüz ile arka uç arasındaki nesne tanımı (`kind` etiketi nesne türüdür).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -872,6 +955,8 @@ pub enum ObjectDef {
     Trigger(TriggerDef),
     Type(TypeDef),
     Domain(DomainDef),
+    Policy(PolicyDef),
+    Tablespace(TablespaceDef),
 }
 
 impl ObjectDef {
@@ -891,6 +976,8 @@ impl ObjectDef {
             ObjectDef::Trigger(_) => ObjectKind::Trigger,
             ObjectDef::Type(_) => ObjectKind::Type,
             ObjectDef::Domain(_) => ObjectKind::Domain,
+            ObjectDef::Policy(_) => ObjectKind::Policy,
+            ObjectDef::Tablespace(_) => ObjectKind::Tablespace,
         }
     }
 
@@ -910,6 +997,8 @@ impl ObjectDef {
             ObjectDef::Trigger(d) => &d.name,
             ObjectDef::Type(d) => &d.name,
             ObjectDef::Domain(d) => &d.name,
+            ObjectDef::Policy(d) => &d.name,
+            ObjectDef::Tablespace(d) => &d.name,
         }
     }
 }
@@ -1064,8 +1153,58 @@ mod tests {
             ],
             "partitionBy": {"strategy": "range", "keys": [{"kind": "column", "name": "id"}, {"kind": "expression", "sql": "lower(x)"}]},
             "fillfactor": 70, "comment": null,
-            "partitionText": "RANGE (id)", "isPartition": false, "inherits": true, "unsupported": ["EXCLUDE ex"]
+            "partitionText": "RANGE (id)", "isPartition": false, "inherits": true,
+            "rowSecurity": {"enabled": true, "forced": false}, "unsupported": ["EXCLUDE ex"]
         })
+    }
+
+    #[test]
+    fn table_row_security_defaults_off_when_missing() {
+        let mut v = table_json();
+        v.as_object_mut().unwrap().remove("rowSecurity");
+        let ObjectDef::Table(t) = serde_json::from_value(v).unwrap() else { panic!() };
+        assert_eq!(t.row_security, RowSecurity { enabled: false, forced: false });
+        assert_eq!(RowSecurity::default(), t.row_security);
+    }
+
+    #[test]
+    fn policy_and_tablespace_round_trip_camel_case() {
+        let policy = json!({
+            "kind": "policy", "schema": "public", "table": "t", "name": "p", "command": "update", "permissive": false,
+            "roles": ["a", "b"], "using": "x > 0", "withCheck": "x < 9", "comment": "c", "editable": true,
+            "unsupported": [], "tableRls": {"enabled": true, "forced": true}
+        });
+        let ObjectDef::Policy(p) = serde_json::from_value(policy.clone()).unwrap() else { panic!() };
+        assert_eq!((p.command, p.permissive, p.with_check.as_deref()), (PolicyCommand::Update, false, Some("x < 9")));
+        assert_eq!(p.table_rls, Some(RowSecurity { enabled: true, forced: true }));
+        let d = ObjectDef::Policy(p);
+        assert_eq!((d.kind(), d.name()), (ObjectKind::Policy, "p"));
+        assert_eq!(serde_json::to_value(&d).unwrap(), policy);
+        // `tableRls` eksikse `None`.
+        let mut no_rls = policy.clone();
+        no_rls.as_object_mut().unwrap().remove("tableRls");
+        let ObjectDef::Policy(p) = serde_json::from_value(no_rls).unwrap() else { panic!() };
+        assert_eq!(p.table_rls, None);
+        for (c, j) in [
+            (PolicyCommand::All, "all"),
+            (PolicyCommand::Select, "select"),
+            (PolicyCommand::Insert, "insert"),
+            (PolicyCommand::Update, "update"),
+            (PolicyCommand::Delete, "delete"),
+        ] {
+            assert_eq!(serde_json::to_value(c).unwrap(), j);
+        }
+        let ts = json!({
+            "kind": "tablespace", "name": "ts", "owner": null, "location": "/data/ts",
+            "options": {"seqPageCost": "1.5", "randomPageCost": null, "effectiveIoConcurrency": "2", "maintenanceIoConcurrency": null},
+            "comment": null, "editable": true, "unsupported": []
+        });
+        let d: ObjectDef = serde_json::from_value(ts.clone()).unwrap();
+        assert_eq!((d.kind(), d.name()), (ObjectKind::Tablespace, "ts"));
+        assert_eq!(serde_json::to_value(&d).unwrap(), ts);
+        assert_eq!(TablespaceOptions::default().seq_page_cost, None);
+        assert_eq!(serde_json::to_value(ObjectKind::Policy).unwrap(), "policy");
+        assert_eq!(serde_json::to_value(ObjectKind::Tablespace).unwrap(), "tablespace");
     }
 
     #[test]
@@ -1426,7 +1565,7 @@ mod tests {
     }
 
     #[test]
-    fn only_database_and_role_are_server_scoped() {
+    fn only_database_role_and_tablespace_are_server_scoped() {
         for (k, scoped) in [
             (ObjectKind::Schema, false),
             (ObjectKind::Sequence, false),
@@ -1442,6 +1581,8 @@ mod tests {
             (ObjectKind::Trigger, false),
             (ObjectKind::Type, false),
             (ObjectKind::Domain, false),
+            (ObjectKind::Policy, false),
+            (ObjectKind::Tablespace, true),
         ] {
             assert_eq!(k.server_scoped(), scoped, "{k:?}");
         }

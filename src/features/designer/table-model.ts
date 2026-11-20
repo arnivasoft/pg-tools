@@ -431,3 +431,22 @@ export function storageGate(mode: "create" | "alter", original: TableDef | null,
     tablespaceHint: loaded ? g.partitionedTablespaceAlter : createP ? g.partitionedTablespaceCreate : null,
   };
 }
+
+export type RowSecurityNote = "enableDestructive" | "disableWarning" | "forceWithoutEnable";
+
+/**
+ * Karar 8: alter'da RLS bayrak değişimi notları. `false → true` (ENABLE ya da FORCE) → `enableDestructive` (bir kez);
+ * `enabled true → false` → `disableWarning`. FORCE açılıyor ama taslakta RLS kapalıysa (ve açılmıyorsa) `enableDestructive`
+ * yerine bilgi notu `forceWithoutEnable`. Create (`original === null`) → [].
+ */
+export function rowSecurityNotes(original: TableDef | null, d: TableDef): RowSecurityNote[] {
+  if (!original) return [];
+  const a = original.rowSecurity ?? { enabled: false, forced: false };
+  const b = d.rowSecurity ?? { enabled: false, forced: false };
+  const notes: RowSecurityNote[] = [];
+  const forceOn = !a.forced && b.forced;
+  if ((!a.enabled && b.enabled) || (forceOn && b.enabled)) notes.push("enableDestructive");
+  else if (forceOn) notes.push("forceWithoutEnable");
+  if (a.enabled && !b.enabled) notes.push("disableWarning");
+  return notes;
+}

@@ -1,0 +1,18 @@
+---
+source: crates/pgt-ddl/src/build/tablespace.rs
+expression: out
+---
+[Safe non-tx] CREATE TABLESPACE ts LOCATION '/data/ts1'
+
+[Safe non-tx] CREATE TABLESPACE ts OWNER "Bob Sahip" LOCATION '/data/ts1'
+
+[Safe non-tx] CREATE TABLESPACE ts LOCATION E'C:\\pgdata\\ts'
+
+[Safe non-tx] CREATE TABLESPACE ts LOCATION 'd:/pgdata/ts'
+
+[Safe non-tx] CREATE TABLESPACE ts LOCATION E'/data/a\\b'
+
+[Safe non-tx] CREATE TABLESPACE ts OWNER o LOCATION '/data/ts1' WITH (effective_io_concurrency = '200', maintenance_io_concurrency = '10', random_page_cost = '1.1', seq_page_cost = '1.5')
+[Safe non-tx] COMMENT ON TABLESPACE ts IS 'it''s'
+
+[Safe non-tx] CREATE TABLESPACE ts LOCATION '/data/ts1'

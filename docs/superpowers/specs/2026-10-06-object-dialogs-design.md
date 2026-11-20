@@ -37,8 +37,8 @@ Object Explorer salt okunurdu; Query Tool SQL yazdırır ama nesne tanımlamak i
 
 ### 1.3 Kapsam dışı
 
-- RLS politikaları, FDW/publication/subscription diyalogları (trigger, fonksiyon, procedure, type ve domain diyalogları artık kapsamdadır: bkz. `docs/superpowers/specs/2026-10-16-object-dialogs-routines-types-design.md`; GRANT/REVOKE yetki matrisi ve varsayılan yetkiler (`ALTER DEFAULT PRIVILEGES`) de artık kapsamdadır: bkz. `docs/superpowers/specs/2026-10-17-privileges-design.md`).
-- Partition oluşturma/bağlama (tablo diyaloğu yalnızca partitioned tablo **tanımlar**), inheritance, EXCLUDE kısıtları, tablespace oluşturma.
+- FDW/publication/subscription diyalogları (RLS politikaları ve tablespace artık kapsamdadır: bkz. `docs/superpowers/specs/2026-11-19-object-dialogs-remaining-design.md`; trigger, fonksiyon, procedure, type ve domain diyalogları artık kapsamdadır: bkz. `docs/superpowers/specs/2026-10-16-object-dialogs-routines-types-design.md`; GRANT/REVOKE yetki matrisi ve varsayılan yetkiler (`ALTER DEFAULT PRIVILEGES`) de artık kapsamdadır: bkz. `docs/superpowers/specs/2026-10-17-privileges-design.md`).
+- Partition oluşturma/bağlama (tablo diyaloğu yalnızca partitioned tablo **tanımlar**), inheritance, EXCLUDE kısıtları (tablespace oluşturma artık kapsamdadır: bkz. `docs/superpowers/specs/2026-11-19-object-dialogs-remaining-design.md`).
 - Kolon sırası değiştirme (PostgreSQL desteklemez; arayüz uyarır), toplu/şablonlu iş akışları, DDL geçmişi/geri alma.
 - Rol üyeliklerinde PG 16+ seçenekleri (`INHERIT`/`SET` per grant): yalnızca salt okunur gösterilir (yükleyici doldurur, üretici yazmaz; yeni üyelik sunucu varsayılanlarıyla verilir).
 

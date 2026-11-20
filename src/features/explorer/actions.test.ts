@@ -453,14 +453,38 @@ describe("yetki eylemleri (Yetkiler… / Varsayılan yetkiler…)", () => {
       "refresh", "copyName", "copyQualifiedName", "copyDdl",
     ]);
   });
-  it("indeks, trigger, eklenti, rol, kısıt, kolon (odak hedefleri), politika, tablespace ve koleksiyonlarda yok", () => {
+  it("indeks, trigger, eklenti, rol, kısıt, kolon (odak hedefleri), politika ve koleksiyonlarda yok", () => {
     for (const id of [
-      "idx-1", "trg-1", "ext-1", "role-1", "con-1", "col-id", "col-part", "vcol-1", "pol-1", "ts-1", "srv-up", "srv-down",
+      "idx-1", "trg-1", "ext-1", "role-1", "con-1", "col-id", "col-part", "vcol-1", "pol-1", "srv-up", "srv-down",
       "coll-tables", "coll-cols", "coll-con", "coll-part", "coll-fn", "coll-seq", "coll-roles", "coll-type",
     ]) {
       const a = actionsFor(s, node(s, id));
       for (const x of ACL) expect(a, `${id}: ${x}`).not.toContain(x);
     }
+  });
+  it("Plan 35: policy ve tablespace koleksiyonlarında createObject", () => {
+    // Nesne arama yalnız veritabanı altında; tablespace koleksiyonu sunucu altındadır.
+    expect(actionsFor(s, node(s, "coll-pol"))).toEqual(["searchObjects", "createObject", "refresh", "copyName"]);
+    expect(actionsFor(s, node(s, "coll-ts"))).toEqual(["createObject", "refresh", "copyName"]);
+  });
+  it("Plan 35: policy düğümünde edit/rename/drop; Yetkiler ve Varsayılan yetkiler yok", () => {
+    expect(des("pol-1")).toEqual(["editObject", "renameObject", "dropObject"]);
+  });
+  it("Plan 35: tablespace düğümünde edit/rename/Yetkiler/drop; Varsayılan yetkiler, bakım ve yedek yok", () => {
+    expect(des("ts-1")).toEqual(["editObject", "renameObject", "privilegesObject", "dropObject"]);
+    const a = actionsFor(s, node(s, "ts-1"));
+    for (const x of ["defaultPrivilegesObject", "maintenance", "backup"] as ActionId[]) expect(a).not.toContain(x);
+  });
+  it("Plan 35: kilitli sunucuda policy/tablespace designer eylemleri kapalı", () => {
+    const lockedTree = aclTree();
+    const srv = lockedTree.nodes.get("srv-up")!;
+    lockedTree.nodes.set("srv-up", { ...srv, flags: { ...srv.flags, locked: true } });
+    const viaTree = { state: () => lockedTree } as unknown as ActionDeps;
+    for (const id of ["pol-1", "ts-1"]) {
+      for (const a of ["editObject", "renameObject", "dropObject"] as ActionId[]) expect(disabledReason(a, viaTree, id)).toBe(t.query.hint.locked);
+    }
+    expect(disabledReason("privilegesObject", viaTree, "ts-1")).toBe(t.query.hint.locked);
+    for (const id of ["coll-pol", "coll-ts"]) expect(disabledReason("createObject", viaTree, id)).toBe(t.query.hint.locked);
   });
   it("grup 3 (designer grubu)", () => {
     for (const a of ACL) expect(groupOf(a)).toBe(groupOf("editObject"));

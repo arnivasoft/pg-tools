@@ -15,12 +15,12 @@
 
 mod common;
 
-use common::{Env, acl_role, cleanup_acl, guarded, servers, setup_in};
+use common::{Env, acl_role, cleanup_acl, drop_test_tablespaces, guarded, servers, setup_in, ts_name, ts_root};
 use pgt_core::Error;
 use pgt_core::testing::TestServer;
 use pgt_ddl::build::acl::privileges;
 use pgt_ddl::build::default_acl::default_privileges;
-use pgt_ddl::load_acl::{LARGE_OBJECTS_REASON, SYSTEM_SCHEMA_REASON};
+use pgt_ddl::load_acl::{LARGE_OBJECTS_REASON, SYSTEM_SCHEMA_REASON, SYSTEM_TABLESPACE_REASON};
 use pgt_ddl::*;
 
 const PFX: &str = "pgt_ddl_acl";
@@ -1106,4 +1106,113 @@ async fn def_large_body(ts: TestServer, tag: &'static str) {
     // Şema kapsamında genel large object girdisi görünmez.
     let ds = ldd(&env, None, Some(env.schema_oid(&s).await)).await;
     assert!(ds.unsupported.is_empty() && ds.editable, "{ds:?}");
+}
+
+// ================================================================================================================
+// tablespace yetkileri (Plan 34 Karar 11): sunucu kapsamlı, bakım veritabanında; `PGT_TEST_TS_ROOT` yoksa atlanır
+// ================================================================================================================
+
+/// Veritabanı + roller (`cleanup_acl`), ardından tablespace'ler: tablespace'teki yetkiler tablespace düşerken kalkar,
+/// roller en sonda silinir.
+async fn cleanup_ts_acl(ts: &TestServer, tag: &str) {
+    common::cleanup_in(ts, PFX, tag).await;
+    drop_test_tablespaces(ts, tag).await;
+    common::drop_acl_roles(ts, tag).await;
+}
+
+#[tokio::test]
+async fn tablespace_acl_grant_revoke_roundtrip_in_maintenance_db() {
+    for ts in servers() {
+        guarded(tablespace_acl_body(ts.clone()), cleanup_ts_acl(&ts, "tsacl")).await;
+    }
+}
+
+async fn tablespace_acl_body(ts: TestServer) {
+    use Privilege::*;
+    let Some(root) = ts_root() else { return };
+    let tag = "tsacl";
+    let env = setup(&ts, tag, &["a", "b"]).await;
+    let (r1, r2) = (role(tag, "a"), role(tag, "b"));
+    let name = ts_name(tag);
+    env.sql(&format!("CREATE TABLESPACE {} LOCATION '{root}/ts6'", quote_ident(&name))).await;
+    let oid: u32 = env.admin.query_one("SELECT oid FROM pg_tablespace WHERE spcname = $1::text", &[&name]).await.unwrap().get(0);
+    let tsref = ObjectRef { kind: ObjectKind::Tablespace, oid };
+    // Plan bakım veritabanında uygulanır (sunucu kapsamı); test veritabanı bağlantısı kullanılmaz.
+    let maint = pgt_core::testing::admin_client(&ts, &ts.config.maintenance_db).await;
+    let run = |p: Plan| {
+        let maint = &maint;
+        async move {
+            maint.batch_execute("BEGIN").await.unwrap();
+            for s in &p.statements {
+                maint.batch_execute(&s.sql).await.unwrap_or_else(|e| panic!("ifade başarısız: {}: {e}", s.sql));
+            }
+            maint.batch_execute("COMMIT").await.unwrap();
+        }
+    };
+    let me = Some(env.me.as_str());
+
+    // Varsayılan (NULL) ACL: sahip CREATE; `database_oid` yok sayılır.
+    let l = load_acl(&env.mgr, env.server, None, tsref).await.unwrap();
+    assert_default(&env, &l, ObjectKind::Tablespace, vec![row(me, &[Create])]);
+    assert_eq!(l.name, name);
+    assert_eq!(load_acl(&env.mgr, env.server, 12345u32, tsref).await.unwrap(), l);
+
+    // GRANT CREATE → yükle → eşit; WITH GRANT OPTION.
+    let step = |l: &AclDef, grants: Vec<AclGrant>| {
+        let new = AclDef { grants, ..l.clone() };
+        (privileges(&env.ctx(false), l, &new, false).unwrap_or_else(|e| panic!("plan reddedildi: {e:?}")), new)
+    };
+    let (p, _) = step(&l, vec![row(me, &[Create]), row(Some(&r1), &[Create])]);
+    assert_eq!(sqls(&p), [format!("GRANT CREATE ON TABLESPACE {} TO {}", quote_ident(&name), quote_ident(&r1))]);
+    run(p).await;
+    let l1 = load_acl(&env.mgr, env.server, None, tsref).await.unwrap();
+    assert_eq!(l1.grants, canonical(ObjectKind::Tablespace, vec![row(me, &[Create]), row(Some(&r1), &[Create])]));
+    assert!(l1.explicit);
+    assert_fixed(&env, &l1);
+
+    let (p, _) = step(&l1, vec![row(me, &[Create]), row(Some(&r1), &[Create]), row_go(Some(&r2), &[(Create, true)])]);
+    assert_eq!(sqls(&p), [format!("GRANT CREATE ON TABLESPACE {} TO {} WITH GRANT OPTION", quote_ident(&name), quote_ident(&r2))]);
+    run(p).await;
+    let l2 = load_acl(&env.mgr, env.server, None, tsref).await.unwrap();
+    assert_eq!(
+        l2.grants,
+        canonical(ObjectKind::Tablespace, vec![row(me, &[Create]), row(Some(&r1), &[Create]), row_go(Some(&r2), &[(Create, true)])])
+    );
+    assert_fixed(&env, &l2);
+
+    // REVOKE.
+    let (p, _) = step(&l2, vec![row(me, &[Create]), row_go(Some(&r2), &[(Create, true)])]);
+    assert_eq!(sqls(&p), [format!("REVOKE CREATE ON TABLESPACE {} FROM {}", quote_ident(&name), quote_ident(&r1))]);
+    run(p).await;
+    let l3 = load_acl(&env.mgr, env.server, None, tsref).await.unwrap();
+    assert_eq!(l3.grants, canonical(ObjectKind::Tablespace, vec![row(me, &[Create]), row_go(Some(&r2), &[(Create, true)])]));
+    assert_fixed(&env, &l3);
+
+    // Alan hatası: tablespace için CREATE dışı yetki.
+    let bad = AclDef { grants: vec![row(me, &[Create]), row(Some(&r1), &[Usage])], ..l3.clone() };
+    assert_eq!(paths(&privileges(&env.ctx(false), &l3, &bad, false).unwrap_err()).len(), 1);
+
+    // pg_default düzenlenebilir; pg_global salt okunur (GRANT anlamsız).
+    let sys = |n: &'static str| {
+        let env = &env;
+        async move {
+            let oid: u32 = env.admin.query_one("SELECT oid FROM pg_tablespace WHERE spcname = $1::text", &[&n]).await.unwrap().get(0);
+            load_acl(&env.mgr, env.server, None, ObjectRef { kind: ObjectKind::Tablespace, oid }).await.unwrap()
+        }
+    };
+    let d = sys("pg_default").await;
+    assert!(d.editable && d.unsupported.is_empty(), "{d:?}");
+    let g = sys("pg_global").await;
+    assert!(!g.editable && g.unsupported == [SYSTEM_TABLESPACE_REASON], "{g:?}");
+}
+
+#[tokio::test]
+async fn tablespace_acl_missing_oid_is_not_found() {
+    for ts in servers() {
+        let env = setup(&ts, "tsnf", &[]).await;
+        let r = load_acl(&env.mgr, env.server, None, ObjectRef { kind: ObjectKind::Tablespace, oid: 0 }).await;
+        let ok = matches!(r, Err(Error::NotFound(_)));
+        cleanup_acl(&ts, PFX, "tsnf").await;
+        assert!(ok, "{r:?}");
+    }
 }

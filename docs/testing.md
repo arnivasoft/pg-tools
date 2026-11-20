@@ -33,6 +33,12 @@ başlatır, her çalıştırmada rastgele üretilen (hiçbir yere yazılmayan) b
 Portlar 55410–55418'dir (sürüm başına bir port, çakışma yok). `powershell -File scripts/test-matrix.ps1 -Versions 13,15`
 biçiminde dışarıdan çağrıldığında liste tek dize olarak gelir; betik virgüllerden böler.
 
+`PGT_TEST_TS_ROOT` (isteğe bağlı): tablespace Docker testlerinin (`crates/pgt-ddl/tests/policy_roundtrip.rs`) kullandığı,
+SUNUCUNUN gördüğü ve `postgres` kullanıcısına ait dizin (içinde boş `ts1`…`ts8` alt dizinleri; her test kendi
+alt dizinini kullanır). Matris betiği her kapsayıcıda `/var/lib/postgresql/pgt_ts/ts1…ts8` dizinlerini oluşturup
+`chown`'lar ve değişkeni yalnızca test komutu süresince `/var/lib/postgresql/pgt_ts` olarak ayarlar. Değişken
+tanımlı değilse (örn. elle çalıştırma) tablespace testleri atlanır, başarısız sayılmaz (çıktıda not düşülür).
+
 Matris süresinin büyük kısmını tek başına performans testi (`five_thousand_tables_stay_within_budget`) oluşturur:
 her sunucuda 5.000 tablo kurar (7 sürümlük matriste ~215 s, 9 sürümde daha uzun; geri kalan tüm testler toplamda ~45 s). Hızlı yineleme için
 `-SkipPerf` bu testi `cargo test ... -- --skip five_thousand_tables_stay_within_budget` ile atlar; varsayılan

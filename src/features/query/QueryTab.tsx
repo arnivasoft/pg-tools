@@ -21,6 +21,7 @@ import type { TxAction } from "../../ipc/bindings/TxAction";
 import type { TxMode } from "../../ipc/bindings/TxMode";
 import { commands } from "../../ipc/commands";
 import { tabCommands } from "./tab-commands";
+import { qtCancel, qtMore } from "../../ipc/qt-more-commands";
 import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
 import { isProductionLabel } from "../servers/server-form";
@@ -431,12 +432,12 @@ export default function QueryTab(props: { ctl: QueryController }) {
     if (!id || !m?.session) return;
     if (m.op === "explain") {
       // EXPLAIN sürüyor: çalıştırma durumu değişmez; iptal hatası Mesajlar'a düşer.
-      void commands.qtCancel(m.session).catch((e) => notify(toPayload(e).message));
+      void qtCancel(m.session).catch((e) => notify(toPayload(e).message));
       return;
     }
     if (!canCancel(m.run)) return;
     ctl.dispatch(id, { type: "cancelRequested" });
-    void commands.qtCancel(m.session).catch((e) => notify(toPayload(e).message));
+    void qtCancel(m.session).catch((e) => notify(toPayload(e).message));
   };
 
   const loadMore = async (stmtIndex: number) => {
@@ -446,7 +447,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
     const runId = m.run.runId;
     ctl.patch(id, { op: "more" });
     try {
-      await commands.qtMore(m.session, stmtIndex, (ev) => ctl.dispatch(id, { type: "event", runId, event: ev }));
+      await qtMore(m.session, stmtIndex, (ev) => ctl.dispatch(id, { type: "event", runId, event: ev }));
     } catch (err) {
       const e = toPayload(err);
       ctl.dispatch(id, { type: "optionsChanged" }); // "daha fazla" kapanır

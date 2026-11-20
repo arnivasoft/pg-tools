@@ -12,7 +12,9 @@ import type { ObjectDef } from "../../ipc/bindings/ObjectDef";
 import type { ObjectKind } from "../../ipc/bindings/ObjectKind";
 import type { ObjectRef } from "../../ipc/bindings/ObjectRef";
 import type { PlanView } from "../../ipc/bindings/PlanView";
+import type { PolicyDef } from "../../ipc/bindings/PolicyDef";
 import type { Statement } from "../../ipc/bindings/Statement";
+import type { TableDef } from "../../ipc/bindings/TableDef";
 
 export type DesignerKind = ObjectKind;
 
@@ -58,6 +60,8 @@ const KIND_LABELS: Record<ObjectKind, string> = {
   trigger: "Trigger",
   type: "Type",
   domain: "Domain",
+  policy: "Politika",
+  tablespace: "Tablespace",
 };
 export function kindLabel(kind: ObjectKind): string {
   return KIND_LABELS[kind];
@@ -65,7 +69,7 @@ export function kindLabel(kind: ObjectKind): string {
 
 /** Plan 14: sunucu kapsamlı türler (bakım veritabanında; databaseOid her zaman null). */
 export function isServerScoped(kind: ObjectKind): boolean {
-  return kind === "database" || kind === "role";
+  return kind === "database" || kind === "role" || kind === "tablespace";
 }
 
 /** Planda gizlenmiş (parola) ifade var mı → Query Tool'a aktarılmaz/kopyalanmaz, uygulamada parola gerekir. */
@@ -106,6 +110,7 @@ export function defName(def: DesignerDef): string {
     case "domain":
       return `${def.schema}.${def.name}`;
     case "trigger":
+    case "policy":
       return `${def.schema}.${def.table}.${def.name}`;
     default:
       return def.name;
@@ -417,4 +422,43 @@ export function focusFieldOf(f: DdlFocus): string {
 export function parseFocusField(field: string): DdlFocus | null {
   const m = /^(column|constraint):([0-9]+)$/.exec(field);
   return m ? ({ kind: m[1] as DdlFocus["kind"], id: Number(m[2]) }) : null;
+}
+
+/** `policyTabsForTable` için sekme özeti (denetleyici modelinden). */
+export interface PolicyTabProbe {
+  tabId: string;
+  serverId: string;
+  databaseOid: number | null;
+  kind: ObjectKind;
+  variant: DesignerVariant;
+  original: DesignerDef | null;
+}
+
+/**
+ * Karar 9 (spec §9.3): tablo alter'ı sonrası yenilenecek politika sekmeleri. Tetik: RLS bayrağı, ad ya da şema değişti;
+ * değilse []. Eşleşme: aynı sunucu + veritabanı, nesne sekmesi, yüklü politikanın tablosu `before` tablosu.
+ */
+export function policyTabsForTable(
+  tabs: readonly PolicyTabProbe[],
+  serverId: string,
+  databaseOid: number | null,
+  before: TableDef,
+  after: TableDef,
+): string[] {
+  const rsOf = (t: TableDef) => t.rowSecurity ?? { enabled: false, forced: false };
+  const triggered =
+    rsOf(before).enabled !== rsOf(after).enabled ||
+    rsOf(before).forced !== rsOf(after).forced ||
+    before.name !== after.name ||
+    before.schema !== after.schema;
+  if (!triggered) return [];
+  return tabs
+    .filter((t) => {
+      if (t.variant !== "object" || t.kind !== "policy" || t.serverId !== serverId || t.databaseOid !== databaseOid) return false;
+      const o = t.original;
+      if (!o || !isObjectDef(o) || o.kind !== "policy") return false;
+      const pol: PolicyDef = o;
+      return pol.schema === before.schema && pol.table === before.name;
+    })
+    .map((t) => t.tabId);
 }

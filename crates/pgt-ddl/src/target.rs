@@ -174,6 +174,19 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
                 t.create = create(ObjectKind::Trigger, Some(s), Some(tbl));
             }
         }
+        // Politika: ağaçta geçerli konumdaki (bölüm dahil) tablonun altında.
+        Some(Seg::Policy(oid)) => {
+            if parent_table.is_some() {
+                t.object = obj(ObjectKind::Policy, oid);
+            }
+        }
+        Some(Seg::Coll(Coll::Policies)) => {
+            if let Some(tbl) = parent_table
+                && let Some(s) = path.iter().rev().find_map(|s| if let Seg::Schema(o) = s { Some(*o) } else { None })
+            {
+                t.create = create(ObjectKind::Policy, Some(s), Some(tbl));
+            }
+        }
         Some(Seg::Coll(Coll::Indexes)) => {
             // Şema, yoldaki en yakın `Schema` parçasıdır; tablo koleksiyonun hemen üstündeki parçadır.
             if let Some(Seg::Table(tbl)) = prev
@@ -194,6 +207,8 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
             Seg::Coll(Coll::Roles) => t.create = create(ObjectKind::Role, None, None),
             Seg::Db(oid) => t.object = obj(ObjectKind::Database, oid),
             Seg::Role(oid) => t.object = obj(ObjectKind::Role, oid),
+            Seg::Coll(Coll::Tablespaces) => t.create = create(ObjectKind::Tablespace, None, None),
+            Seg::Tablespace(oid) => t.object = obj(ObjectKind::Tablespace, oid),
             _ => {}
         }
         if t.object.is_some() || t.create.is_some() {
@@ -232,6 +247,8 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
             ObjectKind::Trigger => Coll::Triggers,
             ObjectKind::Type => Coll::Types,
             ObjectKind::Domain => Coll::Domains,
+            ObjectKind::Policy => Coll::Policies,
+            ObjectKind::Tablespace => Coll::Tablespaces,
         };
         t.refresh_node_id = Some(id.parent().child(Seg::Coll(coll)).to_string());
     }
@@ -295,6 +312,53 @@ mod tests {
         for (p, object, create, refresh) in cases {
             let x = t(p);
             assert_eq!((x.object, x.create, x.focus, x.database_oid), (object, create, None, Some(5)), "{p}");
+            assert_eq!(x.refresh_node_id, refresh, "{p}");
+            let id = x.refresh_node_id.unwrap();
+            assert_eq!(NodeId::parse(&id).unwrap().to_string(), id, "{p}");
+        }
+    }
+
+    #[test]
+    fn policy_and_tablespace_nodes() {
+        let s = |p: &str| Some(format!("srv:{U}/{p}"));
+        // (düğüm, nesne, oluşturma, databaseOid, yenilenecek düğüm)
+        let cases = [
+            (
+                "db:5/sch:2200/tbl:24576/pol:43",
+                obj(ObjectKind::Policy, 43),
+                None,
+                Some(5),
+                s("db:5/sch:2200/tbl:24576/policies"),
+            ),
+            // Bölüm tablosunun politikası da eşlenir.
+            (
+                "db:5/sch:2200/tbl:24576/tbl:24580/pol:44",
+                obj(ObjectKind::Policy, 44),
+                None,
+                Some(5),
+                s("db:5/sch:2200/tbl:24576/tbl:24580/policies"),
+            ),
+            (
+                "db:5/sch:2200/tbl:24576/policies",
+                None,
+                cr(ObjectKind::Policy, Some(2200), Some(24576)),
+                Some(5),
+                s("db:5/sch:2200/tbl:24576/policies"),
+            ),
+            (
+                "db:5/sch:2200/tbl:24576/tbl:24580/policies",
+                None,
+                cr(ObjectKind::Policy, Some(2200), Some(24580)),
+                Some(5),
+                s("db:5/sch:2200/tbl:24576/tbl:24580/policies"),
+            ),
+            // Tablespace sunucu kapsamlı: databaseOid her zaman yok.
+            ("tablespaces", None, cr(ObjectKind::Tablespace, None, None), None, s("tablespaces")),
+            ("ts:1663", obj(ObjectKind::Tablespace, 1663), None, None, s("tablespaces")),
+        ];
+        for (p, object, create, db, refresh) in cases {
+            let x = t(p);
+            assert_eq!((x.object, x.create, x.database_oid, x.focus), (object, create, db, None), "{p}");
             assert_eq!(x.refresh_node_id, refresh, "{p}");
             let id = x.refresh_node_id.unwrap();
             assert_eq!(NodeId::parse(&id).unwrap().to_string(), id, "{p}");
@@ -379,7 +443,7 @@ mod tests {
         assert_eq!(r("db:5/sch:2200/view:30"), s("db:5/sch:2200/views"));
         assert_eq!(r("db:5/sch:2200/matviews"), s("db:5/sch:2200/matviews"));
         assert_eq!(r("db:5/sch:2200/mv:31"), s("db:5/sch:2200/matviews"));
-        for p in ["", "db:5/sch:2200/tbl:24576/columns", "db:5/sch:2200/tbl:24576/partitions", "tablespaces", "ts:1663"] {
+        for p in ["", "db:5/sch:2200/tbl:24576/columns", "db:5/sch:2200/tbl:24576/partitions"] {
             assert_eq!(r(p), None, "{p}");
         }
         // Üretilen kimlik gerçekten ayrıştırılıp aynen geri yazılabilir.
@@ -425,13 +489,22 @@ mod tests {
     fn other_nodes_are_empty() {
         for p in [
             "",
-            "tablespaces",
-            "ts:1663",
             "db:5/sch:2200/tbl:24576/columns",
             "db:5/sch:2200/tbl:24576/constraints",
             "db:5/sch:2200/tbl:24576/partitions",
-            "db:5/sch:2200/tbl:24576/policies",
-            "db:5/sch:2200/tbl:24576/pol:43",
+            // Politika yalnızca (bölüm) tablo altında; Tablespace yalnızca sunucunun hemen altında.
+            "db:5/sch:2200/policies",
+            "db:5/sch:2200/pol:43",
+            "db:5/pol:43",
+            "db:5/policies",
+            "db:5/sch:2200/view:30/policies",
+            "db:5/sch:2200/view:30/pol:43",
+            "db:5/sch:2200/tbl:24576/policies/pol:43",
+            "db:5/tablespaces",
+            "db:5/ts:1663",
+            "db:5/sch:2200/ts:1663",
+            "tbl:1/pol:2",
+            "tbl:1/policies",
             // Görünüm / materialized view kolonları tablo diyaloğu açmaz.
             "db:5/sch:2200/view:30/columns",
             "db:5/sch:2200/view:30/col:1",

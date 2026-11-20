@@ -6,14 +6,15 @@ import type { TableDef } from "../../ipc/bindings/TableDef";
 import { defsEqual, groupIssues } from "./designer-model";
 import {
   addPartitionKey, addTableColumn, applySerialFix, columnDetailsHaveIssues, columnLockGate, removeColumnRestoringName, columnTypeWarning, primaryKeyMember, partitionColumnChoices, partitionKeyLabel, allowedValueSources, asTable, columnRefs, newColumn, originalColumn, removePartitionKey, removeTableColumn,
-  removedColumns, renameTable, renameTableColumn, restoreColumn, rowOfFocus, sectionHasIssues, selfRefs, serialFix, storageGate, structureLocked,
+  removedColumns, renameTable, renameTableColumn, restoreColumn, rowOfFocus, rowSecurityNotes, sectionHasIssues, selfRefs, serialFix, storageGate, structureLocked,
   switchPartitionKeyKind, tableSections, typeQueryOf, typeTextWarning, updatePartitionKey, updateTableColumn, usingVisible,
   valueExpr, valueSourceOf, withCollation, withDataType, withPartitionStrategy, withValueExpr, withValueSource,
 } from "./table-model";
 
 const T = (p: Partial<TableDef> = {}): TableDef => ({
   schema: "public", name: "t", owner: null, tablespace: null, persistence: "permanent", columns: [], constraints: [], partitionBy: null,
-  fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false, unsupported: [], ...p,
+  fillfactor: null, comment: null, partitionText: null, isPartition: false, inherits: false,
+  rowSecurity: { enabled: false, forced: false }, unsupported: [], ...p,
 });
 const col = (name: string, attnum: number | null, p: Partial<ColumnDef> = {}): ColumnDef => ({ ...newColumn(), name, attnum, dataType: "integer", ...p });
 const uq = (columns: string[], oid: number | null, include: string[] = []): ConstraintDef => ({
@@ -426,5 +427,26 @@ describe("kolon ızgarası yardımcıları (Task 6)", () => {
     expect(columnLockGate(false, T({ inherits: true }))).toEqual({ structure: true, comment: false });
     expect(columnLockGate(true, T())).toEqual({ structure: true, comment: true });
     expect(columnLockGate(false, null)).toEqual({ structure: false, comment: false });
+  });
+});
+
+describe("rowSecurityNotes (Karar 8)", () => {
+  const rs = (enabled: boolean, forced: boolean) => T({ rowSecurity: { enabled, forced } });
+  it("create (original null) ve değişmeyen → []", () => {
+    expect(rowSecurityNotes(null, rs(true, true))).toEqual([]);
+    expect(rowSecurityNotes(rs(false, false), rs(false, false))).toEqual([]);
+    expect(rowSecurityNotes(rs(true, false), rs(true, false))).toEqual([]);
+  });
+  it("enable false→true ya da forced false→true → enableDestructive (bir kez)", () => {
+    expect(rowSecurityNotes(rs(false, false), rs(true, false))).toEqual(["enableDestructive"]);
+    expect(rowSecurityNotes(rs(false, false), rs(false, true))).toEqual(["forceWithoutEnable"]);
+    expect(rowSecurityNotes(rs(true, false), rs(true, true))).toEqual(["enableDestructive"]);
+    expect(rowSecurityNotes(rs(false, false), rs(true, true))).toEqual(["enableDestructive"]);
+  });
+  it("enabled true→false → disableWarning", () => {
+    expect(rowSecurityNotes(rs(true, false), rs(false, false))).toEqual(["disableWarning"]);
+  });
+  it("biri açılıp biri kapanınca iki not", () => {
+    expect(rowSecurityNotes(rs(true, false), rs(false, true))).toEqual(["forceWithoutEnable", "disableWarning"]);
   });
 });

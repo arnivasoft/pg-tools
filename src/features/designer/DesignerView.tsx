@@ -36,6 +36,8 @@ const FORMS: Record<ObjectKind, FormEntry> = {
   trigger: { view: lazy(() => import("./TriggerForm")), paths: FORM_PATHS.trigger },
   type: { view: lazy(() => import("./TypeForm")), paths: FORM_PATHS.type },
   domain: { view: lazy(() => import("./DomainForm")), paths: FORM_PATHS.domain },
+  policy: { view: lazy(() => import("./PolicyForm")), paths: FORM_PATHS.policy },
+  tablespace: { view: lazy(() => import("./TablespaceForm")), paths: FORM_PATHS.tablespace },
 };
 
 // Plan 22: yetki sekmelerinin formları (`variant !== "object"`; ayrı tembel parçalar, kendi prop tipleriyle). Hata yolları

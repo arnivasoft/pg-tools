@@ -64,7 +64,7 @@ pub fn object_target(d: &AclDef) -> Result<String, Vec<FieldError>> {
         return Err(vec![err("object", UNSUPPORTED_KIND_MSG)]);
     }
     let mut e = vec![];
-    let schemaless = matches!(d.kind, ObjectKind::Schema | ObjectKind::Database);
+    let schemaless = matches!(d.kind, ObjectKind::Schema | ObjectKind::Database | ObjectKind::Tablespace);
     match (&d.schema, schemaless) {
         (Some(_), true) => e.push(err("schema", SCHEMA_EXTRA_MSG)),
         (None, false) => e.push(err("schema", SCHEMA_MISSING_MSG)),
@@ -92,6 +92,7 @@ pub fn object_target(d: &AclDef) -> Result<String, Vec<FieldError>> {
         ObjectKind::Procedure => format!("PROCEDURE {}({})", rel(), d.signature.as_deref().unwrap_or_default()),
         ObjectKind::Schema => format!("SCHEMA {}", quote_ident(&d.name)),
         ObjectKind::Database => format!("DATABASE {}", quote_ident(&d.name)),
+        ObjectKind::Tablespace => format!("TABLESPACE {}", quote_ident(&d.name)),
         ObjectKind::Type => format!("TYPE {}", rel()),
         ObjectKind::Domain => format!("DOMAIN {}", rel()),
         _ => unreachable!("acl_supported"),
@@ -392,6 +393,7 @@ mod tests {
         let (schema, name, signature) = match kind {
             ObjectKind::Schema => (None, "s", None),
             ObjectKind::Database => (None, "d", None),
+            ObjectKind::Tablespace => (None, "t", None),
             ObjectKind::Function | ObjectKind::Procedure => (Some("s".to_string()), "f", Some("integer".to_string())),
             _ => (Some("s".to_string()), "t", None),
         };
@@ -447,6 +449,7 @@ mod tests {
             (ObjectKind::Procedure, "PROCEDURE s.f(integer)"),
             (ObjectKind::Schema, "SCHEMA s"),
             (ObjectKind::Database, "DATABASE d"),
+            (ObjectKind::Tablespace, "TABLESPACE t"),
             (ObjectKind::Type, "TYPE s.t"),
             (ObjectKind::Domain, "DOMAIN s.t"),
         ];
@@ -609,6 +612,7 @@ mod tests {
             ObjectKind::Procedure,
             ObjectKind::Schema,
             ObjectKind::Database,
+            ObjectKind::Tablespace,
             ObjectKind::Type,
             ObjectKind::Domain,
         ] {
@@ -627,6 +631,20 @@ mod tests {
         // Salt okunur tanım: değişiklik yoksa boş plan.
         let ro = AclDef { editable: false, unsupported: vec!["yetki SET".into()], ..old.clone() };
         assert!(ok(&ro, &ro, false).statements.is_empty());
+    }
+
+    #[test]
+    fn tablespace_acl_errors() {
+        // Tablespace yalnız CREATE kabul eder; USAGE alan hatasıdır.
+        let base = def(ObjectKind::Tablespace);
+        let good = with(&base, vec![row(Some("r"), &plain(&[Create]))]);
+        assert!(privileges(&ctx(), &base, &good, false).is_ok());
+        let bad = with(&base, vec![row(Some("r"), &plain(&[Usage]))]);
+        let e = privileges(&ctx(), &base, &bad, false).unwrap_err();
+        assert_eq!(paths(e), ["grants[1].privileges[0].privilege"]);
+        // Tablespace şema taşımaz.
+        let with_schema = AclDef { schema: Some("s".into()), ..base.clone() };
+        assert_eq!(paths(object_target(&with_schema).unwrap_err()), ["schema"]);
     }
 
     #[test]

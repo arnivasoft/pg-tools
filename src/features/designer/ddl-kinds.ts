@@ -8,6 +8,8 @@ import type { NodeKind } from "../../ipc/bindings/NodeKind";
 export const DDL_OBJECT_KINDS: NodeKind[] = [
   "schema", "sequence", "extension", "index", "table", "view", "materializedView", "database", "role",
   "function", "procedure", "triggerFunction", "type", "domain", "trigger",
+  // Plan 35: RLS politikası ve tablespace.
+  "policy", "tablespace",
 ];
 /** …Collection: yukarıdaki her tür (ör. functionCollection, triggerFunctionCollection, triggerCollection). */
 export const DDL_CREATE_COLLECTIONS = DDL_OBJECT_KINDS.map((k) => `${k}Collection` as NodeKind);
@@ -23,11 +25,12 @@ export const canEditObject = (kind: NodeKind) => DDL_OBJECT_KINDS.includes(kind)
 export const DDL_ROW_KINDS: NodeKind[] = ["column", "constraint"];
 export const isTableRowKind = (kind: NodeKind) => DDL_ROW_KINDS.includes(kind);
 /**
- * Plan 22 (spec §8): "Yetkiler…" menüsünün göründüğü (ACL destekleyen) nesne düğümleri. Kolon/kısıt (tablo odak
+ * Plan 22 (spec §8): "Yetkiler…" menüsünün göründüğü (ACL destekleyen) nesne düğümleri. Plan 35: tablespace de
+ * (yalnız CREATE yetkisi; varsayılan yetki yok). Kolon/kısıt (tablo odak
  * hedefleri), indeks, trigger, eklenti ve rol yoktur. Salt okunur kararını (aggregate, sistem şeması…) arka uç verir.
  */
 export const ACL_KINDS: NodeKind[] = [
-  "table", "view", "materializedView", "sequence", "function", "procedure", "triggerFunction", "schema", "database", "type", "domain",
+  "table", "view", "materializedView", "sequence", "function", "procedure", "triggerFunction", "schema", "database", "type", "domain", "tablespace",
 ];
 /** Plan 25: "Bakım…" (VACUUM/ANALYZE/REINDEX/CLUSTER) menüsünün göründüğü düğümler. */
 export const MAINTENANCE_KINDS: ReadonlySet<NodeKind> = new Set<NodeKind>(["table", "materializedView", "index", "schema", "database"]);

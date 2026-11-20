@@ -26,7 +26,7 @@ export function dropRequest(object: ObjectRef, def: ObjectDef, cascade: boolean,
  */
 export function dropOptionsFor(kind: ObjectKind): { cascade: boolean; force: boolean } {
   if (kind === "database") return { cascade: false, force: true };
-  if (kind === "role") return { cascade: false, force: false };
+  if (kind === "role" || kind === "policy" || kind === "tablespace") return { cascade: false, force: false };
   return { cascade: true, force: false };
 }
 

@@ -86,11 +86,21 @@ export const TYPE_PATHS: ReadonlySet<string> = new Set(["schema", "name", "owner
 export const DOMAIN_PATHS: ReadonlySet<string> = new Set([
   "schema", "name", "owner", "comment", "baseType", "collation", "default", "constraints", "object",
 ]);
+/**
+ * Policy (spec §9.2): `roles` kökü `roles[i]` alt yollarını kapsar; `old.*` genel şeride düşer. `schema`/`table`/`object`
+ * salt okunur bilgi olsa da kök listededir (formun üstünde gösterilir).
+ */
+export const POLICY_PATHS: ReadonlySet<string> = new Set([
+  "schema", "table", "name", "roles", "using", "withCheck", "comment", "object",
+]);
+/** Tablespace: `options` kökü dört seçenek alanını kapsar; `old.*` genel şeride düşer. */
+export const TABLESPACE_PATHS: ReadonlySet<string> = new Set(["name", "owner", "location", "options", "comment", "object"]);
 /** Tür → bilinen yollar (testte denetlenir; her `ObjectKind` için tanımlı). */
 export const FORM_PATHS: Record<ObjectKind, ReadonlySet<string>> = {
   schema: SCHEMA_PATHS, extension: EXTENSION_PATHS, sequence: SEQUENCE_PATHS, index: INDEX_PATHS, table: TABLE_PATHS,
   view: VIEW_PATHS, materialized_view: MATVIEW_PATHS, database: DATABASE_PATHS, role: ROLE_PATHS,
   function: ROUTINE_PATHS, procedure: ROUTINE_PATHS, trigger: TRIGGER_PATHS, type: TYPE_PATHS, domain: DOMAIN_PATHS,
+  policy: POLICY_PATHS, tablespace: TABLESPACE_PATHS,
 };
 
 /**

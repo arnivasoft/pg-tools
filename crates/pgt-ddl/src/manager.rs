@@ -220,6 +220,11 @@ const FIND_MATVIEW_SQL: &str = "SELECT c.oid FROM pg_class c JOIN pg_namespace n
      WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'm'";
 const FIND_DATABASE_SQL: &str = "SELECT oid FROM pg_database WHERE datname = $1";
 const FIND_ROLE_SQL: &str = "SELECT oid FROM pg_roles WHERE rolname = $1";
+/// Tablespace (sunucu kapsamlı): ad.
+const FIND_TABLESPACE_SQL: &str = "SELECT oid FROM pg_tablespace WHERE spcname = $1";
+/// Policy: tablo (şema + ad → oid) + politika adı.
+const FIND_POLICY_SQL: &str = "SELECT p.oid FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid \
+     JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND p.polname = $3";
 /// Fonksiyon: şema + ad + giriş tipleri (`proargtypes`, OUT hariç). `to_regprocedure` kullanılmaz: tipler tek tek
 /// `regtype` ile çözülür ve oid listesi (`oidvector` metni: boşlukla ayrık) karşılaştırılır; aşırı yüklemede doğru
 /// nesne. `{kind}` sürüme göre tür süzgeci (PG 11+ `prokind`). `::regtype` çözümü havuzdaki katalog bağlantısının
@@ -357,6 +362,16 @@ pub const MAINTENANCE_LOCK_HINT: &str = "Nesne başka bir oturumca kilitli; daha
 pub const MAINTENANCE_PRIVILEGE_HINT: &str = "Bakım işlemi için nesnenin sahibi (ya da PG 17+'da MAINTAIN yetkisi) gerekir.";
 /// Plan 24: seçenek bu nesnede desteklenmiyor (0A000; ör. REINDEX CONCURRENTLY sistem kataloğunda).
 pub const MAINTENANCE_UNSUPPORTED_HINT: &str = "Bu nesnede bu seçenek desteklenmiyor.";
+/// Plan 34: `DROP TABLESPACE` boş olmayan tablespace'te (55000).
+pub const TABLESPACE_NOT_EMPTY_HINT: &str =
+    "Tablespace boş değil; önce içindeki nesneleri başka tablespace'e taşıyın (başka veritabanlarındaki nesneler de sayılır).";
+/// `CREATE TABLESPACE` süper kullanıcı ister (42501; genel yetki ipucunun yerine). 42501 dizin sahipliğinden de gelebilir.
+pub const TABLESPACE_SUPERUSER_HINT: &str =
+    "Tablespace oluşturmak süper kullanıcı yetkisi ister; konum dizini de PostgreSQL hizmet kullanıcısına ait olmalı.";
+/// `CREATE TABLESPACE` konum hatası (58P01 dizin yok, 42P17 göreli yol). 22023 çoğunlukla WITH sınırlarından gelir: ipucu yok.
+pub const TABLESPACE_LOCATION_HINT: &str = "Konum sunucuda var olan, PostgreSQL hizmet kullanıcısına ait boş bir dizin olmalı.";
+/// `CREATE TABLESPACE` konum başka bir tablespace tarafından kullanılıyor (55006).
+pub const TABLESPACE_IN_USE_HINT: &str = "Bu konum zaten bir tablespace tarafından kullanılıyor; boş ve kullanılmayan bir dizin seçin.";
 /// Plan 24: transaction bloğu içinde çalıştırılamaz (25001). Bakım ifadeleri transaction dışıdır; beklenmez, savunma.
 pub const MAINTENANCE_TX_HINT: &str = "Bu bakım işlemi transaction bloğu içinde çalıştırılamaz; yeniden deneyin.";
 
@@ -402,6 +417,10 @@ fn identity_changed(old: &ObjectDef, new: &ObjectDef) -> bool {
         (ObjectDef::Trigger(a), ObjectDef::Trigger(b)) => a.name != b.name || build::trigger::structure_changed(a, b),
         (ObjectDef::Type(a), ObjectDef::Type(b)) => (&a.schema, &a.name) != (&b.schema, &b.name),
         (ObjectDef::Domain(a), ObjectDef::Domain(b)) => (&a.schema, &a.name) != (&b.schema, &b.name),
+        // Plan 34: yeniden adlandırma oid'i korur (yeni adla arama aynı oid'i bulur); yeniden kurma (DROP + CREATE) yeni
+        // oid üretir — açık tasarımcı sekmesi `created` ile yeni nesneye geçer, bu yüzden ad farkı YA DA yeniden kurma.
+        (ObjectDef::Policy(a), ObjectDef::Policy(b)) => a.name != b.name || build::policy::needs_rebuild(a, b),
+        (ObjectDef::Tablespace(a), ObjectDef::Tablespace(b)) => a.name != b.name,
         _ => false,
     }
 }
@@ -453,6 +472,8 @@ fn read_only_refusal(req: &PlanRequest) -> Option<String> {
         ObjectDef::Trigger(d) => (d.editable, &d.unsupported),
         ObjectDef::Type(d) => (d.editable, &d.unsupported),
         ObjectDef::Domain(d) => (d.editable, &d.unsupported),
+        ObjectDef::Policy(d) => (d.editable, &d.unsupported),
+        ObjectDef::Tablespace(d) => (d.editable, &d.unsupported),
         _ => return None,
     };
     refuse(editable, unsupported.first())
@@ -464,7 +485,7 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
     const GENERIC: &str = "desteklenmeyen özellik";
     let Some(e) = entry else { return GENERIC };
     // (önek, gerekçe): ilk eşleşen kazanır; sabit girdiler kendi metniyle.
-    const PREFIXES: [(&str, &str); 41] = [
+    const PREFIXES: [(&str, &str); 44] = [
         ("LANGUAGE ", "desteklenmeyen dil (C/internal)"),
         ("BEGIN ATOMIC", "BEGIN ATOMIC (SQL standart gövde)"),
         ("AGGREGATE", "aggregate fonksiyonu"),
@@ -507,6 +528,10 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
         // Plan 24 bakım hedefi yükleyicisi (`load_maintenance`).
         ("bölümlenmiş indeks", "bölümlenmiş indeks"),
         ("geçici şema", "geçici şema (başka oturumun nesneleri)"),
+        // Plan 34 yükleyicileri: sistem tablespace'i, bilinmeyen politika komutu, bilinmeyen tablespace seçeneği.
+        ("Sistem tablespace'i", "sistem tablespace'i"),
+        ("komut '", "desteklenmeyen politika komutu"),
+        ("seçenek ", "desteklenmeyen tablespace seçeneği"),
         // Yükleyicinin `'<kod>' türü …` biçimleri (ilişki/tip/kısıt türü).
         ("'", ""),
     ];
@@ -515,7 +540,7 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
             if !reason.is_empty() {
                 return reason;
             }
-            return if e.ends_with("trigger'ı") {
+            return if e.ends_with("trigger'ı") || e.ends_with("ilişkinin politikası") {
                 "desteklenmeyen ilişki türü"
             } else if e.ends_with(" türü tip") {
                 "desteklenmeyen tip türü"
@@ -527,6 +552,12 @@ fn read_only_reason(entry: Option<&str>) -> &'static str {
         }
     }
     GENERIC
+}
+
+/// Başarısızlıkta `created` için yeniden aranacak tanım: yalnızca en az bir ifade kalıcılaşmışsa (`committed ≥ 1`;
+/// transaction dışı planlarda önceki ifadeler geri alınmaz — ör. `CREATE TABLESPACE` başarılı, `COMMENT` başarısız).
+fn created_after_failure(created: &Option<ObjectDef>, committed: u32) -> Option<&ObjectDef> {
+    created.as_ref().filter(|_| committed >= 1)
 }
 
 /// İpucu kararının istekten gelen bağlamı (başarısız ifadenin metni dışında).
@@ -679,6 +710,11 @@ fn hint_for(kind: ObjectKind, op: &str, ctx: HintCtx, sql: &str, code: &str) -> 
         ("55006", ObjectKind::Database) if sql.starts_with("CREATE DATABASE ") => TEMPLATE_IN_USE_HINT,
         ("55006", ObjectKind::Database) if sql.starts_with("DROP DATABASE ") && sql.ends_with(" WITH (FORCE)") => FORCE_LIMITS_HINT,
         ("55006", ObjectKind::Database) => DATABASE_IN_USE_HINT,
+        // Plan 34: Tablespace ipuçları (genel 42501 kolundan önce). 42710 + CREATE POLICY özel ipucu almaz (PG iletisi).
+        ("55000", ObjectKind::Tablespace) if sql.starts_with("DROP TABLESPACE ") => TABLESPACE_NOT_EMPTY_HINT,
+        ("42501", ObjectKind::Tablespace) if sql.starts_with("CREATE TABLESPACE ") => TABLESPACE_SUPERUSER_HINT,
+        ("58P01" | "42P17", ObjectKind::Tablespace) if sql.starts_with("CREATE TABLESPACE ") => TABLESPACE_LOCATION_HINT,
+        ("55006", ObjectKind::Tablespace) if sql.starts_with("CREATE TABLESPACE ") => TABLESPACE_IN_USE_HINT,
         // Plan 20 Karar 15: yetki istekleri işleme (`op`) göre; genel 42501 kolundan önce.
         ("42501", _) if op == "privileges" => ACL_PRIVILEGE_HINT,
         ("42501", _) if op == "default_privileges" => DEFAULT_ACL_PRIVILEGE_HINT,
@@ -820,6 +856,10 @@ const TABLE_NAME_SQL: &str = "SELECT n.nspname::text AS schema, c.relname::text 
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1 AND c.relkind IN ('r', 'm', 'p')";
 
 const TRIGGER_TABLE_SQL: &str = "SELECT n.nspname::text AS schema, c.relname::text AS name \
+     FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1 AND c.relkind IN ('r', 'p')";
+/// Politika tablosu: sıradan ve bölümlenmiş tablo + güncel RLS bayrakları.
+const POLICY_TABLE_SQL: &str = "SELECT n.nspname::text AS schema, c.relname::text AS name, \
+     c.relrowsecurity AS rls_enabled, c.relforcerowsecurity AS rls_forced \
      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1 AND c.relkind IN ('r', 'p')";
 /// Yeni fonksiyon/procedure gövde şablonu (plpgsql).
 const FUNCTION_BODY: &str = "BEGIN\n\nEND;";
@@ -1099,9 +1139,9 @@ impl DdlManager {
                     failure_payload_with(kind, op, hint, failed, committed, &error)
                 };
                 // Kısmi uygulama: oluşturulan/yeniden adlandırılan nesne yine de bulunur (ör. CREATE DATABASE kalıcı).
-                let created = match (&created, committed) {
-                    (Some(def), 1..) => self.find_created(server, target, def).await,
-                    _ => None,
+                let created = match created_after_failure(&created, committed) {
+                    Some(def) => self.find_created(server, target, def).await,
+                    None => None,
                 };
                 ApplyOutcome::Failed { failed_index, committed, sqlstate, position, error, created, messages }
             }
@@ -1276,6 +1316,8 @@ impl DdlManager {
                 (ObjectKind::Type, FIND_TYPE_SQL.into(), text(&[&d.schema, &d.name, &typtype.to_string()]))
             }
             ObjectDef::Domain(d) => (ObjectKind::Domain, FIND_TYPE_SQL.into(), text(&[&d.schema, &d.name, &"d".to_string()])),
+            ObjectDef::Policy(d) => (ObjectKind::Policy, FIND_POLICY_SQL.into(), text(&[&d.schema, &d.table, &d.name])),
+            ObjectDef::Tablespace(d) => (ObjectKind::Tablespace, FIND_TABLESPACE_SQL.into(), text(&[&d.name])),
         };
         let row = self
             .mgr
@@ -1423,6 +1465,7 @@ impl DdlManager {
                     partition_text: None,
                     is_partition: false,
                     inherits: false,
+                    row_security: RowSecurity::default(),
                     unsupported: vec![],
                 })
             }
@@ -1482,8 +1525,8 @@ impl DdlManager {
                     })
                 }
             }
-            ObjectKind::Database | ObjectKind::Role if ctx != CreateContext::default() => {
-                return invalid("Veritabanı ve rol sunucu düzeyinde oluşturulur (şema/tablo bağlamı olmadan).");
+            ObjectKind::Database | ObjectKind::Role | ObjectKind::Tablespace if ctx != CreateContext::default() => {
+                return invalid("Veritabanı, rol ve tablespace sunucu düzeyinde oluşturulur (şema/tablo bağlamı olmadan).");
             }
             ObjectKind::Database => ObjectDef::Database(DatabaseDef {
                 name: String::new(),
@@ -1604,6 +1647,35 @@ impl DdlManager {
                     unsupported: vec![],
                 })
             }
+            ObjectKind::Policy => {
+                let Some(table_oid) = ctx.table_oid else {
+                    return invalid("Politika yalnızca bir tablo altında oluşturulabilir.");
+                };
+                let (schema, table, rls) = self.policy_table(server, database_oid, table_oid).await?;
+                ObjectDef::Policy(PolicyDef {
+                    schema,
+                    table,
+                    name: String::new(),
+                    command: PolicyCommand::All,
+                    permissive: true,
+                    roles: vec![],
+                    using: None,
+                    with_check: None,
+                    comment: None,
+                    editable: true,
+                    unsupported: vec![],
+                    table_rls: Some(rls),
+                })
+            }
+            ObjectKind::Tablespace => ObjectDef::Tablespace(TablespaceDef {
+                name: String::new(),
+                owner: None,
+                location: String::new(),
+                options: TablespaceOptions::default(),
+                comment: None,
+                editable: true,
+                unsupported: vec![],
+            }),
         })
     }
 
@@ -1621,6 +1693,16 @@ impl DdlManager {
             .run(server, Target::Database(database_oid), move |c| async move { c.client.query_opt(TABLE_NAME_SQL, &[&oid]).await })
             .await?;
         row.map(|r| (r.get("schema"), r.get("name"))).ok_or_else(|| Error::NotFound("tablo".into()))
+    }
+
+    /// Politikanın tablosu (sıradan ve bölümlenmiş tablo) + güncel RLS bayrakları.
+    async fn policy_table(&self, server: Uuid, database_oid: u32, oid: u32) -> Result<(String, String, RowSecurity)> {
+        let row = self
+            .mgr
+            .run(server, Target::Database(database_oid), move |c| async move { c.client.query_opt(POLICY_TABLE_SQL, &[&oid]).await })
+            .await?;
+        row.map(|r| (r.get("schema"), r.get("name"), RowSecurity { enabled: r.get("rls_enabled"), forced: r.get("rls_forced") }))
+            .ok_or_else(|| Error::NotFound("tablo".into()))
     }
 
     /// Trigger'ın tablosu: yalnızca sıradan ve bölümlenmiş tablo (görünüm/MV/yabancı tablo trigger'ı kapsam dışı).
@@ -2058,6 +2140,7 @@ mod tests {
             partition_text: None,
             is_partition: false,
             inherits: false,
+            row_security: RowSecurity::default(),
             unsupported: vec![],
         })
     }
@@ -2131,6 +2214,8 @@ mod tests {
             ObjectKind::Trigger,
             ObjectKind::Type,
             ObjectKind::Domain,
+            ObjectKind::Policy,
+            ObjectKind::Tablespace,
         ];
         for k in kinds {
             for db in [None, Some(5)] {
@@ -2149,7 +2234,7 @@ mod tests {
 
     #[test]
     fn target_for_scopes() {
-        for k in [ObjectKind::Database, ObjectKind::Role] {
+        for k in [ObjectKind::Database, ObjectKind::Role, ObjectKind::Tablespace] {
             assert_eq!(target_for(k, None).unwrap(), Target::Maintenance, "{k:?}");
             assert_eq!(target_for(k, Some(5)).unwrap(), Target::Maintenance, "{k:?}: database_oid yok sayılır");
         }
@@ -2166,6 +2251,7 @@ mod tests {
             ObjectKind::Trigger,
             ObjectKind::Type,
             ObjectKind::Domain,
+            ObjectKind::Policy,
         ] {
             assert_eq!(target_for(k, Some(5)).unwrap(), Target::Database(5), "{k:?}");
             assert!(matches!(target_for(k, None), Err(Error::Invalid(m)) if m == NEEDS_DATABASE), "{k:?}");
@@ -2579,6 +2665,121 @@ mod tests {
         assert_eq!(read_only_refusal(&PlanRequest::Drop { object, def: schema("s"), cascade: false, force: false }), None);
     }
 
+    fn policy(name: &str) -> PolicyDef {
+        PolicyDef {
+            schema: "public".into(),
+            table: "t".into(),
+            name: name.into(),
+            command: PolicyCommand::All,
+            permissive: true,
+            roles: vec![],
+            using: Some("true".into()),
+            with_check: None,
+            comment: None,
+            editable: true,
+            unsupported: vec![],
+            table_rls: None,
+        }
+    }
+
+    fn tablespace(name: &str) -> TablespaceDef {
+        TablespaceDef {
+            name: name.into(),
+            owner: None,
+            location: "/data/ts".into(),
+            options: TablespaceOptions::default(),
+            comment: Some("c".into()),
+            editable: true,
+            unsupported: vec![],
+        }
+    }
+
+    #[test]
+    fn policy_and_tablespace_identity_gate_and_scope() {
+        // Kimlik: yalnız ad (Policy'de tablo değişimi üreticide alan hatası; yeniden kurma aynı adla oid'i bulur).
+        let (p, t) = (ObjectDef::Policy, ObjectDef::Tablespace);
+        let mut other = policy("p");
+        other.using = Some("false".into());
+        assert!(!identity_changed(&p(policy("p")), &p(other)), "yalnız ifade değişimi oid'i korur");
+        // Yeniden kurma (DROP + CREATE) yeni oid üretir: komut/permissive değişimi, ifadenin kaldırılması.
+        let rebuilt = |f: fn(&mut PolicyDef)| {
+            let mut n = policy("p");
+            f(&mut n);
+            identity_changed(&p(policy("p")), &p(n))
+        };
+        assert!(rebuilt(|n| n.command = PolicyCommand::Select));
+        assert!(rebuilt(|n| n.permissive = false));
+        assert!(rebuilt(|n| n.using = None));
+        assert!(identity_changed(&p(policy("p")), &p(policy("q"))));
+        assert!(!identity_changed(&t(tablespace("a")), &t(TablespaceDef { comment: None, ..tablespace("a") })));
+        assert!(identity_changed(&t(tablespace("a")), &t(tablespace("b"))));
+        // Salt okunur kapısı: alter ve drop, gerekçe genel ve adsız.
+        let ro_ts = TablespaceDef { editable: false, unsupported: vec!["Sistem tablespace'i".into()], ..tablespace("pg_default") };
+        let ro_pol = PolicyDef { editable: false, unsupported: vec!["komut 'zz_gizli'".into()], ..policy("zz_gizli") };
+        for def in [t(ro_ts), p(ro_pol)] {
+            let object = ObjectRef { kind: def.kind(), oid: 1 };
+            let drop = PlanRequest::Drop { object, def: def.clone(), cascade: false, force: false };
+            let alter = PlanRequest::Alter { object, old: def.clone(), new: def.clone() };
+            for r in [&drop, &alter] {
+                let m = read_only_refusal(r).expect("salt okunur reddedilmeli");
+                assert!(m.starts_with(READ_ONLY_PREFIX) && !m.contains("zz_gizli") && !m.contains("pg_default"), "{m}");
+            }
+            assert_eq!(read_only_refusal(&PlanRequest::Create { def, concurrently: false }), None);
+        }
+        let ok = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Policy, oid: 1 }, def: p(policy("p")), cascade: false, force: false };
+        assert_eq!(read_only_refusal(&ok), None);
+        // Nesne denetimi: iki tür de yeniden yükleme eşitliği ister.
+        assert!(matches!(object_check(&ok), Some(Expected::Def(o, d)) if o.kind == ObjectKind::Policy && *d == p(policy("p"))));
+        let drop_ts = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Tablespace, oid: 2 }, def: t(tablespace("a")), cascade: false, force: false };
+        assert!(matches!(object_check(&drop_ts), Some(Expected::Def(o, _)) if o.kind == ObjectKind::Tablespace));
+        // Tablespace sunucu kapsamlıdır: `database_oid` gerekmez.
+        assert_eq!(apply_target(&drop_ts, None).unwrap(), Target::Maintenance);
+    }
+
+    #[test]
+    fn tablespace_hints_follow_code_and_statement() {
+        let none = HintCtx::default();
+        let h = |k, op: &str, sql: &str, code: &str| hint_for(k, op, none, sql, code);
+        let ts = ObjectKind::Tablespace;
+        assert_eq!(h(ts, "drop", "DROP TABLESPACE t", "55000"), Some(TABLESPACE_NOT_EMPTY_HINT));
+        assert_eq!(h(ts, "drop", "ALTER TABLESPACE t RENAME TO u", "55000"), None);
+        assert_eq!(h(ts, "create", "CREATE TABLESPACE t LOCATION 'x'", "42501"), Some(TABLESPACE_SUPERUSER_HINT));
+        for code in ["58P01", "42P17"] {
+            assert_eq!(h(ts, "create", "CREATE TABLESPACE t LOCATION 'x'", code), Some(TABLESPACE_LOCATION_HINT), "{code}");
+            assert_eq!(h(ts, "alter", "ALTER TABLESPACE t SET (seq_page_cost = '1')", code), None, "{code}");
+        }
+        assert_eq!(h(ts, "create", "CREATE TABLESPACE t LOCATION 'x'", "55006"), Some(TABLESPACE_IN_USE_HINT));
+        assert_eq!(h(ts, "alter", "ALTER TABLESPACE t RENAME TO u", "55006"), None);
+        // 22023 (WITH seçenek sınırları) kural ipucu almaz.
+        assert_eq!(h(ts, "create", "CREATE TABLESPACE t LOCATION 'x' WITH (effective_io_concurrency = '4')", "22023"), None);
+        // Diğer tablespace ifadelerinde 42501 genel yetki ipucunu alır.
+        assert_eq!(h(ts, "alter", "ALTER TABLESPACE t OWNER TO r", "42501"), Some(PRIVILEGE_HINT));
+        // Politika yinelenen ad (42710): özel ipucu yok (PG iletisi yeter).
+        assert_eq!(h(ObjectKind::Policy, "create", "CREATE POLICY p ON public.t", "42710"), None);
+        // Metinler ad/konum taşımaz.
+        for t in [TABLESPACE_NOT_EMPTY_HINT, TABLESPACE_SUPERUSER_HINT, TABLESPACE_LOCATION_HINT, TABLESPACE_IN_USE_HINT] {
+            assert!(!t.contains('/'));
+        }
+    }
+
+    #[test]
+    fn tablespace_create_then_comment_failure_reports_created() {
+        // Plan: CREATE + COMMENT, ikisi de transaction dışı (Database kalıbı).
+        let req = PlanRequest::Create { def: ObjectDef::Tablespace(tablespace("pgt_ts")), concurrently: false };
+        let view = plan_view(&req, 160000);
+        assert_eq!(view.statements.len(), 2, "{view:?}");
+        assert!(view.statements.iter().all(|s| !s.transactional), "tüm tablespace ifadeleri transaction dışı");
+        assert!(view.statements[0].sql.starts_with("CREATE TABLESPACE ") && view.statements[1].sql.starts_with("COMMENT ON TABLESPACE "));
+        // COMMENT (indeks 1) başarısız → bir ifade kalıcı → `created` aranır; CREATE başarısızsa aranmaz.
+        let created = Some(ObjectDef::Tablespace(tablespace("pgt_ts")));
+        assert!(created_after_failure(&created, 1).is_some());
+        assert!(created_after_failure(&created, 0).is_none());
+        assert!(created_after_failure(&None, 1).is_none());
+        // Kısmi uygulama ipucu: ipucu yoksa kısmi uygulama söylenir.
+        let p = failure_payload_for(ObjectKind::Tablespace, "create", view.statements.get(1), 1, &q("XX000", None));
+        assert_eq!(p.hint.as_deref(), Some(PARTIAL_APPLY_HINT));
+    }
+
     #[test]
     fn read_only_reasons_are_generic() {
         // Yükleyicinin ürettiği her gerekçe biçimi (ad/değer taşıyanlar dahil) ad/değer içermeyen sabit metne iner.
@@ -2591,6 +2792,10 @@ mod tests {
             "sistem şeması",
             "SUPPORT zz_gizli",
             "TRANSFORM FOR TYPE",
+            "Sistem tablespace'i",
+            "komut 'zz_gizli'",
+            "seçenek zz_gizli",
+            "'zz_gizli' türü ilişkinin politikası",
             "tip zz_gizli",
             "argüman modu 'zz_gizli'",
             "adsız TABLE kolonu",

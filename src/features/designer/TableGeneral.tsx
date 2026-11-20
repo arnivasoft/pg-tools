@@ -11,11 +11,11 @@ import type { Persistence } from "../../ipc/bindings/Persistence";
 import type { TableDef } from "../../ipc/bindings/TableDef";
 import { Button } from "../../ui/Button";
 import { inputClass } from "../../ui/Field";
-import { CommentField, FieldRow, FreeSqlNote, OwnerSelect, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
+import { CheckRow, CommentField, FieldRow, FreeSqlNote, OwnerSelect, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
 import { exactIssues, fillfactorFromInput, normalizeEmpty, normalizeTablespaceEdit, orphanRowIssues, tablespaceChoices } from "./forms-model";
 import type { TableSectionProps } from "./table-form-state";
 import {
-  addPartitionKey, partitionColumnChoices, partitionKeyLabel, removePartitionKey, renameTable, storageGate, structureLocked,
+  addPartitionKey, partitionColumnChoices, partitionKeyLabel, removePartitionKey, renameTable, rowSecurityNotes, storageGate, structureLocked,
   switchPartitionKeyKind, updatePartitionKey, withPartitionStrategy, type TableDraft,
 } from "./table-model";
 
@@ -50,6 +50,9 @@ export function TableGeneral(props: TableSectionProps) {
   const d = () => props.draft;
   const originalTablespace = () => props.original?.tablespace ?? null;
   const persistenceChanged = () => alter() && props.original !== null && props.original.persistence !== d().persistence;
+  // Eski yüklemede `rowSecurity` olmayabilir (serde varsayılanı vardır): kapalı varsayılır.
+  const rls = () => d().rowSecurity ?? { enabled: false, forced: false };
+  const rlsNotes = () => (alter() ? rowSecurityNotes(props.original, d()) : []);
   // Bölümlenmiş tablo: her zaman reddedilen depolama denetimleri kilitli, sürüme bağlı olanlar ipucu.
   const gate = createMemo(() => storageGate(props.model.mode, props.original, d()));
 
@@ -198,6 +201,33 @@ export function TableGeneral(props: TableSectionProps) {
         disabled={props.readOnly}
         onChange={(v) => patch({ comment: v === null ? null : normalizeEmpty(v) })}
       />
+      <fieldset class="flex flex-col gap-2 rounded border border-border px-3 py-2">
+        <legend class="px-1 text-xs font-medium">{g.rls.legend}</legend>
+        <CheckRow
+          label={g.rls.enable}
+          path="rowSecurity.enabled"
+          issues={props.issues}
+          checked={rls().enabled}
+          disabled={props.readOnly}
+          onChange={(v) => patch({ rowSecurity: { ...rls(), enabled: v } })}
+        />
+        <CheckRow
+          label={g.rls.force}
+          path="rowSecurity.forced"
+          issues={props.issues}
+          hint={g.rls.forceHint}
+          checked={rls().forced}
+          disabled={props.readOnly}
+          onChange={(v) => patch({ rowSecurity: { ...rls(), forced: v } })}
+        />
+        <For each={rlsNotes()}>
+          {(n) => (
+            <span role="note" class={`text-xs ${n === "enableDestructive" ? "text-warn-text" : "text-muted"}`}>
+              {g.rls[n]}
+            </span>
+          )}
+        </For>
+      </fieldset>
       <Show when={alter() ? props.original?.partitionText : null}>
         {(text) => (
           <div class="flex flex-col gap-1">

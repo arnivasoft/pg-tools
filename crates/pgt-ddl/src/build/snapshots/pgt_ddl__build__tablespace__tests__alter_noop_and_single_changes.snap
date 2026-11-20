@@ -1,0 +1,22 @@
+---
+source: crates/pgt-ddl/src/build/tablespace.rs
+expression: out
+---
+[Safe non-tx] ALTER TABLESPACE ts RENAME TO ts2
+
+[Safe non-tx] ALTER TABLESPACE ts SET (random_page_cost = '1.1', seq_page_cost = '1')
+
+[Safe non-tx] ALTER TABLESPACE ts SET (seq_page_cost = '2')
+[Safe non-tx] ALTER TABLESPACE ts RESET (effective_io_concurrency, maintenance_io_concurrency, random_page_cost)
+
+[Safe non-tx] COMMENT ON TABLESPACE ts IS 'yeni'
+
+[Safe non-tx] COMMENT ON TABLESPACE ts IS NULL
+
+[Safe non-tx] ALTER TABLESPACE ts OWNER TO "Bob"
+
+[Safe non-tx] ALTER TABLESPACE ts RENAME TO ts9
+[Safe non-tx] ALTER TABLESPACE ts9 SET (effective_io_concurrency = '6', seq_page_cost = '3')
+[Safe non-tx] ALTER TABLESPACE ts9 RESET (maintenance_io_concurrency, random_page_cost)
+[Safe non-tx] COMMENT ON TABLESPACE ts9 IS 'x'
+[Safe non-tx] ALTER TABLESPACE ts9 OWNER TO bob

@@ -195,6 +195,7 @@ pub fn acl_supported(kind: ObjectKind) -> bool {
             | ObjectKind::Procedure
             | ObjectKind::Schema
             | ObjectKind::Database
+            | ObjectKind::Tablespace
             | ObjectKind::Type
             | ObjectKind::Domain
     )
@@ -208,6 +209,8 @@ const SEQUENCE: &[Privilege] = &[Usage, Select, Update];
 const EXECUTE: &[Privilege] = &[Execute];
 const SCHEMA: &[Privilege] = &[Usage, Create];
 const DATABASE: &[Privilege] = &[Create, Temporary, Connect];
+/// Tablespace (Plan 34 Karar 11): yalnız CREATE.
+const TABLESPACE: &[Privilege] = &[Create];
 const USAGE: &[Privilege] = &[Usage];
 
 fn table_set(version_num: u32) -> &'static [Privilege] {
@@ -222,6 +225,7 @@ pub fn privileges_for(kind: ObjectKind, version_num: u32) -> &'static [Privilege
         ObjectKind::Function | ObjectKind::Procedure => EXECUTE,
         ObjectKind::Schema => SCHEMA,
         ObjectKind::Database => DATABASE,
+        ObjectKind::Tablespace => TABLESPACE,
         ObjectKind::Type | ObjectKind::Domain => USAGE,
         _ => &[],
     }
@@ -251,6 +255,7 @@ pub fn acldefault_letter(kind: ObjectKind) -> char {
         ObjectKind::Function | ObjectKind::Procedure => 'f',
         ObjectKind::Schema => 'n',
         ObjectKind::Database => 'd',
+        ObjectKind::Tablespace => 't',
         ObjectKind::Type | ObjectKind::Domain => 'T',
         _ => 'r',
     }
@@ -298,6 +303,7 @@ mod tests {
         assert_eq!(privileges_for(ObjectKind::Procedure, 160000), [Execute]);
         assert_eq!(privileges_for(ObjectKind::Schema, 160000), [Usage, Create]);
         assert_eq!(privileges_for(ObjectKind::Database, 160000), [Create, Temporary, Connect]);
+        assert_eq!(privileges_for(ObjectKind::Tablespace, 160000), [Create]);
         assert_eq!(privileges_for(ObjectKind::Type, 160000), [Usage]);
         assert_eq!(privileges_for(ObjectKind::Domain, 160000), [Usage]);
         assert!(privileges_for(ObjectKind::Index, 170000).is_empty());
@@ -314,6 +320,7 @@ mod tests {
             ObjectKind::Procedure,
             ObjectKind::Schema,
             ObjectKind::Database,
+            ObjectKind::Tablespace,
             ObjectKind::Type,
             ObjectKind::Domain,
         ] {
@@ -348,6 +355,7 @@ mod tests {
         assert_eq!(acldefault_letter(ObjectKind::Procedure), 'f');
         assert_eq!(acldefault_letter(ObjectKind::Schema), 'n');
         assert_eq!(acldefault_letter(ObjectKind::Database), 'd');
+        assert_eq!(acldefault_letter(ObjectKind::Tablespace), 't');
         assert_eq!(acldefault_letter(ObjectKind::Type), 'T');
         assert_eq!(acldefault_letter(ObjectKind::Domain), 'T');
     }
