@@ -60,6 +60,11 @@ pub enum LookupRequest {
     /// `TriggerDef.function_schema/function_name`; ad noktalı olabilir, birleşik metin ayrıştırılmaz). `schema`: yalnız o
     /// şema; `None` → kullanıcı şemaları + `pg_catalog` (kullanıcı şemaları önce). En çok 5000.
     TriggerFunctions { schema: Option<String> },
+    /// `ATTACH PARTITION` için bağlanabilir tablolar (Plan 36): value = tablo adı, detail = şema adı. Veritabanı kapsamlı.
+    AttachableTables {
+        #[ts(type = "number")]
+        parent_oid: u32,
+    },
 }
 
 impl LookupRequest {
@@ -217,6 +222,8 @@ pub(crate) async fn lookup_at(mgr: &ConnectionManager, server: Uuid, target: Tar
         LookupRequest::Settings => items(&fetch(mgr, server, db, &SETTINGS, vec![]).await?),
         LookupRequest::Languages => items(&fetch(mgr, server, db, &LANGUAGES, vec![]).await?),
         LookupRequest::TriggerFunctions { schema } => items(&fetch(mgr, server, db, &TRIGGER_FUNCTIONS, vec![schema]).await?),
+        // Geçici: gövde Task 3'te (Plan 36).
+        LookupRequest::AttachableTables { .. } => return Err(pgt_core::Error::Invalid("henüz desteklenmiyor".to_string())),
     })
 }
 

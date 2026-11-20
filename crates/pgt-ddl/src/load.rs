@@ -198,6 +198,8 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into
         ObjectKind::Policy => load_policy(mgr, server, database_oid, obj.oid).await,
         // Sunucu kapsamlı: bakım veritabanında (veritabanı oid'i yok sayılır).
         ObjectKind::Tablespace => load_tablespace(mgr, server, Target::Maintenance, obj.oid).await,
+        // Geçici: yükleyici sonraki görevlerde (Plan 36).
+        ObjectKind::Partition => Err(Error::Invalid("henüz desteklenmiyor".to_string())),
     }
 }
 
@@ -223,6 +225,8 @@ pub async fn load_in(client: &Client, version_num: u32, obj: ObjectRef) -> Resul
         // `in_scope` bunları zaten eledi.
         ObjectKind::Database | ObjectKind::Role | ObjectKind::Tablespace => Err(Error::Invalid(SERVER_SCOPED_MSG.to_string())),
         ObjectKind::Policy => parse_policy(fetch_policy(client, v, oid).await.map_err(q)?),
+        // Geçici: yükleyici sonraki görevlerde (Plan 36).
+        ObjectKind::Partition => Err(Error::Invalid("henüz desteklenmiyor".to_string())),
     }
 }
 

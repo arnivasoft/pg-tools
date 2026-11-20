@@ -73,6 +73,10 @@ pub enum PlanRequest {
         cascade: bool,
         #[serde(default)]
         force: bool,
+        /// Yalnızca Partition: `DETACH PARTITION … CONCURRENTLY` (PG 14+). TS'de isteğe bağlı.
+        #[serde(default)]
+        #[ts(as = "Option<bool>", optional)]
+        concurrently: bool,
     },
     /// Nesne yetkileri (GRANT/REVOKE; Plan 20). `old` yüklenen etkin ACL'ye eşit olmalı (bkz. `Alter`).
     Privileges { object: ObjectRef, old: AclDef, new: AclDef, cascade: bool },
@@ -1316,6 +1320,8 @@ impl DdlManager {
                 (ObjectKind::Type, FIND_TYPE_SQL.into(), text(&[&d.schema, &d.name, &typtype.to_string()]))
             }
             ObjectDef::Domain(d) => (ObjectKind::Domain, FIND_TYPE_SQL.into(), text(&[&d.schema, &d.name, &"d".to_string()])),
+            // Geçici: oid araması sonraki görevlerde (Plan 36); en iyi çaba → `None`.
+            ObjectDef::Partition(_) => return None,
             ObjectDef::Policy(d) => (ObjectKind::Policy, FIND_POLICY_SQL.into(), text(&[&d.schema, &d.table, &d.name])),
             ObjectDef::Tablespace(d) => (ObjectKind::Tablespace, FIND_TABLESPACE_SQL.into(), text(&[&d.name])),
         };
@@ -1620,6 +1626,8 @@ impl DdlManager {
                     }),
                 }
             }
+            // Geçici: varsayılanlar sonraki görevlerde (Plan 36).
+            ObjectKind::Partition => return invalid("henüz desteklenmiyor"),
             ObjectKind::Trigger => {
                 let Some(table_oid) = ctx.table_oid else {
                     return invalid("Trigger yalnızca bir tablo altında oluşturulabilir.");
@@ -1757,9 +1765,11 @@ pub(crate) fn plan_view(req: &PlanRequest, version_num: u32) -> PlanView {
         PlanRequest::DefaultPrivileges { old, new, .. } => build::default_acl::default_privileges(&ctx(false), old, new),
         PlanRequest::Create { def, concurrently } => build::create(def, &ctx(*concurrently)),
         PlanRequest::Alter { old, new, .. } => build::alter(old, new, &ctx(false)),
-        PlanRequest::Drop { def, cascade, force, .. } => {
-            build::drop_with(def, build::DropOptions { cascade: *cascade, force: *force }, &ctx(false))
-        }
+        PlanRequest::Drop { def, cascade, force, concurrently, .. } => build::drop_with(
+            def,
+            build::DropOptions { cascade: *cascade, force: *force, concurrently: *concurrently },
+            &ctx(false),
+        ),
         // REINDEX CONCURRENTLY `ReindexOptions`'tan gelir (`ctx.concurrently` kullanılmaz).
         PlanRequest::Maintenance { target, op, .. } => build::maintenance::maintenance(&ctx(false), target, op),
     })
@@ -2055,7 +2065,7 @@ mod tests {
 
     #[test]
     fn request_and_outcome_json_shapes() {
-        let r = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid: 1 }, def: schema("a"), cascade: true, force: false };
+        let r = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Schema, oid: 1 }, def: schema("a"), cascade: true, force: false, concurrently: false };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v["op"], "drop");
         assert_eq!(v["def"]["kind"], "schema");
@@ -2183,10 +2193,10 @@ mod tests {
     #[test]
     fn plan_view_drop_passes_force() {
         let object = ObjectRef { kind: ObjectKind::Schema, oid: 1 };
-        let v = plan_view(&PlanRequest::Drop { object, def: schema("a"), cascade: false, force: true }, 160000);
+        let v = plan_view(&PlanRequest::Drop { object, def: schema("a"), cascade: false, force: true, concurrently: false }, 160000);
         assert!(v.empty);
         assert_eq!(v.errors[0].path, "force");
-        let v = plan_view(&PlanRequest::Drop { object, def: schema("a"), cascade: false, force: false }, 160000);
+        let v = plan_view(&PlanRequest::Drop { object, def: schema("a"), cascade: false, force: false, concurrently: false }, 160000);
         assert!(!v.empty && v.errors.is_empty());
     }
 
@@ -2635,7 +2645,7 @@ mod tests {
         let mut new = ro.clone();
         new.comment = Some("x".into());
         let alter = PlanRequest::Alter { object, old: ObjectDef::Function(ro.clone()), new: ObjectDef::Function(new) };
-        let drop = PlanRequest::Drop { object, def: ObjectDef::Function(ro.clone()), cascade: false, force: false };
+        let drop = PlanRequest::Drop { object, def: ObjectDef::Function(ro.clone()), cascade: false, force: false, concurrently: false };
         for req in [&alter, &drop] {
             let m = read_only_refusal(req).expect("salt okunur reddedilmeli");
             assert!(m.starts_with(READ_ONLY_PREFIX), "{m}");
@@ -2646,7 +2656,7 @@ mod tests {
         // Gerekçe ilk girdiden, genel biçimde.
         assert_eq!(read_only_refusal(&drop).unwrap(), format!("{READ_ONLY_PREFIX}{}", read_only_reason(Some("LANGUAGE c"))));
         // Düzenlenebilir nesne ve create geçer.
-        let ok = PlanRequest::Drop { object, def: ObjectDef::Function(func("f", &[])), cascade: false, force: false };
+        let ok = PlanRequest::Drop { object, def: ObjectDef::Function(func("f", &[])), cascade: false, force: false, concurrently: false };
         assert_eq!(read_only_refusal(&ok), None);
         assert_eq!(read_only_refusal(&PlanRequest::Create { def: ObjectDef::Function(ro.clone()), concurrently: false }), None);
         // Beş türün her biri.
@@ -2658,11 +2668,11 @@ mod tests {
         (dm.editable, dm.unsupported) = (false, vec![]);
         let p = ObjectDef::Procedure(FunctionDef { returns: None, ..ro.clone() });
         for def in [p, ObjectDef::Trigger(t), ObjectDef::Type(ty), ObjectDef::Domain(dm)] {
-            let req = PlanRequest::Drop { object: ObjectRef { kind: def.kind(), oid: 1 }, def, cascade: true, force: false };
+            let req = PlanRequest::Drop { object: ObjectRef { kind: def.kind(), oid: 1 }, def, cascade: true, force: false, concurrently: false };
             assert!(read_only_refusal(&req).is_some_and(|m| m.starts_with(READ_ONLY_PREFIX)), "{req:?}");
         }
         // Eski türler bu kapıdan etkilenmez.
-        assert_eq!(read_only_refusal(&PlanRequest::Drop { object, def: schema("s"), cascade: false, force: false }), None);
+        assert_eq!(read_only_refusal(&PlanRequest::Drop { object, def: schema("s"), cascade: false, force: false, concurrently: false }), None);
     }
 
     fn policy(name: &str) -> PolicyDef {
@@ -2718,7 +2728,7 @@ mod tests {
         let ro_pol = PolicyDef { editable: false, unsupported: vec!["komut 'zz_gizli'".into()], ..policy("zz_gizli") };
         for def in [t(ro_ts), p(ro_pol)] {
             let object = ObjectRef { kind: def.kind(), oid: 1 };
-            let drop = PlanRequest::Drop { object, def: def.clone(), cascade: false, force: false };
+            let drop = PlanRequest::Drop { object, def: def.clone(), cascade: false, force: false, concurrently: false };
             let alter = PlanRequest::Alter { object, old: def.clone(), new: def.clone() };
             for r in [&drop, &alter] {
                 let m = read_only_refusal(r).expect("salt okunur reddedilmeli");
@@ -2726,11 +2736,11 @@ mod tests {
             }
             assert_eq!(read_only_refusal(&PlanRequest::Create { def, concurrently: false }), None);
         }
-        let ok = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Policy, oid: 1 }, def: p(policy("p")), cascade: false, force: false };
+        let ok = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Policy, oid: 1 }, def: p(policy("p")), cascade: false, force: false, concurrently: false };
         assert_eq!(read_only_refusal(&ok), None);
         // Nesne denetimi: iki tür de yeniden yükleme eşitliği ister.
         assert!(matches!(object_check(&ok), Some(Expected::Def(o, d)) if o.kind == ObjectKind::Policy && *d == p(policy("p"))));
-        let drop_ts = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Tablespace, oid: 2 }, def: t(tablespace("a")), cascade: false, force: false };
+        let drop_ts = PlanRequest::Drop { object: ObjectRef { kind: ObjectKind::Tablespace, oid: 2 }, def: t(tablespace("a")), cascade: false, force: false, concurrently: false };
         assert!(matches!(object_check(&drop_ts), Some(Expected::Def(o, _)) if o.kind == ObjectKind::Tablespace));
         // Tablespace sunucu kapsamlıdır: `database_oid` gerekmez.
         assert_eq!(apply_target(&drop_ts, None).unwrap(), Target::Maintenance);
@@ -2920,7 +2930,7 @@ mod tests {
         let object = ObjectRef { kind: ObjectKind::Function, oid: 1 };
         let alter = PlanRequest::Alter { object, old: ObjectDef::Function(f.clone()), new: ObjectDef::Function(l.clone()) };
         assert!(HintCtx::of(&alter).leakproof);
-        let drop = PlanRequest::Drop { object, def: ObjectDef::Function(l), cascade: false, force: false };
+        let drop = PlanRequest::Drop { object, def: ObjectDef::Function(l), cascade: false, force: false, concurrently: false };
         assert!(!HintCtx::of(&drop).leakproof);
     }
 
@@ -2973,7 +2983,7 @@ mod tests {
         let comment = alter(&|n| n.comment = Some("c".into()));
         let limit = alter(&|n| n.connection_limit = 5);
         let no_conn = alter(&|n| n.connection_limit = 0);
-        let drop = PlanRequest::Drop { object, def: ObjectDef::Database(d("postgres")), cascade: false, force: false };
+        let drop = PlanRequest::Drop { object, def: ObjectDef::Database(d("postgres")), cascade: false, force: false, concurrently: false };
         for r in [&rename, &move_ts, &close, &no_conn, &drop] {
             assert!(touches_maintenance(r, "postgres"), "{r:?}");
             assert!(!touches_maintenance(r, "other"), "{r:?}");

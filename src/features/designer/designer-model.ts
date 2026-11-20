@@ -62,6 +62,7 @@ const KIND_LABELS: Record<ObjectKind, string> = {
   domain: "Domain",
   policy: "Politika",
   tablespace: "Tablespace",
+  partition: "Bölüm",
 };
 export function kindLabel(kind: ObjectKind): string {
   return KIND_LABELS[kind];

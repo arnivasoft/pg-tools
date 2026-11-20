@@ -360,7 +360,7 @@ async fn routine_logging_body(ts: TestServer) {
     let ObjectDef::Type(mut loaded) = dm.load(server, db, object).await.unwrap() else { panic!() };
     loaded.editable = false;
     loaded.unsupported = vec!["EXTENSION zr_gizli_eklenti (eklentiye ait)".into()];
-    let req = PlanRequest::Drop { object, def: ObjectDef::Type(loaded), cascade: false, force: false };
+    let req = PlanRequest::Drop { object, def: ObjectDef::Type(loaded), cascade: false, force: false, concurrently: false };
     let r = dm.apply(server, db, &req, opts("x")).await;
     assert!(matches!(&r, Err(pgt_core::Error::Invalid(m)) if !m.contains("zr_gizli")), "{r:?}");
 }

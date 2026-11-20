@@ -105,13 +105,21 @@ fn defs() -> Vec<(ObjectKind, Value)> {
                    "options": {"seqPageCost": "1.5", "randomPageCost": null, "effectiveIoConcurrency": null, "maintenanceIoConcurrency": "4"},
                    "comment": null, "editable": true, "unsupported": []}),
         ),
+        (
+            ObjectKind::Partition,
+            json!({"kind": "partition", "parentSchema": "public", "parentTable": "m", "strategy": "range", "keyCount": 1,
+                   "mode": "create", "schema": "public", "name": "m_1",
+                   "bound": {"kind": "range", "from": [{"kind": "value", "sql": "1"}], "to": [{"kind": "maxvalue"}]},
+                   "partitionBy": null, "tablespace": null, "owner": null, "comment": null,
+                   "detachPending": false, "editable": true, "unsupported": []}),
+        ),
     ]
 }
 
 #[test]
 fn every_object_kind_has_a_json_fixture() {
     let kinds: Vec<ObjectKind> = defs().into_iter().map(|(k, _)| k).collect();
-    assert_eq!(kinds.len(), 16);
+    assert_eq!(kinds.len(), 17);
     for k in [
         ObjectKind::Function,
         ObjectKind::Procedure,
@@ -120,6 +128,7 @@ fn every_object_kind_has_a_json_fixture() {
         ObjectKind::Domain,
         ObjectKind::Policy,
         ObjectKind::Tablespace,
+        ObjectKind::Partition,
     ] {
         assert!(kinds.contains(&k), "{k:?}");
     }
@@ -183,7 +192,7 @@ fn plan_requests_parse_for_every_kind() {
         assert!(matches!(&c, PlanRequest::Create { def, concurrently: false } if def.kind() == kind));
         let a: PlanRequest = roundtrip(json!({"op": "alter", "object": {"kind": kind, "oid": 16384}, "old": def, "new": def}));
         assert!(matches!(&a, PlanRequest::Alter { new, object, .. } if new.kind() == kind && object.kind == kind));
-        let d: PlanRequest = roundtrip(json!({"op": "drop", "object": {"kind": kind, "oid": 16384}, "def": def, "cascade": true, "force": false}));
+        let d: PlanRequest = roundtrip(json!({"op": "drop", "object": {"kind": kind, "oid": 16384}, "def": def, "cascade": true, "force": false, "concurrently": false}));
         assert!(matches!(&d, PlanRequest::Drop { def, cascade: true, .. } if def.kind() == kind));
         // `object` zorunludur: eksik olan alter/drop reddedilir.
         assert!(serde_json::from_value::<PlanRequest>(json!({"op": "drop", "def": def, "cascade": true})).is_err());
@@ -215,8 +224,21 @@ fn apply_options_parse() {
     assert!(!format!("{o:?}").contains("p@ss"));
     assert_eq!(serde_json::to_value(&o).unwrap()["password"], "********");
     // Drop isteği `force: true` taşır.
-    let d: PlanRequest = roundtrip(json!({"op": "drop", "object": {"kind": "database", "oid": 1}, "def": defs()[0].1, "cascade": false, "force": true}));
+    let d: PlanRequest = roundtrip(json!({"op": "drop", "object": {"kind": "database", "oid": 1}, "def": defs()[0].1, "cascade": false, "force": true, "concurrently": false}));
     assert!(matches!(d, PlanRequest::Drop { force: true, .. }));
+}
+
+#[test]
+fn drop_request_concurrently_defaults_false() {
+    let part = defs().into_iter().find(|(k, _)| *k == ObjectKind::Partition).unwrap().1;
+    let base = json!({"op": "drop", "object": {"kind": "partition", "oid": 1}, "def": part, "cascade": false, "force": false});
+    // Alan yokken `false` (mevcut ön yüz çağrıları değişmez).
+    let d: PlanRequest = serde_json::from_value(base.clone()).unwrap();
+    assert!(matches!(d, PlanRequest::Drop { concurrently: false, .. }));
+    let mut with = base;
+    with["concurrently"] = json!(true);
+    let d: PlanRequest = roundtrip(with);
+    assert!(matches!(d, PlanRequest::Drop { concurrently: true, .. }));
 }
 
 #[test]

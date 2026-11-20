@@ -28,7 +28,7 @@ describe("dropRequest", () => {
     expect(dropRequest({ kind: "database", oid: 5 }, def(), false).force).toBe(false);
   });
 
-  it("dropOptionsFor: database → FORCE (CASCADE yok); role/policy/tablespace → hiçbiri; diğerleri → CASCADE", () => {
+  it("dropOptionsFor: database → FORCE (CASCADE yok); role/policy/tablespace/partition → hiçbiri; diğerleri → CASCADE", () => {
     const table: Record<ObjectKind, { cascade: boolean; force: boolean }> = {
       schema: { cascade: true, force: false }, sequence: { cascade: true, force: false }, extension: { cascade: true, force: false },
       index: { cascade: true, force: false }, table: { cascade: true, force: false }, view: { cascade: true, force: false },
@@ -37,6 +37,7 @@ describe("dropRequest", () => {
       function: { cascade: true, force: false }, procedure: { cascade: true, force: false }, trigger: { cascade: true, force: false },
       type: { cascade: true, force: false }, domain: { cascade: true, force: false },
       policy: { cascade: false, force: false }, tablespace: { cascade: false, force: false },
+      partition: { cascade: false, force: false },
     };
     for (const [k, v] of Object.entries(table)) expect(dropOptionsFor(k as ObjectKind)).toEqual(v);
   });

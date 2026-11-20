@@ -213,6 +213,7 @@ fn kind_label(k: ObjectKind) -> &'static str {
         ObjectKind::Role => "Rol",
         ObjectKind::Policy => "Politika",
         ObjectKind::Tablespace => "Tablespace",
+        ObjectKind::Partition => "Bölüm",
     }
 }
 
@@ -235,6 +236,7 @@ fn kind_rank(k: ObjectKind) -> u8 {
         ObjectKind::Role => 13,
         ObjectKind::Policy => 14,
         ObjectKind::Tablespace => 15,
+        ObjectKind::Partition => 16,
     }
 }
 

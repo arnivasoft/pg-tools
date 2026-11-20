@@ -67,6 +67,16 @@ pub struct DdlTarget {
     /// Uygulama sonrası arayüzün yenileyeceği ağaç düğümü: `create` için koleksiyonun kendisi, `object` için üst
     /// koleksiyon (bölüm tablosunda üst tablonun `partitions` koleksiyonu); kolon/kısıt düğümünde tablonun kendisi.
     pub refresh_node_id: Option<String>,
+    /// Yalnızca gerçek bölüm düğümünde (`…/tbl:P/tbl:C`): `object` (Table) ile aynı tablo, ama `Partition` türünde;
+    /// arayüz "Bölümü ayır" için kullanır.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub partition: Option<ObjectRef>,
+    /// Bölüm düğümünde ve `partitions` koleksiyonunda: bağlanan/ayrılan tablonun görüneceği şemanın `tables`
+    /// koleksiyonu (ikinci yenileme hedefi). Üst tablodan farklı şemadaki tablo için yenilenmez (bilinen sınır).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tables_refresh_node_id: Option<String>,
 }
 
 /// `path[i]` ağacın gerçekten tablo olarak listelediği bir yerde mi: şema altında ya da (bölüm) tablo altında.
@@ -84,7 +94,7 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
         return Err(Error::Invalid(format!("düğüm bir sunucuya ait değil: {node_id}")));
     };
     let database_oid = path.iter().find_map(|s| if let Seg::Db(o) = s { Some(*o) } else { None });
-    let mut t = DdlTarget { server_id: server, database_oid, object: None, create: None, focus: None, refresh_node_id: None };
+    let mut t = DdlTarget { server_id: server, database_oid, object: None, create: None, focus: None, refresh_node_id: None, partition: None, tables_refresh_node_id: None };
     let obj = |kind, oid| Some(ObjectRef { kind, oid });
     let create = |kind, schema_oid, table_oid| Some(DdlCreate { kind, context: CreateContext { schema_oid, table_oid }, preset: None });
     let last = path.len().checked_sub(1);
@@ -99,6 +109,10 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
         Some(Seg::Table(_)) => {
             if let Some(oid) = last.and_then(|i| table_at(path, i)) {
                 t.object = obj(ObjectKind::Table, oid);
+                // Üst tablonun altındaki tablo düğümü gerçek bir bölümdür (şema altındaki sıradan tablo değil).
+                if matches!(prev, Some(Seg::Table(_))) {
+                    t.partition = obj(ObjectKind::Partition, oid);
+                }
             }
         }
         // Sistem kolonları (attnum ≤ 0) ağaçta listelenmez; yine de düzenlenemez.
@@ -187,6 +201,14 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
                 t.create = create(ObjectKind::Policy, Some(s), Some(tbl));
             }
         }
+        // Bölüm oluşturma: üst (bölümlü) tablonun `partitions` koleksiyonu; şema yoldaki en yakın şemadır.
+        Some(Seg::Coll(Coll::Partitions)) => {
+            if let Some(tbl) = parent_table
+                && let Some(s) = path.iter().rev().find_map(|s| if let Seg::Schema(o) = s { Some(*o) } else { None })
+            {
+                t.create = create(ObjectKind::Partition, Some(s), Some(tbl));
+            }
+        }
         Some(Seg::Coll(Coll::Indexes)) => {
             // Şema, yoldaki en yakın `Schema` parçasıdır; tablo koleksiyonun hemen üstündeki parçadır.
             if let Some(Seg::Table(tbl)) = prev
@@ -201,7 +223,7 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
     // `role:N`); bakım veritabanında çalışırlar → `database_oid` her zaman `None` (yol `Db` içerse bile).
     if path.len() == 1 {
         // Tek parçalı yolda veritabanı kapsamlı bir hedef olamaz (ör. `sch:2200`, `tables`).
-        (t.object, t.create, t.focus) = (None, None, None);
+        (t.object, t.create, t.focus, t.partition) = (None, None, None, None);
         match path[0] {
             Seg::Coll(Coll::Databases) => t.create = create(ObjectKind::Database, None, None),
             Seg::Coll(Coll::Roles) => t.create = create(ObjectKind::Role, None, None),
@@ -219,6 +241,7 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
         t.object = None;
         t.create = None;
         t.focus = None;
+        t.partition = None;
     }
     // Yenilenecek düğüm: oluşturmada koleksiyonun kendisi; düzenle/silde nesnenin üst koleksiyonu (çocuk kimlikleri
     // koleksiyon parçasını atlar: `parent.child(seg(oid))`, koleksiyon kimliği `parent.child(Coll)`); kolon/kısıt
@@ -249,8 +272,16 @@ pub fn target_of(node_id: &str) -> Result<DdlTarget> {
             ObjectKind::Domain => Coll::Domains,
             ObjectKind::Policy => Coll::Policies,
             ObjectKind::Tablespace => Coll::Tablespaces,
+            // Hedef eşlemesi bölümü `Table` olarak verir; `Partition` yalnızca `partition` alanında.
+            ObjectKind::Partition => Coll::Partitions,
         };
         t.refresh_node_id = Some(id.parent().child(Seg::Coll(coll)).to_string());
+    }
+    // Bölüm bağlama/ayırma tabloyu şemanın `tables` koleksiyonuna da ekler/çıkarır → ikinci yenileme hedefi.
+    if t.partition.is_some() || matches!(t.create, Some(DdlCreate { kind: ObjectKind::Partition, .. })) {
+        t.tables_refresh_node_id = path.iter().rposition(|s| matches!(s, Seg::Schema(_))).map(|i| {
+            NodeId::Node { server, path: path[..=i].to_vec() }.child(Seg::Coll(Coll::Tables)).to_string()
+        });
     }
     Ok(t)
 }
@@ -366,6 +397,60 @@ mod tests {
     }
 
     #[test]
+    fn partition_nodes() {
+        let s = |p: &str| Some(format!("srv:{U}/{p}"));
+        let tables = s("db:5/sch:2200/tables");
+        // (düğüm, nesne, bölüm, oluşturma, yenilenecek düğüm, şema tabloları)
+        let cases = [
+            (
+                "db:5/sch:2200/tbl:24576/tbl:24580",
+                obj(ObjectKind::Table, 24580),
+                obj(ObjectKind::Partition, 24580),
+                None,
+                s("db:5/sch:2200/tbl:24576/partitions"),
+                tables.clone(),
+            ),
+            // Alt bölüm: üst tablo bir bölümdür; yenileme onun `partitions` koleksiyonu.
+            (
+                "db:5/sch:2200/tbl:24576/tbl:24580/tbl:24590",
+                obj(ObjectKind::Table, 24590),
+                obj(ObjectKind::Partition, 24590),
+                None,
+                s("db:5/sch:2200/tbl:24576/tbl:24580/partitions"),
+                tables.clone(),
+            ),
+            (
+                "db:5/sch:2200/tbl:24576/partitions",
+                None,
+                None,
+                cr(ObjectKind::Partition, Some(2200), Some(24576)),
+                s("db:5/sch:2200/tbl:24576/partitions"),
+                tables.clone(),
+            ),
+            // Şema altındaki sıradan tablo bölüm değildir.
+            ("db:5/sch:2200/tbl:24576", obj(ObjectKind::Table, 24576), None, None, s("db:5/sch:2200/tables"), None),
+        ];
+        for (p, object, partition, create, refresh, tr) in cases {
+            let x = t(p);
+            assert_eq!((x.object, x.partition, x.create), (object, partition, create), "{p}");
+            assert_eq!((x.refresh_node_id, x.tables_refresh_node_id), (refresh, tr), "{p}");
+        }
+        for p in ["db:5/tbl:1/partitions", "db:5/sch:2200/partitions"] {
+            let x = t(p);
+            assert_eq!((x.object, x.create, x.partition, x.refresh_node_id, x.tables_refresh_node_id), (None, None, None, None, None), "{p}");
+        }
+    }
+
+    #[test]
+    fn new_target_fields_are_omitted_when_none() {
+        let v = serde_json::to_value(t("db:5/sch:2200/tbl:24576")).unwrap();
+        assert!(v.get("partition").is_none() && v.get("tablesRefreshNodeId").is_none(), "{v}");
+        let v = serde_json::to_value(t("db:5/sch:2200/tbl:24576/tbl:24580")).unwrap();
+        assert_eq!(v["partition"]["kind"], "partition");
+        assert_eq!(v["tablesRefreshNodeId"], format!("srv:{U}/db:5/sch:2200/tables"));
+    }
+
+    #[test]
     fn create_preset_serializes_snake_case() {
         let v = serde_json::to_value(t("db:5/sch:2200/trigfuncs")).unwrap();
         assert_eq!(
@@ -427,6 +512,7 @@ mod tests {
         assert_eq!(r("db:5/sch:2200/tbl:24576/idx:41"), s("db:5/sch:2200/tbl:24576/indexes"));
         assert_eq!(r("db:5/sch:2200/tbl:24576"), s("db:5/sch:2200/tables"));
         assert_eq!(r("db:5/sch:2200/tbl:24576/tbl:24580"), s("db:5/sch:2200/tbl:24576/partitions"));
+        assert_eq!(r("db:5/sch:2200/tbl:24576/partitions"), s("db:5/sch:2200/tbl:24576/partitions"));
         assert_eq!(r("db:5/sch:2200/tbl:24576/col:3"), s("db:5/sch:2200/tbl:24576"));
         assert_eq!(r("db:5/sch:2200/tbl:24576/con:40"), s("db:5/sch:2200/tbl:24576"));
         assert_eq!(r("db:5/sch:2200/tbl:24576/tbl:24580/con:7"), s("db:5/sch:2200/tbl:24576/tbl:24580"));
@@ -443,7 +529,7 @@ mod tests {
         assert_eq!(r("db:5/sch:2200/view:30"), s("db:5/sch:2200/views"));
         assert_eq!(r("db:5/sch:2200/matviews"), s("db:5/sch:2200/matviews"));
         assert_eq!(r("db:5/sch:2200/mv:31"), s("db:5/sch:2200/matviews"));
-        for p in ["", "db:5/sch:2200/tbl:24576/columns", "db:5/sch:2200/tbl:24576/partitions"] {
+        for p in ["", "db:5/sch:2200/tbl:24576/columns"] {
             assert_eq!(r(p), None, "{p}");
         }
         // Üretilen kimlik gerçekten ayrıştırılıp aynen geri yazılabilir.
@@ -491,7 +577,10 @@ mod tests {
             "",
             "db:5/sch:2200/tbl:24576/columns",
             "db:5/sch:2200/tbl:24576/constraints",
-            "db:5/sch:2200/tbl:24576/partitions",
+            // Bölüm koleksiyonu yalnızca bir (bölüm) tablonun altında geçerlidir.
+            "db:5/tbl:1/partitions",
+            "db:5/sch:2200/partitions",
+            "tbl:1/tbl:2",
             // Politika yalnızca (bölüm) tablo altında; Tablespace yalnızca sunucunun hemen altında.
             "db:5/sch:2200/policies",
             "db:5/sch:2200/pol:43",

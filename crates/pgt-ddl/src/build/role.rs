@@ -1268,9 +1268,9 @@ mod tests {
         // Hiçbir yolla REASSIGN/DROP OWNED üretilmez.
         assert!(!p.statements.iter().any(|s| s.sql.contains("OWNED")));
         // CASCADE ve FORCE ortak kuralla reddedilir.
-        let e = drop_with(&o(&role("r")), DropOptions { cascade: true, force: false }, &ctx()).unwrap_err();
+        let e = drop_with(&o(&role("r")), DropOptions { cascade: true, force: false, concurrently: false }, &ctx()).unwrap_err();
         assert_eq!(paths(e), ["cascade"]);
-        let e = drop_with(&o(&role("r")), DropOptions { cascade: false, force: true }, &ctx()).unwrap_err();
+        let e = drop_with(&o(&role("r")), DropOptions { cascade: false, force: true, concurrently: false }, &ctx()).unwrap_err();
         assert_eq!(paths(e), ["force"]);
         // Yüklü ad gevşek (yalnız boş/NUL red); diğer alanlar ne olursa olsun silinebilir.
         let odd = RoleDef { name: "a\u{200b}\nb".into(), connection_limit: -9, valid_until: Some("x".into()), ..role("r") };

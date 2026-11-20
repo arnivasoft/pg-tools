@@ -534,11 +534,11 @@ const redactedView = (p: Partial<PlanView> = {}): PlanView =>
   view({ statements: [stmt("CREATE ROLE r LOGIN"), { ...stmt("ALTER ROLE r PASSWORD ********"), redacted: true }], ...p });
 
 describe("Plan 15: sunucu kapsamı, gizlenmiş plan, parola kapısı", () => {
-  it("isServerScoped: yalnızca database, role ve tablespace", () => {
+  it("isServerScoped: yalnızca database, role ve tablespace (partition değil)", () => {
     const table: Record<ObjectKind, boolean> = {
       schema: false, sequence: false, extension: false, index: false, table: false, view: false, materialized_view: false,
       database: true, role: true, function: false, procedure: false, trigger: false, type: false, domain: false, policy: false,
-      tablespace: true,
+      tablespace: true, partition: false,
     };
     for (const [k, v] of Object.entries(table)) expect(isServerScoped(k as ObjectKind)).toBe(v);
   });

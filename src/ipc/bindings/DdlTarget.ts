@@ -12,4 +12,14 @@ focus: DdlFocus | null,
  * Uygulama sonrası arayüzün yenileyeceği ağaç düğümü: `create` için koleksiyonun kendisi, `object` için üst
  * koleksiyon (bölüm tablosunda üst tablonun `partitions` koleksiyonu); kolon/kısıt düğümünde tablonun kendisi.
  */
-refreshNodeId: string | null, };
+refreshNodeId: string | null, 
+/**
+ * Yalnızca gerçek bölüm düğümünde (`…/tbl:P/tbl:C`): `object` (Table) ile aynı tablo, ama `Partition` türünde;
+ * arayüz "Bölümü ayır" için kullanır.
+ */
+partition?: ObjectRef, 
+/**
+ * Bölüm düğümünde ve `partitions` koleksiyonunda: bağlanan/ayrılan tablonun görüneceği şemanın `tables`
+ * koleksiyonu (ikinci yenileme hedefi). Üst tablodan farklı şemadaki tablo için yenilenmez (bilinen sınır).
+ */
+tablesRefreshNodeId?: string, };
