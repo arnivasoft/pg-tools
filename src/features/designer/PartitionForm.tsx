@@ -11,15 +11,18 @@ import type { PartitionDef } from "../../ipc/bindings/PartitionDef";
 import type { PartitionKey } from "../../ipc/bindings/PartitionKey";
 import type { PartitionStrategy } from "../../ipc/bindings/PartitionStrategy";
 import { inputClass } from "../../ui/Field";
-import { issuesFor } from "./designer-model";
+import { issuesFor, type FieldIssues } from "./designer-model";
 import { CheckRow, CommentField, FieldRow, FreeSqlNote, OwnerSelect, createFocusOnRequest, invalidClass, type FormProps } from "./FormParts";
 import { exactIssues, normalizeEmpty, orphanRowIssues, tablespaceChoices } from "./forms-model";
 import {
-  asPartition, attachPick, boundChanged, defaultPatch, hashPatch, listValuePatch, modePatch, partitionPatch, rangeKindPatch,
+  asPartition, attachPick, boundChanged, defaultPatch, hashPatch, listAdd, listRemove, listValuePatch, modePatch, partitionPatch, rangeKindPatch,
   rangeValuePatch, subKeyKind, subKeyPatch, subKeysPatch, subStrategyPatch, type BoundSide,
 } from "./partition-model";
 import { ReadOnlyReasons } from "./ReadOnlyReasons";
 import { RowList } from "./RowList";
+
+/** DEFAULT onay kutusu için boş hata kümesi (sınır hataları bölüm başında zaten gösterilir). */
+const noIssues: FieldIssues = { byPath: new Map(), general: [], generalPaths: [] };
 
 function Section(props: { title: string; children: JSX.Element }) {
   const id = createUniqueId();
@@ -62,7 +65,6 @@ export default function PartitionForm(props: FormProps) {
     });
 
   const modeName = createUniqueId();
-  const hintId = createUniqueId();
   const subHintId = createUniqueId();
   const noteId = createUniqueId();
   let nameEl: HTMLInputElement | undefined;
@@ -79,10 +81,13 @@ export default function PartitionForm(props: FormProps) {
   );
   // Bağlanabilecek tablolar: yalnız create + attach kipinde ve üst tablo oid'i bilinirken istenir.
   const parentOid = () => props.model.createContext?.tableOid ?? null;
-  const [attachable] = createResource(
-    () => (!alter() && draft()?.mode === "attach" && parentOid() !== null ? { tabId: props.tabId, oid: parentOid() as number } : false),
-    (k) => props.designer.lookup(k.tabId, { kind: "attachable_tables", parent_oid: k.oid }).catch((): LookupItem[] => []),
-  );
+  // İlkel anahtar: taslak her düzenlendiğinde yeni nesne dönmesin, kaynak yeniden yüklenmesin.
+  const attachKey = (): string | false =>
+    !alter() && draft()?.mode === "attach" && parentOid() !== null ? `${props.tabId}|${parentOid()}` : false;
+  const [attachable] = createResource(attachKey, (k) => {
+    const sep = k.lastIndexOf("|");
+    return props.designer.lookup(k.slice(0, sep), { kind: "attachable_tables", parent_oid: Number(k.slice(sep + 1)) }).catch((): LookupItem[] => []);
+  });
 
   return (
     <Show when={draft()}>
@@ -93,6 +98,7 @@ export default function PartitionForm(props: FormProps) {
         const changed = createMemo(() => alter() && boundChanged(original(), d()));
         const topErrors = () => [...issuesFor(props.issues, "parentSchema"), ...issuesFor(props.issues, "parentTable"), ...issuesFor(props.issues, "object")];
         const items = () => attachable() ?? [];
+        const noteShown = () => !attachable.loading && items().length === 0;
         // Seçili tablo (schema + ad eşleşmesi); yoksa boş seçenek.
         const pickedIndex = () => items().findIndex((i) => i.detail === d().schema && i.value === d().name);
         return (
@@ -180,7 +186,7 @@ export default function PartitionForm(props: FormProps) {
                             class={inputClass + invalidClass(f.invalid)}
                             required
                             aria-required="true"
-                            aria-describedby={[f.describedBy, noteId].filter(Boolean).join(" ")}
+                            aria-describedby={[f.describedBy, noteShown() ? noteId : undefined].filter(Boolean).join(" ") || undefined}
                             aria-invalid={f.invalid}
                             disabled={locked() || items().length === 0}
                             onChange={(ev) => {
@@ -201,7 +207,7 @@ export default function PartitionForm(props: FormProps) {
                           </select>
                         )}
                       </FieldRow>
-                      <Show when={!attachable.loading && items().length === 0}>
+                      <Show when={noteShown()}>
                         <p id={noteId} class="text-xs text-muted">
                           {tpart.attach.noneNote}
                         </p>
@@ -269,8 +275,8 @@ export default function PartitionForm(props: FormProps) {
                 <CheckRow
                   label={tpart.bound.default}
                   hint={tpart.bound.defaultHint}
-                  path="bound.default"
-                  issues={props.issues}
+                  path="bound"
+                  issues={noIssues}
                   checked={d().bound.kind === "default"}
                   disabled={boundLocked()}
                   onChange={(on) => update((x) => defaultPatch(x, on))}
@@ -280,7 +286,7 @@ export default function PartitionForm(props: FormProps) {
                 <RangeEditor d={d()} props={props} disabled={boundLocked()} update={update} />
                 <ListEditor d={d()} props={props} disabled={boundLocked()} update={update} />
                 <HashEditor d={d()} props={props} disabled={boundLocked()} update={update} />
-                <p id={hintId} class="text-xs text-muted">
+                <p class="text-xs text-muted">
                   {tpart.bound.hint}
                 </p>
                 <FreeSqlNote />
@@ -324,7 +330,7 @@ export default function PartitionForm(props: FormProps) {
                 </FieldRow>
                 <Show when={d().partitionBy}>
                   {(p) => (
-                    <div class="flex flex-col gap-1" aria-describedby={subHintId}>
+                    <div class="flex flex-col gap-1">
                       <RowList
                         label={tpart.sub.keys}
                         items={p().keys}
@@ -369,7 +375,7 @@ export default function PartitionForm(props: FormProps) {
                                   required
                                   aria-required="true"
                                   placeholder={k().kind === "column" ? tpart.sub.columnPlaceholder : tpart.sub.expressionPlaceholder}
-                                  aria-describedby={f.describedBy}
+                                  aria-describedby={[f.describedBy, subHintId].filter(Boolean).join(" ")}
                                   aria-invalid={f.invalid}
                                   disabled={locked()}
                                   value={k().kind === "column" ? (k() as { name: string }).name : (k() as { sql: string }).sql}
@@ -519,7 +525,19 @@ function ListEditor(p: EditorProps) {
         <RowList
           label={tpart.bound.values}
           items={values()}
-          onChange={(vals) => p.update((x) => (x.bound.kind === "list" ? { ...x, bound: { ...x.bound, values: vals } } : x))}
+          onChange={(vals) =>
+            p.update((x) => {
+              // RowList tüm diziyi döner; ekleme/silme yardımcılarıyla eşlenir (sıralama kapalı).
+              if (x.bound.kind !== "list") return x;
+              const cur = x.bound.values;
+              if (vals.length === cur.length + 1) return listAdd(x);
+              if (vals.length === cur.length - 1) {
+                const i = cur.findIndex((v, n) => v !== vals[n] || n === vals.length);
+                return listRemove(x, i < 0 ? cur.length - 1 : i);
+              }
+              return x;
+            })
+          }
           name={(v) => v}
           newItem={() => ""}
           reorderable={false}

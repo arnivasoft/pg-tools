@@ -48,8 +48,14 @@ describe("modePatch", () => {
     const d = part({ partitionBy: { strategy: "list", keys: [{ kind: "column", name: "a" }] }, tablespace: "ts", owner: "o", comment: "c" });
     const snap = JSON.stringify(d);
     const a = modePatch(d, "attach");
-    expect(a).toMatchObject({ mode: "attach", partitionBy: null, tablespace: null, owner: null, comment: null, name: "t_p1" });
+    expect(a).toMatchObject({ mode: "attach", partitionBy: null, tablespace: null, owner: null, comment: null, name: "", schema: "public" });
     expect(JSON.stringify(d)).toBe(snap);
+  });
+  it("create'te yazılan ad attach'e taşınmaz; attach → create ad/şema sıfırlanır", () => {
+    const d = part({ mode: "create", name: "yazilan", schema: "other" });
+    const a = modePatch(d, "attach");
+    expect(a).toMatchObject({ mode: "attach", name: "", schema: "public" });
+    expect(modePatch(a, "create")).toMatchObject({ mode: "create", name: "", schema: "public" });
   });
   it("create'e dönüş: ad boş, şema üst şema", () => {
     const d = part({ mode: "attach", schema: "other", name: "x" });

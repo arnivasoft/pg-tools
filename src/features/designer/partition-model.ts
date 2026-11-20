@@ -27,13 +27,15 @@ export function emptyBound(strategy: PartitionStrategy, keyCount: number): Parti
 }
 
 /**
- * Karar 6 kip geçişi: attach → partitionBy/tablespace/owner/comment = null (arka uç yok sayar; taslak temiz kalsın);
+ * Karar 6 kip geçişi: attach → partitionBy/tablespace/owner/comment = null (arka uç yok sayar; taslak temiz kalsın)
+ * ve name "", schema = parentSchema (create'te yazılan ad, seçilmemiş tabloya ATTACH'e dönüşmesin);
  * create → name "", schema = parentSchema. Aynı kip → aynı nesne.
  */
 export function modePatch(d: PartitionDef, mode: PartitionMode): PartitionDef {
   if (d.mode === mode) return d;
-  if (mode === "attach") return { ...d, mode, partitionBy: null, tablespace: null, owner: null, comment: null };
-  return { ...d, mode, name: "", schema: d.parentSchema };
+  const base = { ...d, mode, name: "", schema: d.parentSchema };
+  if (mode === "attach") return { ...base, partitionBy: null, tablespace: null, owner: null, comment: null };
+  return base;
 }
 
 /** DEFAULT aç/kapa (kapatınca stratejinin boş iskeleti). */
