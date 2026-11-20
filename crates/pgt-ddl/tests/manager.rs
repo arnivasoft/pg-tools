@@ -3258,3 +3258,177 @@ async fn tablespace_body(ts: TestServer) {
     assert_eq!(tablespace_oid(&env.admin, &renamed).await, None);
     assert!(matches!(f.dm.load(f.server, None, object).await, Err(Error::NotFound(_))));
 }
+
+// ---- Plan 36: bölüm (partition) yönetici entegrasyonu ----
+
+fn pbv(sql: &str) -> BoundValue {
+    BoundValue::Value { sql: sql.into() }
+}
+
+fn pbound(a: &str, b: &str) -> PartitionBound {
+    PartitionBound::Range { from: vec![pbv(a)], to: vec![pbv(b)] }
+}
+
+impl Fx {
+    /// Bölümü sunucudan yükler (arayüzün geri göndereceği biçim).
+    async fn load_part(&self, env: &Env, name: &str) -> (ObjectRef, PartitionDef) {
+        let object = ObjectRef { kind: ObjectKind::Partition, oid: env.class_oid("public", name).await };
+        let ObjectDef::Partition(d) = self.dm.load(self.server, self.db, object).await.unwrap() else { panic!("bölüm bekleniyordu") };
+        (object, d)
+    }
+
+    /// `defaults` çıktısı (üst tablo bağlamı).
+    async fn part_defaults(&self, env: &Env, parent: &str) -> PartitionDef {
+        let table_oid = Some(env.class_oid("public", parent).await);
+        let ctx = CreateContext { schema_oid: None, table_oid };
+        match self.dm.defaults(self.server, self.db, ObjectKind::Partition, ctx, None).await.unwrap() {
+            ObjectDef::Partition(d) => d,
+            other => panic!("bölüm bekleniyordu: {other:?}"),
+        }
+    }
+}
+
+fn part_created(r: Result<ApplyOutcome>) -> Option<ObjectRef> {
+    match r {
+        Ok(ApplyOutcome::Applied { created, .. }) => created,
+        other => panic!("uygulanmalıydı: {other:?}"),
+    }
+}
+
+async fn is_partition(env: &Env, name: &str) -> bool {
+    env.admin.query_one("SELECT relispartition FROM pg_class WHERE oid = $1", &[&env.class_oid("public", name).await]).await.unwrap().get(0)
+}
+
+#[tokio::test]
+async fn partition_defaults_created_gates_and_stale_old() {
+    for ts in servers() {
+        guarded(partition_body(ts.clone()), cleanup(&ts, "m_part")).await;
+    }
+}
+
+async fn partition_body(ts: TestServer) {
+    let env = setup(&ts, "m_part").await;
+    let f = fx(&env, &ts, false, None);
+    let prod = fx(&env, &ts, false, Some("Üretim"));
+    env.sql("CREATE TABLE par (id int) PARTITION BY RANGE (id); CREATE TABLE par2 (id int, d date) PARTITION BY RANGE (id, d); CREATE TABLE plain (id int)").await;
+    env.sql("CREATE TABLE parl (id int) PARTITION BY LIST (id)").await;
+    if env.version >= 110000 {
+        env.sql("CREATE TABLE parh (id int) PARTITION BY HASH (id)").await;
+    }
+
+    // defaults: üst tablodan strateji/anahtar sayısı, boş sınır; bölümsüz tablo → invalid; yok → not_found.
+    let d = f.part_defaults(&env, "par2").await;
+    assert_eq!((d.parent_schema.as_str(), d.parent_table.as_str(), d.strategy, d.key_count), ("public", "par2", PartitionStrategy::Range, 2));
+    assert_eq!((d.mode, d.schema.as_str(), d.name.as_str(), d.editable, d.detach_pending), (PartitionMode::Create, "public", "", true, false));
+    assert_eq!(d.bound, PartitionBound::Range { from: vec![pbv(""), pbv("")], to: vec![pbv(""), pbv("")] });
+    assert!(d.partition_by.is_none() && d.tablespace.is_none() && d.owner.is_none() && d.comment.is_none() && d.unsupported.is_empty());
+    assert_eq!(f.part_defaults(&env, "parl").await.bound, PartitionBound::List { values: vec![] });
+    if env.version >= 110000 {
+        assert_eq!(f.part_defaults(&env, "parh").await.bound, PartitionBound::Hash { modulus: 1, remainder: 0 });
+    }
+    let ctx = |t| CreateContext { schema_oid: None, table_oid: t };
+    let plain = Some(env.class_oid("public", "plain").await);
+    let r = f.dm.defaults(f.server, f.db, ObjectKind::Partition, ctx(plain), None).await;
+    assert!(matches!(&r, Err(Error::Invalid(m)) if m.contains("bölümlenmiş")), "{r:?}");
+    let r = f.dm.defaults(f.server, f.db, ObjectKind::Partition, ctx(None), None).await;
+    assert!(matches!(r, Err(Error::Invalid(_))), "{r:?}");
+    let r = f.dm.defaults(f.server, f.db, ObjectKind::Partition, ctx(Some(u32::MAX - 7)), None).await;
+    assert!(matches!(r, Err(Error::NotFound(_))), "{r:?}");
+
+    // Kilitli sunucu uygulamayı reddeder.
+    let mut c1 = f.part_defaults(&env, "par").await;
+    (c1.name, c1.bound) = ("c1".into(), pbound("1", "10"));
+    let locked = fx(&env, &ts, true, None);
+    assert_eq!(code(&locked.apply(&create(ObjectDef::Partition(c1.clone()))).await), "locked");
+    assert!(!exists(&env, "public.c1").await);
+
+    // create → Safe, onay yok; `created` çocuk tablonun oid'i.
+    let req = create(ObjectDef::Partition(c1.clone()));
+    assert_eq!(f.preview(&req).await.risk, Risk::Safe);
+    let c = part_created(f.apply(&req).await);
+    assert_eq!(c, Some(ObjectRef { kind: ObjectKind::Partition, oid: env.class_oid("public", "c1").await }));
+    assert!(is_partition(&env, "c1").await);
+
+    // attach → Destructive: onay ister; üretimde de yalnız genel onay (ad onayı yok); `created` = bağlanan tablo.
+    env.sql("CREATE TABLE a1 (id int); CREATE TABLE a2 (id int)").await;
+    let mut a1 = f.part_defaults(&env, "par").await;
+    (a1.mode, a1.name, a1.bound) = (PartitionMode::Attach, "a1".into(), pbound("10", "20"));
+    let req = create(ObjectDef::Partition(a1.clone()));
+    assert_eq!(f.preview(&req).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&req).await), "confirmation_required");
+    assert!(!is_partition(&env, "a1").await);
+    let c = part_created(f.apply_with(&req, |o| o.confirmed = true).await);
+    assert_eq!(c, Some(ObjectRef { kind: ObjectKind::Partition, oid: env.class_oid("public", "a1").await }));
+    assert!(is_partition(&env, "a1").await);
+    let mut a2 = a1.clone();
+    (a2.name, a2.bound) = ("a2".into(), pbound("20", "30"));
+    let req = create(ObjectDef::Partition(a2));
+    let c = part_created(prod.apply_with(&req, |o| o.confirmed = true).await);
+    assert_eq!(c.map(|c| c.kind), Some(ObjectKind::Partition));
+
+    // Çakışan sınırla attach: 42P17 ve ipucu; hiçbir şey bağlanmaz.
+    env.sql("CREATE TABLE a3 (id int)").await;
+    let mut a3 = a1.clone();
+    (a3.name, a3.bound) = ("a3".into(), pbound("15", "25"));
+    let r = f.apply_with(&create(ObjectDef::Partition(a3)), |o| o.confirmed = true).await;
+    let (_, committed, sqlstate, error) = failed(r);
+    assert_eq!((committed, sqlstate.as_deref()), (0, Some("42P17")));
+    assert!(error.hint.as_deref().is_some_and(|h| h.contains("çakış")), "{:?}", error.hint);
+    assert!(!is_partition(&env, "a3").await);
+    // Sınırı sağlamayan satır: 23514 ve ipucu.
+    env.sql("INSERT INTO a3 VALUES (500)").await;
+    let mut a3 = a1.clone();
+    (a3.name, a3.bound) = ("a3".into(), pbound("100", "200"));
+    let (_, _, sqlstate, error) = failed(f.apply_with(&create(ObjectDef::Partition(a3)), |o| o.confirmed = true).await);
+    assert_eq!(sqlstate.as_deref(), Some("23514"));
+    assert!(error.hint.as_deref().is_some_and(|h| h.contains("satırlar")), "{:?}", error.hint);
+
+    // Sınır değiştirme (alter) → Destructive, `created = None`; sınır gerçekten değişir.
+    let (object, old) = f.load_part(&env, "c1").await;
+    let mut new = old.clone();
+    new.bound = pbound("1", "5");
+    let alter = PlanRequest::Alter { object, old: ObjectDef::Partition(old.clone()), new: ObjectDef::Partition(new.clone()) };
+    assert_eq!(f.preview(&alter).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&alter).await), "confirmation_required");
+    // Bayat `old`: başka oturum sınırı değiştirdi → plan_changed, hiçbir şey yazılmaz.
+    env.sql("ALTER TABLE par DETACH PARTITION c1; ALTER TABLE par ATTACH PARTITION c1 FOR VALUES FROM (1) TO (7)").await;
+    assert_eq!(code(&f.apply_with(&alter, |o| o.confirmed = true).await), "plan_changed");
+    assert_eq!(f.load_part(&env, "c1").await.1.bound, pbound("1", "7"));
+    // Yeniden yükle → uygula.
+    let (object, old) = f.load_part(&env, "c1").await;
+    let alter = PlanRequest::Alter { object, old: ObjectDef::Partition(old.clone()), new: ObjectDef::Partition(PartitionDef { bound: pbound("1", "5"), ..old }) };
+    assert_eq!(part_created(f.apply_with(&alter, |o| o.confirmed = true).await), None);
+    assert_eq!(f.load_part(&env, "c1").await.1.bound, pbound("1", "5"));
+
+    // Ayırma (normal) → Destructive, `created = None`; tablo kalır, bölüm olmaktan çıkar.
+    let (object, def) = f.load_part(&env, "c1").await;
+    let drop = PlanRequest::Drop { object, def: ObjectDef::Partition(def), cascade: false, force: false, concurrently: false };
+    assert_eq!(f.preview(&drop).await.risk, Risk::Destructive);
+    assert_eq!(code(&f.apply(&drop).await), "confirmation_required");
+    assert_eq!(part_created(prod.apply_with(&drop, |o| o.confirmed = true).await), None);
+    assert!(exists(&env, "public.c1").await && !is_partition(&env, "c1").await);
+    // Artık bölüm değil: not_found.
+    let r = f.dm.load(f.server, f.db, object).await;
+    assert!(matches!(r, Err(Error::NotFound(_))), "{r:?}");
+
+    // CONCURRENTLY (PG 14+): transaction dışı çalışır; DEFAULT bölüm varken 55000 + ipucu, kısmi uygulama yok.
+    let (object, def) = f.load_part(&env, "a2").await;
+    let drop = |concurrently| PlanRequest::Drop { object, def: ObjectDef::Partition(def.clone()), cascade: false, force: false, concurrently };
+    if env.version < 140000 {
+        let v = f.preview(&drop(true)).await;
+        assert!(v.errors.iter().any(|e| e.path == "concurrently"), "{v:?}");
+        return;
+    }
+    let v = f.preview(&drop(true)).await;
+    assert!(v.statements.len() == 1 && !v.statements[0].transactional, "{v:?}");
+    env.sql("CREATE TABLE pardef PARTITION OF par DEFAULT").await;
+    let r = f.apply_with(&drop(true), |o| o.confirmed = true).await;
+    let (_, committed, sqlstate, error) = failed(r);
+    assert_eq!((committed, sqlstate.as_deref()), (0, Some("55000")));
+    assert!(error.hint.as_deref().is_some_and(|h| h.contains("DEFAULT")), "{:?}", error.hint);
+    assert!(is_partition(&env, "a2").await);
+    // DEFAULT bölüm yokken CONCURRENTLY uygulanır.
+    env.sql("ALTER TABLE par DETACH PARTITION pardef; DROP TABLE pardef").await;
+    assert_eq!(part_created(f.apply_with(&drop(true), |o| o.confirmed = true).await), None);
+    assert!(!is_partition(&env, "a2").await);
+}
