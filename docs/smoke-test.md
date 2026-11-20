@@ -940,3 +940,24 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 - [ ] Ekran okuyucu (NVDA/Narrator): arama kutusu "combobox" olarak, etkin sonuç ↓/↑ ile seslendirilir; "Aranıyor…", "N sonuç", "Sonuç yok." ve hata metinleri canlı bölgeden duyurulur; tür kutuları "Türler" grubunda okunur. **[—]**
 - [ ] Açık ve koyu temada diyalog, etkin satır vurgusu, soluk sistem satırları ve uyarı metni okunur. **[—]**
 - [ ] Telafi (komutlar tembel parçalara taşındı) sonrası önceki gibi çalışır: Query Tool'da biçimlendirme, sözdizimi denetimi, tamamlama, EXPLAIN / görsel plan, transaction düğmeleri, CSV dışa aktarma, geçmiş listesi ve temizleme, editör/geçmiş ayarları; nesne diyaloğunda oluşturma/düzenleme/yetkiler/varsayılan yetkiler/silme; bakım; yedekleme/geri yükleme hedef seçimi; şema karşılaştırma seçicileri; sunucu diyaloğunda "Bağlantıyı sına"; pgAdmin içe aktarma. **[—]**
+
+## Nesne diyalogları: Policy / Tablespace arka ucu (Plan 34)
+
+Plan 34 yalnızca arka uçtur; **GUI maddeleri Plan 35'te `[—]` olarak yazılacaktır** (menüde bu türler henüz yok; `ddl-kinds.ts` değişmedi). Arka uç elle sınanmaz; Docker testleriyle (`scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`; kapsayıcılar sonda silinir, tablespace dizinleri `PGT_TEST_TS_ROOT` ile betikçe hazırlanır, atlanan test yok) kapsanan maddelerin özeti:
+
+- Policy ve tablespace için create / alter / drop / load gidiş-dönüşü PG 10–18'de (`policy_roundtrip`, `manager`, `logging`): `create → load → eşit`, `alter(loaded, loaded)` boş plan (sabit nokta), `alter(old, new) → load → new`. Tablo `rowSecurity` bayrakları create/alter/yükleme (`table_roundtrip`; bölüm tablosu ve INHERITS çocuğu dahil) ve tablespace yetkileri (`GRANT CREATE ON TABLESPACE`, `acl_roundtrip`).
+- Politika: RESTRICTIVE, PUBLIC / iki rol (sıra farkı boş plan), beş komut, ifadesiz politika uyarısı, karmaşık `USING`/`WITH CHECK` yeniden yüklemede sabit; RLS etkisi gerçek rolle (`SET ROLE`) satır sayısıyla doğrulandı (ENABLE Destructive, DISABLE Safe + uyarı).
+- Yeniden kurma: komut/permissive değişimi ya da ifade kaldırma `DROP POLICY` + `CREATE POLICY` (aynı transaction, Destructive, yorum korunur); `created` yeni oid ile döner; yeniden adlandırma da `created` döner.
+- Tablespace: create + comment transaction dışı; boş olmayan `DROP TABLESPACE` 55000 + ipucu, hiçbir şey değişmez; `pg_default`/`pg_global` alter/drop reddi; konum hatası (58P01) ipucu; maintenance_io_concurrency PG < 13 sürüm kapısı.
+- Onay kapısı: Destructive planlar (policy drop/yeniden kurma, RLS ENABLE/FORCE, tablespace drop) yalnız `confirmation_required` ister; üretimde ek ad onayı yoktur (yalnız DataLoss ister).
+- Günlükte ifade, ad ve tablespace konumu yok (yakalama testi).
+
+Bilinen sınırlar:
+- Politika `command`/`permissive` değişimi ve ifade kaldırma `ALTER POLICY` ile yapılamaz: aynı transaction'da DROP + CREATE ile yeniden kurulur (Destructive; oid değişir).
+- Tablespace ifadeleri transaction dışıdır: create + comment arasında kısmi uygulama olabilir (`failed.created` dolu); geri alma yoktur.
+- Yerinde tablespace (`allow_in_place_tablespaces`, boş `location`) desteklenmez; tablespace'teki nesneleri toplu taşıma yoktur.
+- Tablespace `location` create-only; değiştirmek alan hatasıdır. `pg_default`/`pg_global` DDL için salt okunurdur (ACL'de yalnız `pg_global`).
+- Şema karşılaştırması tablo RLS bayraklarını karşılaştırır ama **politikaları karşılaştırmaz** (backlog).
+- Varsayılan yetkiler (`ALTER DEFAULT PRIVILEGES`) tablespace'i hedefleyemez (PG desteklemez).
+- PG 10'da bölümlenmiş üst tabloda politika testi yoktur (belirsiz destek); bölümün kendisinde denenir.
+- Politika yüklenen ifadesi düz `\` içeriyorsa yalnız o ifadenin düzenlenmesi reddedilir (kaçış için `E'…'`).

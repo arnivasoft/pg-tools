@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 5c: Kalan Nesne Diyalogları Tasarımı (Policy, Tablespace, Bölümler, FDW, Publication, Subscription)
 
 - **Tarih:** 2026-11-19
-- **Durum:** Tasarım (uygulanmadı)
+- **Durum:** Plan 34 arka ucu uygulandı; Plan 35 ön yüzü kalan
 - **Kapsam:** Explorer'da bulunup diyaloğu olmayan **RLS politikası** ve **tablespace**; bölümlü tabloya **bölüm oluşturma / bağlama / ayırma**; ağaçta henüz bulunmayan **Foreign Data Wrapper, Foreign Server, User Mapping, Foreign Table, Publication, Subscription** (önce Explorer düğümleri, sonra diyaloglar).
 - **Temel:** `docs/superpowers/specs/2026-10-06-object-dialogs-design.md` (mimari §2, risk modeli §3, arayüz §4, güvenlik §6, test §7 ve tüm sözleşme notları) ile `docs/superpowers/specs/2026-10-16-object-dialogs-routines-types-design.md` (R5 salt okunur kuralı, `editable`/`unsupported`, eklentiye ait nesneler, `OWNER TO` en sonda) **aynen geçerlidir**. Bu belge yalnızca yeni türleri, kurallarını ve kararlarını ekler; ana spec'in §1.3 "kapsam dışı" listesinden RLS politikaları, FDW/publication/subscription diyalogları, partition oluşturma/bağlama ve tablespace oluşturma çıkarılır.
 - **Kullanıcı kararı (2026-11-19):** dört grubun tamamı kapsamda. Plan 33 CSV içe aktarmaya ayrılmıştır; bu alt proje Plan 34'ten başlar.
@@ -180,3 +180,61 @@ Yeni `NodeKind` / `Seg` / `Coll` (etiketler):
 - Yerinde tablespace (`allow_in_place_tablespaces`); tablespace'teki nesneleri toplu taşıma (`ALTER … SET TABLESPACE` / `ALTER TABLESPACE … MOVE` yoktur, PG'de `ALTER TABLE ALL IN TABLESPACE … SET TABLESPACE`).
 - Bölüm bölme/birleştirme (`SPLIT/MERGE PARTITION`; PG 17 geliştirme sürecinde geri çekildi); kalıtım (`INHERITS`) düzenleme; EXCLUDE kısıtları.
 - Event trigger, rule, collation, cast, operator, FTS nesneleri, language, aggregate (Explorer'da yok).
+
+---
+
+## 9. Plan 34 sözleşme notları (Plan 35 için)
+
+Aşağıdaki maddeler **gönderilen** davranışı anlatır (kod ve Docker PG 10–18 testleriyle doğrulandı).
+
+### 9.1 Model alanları (camelCase) ve salt okunurluk
+
+- `ObjectDef` etiketi `kind`: `policy`, `tablespace`. `ObjectKind::Tablespace.server_scoped() = true` (ön yüzde `isServerScoped("tablespace") = true`).
+- `PolicyDef`: `schema, table, name, command (all|select|insert|update|delete), permissive (true = PERMISSIVE), roles[] (boş = PUBLIC), using, withCheck (serbest SQL, isteğe bağlı), comment, editable, unsupported, tableRls`. `tableRls` **salt okunur** `{enabled, forced}` bilgisidir: üretici yok sayar, yalnız yükleyici ve `defaults` doldurur (`#[serde(default)]`; gönderilmezse `null`). Yükleyici `roles`'u **ada göre sıralı** döndürür; sıra farkı değişiklik sayılmaz.
+- `TablespaceDef`: `name, owner, location, options{seqPageCost, randomPageCost, effectiveIoConcurrency, maintenanceIoConcurrency} (her biri sayısal metin ya da null), comment, editable, unsupported`.
+- `TableDef.rowSecurity: {enabled, forced}` (`#[serde(default)]`; yeni tabloda `false/false`). Yükleyici `relrowsecurity`/`relforcerowsecurity` okur; bölüm tablosunda ve INHERITS çocuğunda da düzenlenebilir.
+- **`editable` ve `unsupported` için serde varsayılanı YOKTUR** (iki yeni tür dahil): yeni tanım `editable: true, unsupported: []` ile gönderilmelidir (`ddl_defaults` bunu doldurur; arayüz alanları düşürmemeli).
+- **R5:** `unsupported` doluysa yükleyici `editable = false` döndürür. Politika: eklentiye ait tablo, sistem şeması, sıradan/bölümlü dışı ilişki, bilinmeyen komut, geçersiz UTF-8. Tablespace: `pg_default`/`pg_global` (`["Sistem tablespace'i"]`, `location = ""`), bilinmeyen `spcoptions` anahtarı (`seçenek <anahtar>`), geçersiz UTF-8. Salt okunur kapısı `alter`/`drop`'u bağlantıdan önce reddeder (kodsuz `invalid`, ad/konum içermeyen sabit gerekçe); `create` etkilenmez. Arayüz `editable = false` nesneyi salt okunur gösterir.
+- **Tablespace ACL'sinde yalnız `pg_global` salt okunurdur** (`pg_default`'a yetki verilebilir); DDL için ikisi de salt okunurdur.
+
+### 9.2 Alan yolları (`FieldError.path`)
+
+- **Policy:** `name`, `schema`, `table` (alter'da tablo değişimi), `command`, `roles`, `roles[i]`, `using`, `withCheck`, `comment`, `object` (salt okunur), `old.*` (bayat/geçersiz yüklü tanım). Kurallar: `insert` → `using` yasak; `select`/`delete` → `withCheck` yasak; rol öğeleri geçerli ad, yinelenen yok, `public` öğe olarak reddedilir ("PUBLIC için listeyi boş bırakın"); `cascade` yok sayılır (drop modeli `cascade: false`, Plan 35 kutuyu göstermez).
+- **Tablespace:** `name` (`pg_` öneki dahil), `location` (boş değil, NUL yok, mutlak yol, ≤ 1024 bayt; alter'da değişim), `options.seqPageCost`, `options.randomPageCost` (sonlu ondalık ≥ 0), `options.effectiveIoConcurrency`, `options.maintenanceIoConcurrency` (0–1000 tamsayı; maintenance PG < 13'te sürüm kapısı alan hatası), `owner`, `comment`, `object`, `old.*`.
+- **Tablo RLS:** `rowSecurity.enabled`, `rowSecurity.forced` yalnız tablo diyaloğunda; Plan 35 tablo formu yollarına eklemelidir.
+- **ACL (Tablespace):** ayrıcalık kümesi yalnız `{Create}`, nesne ifadesi `GRANT … ON TABLESPACE <ad>`; şema alanı yok. **Varsayılan yetkiler yapısal olarak tablespace'i hedefleyemez** (istek biçimi tür taşımaz; Plan 35 menüde göstermemeli).
+
+### 9.3 Kurallar: yeniden kurma, risk, kapılar
+
+- **Politika alter:** (1) ad değiştiyse `ALTER POLICY … RENAME TO`; (2) `command`/`permissive` değişti **ya da** `using`/`withCheck` `Some → None` oldu → aynı transaction'da `DROP POLICY` + `CREATE POLICY` (**Destructive**, not "Politika aynı transaction içinde yeniden kurulur.", yorum yeniden yazılır), aksi hâlde tek `ALTER POLICY … [TO] [USING] [WITH CHECK]` (Safe); (3) `COMMENT ON POLICY`. Yalnız ad değişimi tek `RENAME`; rol sırası farkı boş plan.
+- **Oid:** yeniden kurma yeni oid üretir; `created` yeni `pg_policy` oid'iyle döner (sekme `object`'i güncellenmeli). **Yeniden adlandırma da `created` döndürür.** Yalnız yorum/ifade değişimi `created` döndürmez.
+- **Risk:** Safe: create, `ALTER POLICY`, rename, comment, tablespace create/rename/owner/SET/RESET/comment, tablo `DISABLE`/`NO FORCE ROW LEVEL SECURITY`. **Destructive:** policy drop ve yeniden kurma, tablo `ENABLE`/`FORCE ROW LEVEL SECURITY` (+ not "Politikası olmayan tabloda sahibi dışındakiler hiçbir satır görmez."), `DROP TABLESPACE`. DataLoss yok.
+- **Onay kapısı (ledger kararı):** Destructive planlar yalnız `confirmation_required` ister. **Üretimde ek ad onayı yoktur**; `production_confirmation_required` mevcut kapıda yalnız DataLoss içindir (Policy/RLS/Tablespace hiçbiri DataLoss değil). Arayüz Destructive için yalnız onay kutusunu göstermelidir.
+- **Transaction:** Policy ve tablo RLS ifadeleri transaction içinde. **Tüm Tablespace ifadeleri transaction dışıdır** (`stmt_nt`): create + comment arasında kısmi uygulama olabilir (`failed.created` dolu, `committed = 1`; "Önceki ifadeler uygulandı…" ipucu). Yerinde (boş `location`) tablespace desteklenmez. Alter sırası: `RENAME`, `SET`, `RESET`, `COMMENT`, `OWNER TO` (en sonda); `location` create-only.
+- **Uyarılar:** politika `using` ve `withCheck` ikisi de boşsa "İfadesiz politika: PERMISSIVE tüm satırlara izin verir, RESTRICTIVE etkisizdir."; `tableRls.enabled = false` ise "Tabloda satır güvenliği kapalı; politika etkili olmaz."; tablo `DISABLE`/`NO FORCE` → "Tablonun politikaları devre dışı kalır.". **Alter'da politika uyarıları yalnız plan boş değilse** eklenir (sabit nokta: boş plan, boş uyarı). `tableRls` create'te `defaults`'tan, alter'da yükleyiciden gelir; üretici bunu yazmaz.
+
+### 9.4 `defaults(kind)` ve hedefler
+
+- `defaults(Policy)`: bağlam `tableOid`'inden `schema`/`table`, `command = all`, `permissive = true`, `roles = []`, ifadeler `null`, `tableRls` = tablonun **güncel** bayrakları. `tableOid` yoksa kodsuz `invalid`; tablo yok/görünümse `not_found`. `defaults(Tablespace)`: `owner = null`, `location = ""`, seçenekler boş; bağlam verilirse `invalid`.
+- Hedef: `…/tbl:T/pol:P` → `object(Policy, P)`, `refreshNodeId = …/tbl:T/policies`; `…/tbl:T/policies` → `create(Policy, schemaOid, tableOid)` (bölüm tablosu dahil). `tablespaces` → `create(Tablespace)`, `ts:N` → `object(Tablespace, N)`; `databaseOid = null`, `refreshNodeId = srv:U/tablespaces`. Tablespace yükleme/uygulama/ACL bakım veritabanında çalışır.
+- `identity_changed`: Policy için ad değişimi **ya da** yeniden kurma, Tablespace için ad.
+
+### 9.5 İpuçları (SQLSTATE → ipucu)
+
+- `55000` + `DROP TABLESPACE`: "Tablespace boş değil; önce içindeki nesneleri başka tablespace'e taşıyın (başka veritabanlarındaki nesneler de sayılır)." Hiçbir şey değişmez.
+- `42501` + `CREATE TABLESPACE`: "Tablespace oluşturmak süper kullanıcı yetkisi ister." (genel yetki ipucunun yerine).
+- `58P01`, `42P17`, `22023` + `CREATE TABLESPACE`: "Konum sunucuda var olan, PostgreSQL hizmet kullanıcısına ait boş bir dizin olmalı."
+- `42710` + `CREATE POLICY` (aynı ad): özel ipucu yoktur, PG iletisi geçerlidir.
+- **Kural ipuçları yalnız PG kendi ipucunu vermediyse uygulanır**; PG ipucu varsa olduğu gibi kalır. Transaction dışı ifadelerden sonra hata → kısmi uygulama ipucu (yalnız başka ipucu yoksa).
+
+### 9.6 Güvenlik, günlük ve test notları
+
+- İfade, ad, konum (`location`) ve SQL `tracing`'e, hata iletisine ya da diske yazılmaz (yakalama testi: `logging.rs`, Policy `USING` + tablespace adı/konumu). Salt okunur gerekçeleri ad/konum içermez.
+- Serbest SQL (`using`, `withCheck`) `check_free_sql` + `wrap` + `composed_is_clean` kapısından geçer; sıradan `'…'` içinde `\` → `E'…'`. Yüklenen ifade düz `\` içeriyorsa yalnız o ifadeyi yazan düzenleme reddedilir.
+- Tablespace Docker testleri `PGT_TEST_TS_ROOT` ister (matris betiği sağlar; yoksa atlanır): ts1, ts2, ts3, ts5 `policy_roundtrip`, ts6 `acl_roundtrip`, ts7 `manager`, ts8 `logging`.
+- Şema karşılaştırması tablo RLS bayraklarını **karşılaştırır**, politikaları karşılaştırmaz (backlog).
+
+### 9.7 Ön yüz bütçe notu
+
+- Plan 34 sonunda ana paket **126,582 B**, başlangıç **154,255 B** (tavanlarla birebir, değişmedi). Plan 35'in `ddl-kinds.ts` ve Explorer menü/ikon kancası ek bayt getirir; **adı konmuş bir telafi gerekir** (yalnız tembel kullanılan komutları `src/ipc/commands.ts`'ten tembel modüle taşımak). Tavanlar yükseltilmez.
+- Plan 34'te `src/features/designer` ve `schema-diff` altında yalnızca tembel dosyalar uyum için değişti: geçici `formMissing` bileşeni (`DesignerView.tsx`; Plan 35 gerçek formlarla değiştirir), boş `POLICY_PATHS`/`TABLESPACE_PATHS` (`forms-model.ts`; FORM_PATHS bütünlük denetimi Plan 35'te yeni yollarla tamamlanmalı), `drop-model.ts` (`cascade=false`, `force=false`).
