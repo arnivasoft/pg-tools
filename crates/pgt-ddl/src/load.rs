@@ -114,6 +114,11 @@ const DOMAIN_SQL: &str = include_str!("sql/load_domain.sql");
 const DOMAIN_CHECKS_SQL: &str = include_str!("sql/load_domain_checks.sql");
 static POLICY_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_policy.sql"))]);
 static TABLESPACE_SQL: VersionedSql = VersionedSql(&[(10, include_str!("sql/load_tablespace.sql"))]);
+/// PG 14: `inhdetachpending` (yarım kalmış `DETACH … CONCURRENTLY`).
+static PARTITION_SQL: VersionedSql = VersionedSql(&[
+    (10, include_str!("sql/load_partition.sql")),
+    (14, include_str!("sql/load_partition.pg14.sql")),
+]);
 
 const SYSTEM_ERROR: &str = "sistem nesnesi düzenlenemez";
 
@@ -198,8 +203,7 @@ pub async fn load(mgr: &ConnectionManager, server: Uuid, database_oid: impl Into
         ObjectKind::Policy => load_policy(mgr, server, database_oid, obj.oid).await,
         // Sunucu kapsamlı: bakım veritabanında (veritabanı oid'i yok sayılır).
         ObjectKind::Tablespace => load_tablespace(mgr, server, Target::Maintenance, obj.oid).await,
-        // Geçici: yükleyici sonraki görevlerde (Plan 36).
-        ObjectKind::Partition => Err(Error::Invalid("henüz desteklenmiyor".to_string())),
+        ObjectKind::Partition => load_partition(mgr, server, database_oid, obj.oid).await,
     }
 }
 
@@ -225,8 +229,7 @@ pub async fn load_in(client: &Client, version_num: u32, obj: ObjectRef) -> Resul
         // `in_scope` bunları zaten eledi.
         ObjectKind::Database | ObjectKind::Role | ObjectKind::Tablespace => Err(Error::Invalid(SERVER_SCOPED_MSG.to_string())),
         ObjectKind::Policy => parse_policy(fetch_policy(client, v, oid).await.map_err(q)?),
-        // Geçici: yükleyici sonraki görevlerde (Plan 36).
-        ObjectKind::Partition => Err(Error::Invalid("henüz desteklenmiyor".to_string())),
+        ObjectKind::Partition => parse_partition(fetch_partition(client, v, oid).await.map_err(q)?),
     }
 }
 
@@ -1734,6 +1737,59 @@ fn parse_policy(rows: Vec<Row>) -> Result<ObjectDef> {
         editable: unsupported.is_empty(),
         unsupported,
         table_rls: Some(RowSecurity { enabled: r.get("rls_enabled"), forced: r.get("rls_forced") }),
+    }))
+}
+
+async fn fetch_partition(c: &Client, v: PgVersion, oid: u32) -> QueryResult<Vec<Row>> {
+    query_oid(c, v, &PARTITION_SQL, oid).await
+}
+
+/// Bölüm yükleyicisi (`ObjectRef.oid` = çocuk tablo). Normalleştirme: `mode = create`; `partition_by`/`tablespace`/
+/// `owner`/`comment` her zaman `None` (bu özellikler Tablo diyaloğundadır); `strategy`/`key_count` üst tablodan,
+/// `bound` = `pg_get_expr(relpartbound)` metninin `parse_bound` sonucu (alter(yüklü, yüklü) boştur). `unsupported`
+/// (R5; doluysa `editable = false`): eklentiye ait çocuk/üst tablo, bilinmeyen `partstrat`, ayrıştırılamayan sınır,
+/// geçersiz UTF-8 (adlar kayıplı çözülür; yalnızca gösterim). Bölüm olmayan oid → `NotFound`.
+async fn load_partition(mgr: &ConnectionManager, server: Uuid, db: u32, oid: u32) -> Result<ObjectDef> {
+    parse_partition(run_oid(mgr, server, db, &PARTITION_SQL, oid).await?)
+}
+
+fn parse_partition(rows: Vec<Row>) -> Result<ObjectDef> {
+    let r = rows.first().ok_or_else(|| not_found("bölüm"))?;
+    let mut unsupported = vec![];
+    if let Some(e) = lossy_opt(r, "extension") {
+        unsupported.push(format!("EXTENSION {e} (eklentiye ait)"));
+    }
+    let code = lossy(r, "strat");
+    let strategy = match code.as_str() {
+        "r" => PartitionStrategy::Range,
+        "l" => PartitionStrategy::List,
+        "h" => PartitionStrategy::Hash,
+        _ => {
+            unsupported.push(format!("bölümleme stratejisi '{code}'"));
+            PartitionStrategy::Range
+        }
+    };
+    let bound = crate::build::partition::parse_bound(&lossy(r, "bound")).unwrap_or_else(|| {
+        unsupported.push("sınır ifadesi ayrıştırılamadı".to_string());
+        PartitionBound::Default
+    });
+    note_invalid_utf8(&[&rows], &mut unsupported);
+    Ok(ObjectDef::Partition(PartitionDef {
+        parent_schema: lossy(r, "parent_schema"),
+        parent_table: lossy(r, "parent_table"),
+        strategy,
+        key_count: u32::try_from(r.get::<_, i32>("key_count")).unwrap_or(0),
+        mode: PartitionMode::Create,
+        schema: lossy(r, "schema"),
+        name: lossy(r, "name"),
+        bound,
+        partition_by: None,
+        tablespace: None,
+        owner: None,
+        comment: None,
+        detach_pending: r.get("detach_pending"),
+        editable: unsupported.is_empty(),
+        unsupported,
     }))
 }
 

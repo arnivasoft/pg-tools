@@ -390,8 +390,6 @@ fn hash_number(item: &str, kw: &str) -> Option<u32> {
 }
 
 /// `pg_get_expr(relpartbound, oid)` metnini sınıra çevirir; tanınmayan/bozuk metin → `None`.
-// Yükleyici (Task 3) çağırır; o zamana dek yalnız testlerde kullanılır.
-#[allow(dead_code)]
 pub(crate) fn parse_bound(text: &str) -> Option<PartitionBound> {
     let t = text.trim();
     if t.eq_ignore_ascii_case("DEFAULT") {
