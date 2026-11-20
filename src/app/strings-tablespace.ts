@@ -11,10 +11,10 @@ export const ttsp = {
   },
   location: {
     label: "Konum (LOCATION)",
-    placeholder: "D:\pgdata\ts1",
+    placeholder: "D:\\pgdata\\ts1",
     createHint:
       "Süper kullanıcı gerekir; dizin sunucuda var olmalı, boş ve PostgreSQL hizmet kullanıcısına ait olmalı. " +
-      "örn. D:\pgdata\ts1 ya da /var/lib/postgresql/ts1",
+      "örn. D:\\pgdata\\ts1 ya da /var/lib/postgresql/ts1",
     alterHint: "Konum oluşturulduktan sonra değiştirilemez.",
     empty: "—",
   },
