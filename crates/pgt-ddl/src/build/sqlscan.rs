@@ -208,9 +208,170 @@ pub fn scan_semicolons(sql: &str) -> ScanResult {
     }
 }
 
+/// `skip_region` sonucu.
+enum Region {
+    /// `b[i]` bir bölge başlatmıyor.
+    Plain,
+    /// Bölge kapandı; bir sonraki bayt indeksi.
+    Closed(usize),
+    Unterminated,
+}
+
+/// `b[i]` bir tek tırnaklı dize (`E'…'` dahil), çift tırnaklı tanımlayıcı, dolar tırnak, `--` ya da (iç içe) `/* */`
+/// başlatıyorsa bölgeyi atlar. Kurallar `scan_semicolons` ile aynıdır (`standard_conforming_strings = on`).
+fn skip_region(b: &[u8], i: usize) -> Region {
+    let n = b.len();
+    let mut j = i;
+    match b[i] {
+        b'\'' => {
+            let escape = i >= 1 && matches!(b[i - 1], b'e' | b'E') && (i < 2 || !is_ident_byte(b[i - 2]));
+            j += 1;
+            while j < n {
+                if escape && b[j] == b'\\' {
+                    j += 2;
+                } else if b[j] == b'\'' {
+                    if j + 1 < n && b[j + 1] == b'\'' {
+                        j += 2;
+                    } else {
+                        return Region::Closed(j + 1);
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            Region::Unterminated
+        }
+        b'"' => {
+            j += 1;
+            while j < n {
+                if b[j] == b'"' {
+                    if j + 1 < n && b[j + 1] == b'"' {
+                        j += 2;
+                    } else {
+                        return Region::Closed(j + 1);
+                    }
+                } else {
+                    j += 1;
+                }
+            }
+            Region::Unterminated
+        }
+        b'$' if i == 0 || !is_ident_byte(b[i - 1]) => match dollar_tag_len(b, i) {
+            Some(len) => {
+                let tag = &b[i..i + len];
+                match b[(i + len).min(n)..].windows(len).position(|w| w == tag) {
+                    Some(p) => Region::Closed(i + len + p + len),
+                    None => Region::Unterminated,
+                }
+            }
+            None => Region::Plain,
+        },
+        b'-' if i + 1 < n && b[i + 1] == b'-' => {
+            while j < n && b[j] != b'\n' && b[j] != b'\r' {
+                j += 1;
+            }
+            Region::Closed(j)
+        }
+        b'/' if i + 1 < n && b[i + 1] == b'*' => {
+            let mut depth = 1;
+            j += 2;
+            while j < n && depth > 0 {
+                if b[j] == b'/' && j + 1 < n && b[j + 1] == b'*' {
+                    depth += 1;
+                    j += 2;
+                } else if b[j] == b'*' && j + 1 < n && b[j + 1] == b'/' {
+                    depth -= 1;
+                    j += 2;
+                } else {
+                    j += 1;
+                }
+            }
+            if depth > 0 { Region::Unterminated } else { Region::Closed(j) }
+        }
+        _ => Region::Plain,
+    }
+}
+
+/// Üst düzey virgüllerden böler (tırnak/yorum bölgeleri, iç içe `(…)` ve `[…]` içindeki virgüller bölmez). Öğeler
+/// kırpılmadan döner; boş girdi tek boş öğe verir, `1,,2` ortada boş öğe taşır. Kapanmamış bölge ya da dengesiz/eşleşmeyen
+/// parantez → `None`.
+pub(crate) fn split_top_level_commas(s: &str) -> Option<Vec<String>> {
+    let b = s.as_bytes();
+    let mut stack: Vec<u8> = vec![];
+    let mut out = vec![];
+    let mut start = 0;
+    let mut i = 0;
+    while i < b.len() {
+        match skip_region(b, i) {
+            Region::Closed(j) => {
+                i = j;
+                continue;
+            }
+            Region::Unterminated => return None,
+            Region::Plain => {}
+        }
+        match b[i] {
+            b'(' => stack.push(b')'),
+            b'[' => stack.push(b']'),
+            b')' | b']' => {
+                if stack.pop() != Some(b[i]) {
+                    return None;
+                }
+            }
+            b',' if stack.is_empty() => {
+                out.push(s[start..i].to_string());
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if !stack.is_empty() {
+        return None;
+    }
+    out.push(s[start..].to_string());
+    Some(out)
+}
+
+/// `s` bir `(` ile başlar: eşleşen `)`'a kadar iç metni ve kalan metni verir (tırnak/yorum bölgeleri ve iç içe
+/// parantez/köşeli parantez farkında). `(` ile başlamıyorsa, kapanmıyorsa ya da kapanmamış bölge varsa `None`.
+pub(crate) fn paren_group(s: &str) -> Option<(&str, &str)> {
+    let b = s.as_bytes();
+    if b.first() != Some(&b'(') {
+        return None;
+    }
+    let mut stack: Vec<u8> = vec![b')'];
+    let mut i = 1;
+    while i < b.len() {
+        match skip_region(b, i) {
+            Region::Closed(j) => {
+                i = j;
+                continue;
+            }
+            Region::Unterminated => return None,
+            Region::Plain => {}
+        }
+        match b[i] {
+            b'(' => stack.push(b')'),
+            b'[' => stack.push(b']'),
+            b')' | b']' => {
+                if stack.pop() != Some(b[i]) {
+                    return None;
+                }
+                if stack.is_empty() {
+                    return Some((&s[1..i], &s[i + 1..]));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::scan_semicolons;
+    use super::{paren_group, scan_semicolons, split_top_level_commas};
 
     /// Dış `;` sayısı; kapanmamış bölge varsa ayrıca `u` testleri bakar.
     fn c(s: &str) -> usize {
@@ -483,5 +644,50 @@ mod tests {
         for s in [r"E'\''", r"e'a\\'", "'a'", r#""a\b""#, r"$$a\b$$", "-- 'a\\b\n", r"/* 'a\ */", "'a''b'"] {
             assert!(!b(s), "{s}");
         }
+    }
+
+    fn split(s: &str) -> Option<Vec<String>> {
+        split_top_level_commas(s)
+    }
+    fn v(a: &[&str]) -> Option<Vec<String>> {
+        Some(a.iter().map(|x| x.to_string()).collect())
+    }
+
+    #[test]
+    fn split_top_level_commas_cases() {
+        assert_eq!(split("1, 2,3"), v(&["1", " 2", "3"]));
+        assert_eq!(split(""), v(&[""]));
+        assert_eq!(split("1,,2"), v(&["1", "", "2"]));
+        assert_eq!(split("1,"), v(&["1", ""]));
+        // iç içe parantez ve köşeli parantez
+        assert_eq!(split("f(1,2), g(h(3,4),5), 6"), v(&["f(1,2)", " g(h(3,4),5)", " 6"]));
+        assert_eq!(split("ARRAY[1,2], 3"), v(&["ARRAY[1,2]", " 3"]));
+        assert_eq!(split("a[1][2], b"), v(&["a[1][2]", " b"]));
+        // tek/çift tırnak, E'' ve dolar tırnağı
+        assert_eq!(split("'a,b', 'it''s', NULL"), v(&["'a,b'", " 'it''s'", " NULL"]));
+        assert_eq!(split(r#""a,b", "x""y,z""#), v(&[r#""a,b""#, r#" "x""y,z""#]));
+        assert_eq!(split(r"E'\', x', y"), v(&[r"E'\', x'", " y"]));
+        assert_eq!(split(r"'x\', y"), v(&[r"'x\'", " y"]), "sıradan dizede \\ kaçış değildir");
+        assert_eq!(split("$$a,b$$, $t$c,$$d$t$, e"), v(&["$$a,b$$", " $t$c,$$d$t$", " e"]));
+        assert_eq!(split("1 /* a, b */, 2 -- c, d\n, 3"), v(&["1 /* a, b */", " 2 -- c, d\n", " 3"]));
+        // reddedilenler
+        assert_eq!(split("'a, b"), None);
+        assert_eq!(split("(1, 2"), None);
+        assert_eq!(split("1, 2)"), None);
+        assert_eq!(split("(1, 2]"), None);
+        assert_eq!(split("$$a, b"), None);
+        assert_eq!(split("\"a, b"), None);
+        assert_eq!(split("/* a, b"), None);
+    }
+
+    #[test]
+    fn paren_group_cases() {
+        assert_eq!(paren_group("(1, 2) TO (3)"), Some(("1, 2", " TO (3)")));
+        assert_eq!(paren_group("('(x)', f(1)) rest"), Some(("'(x)', f(1)", " rest")));
+        assert_eq!(paren_group("('a)') x"), Some(("'a)'", " x")));
+        assert_eq!(paren_group("()"), Some(("", "")));
+        assert_eq!(paren_group("x (1)"), None);
+        assert_eq!(paren_group("(1"), None);
+        assert_eq!(paren_group("('a)"), None);
     }
 }

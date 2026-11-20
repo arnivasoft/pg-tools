@@ -16,6 +16,7 @@ pub mod freesql;
 pub mod index;
 pub mod maintenance;
 pub mod matview;
+pub mod partition;
 pub mod pgtype;
 pub mod policy;
 pub mod role;
@@ -35,7 +36,7 @@ pub mod view;
 
 pub use sqlscan::{ScanResult, scan_semicolons};
 
-use crate::model::{DomainDef, FieldError, MatViewDef, ObjectDef, ObjectKind, PolicyDef, TableDef, TablespaceDef, TriggerDef, ViewDef};
+use crate::model::{DomainDef, FieldError, MatViewDef, ObjectDef, ObjectKind, PartitionDef, PolicyDef, TableDef, TablespaceDef, TriggerDef, ViewDef};
 use crate::plan::{Plan, Risk, Statement};
 
 /// PG tanımlayıcı üst sınırı (BAYT, UTF-8).
@@ -207,8 +208,7 @@ pub fn validate(def: &ObjectDef, ctx: &BuildCtx) -> Vec<FieldError> {
         ObjectDef::Domain(d) => domain::validate(ctx, d),
         ObjectDef::Policy(d) => policy::validate(ctx, d),
         ObjectDef::Tablespace(d) => tablespace::validate(ctx, d),
-        // Geçici: doğrulayıcı sonraki görevlerde (Plan 36).
-        ObjectDef::Partition(_) => vec![err("object", "henüz desteklenmiyor")],
+        ObjectDef::Partition(d) => partition::validate(ctx, d),
     }
 }
 
@@ -302,6 +302,7 @@ fn invalid_utf8_locked(d: &ObjectDef) -> bool {
         ObjectDef::Domain(d) => &d.unsupported,
         ObjectDef::Policy(d) => &d.unsupported,
         ObjectDef::Tablespace(d) => &d.unsupported,
+        ObjectDef::Partition(d) => &d.unsupported,
         _ => return false,
     };
     unsupported.iter().any(|u| u == crate::load::INVALID_UTF8_REASON)
@@ -331,6 +332,10 @@ fn droppable_despite_invalid_utf8(d: &ObjectDef) -> Option<ObjectDef> {
         }
         ObjectDef::Tablespace(x) if only_reason(&x.unsupported) => {
             ObjectDef::Tablespace(TablespaceDef { unsupported: vec![], editable: true, ..x.clone() })
+        }
+        // Bölüm: ayırma yalnız (geçerli UTF-8) şema/ad yazar; sınır metni ifadeye girmez.
+        ObjectDef::Partition(x) if only_reason(&x.unsupported) => {
+            ObjectDef::Partition(PartitionDef { unsupported: vec![], editable: true, ..x.clone() })
         }
         _ => return None,
     })
@@ -374,8 +379,7 @@ pub fn create(def: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, Vec<FieldError>> 
         ObjectDef::Domain(d) => domain::create(ctx, d),
         ObjectDef::Policy(d) => policy::create(ctx, d),
         ObjectDef::Tablespace(d) => tablespace::create(ctx, d),
-        // Geçici: üretici sonraki görevlerde (Plan 36).
-        ObjectDef::Partition(_) => Err(vec![err("object", "henüz desteklenmiyor")]),
+        ObjectDef::Partition(d) => partition::create(ctx, d),
     }
 }
 
@@ -426,6 +430,8 @@ pub fn alter(old: &ObjectDef, new: &ObjectDef, ctx: &BuildCtx) -> Result<Plan, V
         (ObjectDef::Policy(o), ObjectDef::Policy(n)) => return policy::alter(ctx, o, n),
         // Tablespace kendi doğrulamasını yapar: konum create-only, yalnızca değişen/yazılan alanlar, salt okunur kapısı.
         (ObjectDef::Tablespace(o), ObjectDef::Tablespace(n)) => return tablespace::alter(ctx, o, n),
+        // Partition kendi doğrulamasını yapar: kimlik/özellikler değiştirilemez, yalnızca sınır değişimi (DETACH + ATTACH).
+        (ObjectDef::Partition(o), ObjectDef::Partition(n)) => return partition::alter(ctx, o, n),
         // Type kendi doğrulamasını yapar: yalnızca değişen/yazılan alanlar, enum/composite `original` eşlemesi, range
         // gövdesi sabit, tür (variant) değişmez, salt okunur kapısı.
         (ObjectDef::Type(o), ObjectDef::Type(n)) => return pgtype::alter(ctx, o, n),
@@ -475,6 +481,9 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
     if o.cascade && matches!(kind, ObjectKind::Database | ObjectKind::Role) {
         errs.push(err("cascade", "Bu tür CASCADE ile silinemez."));
     }
+    if o.cascade && kind == ObjectKind::Partition {
+        errs.push(err("cascade", "Bölüm ayırmada CASCADE yoktur."));
+    }
     if !errs.is_empty() {
         return Err(errs);
     }
@@ -500,8 +509,8 @@ pub fn drop_with(def: &ObjectDef, o: DropOptions, ctx: &BuildCtx) -> Result<Plan
         ObjectDef::Policy(d) => policy::drop(d),
         // Tablespace CASCADE bilmez: `cascade` yok sayılır (Karar 7).
         ObjectDef::Tablespace(d) => tablespace::drop(d),
-        // Geçici: üretici sonraki görevlerde (Plan 36).
-        ObjectDef::Partition(_) => Err(vec![err("object", "henüz desteklenmiyor")]),
+        // Bölüm silinmez, ayrılır (tablo kalır); CONCURRENTLY yalnız burada anlamlıdır.
+        ObjectDef::Partition(d) => partition::detach(ctx, d, o.concurrently),
     }
 }
 

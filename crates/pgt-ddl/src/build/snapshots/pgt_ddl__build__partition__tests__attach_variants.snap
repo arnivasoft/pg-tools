@@ -1,0 +1,16 @@
+---
+source: crates/pgt-ddl/src/build/partition.rs
+expression: out
+---
+# PG 110000
+[Destructive] ALTER TABLE public.measurement ATTACH PARTITION public.m_2024 FOR VALUES FROM (('2024-01-01'
+)) TO (('2025-01-01'
+))  -- Tablo taranır ve sınır doğrulanır; üst tabloda ACCESS EXCLUSIVE kilidi alınır.
+
+# PG 160000
+[Destructive] ALTER TABLE public.measurement ATTACH PARTITION public.m_2024 FOR VALUES FROM (('2024-01-01'
+)) TO (('2025-01-01'
+))  -- Tablo taranır ve sınır doğrulanır; üst tabloda SHARE UPDATE EXCLUSIVE kilidi alınır.
+
+# default
+[Destructive] ALTER TABLE public.measurement ATTACH PARTITION public.m_2024 DEFAULT  -- Tablo taranır ve sınır doğrulanır; üst tabloda SHARE UPDATE EXCLUSIVE kilidi alınır.
