@@ -2,7 +2,7 @@
 import { CircleAlert } from "lucide-solid";
 import { type Component, Show, createSignal } from "solid-js";
 import type { ErrorPayload } from "../../ipc/bindings/ErrorPayload";
-import { BADGE_CLASS, badgeLabel, createBadgeCardLoader, cardActionLabel, cardTitle, isGone } from "./error-badge-model";
+import { BADGE_CLASS, badgeLabel, createBadgeCardLoader, isGone } from "./error-badge-model";
 import type { ErrorBadgeCardProps } from "./ErrorBadgeCard";
 
 /** Yükleyici (tek tanım): `lazy` ve ileride önyükleme aynı içe aktarmayı paylaşır. */
@@ -52,10 +52,9 @@ export function ErrorBadge(props: { error: ErrorPayload; onRetry: () => void; on
         <View
           label={badgeLabel()}
           badgeClass={BADGE_CLASS}
-          title={cardTitle(props.error)}
+          error={props.error}
           detail={props.error.detail ?? null}
           hint={props.error.hint ?? null}
-          actionLabel={cardActionLabel(props.error)}
           onActivate={activate}
           onAction={action}
         />

@@ -24,7 +24,15 @@ import { dropOptionsFor, dropRequest, dropStatusText, type DropStatus } from "./
 import { isConnectionCode } from "./errors";
 import { createPreviewer, type PreviewDeps } from "./preview";
 
-export interface DropInput { serverId: string; databaseOid: number | null; object: ObjectRef; refreshNodeId: string | null; name: string }
+export interface DropInput {
+  serverId: string;
+  databaseOid: number | null;
+  object: ObjectRef;
+  refreshNodeId: string | null;
+  name: string;
+  /** Başarıda `refreshNodeId`'den sonra ayrıca yenilenecek düğümler (Partition ayırma: şemanın tablolar koleksiyonu). */
+  extraRefreshNodeIds?: string[];
+}
 
 export type DropPhase = "loading" | "ready" | "applying" | "error";
 
@@ -36,6 +44,8 @@ export interface DropState {
   cascade: boolean;
   /** Yalnızca Database: `DROP DATABASE … WITH (FORCE)` (PG 13+). */
   force: boolean;
+  /** Yalnızca Partition: `DETACH PARTITION … CONCURRENTLY` (PG 14+). */
+  concurrently: boolean;
   view: PlanView | null;
   viewFor: number;
   version: number;
@@ -98,6 +108,10 @@ export function createDropController(deps: DropControllerDeps) {
     const id = input.refreshNodeId;
     if (id !== null) quiet(() => void Promise.resolve(deps.refreshNode(id)).catch(() => {}));
   }
+  /** Başarıda ek düğümler (her biri ayrı; hata yutulur). */
+  function refreshExtra(input: DropInput) {
+    for (const id of input.extraRefreshNodeIds ?? []) quiet(() => void Promise.resolve(deps.refreshNode(id)).catch(() => {}));
+  }
 
   const onPreview = (r: PreviewOk) => {
     const s = state();
@@ -127,7 +141,7 @@ export function createDropController(deps: DropControllerDeps) {
   const preview = () => {
     const s = state();
     if (!s || s.phase !== "ready" || !s.def) return;
-    const req = dropRequest(s.input.object, s.def, s.cascade, s.force);
+    const req = dropRequest(s.input.object, s.def, s.cascade, s.force, s.concurrently);
     const { version } = s;
     const g = gen;
     patch({ pending: true });
@@ -179,7 +193,7 @@ export function createDropController(deps: DropControllerDeps) {
     close();
     const info = deps.serverInfo(input.serverId);
     setState({
-      input: { ...input, object: { ...input.object } }, phase: "loading", def: null, cascade: false, force: false,
+      input: { ...input, object: { ...input.object } }, phase: "loading", def: null, cascade: false, force: false, concurrently: false,
       view: null, viewFor: -1, version: 0, pending: false, previewError: null, confirm: emptyConfirm(), status: null,
       canReload: false, serverName: info?.name ?? "", locked: info?.locked ?? false, production: info?.production ?? false,
     });
@@ -216,6 +230,14 @@ export function createDropController(deps: DropControllerDeps) {
     patch({ force: v, version: s.version + 1, confirm: emptyConfirm(), status: null });
     preview();
   };
+  /** Yalnızca Partition: `CONCURRENTLY` — cascade kalıbı; yarım kalmış ayırmada (`detachPending`, FINALIZE) etkisiz. */
+  const setConcurrently = (v: boolean) => {
+    const s = state();
+    if (!s || s.phase !== "ready" || s.concurrently === v || !dropOptionsFor(s.input.object.kind).concurrently) return;
+    if (s.def?.kind === "partition" && s.def.detachPending) return;
+    patch({ concurrently: v, version: s.version + 1, confirm: emptyConfirm(), status: null });
+    preview();
+  };
   const setConfirm = (c: Partial<ConfirmState>) => {
     const s = state();
     if (!s || s.phase === "applying") return;
@@ -225,6 +247,7 @@ export function createDropController(deps: DropControllerDeps) {
   /** Silindi: Gezgin düğümü yenilenir, aynı nesnenin alter sekmeleri `gone` (hataları yutulur). */
   const succeeded = (input: DropInput) => {
     refreshTree(input);
+    refreshExtra(input);
     quiet(() => deps.objectDropped(input.serverId, input.databaseOid, input.object));
   };
 
@@ -236,7 +259,7 @@ export function createDropController(deps: DropControllerDeps) {
     if (!canSubmit(gate, s.confirm)) return;
     const options = applyOptionsFor(deps.newId(), deps.lockTimeoutMs, s.view, gate, s.confirm);
     if (!options) return;
-    const req = dropRequest(s.input.object, s.def, s.cascade, s.force);
+    const req = dropRequest(s.input.object, s.def, s.cascade, s.force, s.concurrently);
     const g = gen;
     const input = s.input;
     previewer.cancel();
@@ -260,7 +283,7 @@ export function createDropController(deps: DropControllerDeps) {
       // Kapatılmış diyalogun geç başarısı da Gezgini ve sekmeleri günceller ve bildirilir (nesne silindi);
       // diyalog yalnızca hâlâ aynı kuşaktaysa kapatılır (yeni açılan diyaloğa dokunulmaz).
       succeeded(input);
-      notify(tdes.drop.done(input.name), "success");
+      notify(input.object.kind === "partition" ? tdes.drop.detach.done(input.name) : tdes.drop.done(input.name), "success");
       if (g !== gen) return;
       applyId = null;
       close();
@@ -304,6 +327,7 @@ export function createDropController(deps: DropControllerDeps) {
     },
     setCascade,
     setForce,
+    setConcurrently,
     setConfirm,
     apply,
     cancelApply,
@@ -313,9 +337,9 @@ export function createDropController(deps: DropControllerDeps) {
      * Diyaloğun sunduğu kutular (`dropOptionsFor`; diyalog `drop-model`'i doğrudan içe aktarmaz — paylaşılan parça
      * ana paketin `__vite__mapDeps` listesine yeni ad eklemesin). Diyalog kapalıyken ikisi de false.
      */
-    options: (): { cascade: boolean; force: boolean } => {
+    options: (): { cascade: boolean; force: boolean; concurrently: boolean } => {
       const s = state();
-      return s ? dropOptionsFor(s.input.object.kind) : { cascade: false, force: false };
+      return s ? dropOptionsFor(s.input.object.kind) : { cascade: false, force: false, concurrently: false };
     },
     /** Arayüz kapısı (denetleyici `apply` anında yeniden hesaplar). */
     gate: (): ApplyGate => {

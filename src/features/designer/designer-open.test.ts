@@ -470,3 +470,52 @@ describe("designer-open: yetkiler (Plan 22)", () => {
     }
   });
 });
+
+describe("designer-open: bölüm (Plan 37)", () => {
+  const partTarget: DdlTarget = {
+    serverId: "S1", databaseOid: 5, object: { kind: "table", oid: 300 }, create: null, focus: null, refreshNodeId: "coll-tbl",
+    partition: { kind: "partition", oid: 300 }, tablesRefreshNodeId: "coll-tbl2",
+  };
+
+  it("bound: target.partition ile openAlter; aynı bölüm ikinci kez açılınca mevcut sekme etkinleşir", async () => {
+    const { opener, designer, store, tabs } = setup(partTarget);
+    await opener.open("tbl", "bound");
+    expect(designer.openAlter).toHaveBeenCalledWith(expect.objectContaining({ databaseOid: 5, object: { kind: "partition", oid: 300 } }));
+    expect(opener.context(store.state.designers[0]!.id)).toMatchObject({ tablesNodeId: "coll-tbl2" });
+    designer.findAlter.mockReturnValueOnce("D-existing");
+    await opener.open("tbl", "bound");
+    expect(tabs.activate).toHaveBeenCalledWith("D-existing");
+    expect(designer.openAlter).toHaveBeenCalledTimes(1);
+  });
+
+  it("detach: openDrop(object = partition, extraRefreshNodeIds = [tablesRefreshNodeId])", async () => {
+    const { opener, deps, designer } = setup(partTarget);
+    await opener.open("tbl", "detach");
+    expect(deps.openDrop).toHaveBeenCalledWith({
+      serverId: "S1", databaseOid: 5, object: { kind: "partition", oid: 300 }, refreshNodeId: "coll-tbl", name: "orders",
+      extraRefreshNodeIds: ["coll-tbl2"],
+    });
+    expect(designer.openAlter).not.toHaveBeenCalled();
+  });
+
+  it("target.partition yoksa iki kip de tdes.open.none", async () => {
+    for (const mode of ["bound", "detach"] as const) {
+      const { opener, deps, designer } = setup({ ...partTarget, partition: undefined });
+      await opener.open("tbl", mode);
+      expect(deps.notify).toHaveBeenCalledWith(tdes.open.none, "info");
+      expect(deps.openDrop).not.toHaveBeenCalled();
+      expect(designer.openAlter).not.toHaveBeenCalled();
+    }
+  });
+
+  it("create (partitionCollection): openCreate ve bağlamda tablesNodeId", async () => {
+    const target: DdlTarget = {
+      ...createTarget, create: { kind: "partition", context: { schemaOid: 10, tableOid: 300 }, preset: null },
+      refreshNodeId: "coll-tbl", tablesRefreshNodeId: "coll-tbl2",
+    };
+    const { opener, designer, store } = setup(target);
+    await opener.open("coll-seq", "create");
+    expect(designer.openCreate).toHaveBeenCalledOnce();
+    expect(opener.context(store.state.designers[0]!.id)).toMatchObject({ collectionNodeId: "coll-tbl", tablesNodeId: "coll-tbl2" });
+  });
+});

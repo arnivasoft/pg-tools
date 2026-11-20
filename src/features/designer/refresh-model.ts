@@ -14,6 +14,8 @@ export interface OpenContext {
   tableNodeId: string | null;
   /** Create sekmesi: oluşturulacak nesnenin koleksiyon düğümü (uygulama sonrası tablo düğümü etiketle bulunur); diğerleri null. */
   collectionNodeId?: string | null;
+  /** Partition create/attach/alter: bağlanan/ayrılan tablonun şemasının tablolar koleksiyonu (`tablesRefreshNodeId`); yoksa null. */
+  tablesNodeId?: string | null;
 }
 
 const schemaOf = (d: object | null): string | null => {
@@ -79,6 +81,9 @@ export function extraRefreshIds(tree: TreeState, ctx: OpenContext | null, info: 
       for (const c of kids(tableId)) if (wanted.includes(kindOf(c) as NodeKind)) add(c);
     }
   }
+
+  // Bölüm bağlama/sınır değişimi tablo koleksiyonunda da görünür: yüklüyse yenilenir (spec §11.4).
+  if (info.kind === "partition" && ctx?.tablesNodeId) add(ctx.tablesNodeId);
 
   const target = moveCollection(info);
   if (target && info.mode === "alter" && info.before) {

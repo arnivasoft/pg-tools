@@ -36,7 +36,7 @@ export type { DropInput };
 export interface DesignerOpenDeps {
   designer: Pick<DesignerController, "openCreate" | "openAlter" | "openAcl" | "openDefaultAcl" | "requestFocus" | "findAlter" | "ids">;
   tabs: Pick<TabsStore, "state" | "openDesigner" | "activate" | "rename">;
-  api: Pick<Api, "ddlTargetOf">;
+  api: Pick<DdlApi, "ddlTargetOf">;
   tree: () => TreeState;
   /** Güncel sunucu kayıtları (kilit, ad). */
   refreshServers: () => Promise<ServerConfig[]>;
@@ -69,7 +69,8 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
       const [target, list] = await Promise.all([deps.api.ddlTargetOf(nodeId), deps.refreshServers()]);
       const { refreshNodeId } = target;
       const create = mode === "create" ? target.create : null;
-      const object = mode === "create" ? null : target.object;
+      // Bölüm sınırı / Bölümü ayır: nesne `target.partition`'dır (gerçek bölüm düğümü dışında yok → açılmaz).
+      const object = mode === "create" ? null : mode === "bound" || mode === "detach" ? (target.partition ?? null) : target.object;
       const kind = create?.kind ?? object?.kind;
       // Kolon/kısıt odağı olan hedef (tablo diyaloğu) hiçbir zaman DROP TABLE/yeniden adlandırma diyaloğu açmaz.
       if (target.focus && (mode === "drop" || mode === "rename")) {
@@ -102,8 +103,9 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
       const database = serverScoped ? null : (ancestorOfKind(deps.tree(), nodeId, ["database"])?.label ?? null);
       if (database !== null && databaseOid !== null) dbNames.set(`${serverId}|${databaseOid}`, database);
       const where = database === null ? config.name : `${config.name}/${database}`;
-      if (object && mode === "drop") {
-        deps.openDrop({ serverId, databaseOid, object, refreshNodeId, name: node.label });
+      if (object && (mode === "drop" || mode === "detach")) {
+        const extraRefreshNodeIds = mode === "detach" && target.tablesRefreshNodeId ? [target.tablesRefreshNodeId] : undefined;
+        deps.openDrop({ serverId, databaseOid, object, refreshNodeId, name: node.label, ...(extraRefreshNodeIds && { extraRefreshNodeIds }) });
         return;
       }
       if (create) {
@@ -113,6 +115,7 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
         if (r.created) void designer.openCreate({ tabId: r.id, serverId, databaseOid, create, refreshNodeId });
         remember(r.id, {
           databaseNodeId: ancestorOfKind(deps.tree(), nodeId, ["database"])?.id ?? null, tableNodeId: null, collectionNodeId: refreshNodeId,
+          ...(target.tablesRefreshNodeId && { tablesNodeId: target.tablesRefreshNodeId }),
         });
         return;
       }
@@ -152,7 +155,10 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
         else if (target.focus) designer.requestFocus(id, focusFieldOf(target.focus));
       };
       const tableNode = object.kind === "table" ? (node.kind === "table" ? node : ancestorOfKind(deps.tree(), nodeId, ["table"])) : null;
-      const ctx: OpenContext = { databaseNodeId: ancestorOfKind(deps.tree(), nodeId, ["database"])?.id ?? null, tableNodeId: tableNode?.id ?? null };
+      const ctx: OpenContext = {
+        databaseNodeId: ancestorOfKind(deps.tree(), nodeId, ["database"])?.id ?? null, tableNodeId: tableNode?.id ?? null,
+        ...(target.tablesRefreshNodeId && { tablesNodeId: target.tablesRefreshNodeId }),
+      };
       // Create'ten dönüşen ya da kimliği değişen sekme de eşlenir (sekme anahtarı değişmez).
       const existing = designer.findAlter(serverId, databaseOid, object);
       if (existing !== null) {
@@ -185,9 +191,9 @@ export function createDesignerOpener(deps: DesignerOpenDeps) {
   };
 }
 
-export interface DesignerDeps extends Omit<DesignerOpenDeps, "designer" | "openDrop"> {
+export interface DesignerDeps extends Omit<DesignerOpenDeps, "designer" | "openDrop" | "api"> {
   /** Designer'a özgü komutlar bu parçada (designer-commands.ts); tembel parçaların ortak `ddl_*` komutları ddl-commands.ts'te. */
-  api: Omit<DesignerControllerDeps["api"], keyof DesignerApi | keyof DdlApi> & DesignerOpenDeps["api"];
+  api: Omit<DesignerControllerDeps["api"], keyof DesignerApi | keyof DdlApi>;
   /**
    * `servers`: sunucu listesi (tepkisel; kayıt değişince açık sekmelerin ad/kilit/üretim bilgisi yenilenir);
    * `openScript`: "Query Tool'da aç" (ApplyBar) — betik yeni sorgu sekmesinde, çalıştırılmadan.
@@ -224,6 +230,7 @@ export function createDesigner(deps: DesignerDeps) {
   createRoot(() => createEffect(on(deps.query.servers, (list) => list.forEach((s) => ctl.serverChanged(s.id)), { defer: true })));
   const opener: ReturnType<typeof createDesignerOpener> = createDesignerOpener({
     ...deps,
+    api: ddlCommands,
     designer: ctl,
     openDrop: deps.openDrop ?? ctl.drop.open,
   });

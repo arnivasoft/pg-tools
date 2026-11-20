@@ -437,21 +437,22 @@ describe("drop-controller Plan 15: FORCE ve sunucu kapsamı", () => {
 
   it("dropOptionsFor'da sunulmayan kutular denetleyicide de etkisiz (database cascade, role cascade/force, schema force)", async () => {
     let s = setup();
-    expect(s.drop.options()).toEqual({ cascade: false, force: false }); // kapalı diyalog
+    expect(s.drop.options()).toEqual({ cascade: false, force: false, concurrently: false }); // kapalı diyalog
     await ready(s, DB_INPUT);
-    expect(s.drop.options()).toEqual({ cascade: false, force: true });
+    expect(s.drop.options()).toEqual({ cascade: false, force: true, concurrently: false });
     s.drop.setCascade(true);
     expect(s.drop.state()!.cascade).toBe(false);
     s = setup();
     await ready(s, ROLE_INPUT);
-    expect(s.drop.options()).toEqual({ cascade: false, force: false });
+    expect(s.drop.options()).toEqual({ cascade: false, force: false, concurrently: false });
     s.drop.setCascade(true);
     s.drop.setForce(true);
+    s.drop.setConcurrently(true);
     expect(s.drop.state()).toMatchObject({ cascade: false, force: false });
     expect(s.api.ddlPreview).toHaveBeenCalledOnce();
     s = setup();
     await ready(s);
-    expect(s.drop.options()).toEqual({ cascade: true, force: false });
+    expect(s.drop.options()).toEqual({ cascade: true, force: false, concurrently: false });
     s.drop.setForce(true);
     expect(s.drop.state()!.force).toBe(false);
   });
@@ -468,5 +469,62 @@ describe("drop-controller Plan 15: FORCE ve sunucu kapsamı", () => {
     await flush();
     expect(s.api.ddlApply).toHaveBeenCalledOnce();
     expect(s.drop.state()!.status).toEqual({ kind: "dependents", text: tdes.drop.dependentsNoCascade, detail: "owner of table app.t" });
+  });
+});
+
+describe("drop-controller: Bölümü ayır (partition)", () => {
+  const PART: ObjectRef = { kind: "partition", oid: 300 };
+  const PINPUT: DropInput = { serverId: "S1", databaseOid: 5, object: PART, refreshNodeId: "N-parts", name: "p1", extraRefreshNodeIds: ["N-tables"] };
+  const pdef = (detachPending = false): ObjectDef => ({ kind: "partition", detachPending }) as unknown as ObjectDef;
+  const dropReq = (s: S, i: number) => s.api.ddlPreview.mock.calls[i]![2] as Extract<PlanRequest, { op: "drop" }>;
+
+  it("setConcurrently: sürüm ilerler, onay sıfırlanır, önizleme concurrently: true ile istenir; uygulama isteğine de gider", async () => {
+    const s = setup();
+    s.api.ddlLoad.mockResolvedValue(pdef());
+    const st0 = await ready(s, PINPUT);
+    expect(st0.concurrently).toBe(false);
+    expect(dropReq(s, 0).concurrently).toBe(false);
+    s.drop.setConfirm({ checked: true });
+    s.drop.setConcurrently(true);
+    const st = s.drop.state()!;
+    expect(st).toMatchObject({ concurrently: true, version: st0.version + 1, confirm: { checked: false, typedName: "" } });
+    await flush();
+    expect(dropReq(s, 1).concurrently).toBe(true);
+    s.drop.setConfirm({ checked: true });
+    await s.drop.apply();
+    expect(s.api.ddlApply.mock.calls[0]![2]).toMatchObject({ op: "drop", concurrently: true });
+  });
+
+  it("partition dışı türde setConcurrently etkisiz (istekte alan yok)", async () => {
+    const s = setup();
+    await ready(s);
+    s.drop.setConcurrently(true);
+    expect(s.drop.state()!.concurrently).toBe(false);
+    expect(s.api.ddlPreview).toHaveBeenCalledOnce();
+    expect("concurrently" in dropReq(s, 0)).toBe(false);
+  });
+
+  it("detachPending tanımda setConcurrently etkisiz (FINALIZE)", async () => {
+    const s = setup();
+    s.api.ddlLoad.mockResolvedValue(pdef(true));
+    await ready(s, PINPUT);
+    s.drop.setConcurrently(true);
+    expect(s.drop.state()!.concurrently).toBe(false);
+    expect(s.api.ddlPreview).toHaveBeenCalledOnce();
+  });
+
+  it("başarıda ana ve ek düğümler yenilenir; ek yenileme hatası sonucu bozmaz", async () => {
+    const s = setup();
+    s.api.ddlLoad.mockResolvedValue(pdef());
+    s.refreshNode.mockImplementation((id: string) => {
+      if (id === "N-tables") throw new Error("yok");
+    });
+    await ready(s, PINPUT);
+    s.drop.setConfirm({ checked: true });
+    await s.drop.apply();
+    await flush();
+    expect(s.refreshNode.mock.calls.map((c) => c[0])).toEqual(["N-parts", "N-tables"]);
+    expect(s.notify).toHaveBeenCalledWith(tdes.drop.detach.done("p1"), "success");
+    expect(s.drop.state()).toBeNull();
   });
 });

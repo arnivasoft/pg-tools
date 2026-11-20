@@ -96,7 +96,7 @@ describe("openScript (designer betiği Query Tool'da)", () => {
       qtOpen: vi.fn(),
       qtRun: vi.fn(),
       saveServer: vi.fn(),
-    } as unknown as Api;
+    } as unknown as Api & { qtRun: ReturnType<typeof vi.fn> };
     const notify = vi.fn();
     const ctl = createQueryController({ api, notify, tree: emptyTree, connect: async () => true, serversChanged: () => {} });
     return { ctl, api, notify };

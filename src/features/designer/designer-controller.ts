@@ -28,6 +28,7 @@ import { tdes } from "../../app/strings-designer";
 import type { ToastKind } from "../../app/toast-model";
 import type { AclDef } from "../../ipc/bindings/AclDef";
 import type { ApplyOutcome } from "../../ipc/bindings/ApplyOutcome";
+import type { CreateContext } from "../../ipc/bindings/CreateContext";
 import type { DdlCreate } from "../../ipc/bindings/DdlCreate";
 import type { DefaultAclDef } from "../../ipc/bindings/DefaultAclDef";
 import type { DefaultAclScope } from "../../ipc/bindings/DefaultAclScope";
@@ -132,6 +133,11 @@ export interface DesignerModel {
    * `openCreatedAsAlter` sekmeyi bu nesnenin düzenlemesine çevirir. Yalnızca create kipinde dolar.
    */
   partialCreated: ObjectRef | null;
+  /**
+   * Yalnız create sekmesi: "Yeni …" diyaloğunun açıldığı koleksiyon bağlamı (Partition formu üst tablo oid'ini buradan alır);
+   * alter/acl/default_acl için null. Create→alter dönüşümünde korunması gerekmez.
+   */
+  createContext: CreateContext | null;
 }
 
 /**
@@ -432,7 +438,7 @@ export function createDesignerController(deps: DesignerControllerDeps) {
       applying: false, applyId: null, outcome: null, applyError: null, gateError: null, needsReload: false,
       lockTimeoutMs: DEFAULT_LOCK_TIMEOUT_MS, confirm: emptyConfirm(),
       locked: info?.locked ?? false, production: info?.production ?? false,
-      concurrently: false, cascade: false, postApplyWarnings: [], partialCreated: null,
+      concurrently: false, cascade: false, postApplyWarnings: [], partialCreated: null, createContext: create ? { ...create.context } : null,
     });
     const [focus, setFocus] = createSignal<FocusRequest | null>(null);
     const previewer = createPreviewer<PreviewOk>(pd, onPreview(tabId), onPreviewError(tabId), delay);

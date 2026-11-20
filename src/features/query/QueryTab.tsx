@@ -21,7 +21,8 @@ import type { TxAction } from "../../ipc/bindings/TxAction";
 import type { TxMode } from "../../ipc/bindings/TxMode";
 import { commands } from "../../ipc/commands";
 import { tabCommands } from "./tab-commands";
-import { qtCancel, qtMore } from "../../ipc/qt-more-commands";
+import { settingsCommands } from "../../ipc/settings-commands";
+import { qtCancel, qtMore, qtRun } from "../../ipc/qt-more-commands";
 import { toPayload } from "../../ipc/errors";
 import { Button } from "../../ui/Button";
 import { isProductionLabel } from "../servers/server-form";
@@ -232,7 +233,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
       complete,
     });
     ctl.setRunner((kind) => void run(kind));
-    commands
+    settingsCommands
       .settingsGet()
       .then((s) => {
         setHistoryEnabled(s.historyEnabled);
@@ -332,7 +333,7 @@ export default function QueryTab(props: { ctl: QueryController }) {
       session,
       limit: ROW_LIMIT,
       analyze: async (s, text, scope) => (plans = await tabCommands.qtAnalyze(s, text, scope)),
-      run: commands.qtRun,
+      run: qtRun,
       confirm: (items) => runConfirm.ask(items, production),
       onEvent: (ev) => onEvent(id, runId, ev, snap, () => plans),
     });

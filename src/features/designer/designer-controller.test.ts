@@ -111,6 +111,16 @@ async function readyToApply(s: S, v: PlanView = view()) {
 }
 
 describe("designer-controller açılış", () => {
+  it("createContext: create sekmesinde dolu, alter'da null", async () => {
+    const s = setup();
+    await s.ctl.openCreate({
+      tabId: "C9", serverId: "S1", databaseOid: 5, create: { kind: "schema", context: { schemaOid: 7, tableOid: 42 }, preset: null }, refreshNodeId: null,
+    });
+    expect(s.ctl.model("C9")!.createContext).toEqual({ schemaOid: 7, tableOid: 42 });
+    const a = await openAlter(s);
+    expect(s.ctl.model(a)!.createContext).toBeNull();
+  });
+
   it("openCreate: defaults yüklenir, dirty=false, önizleme zamanlanmaz", async () => {
     const s = setup();
     const id = await openCreate(s);

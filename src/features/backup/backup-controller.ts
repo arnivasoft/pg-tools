@@ -28,6 +28,7 @@ import type { ToolDetection } from "../../ipc/bindings/ToolDetection";
 import type { TreeNode } from "../../ipc/bindings/TreeNode";
 import type { Api } from "../../ipc/commands";
 import type { DdlApi } from "../../ipc/ddl-commands";
+import type { SettingsApi } from "../../ipc/settings-commands";
 import type { BackupApi } from "./backup-commands";
 import { isProductionLabel } from "../servers/server-form";
 import {
@@ -63,7 +64,7 @@ export type Picker = {
 };
 
 export interface BackupControllerDeps {
-  api: Pick<Api, "ddlTargetOf" | "listChildren" | "settingsGet"> & Pick<DdlApi, "ddlLookup"> & BackupApi;
+  api: Pick<Api, "listChildren"> & SettingsApi & Pick<DdlApi, "ddlTargetOf" | "ddlLookup"> & BackupApi;
   tree: () => { nodes: Map<string, TreeNode>; parent: Map<string, string>; children: Map<string, string[]> };
   servers: () => ServerConfig[];
   connect: (serverId: string) => Promise<boolean>;

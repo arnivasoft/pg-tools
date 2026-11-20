@@ -15,7 +15,8 @@ import type { SessionOptions } from "../../ipc/bindings/SessionOptions";
 import { invoke } from "@tauri-apps/api/core";
 import type { Api } from "../../ipc/commands";
 import { toPayload } from "../../ipc/errors";
-import { qtCancel, qtMore } from "../../ipc/qt-more-commands";
+import { ddlCommands, type DdlApi } from "../../ipc/ddl-commands";
+import { qtCancel, qtMore, qtRun } from "../../ipc/qt-more-commands";
 
 /**
  * commands.ts'teki `call`'ın yerel karşılığı (Plan 17 R1): `call` ya da `IpcError` içe aktarılsaydı ana paketin dışa
@@ -47,10 +48,12 @@ export const qtOpenReadonly = (serverId: string, databaseOid: number | null, opt
   call<string>("qt_open_readonly", { serverId, databaseOid, options });
 
 /** commands.ts'ten devralınan üyeler (imzalar aynen). */
-export type DataBaseApi = Pick<Api, "ddlTargetOf" | "qtRun" | "qtClose">;
+export type DataBaseApi = Pick<Api, "qtClose">;
 
 /** Denetleyicinin tüm dış bağımlılığı (testlerde sahtelenir). */
 export interface DataApi extends DataBaseApi {
+  ddlTargetOf: DdlApi["ddlTargetOf"];
+  qtRun: typeof qtRun;
   qtMore: typeof qtMore;
   qtCancel: typeof qtCancel;
   dataLoad: typeof dataLoad;
@@ -69,8 +72,8 @@ export function createDataApi(
   connect: DataApi["connect"],
 ): DataApi {
   return {
-    ddlTargetOf: api.ddlTargetOf,
-    qtRun: api.qtRun,
+    ddlTargetOf: ddlCommands.ddlTargetOf,
+    qtRun,
     qtMore,
     qtCancel,
     qtClose: api.qtClose,

@@ -9,7 +9,7 @@ import type { SchemaDef } from "../../ipc/bindings/SchemaDef";
 import type { SequenceDef } from "../../ipc/bindings/SequenceDef";
 import { addColumn, groupIssues, issuesFor, moveColumn, removeColumn, updateColumn } from "./designer-model";
 import {
-  DATABASE_PATHS, DOMAIN_PATHS, EXTENSION_PATHS, FORM_PATHS, POLICY_PATHS, TABLESPACE_PATHS, ROLE_PATHS, ROUTINE_PATHS, TRIGGER_PATHS, TYPE_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
+  DATABASE_PATHS, DOMAIN_PATHS, EXTENSION_PATHS, FORM_PATHS, PARTITION_PATHS, POLICY_PATHS, TABLESPACE_PATHS, ROLE_PATHS, ROUTINE_PATHS, TRIGGER_PATHS, TYPE_PATHS, INDEX_PATHS, SCHEMA_PATHS, SEQUENCE_PATHS, TABLE_PATHS, VIEW_PATHS, MATVIEW_PATHS, asExtension, asIndex, asSchema, asSequence, btreeOnlyFields,
   columnKeyLabel, exactIssues, extensionEditPatch, extensionOptionLabel, extensionVersionNote, fillfactorEnabled,
   fillfactorFromInput, findExtension, incrementEditPatch, incrementSign, indexEditPatch, indexMethodPatch, indexReadOnlyReason,
   newIndexColumn, normalizeEmpty, normalizeTablespaceEdit, nullsFirstToSelect, orphanRowIssues, ownedByHint, restrictedControlDisabled, schemaEditPatch, sequenceSchemaPatch, tablespaceChoices,
@@ -384,9 +384,8 @@ describe("FORM_PATHS (tür → form eşlemesi)", () => {
   it("her ObjectKind için yol kümesi var", () => {
     const kinds = Object.keys(FORM_PATHS) as (keyof typeof FORM_PATHS)[];
     expect(kinds).toHaveLength(17);
-    // Partition formu Plan 37'de: o zamana kadar boş küme.
-    expect(kinds.filter((k) => k !== "partition").every((k) => FORM_PATHS[k].size > 0)).toBe(true);
-    expect(FORM_PATHS.partition.size).toBe(0);
+    expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
+    expect(FORM_PATHS.partition).toBe(PARTITION_PATHS);
     expect(FORM_PATHS.tablespace).toBe(TABLESPACE_PATHS);
     expect(FORM_PATHS.index).toBe(INDEX_PATHS);
     expect(FORM_PATHS.sequence).toBe(SEQUENCE_PATHS);
@@ -399,6 +398,20 @@ describe("FORM_PATHS (tür → form eşlemesi)", () => {
     );
     expect([...g.byPath.keys()]).toEqual(["columns[1].dataType", "partitionBy.keys[0]"]);
     expect(g.general).toEqual(["b", "c"]);
+  });
+});
+
+describe("PARTITION_PATHS", () => {
+  it("sınır alt yolları alana, old.* genel şeride düşer", () => {
+    const g = groupIssues(
+      [
+        { path: "bound.from[1]", message: "a" }, { path: "bound.values[0]", message: "b" }, { path: "bound.modulus", message: "c" },
+        { path: "partitionBy.keys[0]", message: "d" }, { path: "old.name", message: "e" },
+      ] as never,
+      PARTITION_PATHS,
+    );
+    expect([...g.byPath.keys()]).toEqual(["bound.from[1]", "bound.values[0]", "bound.modulus", "partitionBy.keys[0]"]);
+    expect(g.general).toEqual(["e"]);
   });
 });
 
@@ -574,9 +587,7 @@ describe("FORM_PATHS tam eşleme (Plan 19 Task 6: Partial yok)", () => {
     const kinds = Object.keys(all) as ObjectKind[];
     expect(kinds).toHaveLength(17);
     expect(Object.keys(FORM_PATHS).sort()).toEqual([...kinds].sort());
-    // Partition formu Plan 37'de: o zamana kadar boş küme.
-    expect(kinds.filter((k) => k !== "partition").every((k) => FORM_PATHS[k].size > 0)).toBe(true);
-    expect(FORM_PATHS.partition.size).toBe(0);
+    expect(kinds.every((k) => FORM_PATHS[k].size > 0)).toBe(true);
   });
 });
 
