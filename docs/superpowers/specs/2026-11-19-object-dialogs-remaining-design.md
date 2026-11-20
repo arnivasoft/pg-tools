@@ -1,7 +1,7 @@
 # pg-tools — Alt Proje 5c: Kalan Nesne Diyalogları Tasarımı (Policy, Tablespace, Bölümler, FDW, Publication, Subscription)
 
 - **Tarih:** 2026-11-19
-- **Durum:** Plan 34 arka ucu uygulandı; Plan 35 ön yüzü kalan
+- **Durum:** Plan 34–35 uygulandı (Grup A: Policy ve Tablespace); Grup B–C kalan
 - **Kapsam:** Explorer'da bulunup diyaloğu olmayan **RLS politikası** ve **tablespace**; bölümlü tabloya **bölüm oluşturma / bağlama / ayırma**; ağaçta henüz bulunmayan **Foreign Data Wrapper, Foreign Server, User Mapping, Foreign Table, Publication, Subscription** (önce Explorer düğümleri, sonra diyaloglar).
 - **Temel:** `docs/superpowers/specs/2026-10-06-object-dialogs-design.md` (mimari §2, risk modeli §3, arayüz §4, güvenlik §6, test §7 ve tüm sözleşme notları) ile `docs/superpowers/specs/2026-10-16-object-dialogs-routines-types-design.md` (R5 salt okunur kuralı, `editable`/`unsupported`, eklentiye ait nesneler, `OWNER TO` en sonda) **aynen geçerlidir**. Bu belge yalnızca yeni türleri, kurallarını ve kararlarını ekler; ana spec'in §1.3 "kapsam dışı" listesinden RLS politikaları, FDW/publication/subscription diyalogları, partition oluşturma/bağlama ve tablespace oluşturma çıkarılır.
 - **Kullanıcı kararı (2026-11-19):** dört grubun tamamı kapsamda. Plan 33 CSV içe aktarmaya ayrılmıştır; bu alt proje Plan 34'ten başlar.
@@ -241,3 +241,14 @@ Aşağıdaki maddeler **gönderilen** davranışı anlatır (kod ve Docker PG 10
 
 - Plan 34 sonunda ana paket **126,582 B**, başlangıç **154,255 B** (tavanlarla birebir, değişmedi). Plan 35'in `ddl-kinds.ts` ve Explorer menü/ikon kancası ek bayt getirir; **adı konmuş bir telafi gerekir** (yalnız tembel kullanılan komutları `src/ipc/commands.ts`'ten tembel modüle taşımak). Tavanlar yükseltilmez.
 - Plan 34'te yalnızca tembel dosyalar uyum için değişti (`src/features/schema-diff` **değişmedi**): geçici `formMissing` bileşeni (`DesignerView.tsx`) ve metni (`src/app/strings-designer.ts`; Plan 35 gerçek formlarla değiştirir), boş `POLICY_PATHS`/`TABLESPACE_PATHS` (`forms-model.ts`; FORM_PATHS bütünlük denetimi Plan 35'te yeni yollarla tamamlanmalı), `drop-model.ts` (`cascade=false`, `force=false`), `designer-model.ts` (`KIND_LABELS`, `isServerScoped` Tablespace'i de kapsar, `defName`).
+
+---
+
+## 10. Plan 35 notları (Grup A ön yüzü)
+
+- **Bütçe telafisi ve ölçümler:** `ddl-kinds.ts` ek baytı yalnız `qtMore` taşımasıyla karşılanamadı (10 B eksik); `qtMore` ve `qtCancel` birlikte tembel `src/ipc/qt-more-commands.ts`'e taşındı. Tavanlar yalnız düştü: ana paket 126582 → 126553 B, başlangıç 154255 → 154226 B. PolicyForm 12514 B, TablespaceForm 6147 B; tablo RLS metinleri ortak tembel TypeInput parçasında.
+- **Komut kuralı aynalaması:** `insert` → USING kapalı, `select`/`delete` → WITH CHECK kapalı; komut değişince yasak hâle gelen ifade temizlenir. Diğer kurallar arka ucun alan hatasıyla gösterilir.
+- **Yeniden kurma notu:** komut/tür değişimi ya da ifade kaldırma istemcide hesaplanır ve yalnız bilgi notu olarak gösterilir; seçim kutusu yoktur (arka uç otomatik yeniden kurar, Yıkıcı onay mevcut kapıdan gelir).
+- **Politika sekmesi yenileme:** tablo alter'ı RLS/ad/şemayı değiştirirse aynı sunucu + veritabanındaki o tablonun politika sekmeleri yenilenir; kirli ya da uygulamadaki sekmede taslak ezilmez, `needsReload` işaretlenir.
+- **Biçim uyarıları engellemez:** tablespace seçenek uyarıları (sayı değil, negatif, 0–1000 dışı) gönderimi durdurmaz; yetkili doğrulama arka uç alan hatasıdır. Konum yalnız create'te düzenlenir.
+- **Backlog:** politika ifadeleri için CodeMirror (şimdilik `textarea`); şema karşılaştırmada politikalar.

@@ -943,7 +943,7 @@ Sözleşme: `docs/superpowers/specs/2026-11-05-ai-assistant-design.md`. Panel te
 
 ## Nesne diyalogları: Policy / Tablespace arka ucu (Plan 34)
 
-Plan 34 yalnızca arka uçtur; **GUI maddeleri Plan 35'te `[—]` olarak yazılacaktır** (menüde bu türler henüz yok; `ddl-kinds.ts` değişmedi). Arka uç elle sınanmaz; Docker testleriyle (`scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`; kapsayıcılar sonda silinir, tablespace dizinleri `PGT_TEST_TS_ROOT` ile betikçe hazırlanır, atlanan test yok) kapsanan maddelerin özeti:
+Plan 34 yalnızca arka uçtur; **GUI maddeleri Plan 35 bölümündedir** (menü kancası Plan 35'te eklendi). Arka uç elle sınanmaz; Docker testleriyle (`scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`; kapsayıcılar sonda silinir, tablespace dizinleri `PGT_TEST_TS_ROOT` ile betikçe hazırlanır, atlanan test yok) kapsanan maddelerin özeti:
 
 - Policy ve tablespace için create / alter / drop / load gidiş-dönüşü PG 10–18'de (`policy_roundtrip`, `manager`, `logging`): `create → load → eşit`, `alter(loaded, loaded)` boş plan (sabit nokta), `alter(old, new) → load → new`. Tablo `rowSecurity` bayrakları create/alter/yükleme (`table_roundtrip`; bölüm tablosu ve INHERITS çocuğu dahil) ve tablespace yetkileri (`GRANT CREATE ON TABLESPACE`, `acl_roundtrip`).
 - Politika: RESTRICTIVE, PUBLIC / iki rol (sıra farkı boş plan), beş komut, ifadesiz politika uyarısı, karmaşık `USING`/`WITH CHECK` yeniden yüklemede sabit; RLS etkisi gerçek rolle (`SET ROLE`) satır sayısıyla doğrulandı (ENABLE Destructive, DISABLE Safe + uyarı).
@@ -960,3 +960,25 @@ Bilinen sınırlar:
 - Şema karşılaştırması tablo RLS bayraklarını karşılaştırır ama **politikaları karşılaştırmaz** (backlog).
 - Varsayılan yetkiler (`ALTER DEFAULT PRIVILEGES`) tablespace'i hedefleyemez (PG desteklemez).
 - Politika yüklenen ifadesi düz `\` içeriyorsa yalnız o ifadenin düzenlenmesi reddedilir (kaçış için `E'…'`).
+
+## Nesne diyalogları: Policy / Tablespace arayüzü (Plan 35)
+
+Ön koşul: Docker PG 10, 13 ve 15+; süper kullanıcı ve süper kullanıcı olmayan iki bağlantı; konteynerde `postgres`'e ait boş bir dizin (`docker exec … mkdir -p … && chown postgres …`); politikası olan ve olmayan tablolar; üretim etiketli bir sunucu.
+
+- [ ] Menü: Policies koleksiyonunda "Oluştur", politika düğümünde Düzenle / Yeniden adlandır / Sil görünür, Yetkiler yoktur; Tablespaces koleksiyonunda "Oluştur", tablespace düğümünde Düzenle / Yeniden adlandır / Yetkiler / Sil görünür, Varsayılan yetkiler yoktur; kilitli sunucuda eylemler kapalıdır. **[—]**
+- [ ] Politika oluştur: komut değişince yasak hâle gelen USING / WITH CHECK alanı kapanır ve içeriği temizlenir (`insert` → USING, `select`/`delete` → WITH CHECK); RESTRICTIVE seçilebilir; roller eklenir/kaldırılır, boş liste "PUBLIC (herkes)" demektir; ifadesiz politikada önizleme uyarısı çıkar; RLS kapalı tabloda uyarı çıkar. **[—]**
+- [ ] Politika düzenle: yalnız ifade/rol değişimi → Güvenli tek `ALTER POLICY`; komut/tür değişimi ya da ifade kaldırma → "yeniden kurulur" notu + Yıkıcı onay; üretim etiketli sunucuda ad yazma **istenmez**; yeniden adlandırma sonrası sekme başlığı ve ağaç güncellenir. **[—]**
+- [ ] Politika sil: Yıkıcı onay istenir, CASCADE kutusu yoktur. **[—]**
+- [ ] Hatalı ifade (ör. `USING (`): alan hatası `USING` alanının altında görünür. **[—]**
+- [ ] Tablo diyaloğunda RLS: "Satır güvenliği (RLS)" bölümünde aç/zorla işaretlenince Yıkıcı notu, kapatılınca "politikaları devre dışı kalır" uyarısı görünür; create'te not yoktur. **[—]**
+- [ ] Açık politika sekmesi, tablonun RLS/ad/şema değişiminden sonra yenilenir; sekme kirliyse taslak ezilmez ve "yeniden yükle" ipucu görünür; başka tablonun politika sekmesi etkilenmez. **[—]**
+- [ ] Tablespace oluştur: süper kullanıcıyla başarılı + yorum yazılır; süper kullanıcı olmayanla 42501 ipucu; olmayan dizin → konum ipucu; kullanılan dizin → 55006 ipucu; `pg_` önekli ad alan hatası; göreli yol alan hatası. **[—]**
+- [ ] Tablespace düzenle: ad, sahip, seçenek SET/RESET ve yorum değişir; konum salt okunurdur; PG 10–12'de `maintenance_io_concurrency` alan hatası verir; biçim uyarıları (sayı değil, negatif, 0–1000 dışı) gönderimi engellemez. **[—]**
+- [ ] `pg_default` / `pg_global`: form salt okunur ve gerekçeler listelenir; Yeniden adlandır ve Sil açık ret iletisi verir. **[—]**
+- [ ] Boş olmayan tablespace silme → 55000 ipucu, hiçbir şey değişmez. **[—]**
+- [ ] Tablespace yetkileri: CREATE ver / geri al; `pg_global` salt okunurdur. **[—]**
+- [ ] Tablespace hata toast'unda konum görünmez; PG iletisi yalnız sekmedeki hata alanında görünür. **[—]**
+- [ ] Klavye/erişilebilirlik/tema: çip kaldırma klavyeyle yapılır, radio grupları klavyeyle gezilir, açık ve koyu temada okunur, dar pencerede (≈1100 px) taşma yoktur. **[—]**
+- [ ] Telafi (`qtMore` ve `qtCancel` tembel modüle taşındı) sonrası önceki gibi çalışır: Query Tool "daha fazla satır" ve iptal, veri düzenleyicisi sayfalaması. **[—]**
+
+Ölçümler (Plan 35 sonu): index-*.js = 126553 B (taban 126582 B; tavan 126553 B), başlangıç kümesi 154226 B (taban 154255 B; tavan 154226 B; yalnız düşürüldü), mapDeps = 43 girdi; index.html yalnızca solid/web önyükler. Telafi: `qtMore` + `qtCancel` → tembel `src/ipc/qt-more-commands.ts` (yalnız `qtMore` 10 B yetmedi). PolicyForm-*.js = 12514 B; TablespaceForm-*.js = 6147 B; TableForm-*.js = 65483 B; TypeInput-*.js = 20275 B (tablo RLS metinleri bu ortak tembel parçada). Ana pakette yok: "Politika aynı transaction içinde yeniden kurulur" (PolicyForm-*.js'te).
