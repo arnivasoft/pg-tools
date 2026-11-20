@@ -983,3 +983,29 @@ Bilinen sınırlar:
 - [ ] Telafi (`qtMore` ve `qtCancel` tembel modüle taşındı) sonrası önceki gibi çalışır: Query Tool "daha fazla satır" ve iptal, CSV dışa aktarma iptali (ExportUi `qtCancel` kullanır), veri düzenleyicisi sayfalaması. **[—]**
 
 Ölçümler (Plan 35 sonu): index-*.js = 126553 B (taban 126582 B; tavan 126553 B), başlangıç kümesi 154226 B (taban 154255 B; tavan 154226 B; yalnız düşürüldü), mapDeps = 43 girdi; index.html yalnızca solid/web önyükler. Telafi: `qtMore` + `qtCancel` → tembel `src/ipc/qt-more-commands.ts` (yalnız `qtMore` 10 B yetmedi). PolicyForm-*.js = 12514 B; TablespaceForm-*.js = 6147 B; TableForm-*.js = 65483 B; TypeInput-*.js = 20275 B (tablo RLS metinleri bu ortak tembel parçada). Ana pakette yok: "Politika aynı transaction içinde yeniden kurulur" (PolicyForm-*.js'te).
+
+## Nesne diyalogları: Bölüm arka ucu (Plan 36)
+
+Plan 36 yalnızca arka uçtur; **GUI maddeleri Plan 37'de eklenir** (menü kancası, Bölüm oluştur/bağla/sınır/ayır diyalogları henüz yoktur). Arka uç elle sınanmaz; Docker testleriyle (`scripts/test-matrix.ps1 -Versions 10..18 -SkipPerf`; kapsayıcılar sonda silinir) kapsanan maddelerin özeti:
+
+- Bölüm create / attach / sınır değiştirme / ayırma (normal, `CONCURRENTLY`, `FINALIZE`) ve yükleme PG 10–18'de (`partition_roundtrip`, `manager`, `logging`): range, list, hash ve default sınırları, `MINVALUE`/`MAXVALUE`, çok anahtarlı range; `create → load → eşit`, `alter(loaded, loaded)` boş plan (sabit nokta), `alter(old, new) → load → new`.
+- Sınır ayrıştırma sabit noktası her stratejide; PG 10–11'de sınır değerleri ham yazılır (üst düzey virgül içeren değer `bound.*[i]` alan hatası), PG 12+'da `wrap`'lı.
+- Sınır değiştirme atomik: aynı transaction'da `DETACH` + `ATTACH` (Destructive + not); sınır dışı satır varsa 23514 + ipucu.
+- Ayırma tabloyu ve satırları korur; `CONCURRENTLY`/`FINALIZE` transaction dışıdır (PG 14+); DEFAULT bölüm varken `CONCURRENTLY` 55000 + ipucu ve hiçbir şey değişmez; yarım kalmış ayırma (`detachPending`) yalnız `FINALIZE`.
+- Onay kapısı: tüm planlar en çok Destructive; yalnız `confirmation_required`, üretimde ek ad onayı yoktur.
+- `ddl_defaults` (Partition: tüm stratejiler; bölümsüz tablo `invalid`; olmayan tablo `not_found`), `created` (create/attach dolu; alter/drop boş), `attachable_tables` lookup'ı (en çok 5000, dışlamalar), hedef alanları `partition` ve `tablesRefreshNodeId`.
+- Günlükte sınır değeri, tablo adı, yorum ve SQL yok (yakalama testi).
+
+Bilinen sınırlar:
+- Farklı şemaya bağlanan/ayrılan tablonun **şema `tables` koleksiyonu yenilenmez** (hedef yalnız üst tablonun şemasını bilir; kimlik ayrıştırma yasaktır).
+- Yarım kalmış ayırma (`detachPending`) yalnız `FINALIZE` ile tamamlanır; o durumda ayırma isteği `FINALIZE`'a dönüşür, sınır değiştirme reddedilir.
+- Bölüm tablosunun sahip / yorum / tablespace / alt bölümleme özellikleri **Tablo diyaloğundadır**; Partition alter'ı bunları yazmaz (alan hatası). Ad ve şema da Tablo diyaloğunda değişir.
+- PG < 12'de bölüm sınırı değeri tek bir sabit olmalıdır (üst düzey virgül ve parantezli ifade yok).
+- `CONCURRENTLY` ve `FINALIZE` PG 14+; `default` bölüm ve HASH PG 11+.
+- Eklentiye ait bölüm tablosu ve ayrıştırılamayan sınır salt okunur açılır (eklentiye ait yol yalnız SQL'de, Docker testi yok).
+- Şema karşılaştırması bölüm sınırlarını ayrıca karşılaştırmaz.
+
+Elle kontrol (arayüz Plan 37'de):
+- [ ] Bölüm oluştur / bağla / sınır değiştir / ayır diyalogları, menü kancası ve `partitions` koleksiyonu yenilemesi (üst tablo + şema `tables`). **[—]**
+- [ ] Bölüm bağla açılır listesi (`attachable_tables`) ve `CONCURRENTLY` / `FINALIZE` seçenekleri ile 23514 / 42P17 / 55000 ipuçlarının arayüzde görünmesi. **[—]**
+- [ ] Ölçüm: ana paket 126,553 B, başlangıç 154,226 B (Plan 36'da değişmedi; Plan 37 telafi ister). **[—]**
