@@ -1,82 +1,16 @@
 mod common;
 
+use common::foreign::{assert_no_secret, setup};
 use common::{find, fixtures, labels};
-use pgt_catalog::node::{Coll, NodeId, NodeKind, Seg, TreeNode};
-use pgt_core::testing::{admin_client, drop_database};
-
-/// Ayırt edici sır: hiçbir `TreeNode` alanında görünmemeli.
-const SECRET: &str = "pgt_gizli_parola_7f3";
-const DB: &str = "pgt_cat_fdw_list";
-const OTHER_DB: &str = "pgt_cat_fdw_other";
-const PLAIN_ROLE: &str = "pgt_cat_fdw_plain";
-
-fn assert_no_secret(nodes: &[TreeNode]) {
-    for n in nodes {
-        let json = serde_json::to_string(n).unwrap();
-        assert!(!json.contains(SECRET), "sır düğümde göründü: {}", n.label);
-    }
-}
-
-/// Önceki yarım kalmış çalışmanın aboneliklerini (varsa) bırakır, sonra veritabanını siler.
-async fn drop_db_with_subscriptions(ts: &pgt_core::testing::TestServer, name: &str) {
-    let admin = admin_client(ts, &ts.config.maintenance_db).await;
-    let exists = admin.query_opt("SELECT 1 FROM pg_database WHERE datname = $1", &[&name]).await.unwrap().is_some();
-    if exists {
-        let db = admin_client(ts, name).await;
-        let _ = db
-            .batch_execute(
-                "DO $$ DECLARE s text; BEGIN FOR s IN SELECT subname FROM pg_subscription WHERE subdbid = (SELECT oid FROM pg_database WHERE datname = current_database()) LOOP \
-                 EXECUTE format('ALTER SUBSCRIPTION %I DISABLE', s); EXECUTE format('ALTER SUBSCRIPTION %I SET (slot_name = NONE)', s); EXECUTE format('DROP SUBSCRIPTION %I', s); END LOOP; END $$",
-            )
-            .await;
-    }
-    drop_database(&admin, name).await;
-}
+use pgt_catalog::node::{Coll, NodeId, NodeKind, Seg};
 
 #[tokio::test]
 async fn foreign_and_replication_nodes_list_with_labels_details_and_no_secret() {
     for fx in fixtures().await {
-        let ts = &fx.ts;
         let major = fx.major().await;
-        for name in [DB, OTHER_DB] {
-            drop_db_with_subscriptions(ts, name).await;
-        }
-        let admin = admin_client(ts, &ts.config.maintenance_db).await;
-        admin.batch_execute(&format!("DROP ROLE IF EXISTS {PLAIN_ROLE}")).await.unwrap();
-        admin.batch_execute(&format!("CREATE ROLE {PLAIN_ROLE} LOGIN PASSWORD 'pgt_plain_pw'")).await.unwrap();
-        for name in [DB, OTHER_DB] {
-            admin.batch_execute(&format!("CREATE DATABASE {name} TEMPLATE template0 ENCODING 'UTF8'")).await.unwrap();
-        }
-        let owner = &ts.config.username;
-        let db = admin_client(ts, DB).await;
-        let conninfo = format!("host=127.0.0.1 port=1 dbname=x user=u password={SECRET}");
-        let mut setup = format!(
-            "CREATE EXTENSION postgres_fdw;
-             CREATE FOREIGN DATA WRAPPER pgt_plain_fdw;
-             CREATE SERVER pgt_srv FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'x', dbname 'y');
-             CREATE SERVER pgt_srv_typed TYPE 'pg' VERSION '16' FOREIGN DATA WRAPPER postgres_fdw OPTIONS (host 'x', dbname 'y');
-             CREATE USER MAPPING FOR CURRENT_USER SERVER pgt_srv OPTIONS (user 'u', password '{SECRET}');
-             CREATE USER MAPPING FOR PUBLIC SERVER pgt_srv OPTIONS (user 'u', password '{SECRET}');
-             CREATE TABLE public.pub_t (id int PRIMARY KEY);
-             CREATE FOREIGN TABLE public.ft_remote (id int, label text) SERVER pgt_srv OPTIONS (table_name 'remote_t');
-             CREATE PUBLICATION pgt_pub_tbl FOR TABLE public.pub_t;
-             CREATE PUBLICATION pgt_pub_all FOR ALL TABLES;
-             CREATE SUBSCRIPTION pgt_sub CONNECTION '{conninfo}' PUBLICATION pgt_pub_tbl WITH (connect = false, slot_name = NONE);"
-        );
-        if major >= 15 {
-            setup.push_str("CREATE PUBLICATION pgt_pub_sch FOR TABLES IN SCHEMA public;");
-        }
-        db.batch_execute(&setup).await.unwrap();
-        // Başka veritabanındaki abonelik bu veritabanının listesinde görünmemeli (subdbid süzgeci).
-        admin_client(ts, OTHER_DB)
-            .await
-            .batch_execute(&format!(
-                "CREATE SUBSCRIPTION pgt_sub_other CONNECTION '{conninfo}' PUBLICATION p WITH (connect = false, slot_name = NONE)"
-            ))
-            .await
-            .unwrap();
-        let db_oid: u32 = admin.query_one("SELECT oid FROM pg_database WHERE datname = $1", &[&DB]).await.unwrap().get(0);
-        let db_id = fx.server_id().child(Seg::Db(db_oid));
+        let owner = &fx.ts.config.username;
+        let st = setup(&fx, "pgt_cat_fdw_list").await;
+        let (db_oid, db_id) = (st.db_oid, st.db_id.clone());
 
         // Veritabanı çocuk sırası.
         let kids = fx.catalog.list_children(&db_id).await.unwrap();
@@ -177,15 +111,13 @@ async fn foreign_and_replication_nodes_list_with_labels_details_and_no_secret() 
         }
         assert_no_secret(&all);
 
-        // Süper kullanıcı olmayan rolle: liste hatasız (conninfo okunmaz).
-        let mut limited = ts.config.clone();
-        limited.id = uuid::Uuid::new_v4();
-        limited.username = PLAIN_ROLE.into();
-        fx.registry.write().unwrap().upsert(limited.clone()).unwrap();
-        fx.mgr.connect(limited.clone(), Some("pgt_plain_pw".into())).await.unwrap();
-        let ldb = NodeId::server(limited.id).child(Seg::Db(db_oid));
+        // Süper kullanıcı olmayan rolle: liste hatasız (conninfo okunmaz; PG 10–13'te oid `pg_stat_subscription`'dan).
+        let limited = st.connect_plain(&fx).await;
+        let ldb = NodeId::server(limited).child(Seg::Db(db_oid));
         let lsubs = fx.catalog.list_children(&ldb.child(Seg::Coll(Coll::Subscriptions))).await.unwrap();
-        assert!(lsubs.iter().all(|n| n.label != "pgt_sub_other"));
+        assert_eq!(labels(&lsubs), ["pgt_sub"]);
+        assert_eq!(lsubs[0].id, subs[0].id.replacen(&db_id.to_string(), &ldb.to_string(), 1));
+        assert_eq!((lsubs[0].kind, lsubs[0].detail.as_deref(), lsubs[0].has_children), (NodeKind::Subscription, Some("devre dışı"), false));
         assert_no_secret(&lsubs);
         let lpubs = fx.catalog.list_children(&ldb.child(Seg::Coll(Coll::Publications))).await.unwrap();
         assert_eq!(lpubs.len(), expected_pubs.len());
@@ -196,15 +128,16 @@ async fn foreign_and_replication_nodes_list_with_labels_details_and_no_secret() 
             .list_children(&ldb.child(Seg::ForeignDataWrapper(fdw_oid(&pg_fdw.id))).child(Seg::ForeignServer(srv_oid(&srv.id))).child(Seg::Coll(Coll::UserMappings)))
             .await
             .unwrap();
-        assert_no_secret(&lmaps);
-        fx.mgr.disconnect(limited.id);
-
-        // Temizlik.
-        drop(db);
-        for name in [DB, OTHER_DB] {
-            drop_db_with_subscriptions(ts, name).await;
+        // Yetkisiz rol de eşlemeleri görür (`pg_user_mappings` herkese açık; yalnız seçenekler gizli): aynı kimlikler.
+        assert_eq!(labels(&lmaps), ["PUBLIC", owner.as_str()]);
+        for (l, m) in lmaps.iter().zip(&maps) {
+            assert_eq!(l.id, m.id.replacen(&db_id.to_string(), &ldb.to_string(), 1));
+            assert_eq!((l.kind, l.has_children, l.detail.as_deref()), (NodeKind::UserMapping, false, None));
         }
-        admin.batch_execute(&format!("DROP ROLE {PLAIN_ROLE}")).await.unwrap();
+        assert_no_secret(&lmaps);
+        fx.mgr.disconnect(limited);
+
+        st.teardown(&fx).await;
     }
 }
 

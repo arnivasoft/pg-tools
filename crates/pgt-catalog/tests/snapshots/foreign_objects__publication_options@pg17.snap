@@ -1,0 +1,14 @@
+---
+source: crates/pgt-catalog/tests/foreign_objects.rs
+expression: ddl_text
+---
+-- Publication: pgt_pub_rt
+
+-- DROP PUBLICATION IF EXISTS pgt_pub_rt;
+
+CREATE PUBLICATION pgt_pub_rt
+    FOR TABLE public.pub_t2 WHERE (id > 10), TABLES IN SCHEMA pgt_s2
+    WITH (publish = 'insert, update', publish_via_partition_root = true);
+
+ALTER PUBLICATION pgt_pub_rt
+    OWNER TO <owner>;

@@ -1,0 +1,11 @@
+---
+source: crates/pgt-catalog/tests/foreign_objects.rs
+expression: ddl_text
+---
+-- User Mapping: FOR postgres SERVER pgt_srv
+
+-- DROP USER MAPPING IF EXISTS FOR postgres SERVER pgt_srv;
+
+-- Parola seçeneği gizlenmiştir.
+CREATE USER MAPPING FOR postgres SERVER pgt_srv
+    OPTIONS ("user" 'u', password '********');

@@ -1,0 +1,19 @@
+---
+source: crates/pgt-catalog/tests/foreign_objects.rs
+expression: ddl_text
+---
+-- Subscription: pgt_sub
+
+-- DROP SUBSCRIPTION IF EXISTS pgt_sub;
+
+-- Bağlantı dizgesindeki parola gizlenmiştir.
+CREATE SUBSCRIPTION pgt_sub
+    CONNECTION 'host=127.0.0.1 port=1 dbname=x user=u password=********'
+    PUBLICATION pgt_pub_tbl
+    WITH (enabled = false, slot_name = NONE, synchronous_commit = 'off', binary = false, streaming = false, two_phase = false, disable_on_error = false, origin = 'any', password_required = true, run_as_owner = false);
+
+ALTER SUBSCRIPTION pgt_sub
+    OWNER TO <owner>;
+
+COMMENT ON SUBSCRIPTION pgt_sub
+    IS 'abonelik';

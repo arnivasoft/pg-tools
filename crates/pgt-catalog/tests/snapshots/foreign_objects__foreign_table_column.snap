@@ -1,0 +1,13 @@
+---
+source: crates/pgt-catalog/tests/foreign_objects.rs
+expression: ddl_text
+---
+-- Column: public.ft_rt.label
+
+-- ALTER FOREIGN TABLE IF EXISTS public.ft_rt DROP COLUMN IF EXISTS label;
+
+ALTER FOREIGN TABLE IF EXISTS public.ft_rt
+    ADD COLUMN label text OPTIONS (column_name 'lbl') COLLATE pg_catalog."C" DEFAULT 'x'::text;
+
+COMMENT ON COLUMN public.ft_rt.label
+    IS 'etiket';

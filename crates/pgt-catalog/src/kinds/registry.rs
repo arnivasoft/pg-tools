@@ -279,6 +279,13 @@ pub(crate) static SUBSCRIPTIONS: CollDef = CollDef {
     min_version: 10,
 };
 
+/// `SUBSCRIPTIONS`'ın yedeği: `pg_subscription.oid` okunamıyorsa (42501; PG 10–13'te herkese açık değil) oid
+/// `pg_stat_subscription`'dan ada göre alınır.
+pub(crate) static SUBSCRIPTIONS_BY_STATS: CollDef = CollDef {
+    list: &VersionedSql(&[(10, sql!("list_subscriptions_by_stats.sql"))]),
+    ..SUBSCRIPTIONS
+};
+
 /// Genel motorla yönetilen koleksiyonun tanımı (`Databases`, `Schemas`, `Tables`, `Columns` elle yazılmış modüllerdedir).
 pub(crate) fn coll_def(coll: Coll) -> Option<&'static CollDef> {
     Some(match coll {
@@ -356,7 +363,7 @@ pub(crate) fn props_def(seg: Seg) -> Option<&'static PropsDef> {
         Seg::Extension(_) => &P_EXTENSION,
         Seg::Role(_) => &P_ROLE,
         Seg::Tablespace(_) => &P_TABLESPACE,
-        // FDW/replikasyon türlerinin özellikleri elle yazılmış modüllerdedir (Plan 38 Task 2).
+        // FDW/replikasyon türleri elle yazılmış modüllerdedir (`foreign.rs`, `replication.rs`: maskeleme).
         Seg::Coll(_)
         | Seg::Db(_)
         | Seg::Schema(_)

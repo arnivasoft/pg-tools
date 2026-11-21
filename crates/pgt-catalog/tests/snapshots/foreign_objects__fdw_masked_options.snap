@@ -1,0 +1,14 @@
+---
+source: crates/pgt-catalog/tests/foreign_objects.rs
+expression: ddl_text
+---
+-- Foreign Data Wrapper: pgt_opt_fdw
+
+-- DROP FOREIGN DATA WRAPPER IF EXISTS pgt_opt_fdw;
+
+-- Parola seçeneği gizlenmiştir.
+CREATE FOREIGN DATA WRAPPER pgt_opt_fdw
+    OPTIONS (mode 'x', password '********');
+
+ALTER FOREIGN DATA WRAPPER pgt_opt_fdw
+    OWNER TO <owner>;

@@ -1,0 +1,18 @@
+---
+source: crates/pgt-catalog/tests/foreign_objects.rs
+expression: ddl_text
+---
+-- Foreign Data Wrapper: pgt_plain_fdw
+
+-- DROP FOREIGN DATA WRAPPER IF EXISTS pgt_plain_fdw;
+
+CREATE FOREIGN DATA WRAPPER pgt_plain_fdw;
+
+ALTER FOREIGN DATA WRAPPER pgt_plain_fdw
+    OWNER TO <owner>;
+
+COMMENT ON FOREIGN DATA WRAPPER pgt_plain_fdw
+    IS 'düz fdw';
+
+GRANT USAGE ON FOREIGN DATA WRAPPER pgt_plain_fdw TO <owner>;
+GRANT USAGE ON FOREIGN DATA WRAPPER pgt_plain_fdw TO pgt_cat_fdw_obj_plain;

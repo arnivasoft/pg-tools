@@ -1,0 +1,30 @@
+---
+source: crates/pgt-catalog/tests/foreign_objects.rs
+expression: ddl_text
+---
+-- Foreign Table: public.ft_rt
+
+-- DROP FOREIGN TABLE IF EXISTS public.ft_rt;
+
+CREATE FOREIGN TABLE IF NOT EXISTS public.ft_rt
+(
+    id integer NOT NULL,
+    label text OPTIONS (column_name 'lbl') COLLATE pg_catalog."C" DEFAULT 'x'::text,
+    CONSTRAINT ft_rt_id_check CHECK (id > 0)
+)
+    SERVER pgt_srv_rt
+    OPTIONS (schema_name 'public', table_name 'rt');
+
+ALTER FOREIGN TABLE IF EXISTS public.ft_rt
+    OWNER TO <owner>;
+
+COMMENT ON FOREIGN TABLE public.ft_rt
+    IS 'yabancı';
+
+COMMENT ON COLUMN public.ft_rt.label
+    IS 'etiket';
+
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLE public.ft_rt TO <owner>;
+GRANT SELECT ON TABLE public.ft_rt TO pgt_cat_fdw_obj_plain;
+
+GRANT UPDATE (label) ON TABLE public.ft_rt TO pgt_cat_fdw_obj_plain;
