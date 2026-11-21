@@ -109,6 +109,9 @@ async fn foreign_and_replication_properties_and_ddl_mask_secrets() {
     for fx in fixtures().await {
         // Büyük test geleceği yığında değil yığın belleğinde (hata ayıklama derlemesinde yığın taşması).
         Box::pin(check(&fx)).await;
+        // Sırayla (aynı test içinde): abonelik adları küme geneli `pg_stat_subscription`'da eşlendiği için paralel
+        // kurulumların `pgt_sub`'ları PG 10–13 yetkisiz yolunu belirsizleştirirdi.
+        Box::pin(check_same_name(&fx)).await;
     }
     let out = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
     no_secret("günlük", &out);
@@ -421,5 +424,79 @@ async fn check(fx: &Fixture) {
     assert_eq!(ddl(fx, &id(find(&ftables, "ft_rt"))).await, ft_ddl);
 
     drop(db);
+    st.teardown(fx).await;
+}
+
+/// İki veritabanında aynı adlı abonelik: süper kullanıcı her sürümde bağlı veritabanınınkini oid yoluyla açar
+/// (PG 10–11'de `oid` sistem sütunudur); öbür veritabanının aboneliği hiçbir zaman dönmez; yetkisiz rol PG 10–13'te
+/// (oid herkese açık değil, ad eşlemesi belirsiz) aboneliği güvenli varsayılanla listelemez/bulamaz.
+async fn check_same_name(fx: &Fixture) {
+    let major = fx.major().await;
+    let st = Box::pin(setup(fx, "pgt_cat_fdw_dup")).await;
+    let other = admin_client(&fx.ts, &st.other_db).await;
+    other
+        .batch_execute(&format!(
+            "CREATE SUBSCRIPTION pgt_sub CONNECTION 'host=127.0.0.1 port=1 dbname=other_db user=u password={SECRET}' \
+             PUBLICATION other_pub WITH (connect = false, slot_name = NONE)"
+        ))
+        .await
+        .unwrap();
+    let admin = admin_client(&fx.ts, &fx.ts.config.maintenance_db).await;
+    let sub_oid = |db: &str| {
+        let (admin, db) = (&admin, db.to_string());
+        async move {
+            admin
+                .query_one(
+                    "SELECT s.oid FROM pg_subscription s JOIN pg_database d ON d.oid = s.subdbid WHERE s.subname = 'pgt_sub' AND d.datname = $1",
+                    &[&db],
+                )
+                .await
+                .unwrap()
+                .get::<_, u32>(0)
+        }
+    };
+    let (mine, theirs) = (sub_oid(&st.db).await, sub_oid(&st.other_db).await);
+    assert_ne!(mine, theirs);
+    let mine_id = st.db_id.child(pgt_catalog::node::Seg::Subscription(mine));
+    let theirs_id = st.db_id.child(pgt_catalog::node::Seg::Subscription(theirs));
+
+    // Süper kullanıcı: liste, özellik ve DDL bağlı veritabanının aboneliğidir.
+    let subs = nodes(fx, &st.db_id, Coll::Subscriptions).await;
+    assert_eq!(subs.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), [mine_id.to_string().as_str()]);
+    let p = props(fx, &mine_id).await;
+    assert_eq!(value(&p, "Yayınlar"), Some("pgt_pub_tbl"));
+    assert_eq!(value(&p, "Bağlantı"), Some("host=127.0.0.1 port=1 dbname=x user=u password=********"));
+    let d = ddl(fx, &mine_id).await;
+    assert!(d.contains("dbname=x") && d.contains("PUBLICATION pgt_pub_tbl") && !d.contains("other"), "{d}");
+    // Öbür veritabanının aboneliği bu veritabanından açılmaz.
+    let not_found = |r: pgt_core::Result<_>, what: &str| assert!(matches!(r, Err(pgt_core::Error::NotFound(_))), "{what} bulunmamalıydı");
+    not_found(Box::pin(fx.catalog.properties(&theirs_id)).await.map(|_| ()), "süper kullanıcı özellikleri");
+    not_found(Box::pin(fx.catalog.ddl(&theirs_id)).await.map(|_| ()), "süper kullanıcı DDL'i");
+
+    // Yetkisiz rol.
+    let limited = st.connect_plain(fx).await;
+    let relocate = |n: &NodeId| match n {
+        NodeId::Node { path, .. } => NodeId::Node { server: limited, path: path.clone() },
+        other => other.clone(),
+    };
+    let (lmine, ltheirs) = (relocate(&mine_id), relocate(&theirs_id));
+    let lsubs = nodes(fx, &relocate(&st.db_id), Coll::Subscriptions).await;
+    if major <= 13 {
+        // `oid` yalnız `pg_stat_subscription`'dan ada göre: ad iki veritabanında var → belirsiz → listelenmez/bulunmaz.
+        assert!(lsubs.is_empty(), "{:?}", lsubs.iter().map(|n| &n.id).collect::<Vec<_>>());
+        not_found(Box::pin(fx.catalog.properties(&lmine)).await.map(|_| ()), "yetkisiz rol özellikleri (belirsiz ad)");
+        not_found(Box::pin(fx.catalog.ddl(&lmine)).await.map(|_| ()), "yetkisiz rol DDL'i (belirsiz ad)");
+    } else {
+        assert_eq!(lsubs.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), [lmine.to_string().as_str()]);
+        let lp = props(fx, &lmine).await;
+        assert_eq!((value(&lp, "Yayınlar"), value(&lp, "Bağlantı")), (Some("pgt_pub_tbl"), Some("görüntülemek için yetki gerekir")));
+        let ld = ddl(fx, &lmine).await;
+        assert!(ld.contains("CONNECTION '********'\n    PUBLICATION pgt_pub_tbl\n"), "{ld}");
+    }
+    not_found(Box::pin(fx.catalog.properties(&ltheirs)).await.map(|_| ()), "yetkisiz rol özellikleri");
+    not_found(Box::pin(fx.catalog.ddl(&ltheirs)).await.map(|_| ()), "yetkisiz rol DDL'i");
+    fx.mgr.disconnect(limited);
+
+    drop(other);
     st.teardown(fx).await;
 }

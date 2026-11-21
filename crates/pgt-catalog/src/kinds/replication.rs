@@ -251,19 +251,26 @@ async fn load_subscription(cat: &Catalog, server: Uuid, db: u32, oid: u32, for_d
         return Ok(None);
     }
     let exprs: Vec<&str> = SUB_EXPRS.iter().filter(|(col, _)| readable.iter().any(|r| r == col)).map(|(_, e)| *e).collect();
-    // `oid` okunamıyorsa (PG 10–13 sütun yetkisi) abonelik, listedeki gibi `pg_stat_subscription`'daki adıyla bulunur
-    // (ad veritabanı içinde benzersiz; başka veritabanında aynı ad varsa belirsizdir → bulunamaz).
+    // Önce oid süzgeci; 42501'de (PG 10–13'te `oid` herkese açık değil) abonelik, listedeki gibi `pg_stat_subscription`'daki
+    // adıyla bulunur (ad veritabanı içinde benzersiz; başka veritabanında aynı ad varsa belirsizdir → bulunamaz).
+    // Okunabilirlik `subscription_columns.sql`'den çıkarılmaz: PG 10–11'de `oid` sistem sütunudur (attnum < 0).
     // Yorum veritabanına özgü `pg_description`'dadır (COMMENT ON SUBSCRIPTION paylaşılan katalog kullanmaz).
-    let filter = if readable.iter().any(|r| r == "oid") { SUB_BY_OID } else { SUB_BY_STATS };
-    let sql = format!(
-        "SELECT $1::oid AS oid, obj_description($1::oid, 'pg_subscription') AS comment, {} FROM pg_catalog.pg_subscription s \
-         WHERE s.subdbid = (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = current_database()) AND {filter}",
-        exprs.join(", ")
-    );
-    let rows = match query_text(&cat.mgr, server, target, Arc::new(sql), p![oid]).await {
-        Err(Error::Query { sqlstate: Some(code), .. }) if code == "42501" => return Ok(None),
-        other => other?,
+    let sql = |filter: &str| {
+        Arc::new(format!(
+            "SELECT $1::oid AS oid, obj_description($1::oid, 'pg_subscription') AS comment, {} FROM pg_catalog.pg_subscription s \r
+             WHERE s.subdbid = (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = current_database()) AND {filter}",
+            exprs.join(", ")
+        ))
     };
+    let denied = |r: &Result<Vec<Row>>| matches!(r, Err(Error::Query { sqlstate: Some(code), .. }) if code == "42501");
+    let mut rows = query_text(&cat.mgr, server, target, sql(SUB_BY_OID), p![oid]).await;
+    if denied(&rows) {
+        rows = query_text(&cat.mgr, server, target, sql(SUB_BY_STATS), p![oid]).await;
+    }
+    if denied(&rows) {
+        return Ok(None);
+    }
+    let rows = rows?;
     if for_ddl {
         pgt_core::pgtext::ensure_utf8(&rows)?;
     }
