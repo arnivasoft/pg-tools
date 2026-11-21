@@ -257,7 +257,7 @@ async fn load_subscription(cat: &Catalog, server: Uuid, db: u32, oid: u32, for_d
     // Yorum veritabanına özgü `pg_description`'dadır (COMMENT ON SUBSCRIPTION paylaşılan katalog kullanmaz).
     let sql = |filter: &str| {
         Arc::new(format!(
-            "SELECT $1::oid AS oid, obj_description($1::oid, 'pg_subscription') AS comment, {} FROM pg_catalog.pg_subscription s \r
+            "SELECT $1::oid AS oid, obj_description($1::oid, 'pg_subscription') AS comment, {} FROM pg_catalog.pg_subscription s \
              WHERE s.subdbid = (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = current_database()) AND {filter}",
             exprs.join(", ")
         ))
