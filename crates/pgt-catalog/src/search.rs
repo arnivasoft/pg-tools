@@ -24,7 +24,7 @@ pub const MAX_HITS: usize = 500;
 #[ts(export)]
 pub enum SearchKind {
     Schema, Table, Partition, View, Matview, Function, Procedure, TriggerFunction, Sequence, Type, Domain,
-    Column, Index, Constraint, Trigger, Policy, Extension,
+    Column, Index, Constraint, Trigger, Policy, Extension, ForeignTable, ForeignServer, Publication, Subscription,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -75,7 +75,28 @@ const FRAGMENTS: &[(SearchKind, u32, u32, &str)] = &[
     (SearchKind::Trigger, 10, 99, "SELECT 'trigger', g.oid, 0::int2, g.tgname::text, g.tgname::text, n.oid, n.nspname::text, c.oid, c.relkind::text, c.relname::text, {SYS} FROM pg_trigger g JOIN pg_class c ON c.oid = g.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND NOT g.tgisinternal AND g.tgname ILIKE $1 ESCAPE '\\'"),
     (SearchKind::Policy, 10, 99, "SELECT 'policy', o.oid, 0::int2, o.polname::text, o.polname::text, n.oid, n.nspname::text, c.oid, c.relkind::text, c.relname::text, {SYS} FROM pg_policy o JOIN pg_class c ON c.oid = o.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p') AND o.polname ILIKE $1 ESCAPE '\\'"),
     (SearchKind::Extension, 10, 99, "SELECT 'extension', e.oid, 0::int2, e.extname::text, e.extname::text, 0::oid, NULL::text, 0::oid, '', NULL::text, false FROM pg_extension e WHERE e.extname ILIKE $1 ESCAPE '\\'"),
+    // Foreign table: `list_foreign_tables.sql` (yabancı bölümler bölüm parçasında; `rel_oid` 0 → zincir yüklenmez).
+    (SearchKind::ForeignTable, 10, 99, "SELECT 'foreignTable', c.oid, 0::int2, c.relname::text, c.relname::text, n.oid, n.nspname::text, 0::oid, '', NULL::text, {SYS} FROM pg_class c JOIN pg_foreign_table ft ON ft.ftrelid = c.oid JOIN pg_foreign_server s ON s.oid = ft.ftserver JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind = 'f' AND NOT c.relispartition AND c.relname ILIKE $1 ESCAPE '\\'"),
+    // Foreign server: `list_foreign_servers.sql`; düğüm FDW'nin altında: FDW oid'i `rel_oid`'de, FDW adı `owner`'da.
+    // Yalnız ad okunur (`srvoptions` okunmaz).
+    (SearchKind::ForeignServer, 10, 99, "SELECT 'foreignServer', s.oid, 0::int2, s.srvname::text, s.srvname::text, 0::oid, NULL::text, s.srvfdw, '', w.fdwname::text, false FROM pg_foreign_server s JOIN pg_foreign_data_wrapper w ON w.oid = s.srvfdw WHERE s.srvname ILIKE $1 ESCAPE '\\'"),
+    (SearchKind::Publication, 10, 99, "SELECT 'publication', p.oid, 0::int2, p.pubname::text, p.pubname::text, 0::oid, NULL::text, 0::oid, '', NULL::text, false FROM pg_publication p WHERE p.pubname ILIKE $1 ESCAPE '\\'"),
+    // Subscription: `list_subscriptions.sql`; `subconninfo` okunmaz. Oid okunamıyorsa `SUB_BY_STATS` (bkz. `SubSource`).
+    (SearchKind::Subscription, 10, 99, "SELECT 'subscription', s.oid, 0::int2, s.subname::text, s.subname::text, 0::oid, NULL::text, 0::oid, '', NULL::text, false FROM pg_subscription s WHERE s.subdbid = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database()) AND s.subname ILIKE $1 ESCAPE '\\'"),
 ];
+
+/// Subscription parçasının yedeği: `list_subscriptions_by_stats.sql` ile aynı eşleme (oid `pg_stat_subscription`'dan
+/// ada göre; ad küme genelinde belirsizse abonelik listede olmadığı gibi sonuçta da olmaz). `subconninfo` okunmaz.
+const SUB_BY_STATS: &str = "SELECT 'subscription', st.subid, 0::int2, s.subname::text, s.subname::text, 0::oid, NULL::text, 0::oid, '', NULL::text, false FROM pg_subscription s JOIN (SELECT x.subname, min(x.subid) AS subid FROM pg_stat_subscription x GROUP BY x.subname HAVING count(DISTINCT x.subid) = 1) st ON st.subname = s.subname WHERE s.subdbid = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database()) AND s.subname ILIKE $1 ESCAPE '\\'";
+
+/// Subscription oid'inin kaynağı. `pg_subscription.oid` PG 10–13'te süper kullanıcı olmayana açık değildir (42501):
+/// liste gibi önce oid, sonra `pg_stat_subscription` ad eşlemesi denenir; o da reddedilirse tür atlanır.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubSource {
+    Oid,
+    Stats,
+    Skip,
+}
 
 pub(crate) fn escape_like(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -97,18 +118,28 @@ pub(crate) fn normalize(query: &str) -> Result<Option<String>> {
     Ok((!q.is_empty()).then(|| q.to_string()))
 }
 
-fn selected(kinds: &[SearchKind], major: u32) -> Vec<String> {
+fn selected(kinds: &[SearchKind], major: u32, sub: SubSource) -> Vec<String> {
     FRAGMENTS
         .iter()
         .filter(|(k, min, max, _)| (kinds.is_empty() || kinds.contains(k)) && major >= *min && major <= *max)
-        .map(|(_, _, _, sql)| sql.replace("{SYS}", SYS).replace("{INT}", EXT))
+        .filter_map(|(k, _, _, sql)| match (k, sub) {
+            (SearchKind::Subscription, SubSource::Skip) => None,
+            (SearchKind::Subscription, SubSource::Stats) => Some(SUB_BY_STATS),
+            _ => Some(*sql),
+        })
+        .map(|sql| sql.replace("{SYS}", SYS).replace("{INT}", EXT))
         .collect()
+}
+
+/// Seçimde subscription parçası var mı (yetki reddinde yedeğe geçmeye değer mi).
+fn has_subscription(kinds: &[SearchKind]) -> bool {
+    kinds.is_empty() || kinds.contains(&SearchKind::Subscription)
 }
 
 /// Seçilen türlerin (boş = hepsi) sürüme uyan parçalarından tek sorgu. Sıralama: tam eşleşme, önek, ad, şema, tür.
 #[cfg(test)]
 pub(crate) fn build_sql(kinds: &[SearchKind], major: u32) -> String {
-    assemble(&selected(kinds, major))
+    assemble(&selected(kinds, major, SubSource::Oid))
 }
 
 /// `$2` ham (kırpılmış) metin, `$3` kaçırılmış ham metin + `%`; küçük harfe çevirme sunucuda (`lower`) yapılır.
@@ -185,6 +216,22 @@ pub(crate) fn to_hit(server: Uuid, db: u32, h: &RawHit, chains: &HashMap<u32, Ch
             path.push(db_id.child(Seg::Coll(Coll::Extensions)));
             (db_id.child(Seg::Extension(h.oid)), NodeKind::Extension)
         }
+        SearchKind::Publication => {
+            path.push(db_id.child(Seg::Coll(Coll::Publications)));
+            (db_id.child(Seg::Publication(h.oid)), NodeKind::Publication)
+        }
+        SearchKind::Subscription => {
+            path.push(db_id.child(Seg::Coll(Coll::Subscriptions)));
+            (db_id.child(Seg::Subscription(h.oid)), NodeKind::Subscription)
+        }
+        SearchKind::ForeignServer => {
+            // Kimlik koleksiyon parçasını atlar (motor kuralı): `db:D/fdw:F/fsrv:S`.
+            let fdw = db_id.child(Seg::ForeignDataWrapper(h.rel_oid));
+            path.push(db_id.child(Seg::Coll(Coll::ForeignDataWrappers)));
+            path.push(fdw.clone());
+            path.push(fdw.child(Seg::Coll(Coll::ForeignServers)));
+            (fdw.child(Seg::ForeignServer(h.oid)), NodeKind::ForeignServer)
+        }
         SearchKind::Table | SearchKind::Partition | SearchKind::View | SearchKind::Matview => {
             in_schema(&mut path);
             let node = rel_node(&schema_id, &mut path, h.rel_oid, &h.rel_kind, chain);
@@ -217,6 +264,7 @@ pub(crate) fn to_hit(server: Uuid, db: u32, h: &RawHit, chains: &HashMap<u32, Ch
                 SearchKind::TriggerFunction => (Coll::TriggerFunctions, Seg::TriggerFunction(h.oid), NodeKind::TriggerFunction),
                 SearchKind::Sequence => (Coll::Sequences, Seg::Sequence(h.oid), NodeKind::Sequence),
                 SearchKind::Type => (Coll::Types, Seg::Type(h.oid), NodeKind::Type),
+                SearchKind::ForeignTable => (Coll::ForeignTables, Seg::ForeignTable(h.oid), NodeKind::ForeignTable),
                 _ => (Coll::Domains, Seg::Domain(h.oid), NodeKind::Domain),
             };
             path.push(schema_id.child(Seg::Coll(coll)));
@@ -255,6 +303,10 @@ impl RawHit {
             "trigger" => SearchKind::Trigger,
             "policy" => SearchKind::Policy,
             "extension" => SearchKind::Extension,
+            "foreignTable" => SearchKind::ForeignTable,
+            "foreignServer" => SearchKind::ForeignServer,
+            "publication" => SearchKind::Publication,
+            "subscription" => SearchKind::Subscription,
             other => return Err(Error::Invalid(format!("bilinmeyen arama türü: {other}"))),
         };
         Ok(Self {
@@ -306,13 +358,26 @@ impl Catalog {
         }
         let major = PgVersion(self.mgr.info(server).ok_or(Error::NotConnected)?.version_num).major();
         let started = std::time::Instant::now();
-        let parts = selected(kinds, major);
-        if parts.is_empty() {
-            return Ok(SearchResult { hits: Vec::new(), truncated: false });
+        let denied = |e: &Error| matches!(e, Error::Query { sqlstate: Some(code), .. } if code == "42501");
+        let mut rows = Vec::new();
+        for sub in [SubSource::Oid, SubSource::Stats, SubSource::Skip] {
+            let parts = selected(kinds, major, sub);
+            if parts.is_empty() {
+                return Ok(SearchResult { hits: Vec::new(), truncated: false });
+            }
+            let sql = Arc::new(assemble(&parts));
+            let params = p![format!("%{}%", escape_like(&q)), q.clone(), format!("{}%", escape_like(&q)), self.show_system()];
+            match query_text(&self.mgr, server, Target::Database(db), sql, params).await {
+                // Yalnız subscription parçası yetki reddi verir (öbür kataloglar herkese açık): sıradaki kaynağa geç.
+                Err(e) if denied(&e) && sub != SubSource::Skip && has_subscription(kinds) => {
+                    tracing::debug!(?sub, "nesne araması: abonelik oid'i okunamıyor, yedek deneniyor");
+                }
+                r => {
+                    rows = r?;
+                    break;
+                }
+            }
         }
-        let sql = Arc::new(assemble(&parts));
-        let params = p![format!("%{}%", escape_like(&q)), q.clone(), format!("{}%", escape_like(&q)), self.show_system()];
-        let rows = query_text(&self.mgr, server, Target::Database(db), sql, params).await?;
         let (rows, truncated) = cap(rows);
         let raw: Vec<RawHit> = rows.iter().map(RawHit::from_row).collect::<Result<_>>()?;
         let parts: Vec<u32> = raw.iter().filter(|h| h.rel_oid != 0 && (h.kind == SearchKind::Partition || matches!(h.rel_kind.as_str(), "r" | "p" | "f"))).map(|h| h.rel_oid).collect();
@@ -452,5 +517,41 @@ mod tests {
         assert_eq!(hit.path.last().unwrap(), &format!("srv:{U}/db:1/extensions"));
         let s = to_hit(srv(), 1, &raw(SearchKind::Schema, ""), &Default::default());
         assert_eq!(s.id, format!("srv:{U}/db:1/sch:50"));
+    }
+
+    #[test]
+    fn foreign_and_replication_ids_skip_collection_segment() {
+        let d = format!("srv:{U}/db:1");
+        let ft = to_hit(srv(), 1, &raw(SearchKind::ForeignTable, ""), &Default::default());
+        assert_eq!((ft.id.as_str(), ft.kind), (format!("{d}/sch:2200/ftbl:50").as_str(), NodeKind::ForeignTable));
+        assert_eq!(ft.path[2..].to_vec(), vec![format!("{d}/schemas"), format!("{d}/sch:2200"), format!("{d}/sch:2200/ftables")]);
+        let mut s = raw(SearchKind::ForeignServer, "");
+        (s.rel_oid, s.schema_name) = (7, None);
+        let fs = to_hit(srv(), 1, &s, &Default::default());
+        assert_eq!((fs.id.as_str(), fs.kind), (format!("{d}/fdw:7/fsrv:50").as_str(), NodeKind::ForeignServer));
+        assert_eq!(fs.path[2..].to_vec(), vec![format!("{d}/fdws"), format!("{d}/fdw:7"), format!("{d}/fdw:7/fservers")]);
+        let pubh = to_hit(srv(), 1, &raw(SearchKind::Publication, ""), &Default::default());
+        assert_eq!((pubh.id.as_str(), pubh.kind), (format!("{d}/pub:50").as_str(), NodeKind::Publication));
+        assert_eq!(pubh.path.last().unwrap(), &format!("{d}/pubs"));
+        let sub = to_hit(srv(), 1, &raw(SearchKind::Subscription, ""), &Default::default());
+        assert_eq!((sub.id.as_str(), sub.kind), (format!("{d}/sub:50").as_str(), NodeKind::Subscription));
+        assert_eq!(sub.path.last().unwrap(), &format!("{d}/subs"));
+    }
+
+    #[test]
+    fn subscription_fragment_never_reads_conninfo_and_falls_back() {
+        for sub in [SubSource::Oid, SubSource::Stats] {
+            let sql = assemble(&selected(&[], 13, sub));
+            assert!(sql.contains("'subscription'"), "{sub:?}");
+            assert!(!sql.contains("subconninfo") && !sql.contains("srvoptions") && !sql.contains("umoptions"), "{sub:?}");
+            assert!(sql.contains("s.subdbid = (SELECT d.oid FROM pg_database d WHERE d.datname = current_database())"), "{sub:?}");
+        }
+        assert!(assemble(&selected(&[], 13, SubSource::Oid)).contains("SELECT 'subscription', s.oid,"));
+        assert!(assemble(&selected(&[], 13, SubSource::Stats)).contains("pg_stat_subscription"));
+        let skip = selected(&[], 13, SubSource::Skip);
+        assert!(!assemble(&skip).contains("'subscription'"));
+        assert!(assemble(&skip).contains("'publication'"), "yalnız subscription atlanır");
+        assert!(selected(&[SearchKind::Subscription], 13, SubSource::Skip).is_empty());
+        assert!(has_subscription(&[]) && has_subscription(&[SearchKind::Subscription]) && !has_subscription(&[SearchKind::Table]));
     }
 }

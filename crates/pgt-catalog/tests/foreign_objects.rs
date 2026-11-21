@@ -3,42 +3,13 @@
 
 mod common;
 
-use std::io::Write;
-use std::sync::{Arc, Mutex, OnceLock};
-
-use common::foreign::{SECRET, setup};
+use common::foreign::{SECRET, capture, setup};
 use common::{Fixture, find, fixtures};
 use pgt_catalog::node::{Coll, NodeId};
 use pgt_catalog::props::PropertySection;
 use pgt_core::testing::admin_client;
 
 const PREFIX: &str = "pgt_cat_fdw_obj";
-
-#[derive(Clone, Default)]
-struct Buf(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Buf {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Süreç genelinde günlük yakalama (tüm düzeyler): sır günlüğe de girmemeli.
-fn capture() -> Buf {
-    static BUF: OnceLock<Buf> = OnceLock::new();
-    BUF.get_or_init(|| {
-        let buf = Buf::default();
-        let w = buf.clone();
-        let subscriber = tracing_subscriber::fmt().with_writer(move || w.clone()).with_max_level(tracing::Level::TRACE).finish();
-        tracing::subscriber::set_global_default(subscriber).expect("bu test ikilisinde başka global abone yok");
-        buf
-    })
-    .clone()
-}
 
 macro_rules! snapshot {
     ($fx:expr, $name:expr, $ddl:expr) => {{
@@ -113,7 +84,7 @@ async fn foreign_and_replication_properties_and_ddl_mask_secrets() {
         // kurulumların `pgt_sub`'ları PG 10–13 yetkisiz yolunu belirsizleştirirdi.
         Box::pin(check_same_name(&fx)).await;
     }
-    let out = String::from_utf8_lossy(&log.0.lock().unwrap()).into_owned();
+    let out = log.text();
     no_secret("günlük", &out);
 }
 

@@ -1,6 +1,9 @@
 //! FDW / publication / subscription testlerinin ortak kurulumu (Plan 38): postgres_fdw, sunucular, user mapping'ler
 //! (sır parolalı), foreign table, publication'lar ve `connect = false` abonelik; süper kullanıcı olmayan bir rol.
 
+use std::io::Write;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use pgt_catalog::node::{NodeId, Seg, TreeNode};
 use pgt_core::testing::{TestServer, admin_client, drop_database};
 
@@ -20,6 +23,40 @@ pub struct ForeignSetup {
     pub role: String,
     pub db_oid: u32,
     pub db_id: NodeId,
+}
+
+#[derive(Clone, Default)]
+pub struct Buf(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Buf {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Süreç genelinde günlük yakalama (tüm düzeyler): sır günlüğe de girmemeli. Test ikilisinde başka global abone
+/// kurulmamalı.
+pub fn capture() -> Buf {
+    static BUF: OnceLock<Buf> = OnceLock::new();
+    BUF.get_or_init(|| {
+        let buf = Buf::default();
+        let w = buf.clone();
+        let subscriber = tracing_subscriber::fmt().with_writer(move || w.clone()).with_max_level(tracing::Level::TRACE).finish();
+        tracing::subscriber::set_global_default(subscriber).expect("bu test ikilisinde başka global abone yok");
+        buf
+    })
+    .clone()
+}
+
+impl Buf {
+    /// Şimdiye kadar yakalanan günlük metni.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
 }
 
 pub fn assert_no_secret(nodes: &[TreeNode]) {
