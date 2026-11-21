@@ -1,0 +1,14 @@
+---
+source: crates/pgt-catalog/tests/foreign_objects.rs
+expression: ddl_text
+---
+-- Publication: pgt_pub_all
+
+-- DROP PUBLICATION IF EXISTS pgt_pub_all;
+
+CREATE PUBLICATION pgt_pub_all
+    FOR ALL TABLES
+    WITH (publish = 'insert, update, delete, truncate');
+
+ALTER PUBLICATION pgt_pub_all
+    OWNER TO <owner>;

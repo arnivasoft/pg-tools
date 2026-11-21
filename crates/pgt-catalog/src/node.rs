@@ -28,9 +28,15 @@ pub enum Coll {
     Extensions,
     Roles,
     Tablespaces,
+    ForeignDataWrappers,
+    ForeignServers,
+    UserMappings,
+    ForeignTables,
+    Publications,
+    Subscriptions,
 }
 
-const COLL_TAGS: [(Coll, &str); 20] = [
+const COLL_TAGS: [(Coll, &str); 26] = [
     (Coll::Databases, "dbs"),
     (Coll::Schemas, "schemas"),
     (Coll::Tables, "tables"),
@@ -51,6 +57,12 @@ const COLL_TAGS: [(Coll, &str); 20] = [
     (Coll::Extensions, "extensions"),
     (Coll::Roles, "roles"),
     (Coll::Tablespaces, "tablespaces"),
+    (Coll::ForeignDataWrappers, "fdws"),
+    (Coll::ForeignServers, "fservers"),
+    (Coll::UserMappings, "umaps"),
+    (Coll::ForeignTables, "ftables"),
+    (Coll::Publications, "pubs"),
+    (Coll::Subscriptions, "subs"),
 ];
 
 impl Coll {
@@ -84,6 +96,12 @@ pub enum Seg {
     Extension(u32),
     Role(u32),
     Tablespace(u32),
+    ForeignDataWrapper(u32),
+    ForeignServer(u32),
+    UserMapping(u32),
+    ForeignTable(u32),
+    Publication(u32),
+    Subscription(u32),
 }
 
 impl Seg {
@@ -108,6 +126,12 @@ impl Seg {
             Seg::Extension(o) => ("ext", o),
             Seg::Role(o) => ("role", o),
             Seg::Tablespace(o) => ("ts", o),
+            Seg::ForeignDataWrapper(o) => ("fdw", o),
+            Seg::ForeignServer(o) => ("fsrv", o),
+            Seg::UserMapping(o) => ("um", o),
+            Seg::ForeignTable(o) => ("ftbl", o),
+            Seg::Publication(o) => ("pub", o),
+            Seg::Subscription(o) => ("sub", o),
             Seg::Column(_) | Seg::Coll(_) => return None,
         })
     }
@@ -132,6 +156,12 @@ impl Seg {
             "ext" => Seg::Extension(oid),
             "role" => Seg::Role(oid),
             "ts" => Seg::Tablespace(oid),
+            "fdw" => Seg::ForeignDataWrapper(oid),
+            "fsrv" => Seg::ForeignServer(oid),
+            "um" => Seg::UserMapping(oid),
+            "ftbl" => Seg::ForeignTable(oid),
+            "pub" => Seg::Publication(oid),
+            "sub" => Seg::Subscription(oid),
             _ => return None,
         })
     }
@@ -299,6 +329,18 @@ pub enum NodeKind {
     Role,
     TablespaceCollection,
     Tablespace,
+    ForeignDataWrapperCollection,
+    ForeignDataWrapper,
+    ForeignServerCollection,
+    ForeignServer,
+    UserMappingCollection,
+    UserMapping,
+    ForeignTableCollection,
+    ForeignTable,
+    PublicationCollection,
+    Publication,
+    SubscriptionCollection,
+    Subscription,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
@@ -499,6 +541,62 @@ mod tests {
     fn rejects_new_garbage() {
         for bad in [format!("srv:{U}/con:abc"), format!("srv:{U}/con:-5"), format!("srv:{U}/nope:1"), format!("srv:{U}/rolez")] {
             assert!(matches!(NodeId::parse(&bad), Err(Error::Invalid(_))), "{bad}");
+        }
+    }
+
+    #[test]
+    fn round_trips_foreign_and_replication_shapes() {
+        let cases = [
+            format!("srv:{U}/db:16384/fdws"),
+            format!("srv:{U}/db:16384/fdw:1"),
+            format!("srv:{U}/db:16384/fdw:1/fservers"),
+            format!("srv:{U}/db:16384/fdw:1/fsrv:2"),
+            format!("srv:{U}/db:16384/fdw:1/fsrv:2/umaps"),
+            format!("srv:{U}/db:16384/fdw:1/fsrv:2/um:3"),
+            format!("srv:{U}/db:16384/sch:2200/ftables"),
+            format!("srv:{U}/db:16384/sch:2200/ftbl:4"),
+            format!("srv:{U}/db:16384/sch:2200/ftbl:4/columns"),
+            format!("srv:{U}/db:16384/sch:2200/ftbl:4/col:1"),
+            format!("srv:{U}/db:16384/pubs"),
+            format!("srv:{U}/db:16384/pub:5"),
+            format!("srv:{U}/db:16384/subs"),
+            format!("srv:{U}/db:16384/sub:6"),
+        ];
+        for s in cases {
+            assert_eq!(NodeId::parse(&s).unwrap().to_string(), s);
+        }
+        let id = NodeId::parse(&format!("srv:{U}/db:1/fdw:2/fsrv:3/um:4")).unwrap();
+        let NodeId::Node { path, .. } = id else { panic!() };
+        assert_eq!(
+            path,
+            vec![
+                Seg::Db(1),
+                Seg::ForeignDataWrapper(2),
+                Seg::ForeignServer(3),
+                Seg::UserMapping(4)
+            ]
+        );
+        assert_eq!(Seg::Publication(5).oid(), Some(5));
+        assert_eq!(Seg::Subscription(6).oid(), Some(6));
+    }
+
+    #[test]
+    fn foreign_and_replication_kinds_serialize_camel_case() {
+        for (kind, name) in [
+            (NodeKind::ForeignDataWrapperCollection, "foreignDataWrapperCollection"),
+            (NodeKind::ForeignDataWrapper, "foreignDataWrapper"),
+            (NodeKind::ForeignServerCollection, "foreignServerCollection"),
+            (NodeKind::ForeignServer, "foreignServer"),
+            (NodeKind::UserMappingCollection, "userMappingCollection"),
+            (NodeKind::UserMapping, "userMapping"),
+            (NodeKind::ForeignTableCollection, "foreignTableCollection"),
+            (NodeKind::ForeignTable, "foreignTable"),
+            (NodeKind::PublicationCollection, "publicationCollection"),
+            (NodeKind::Publication, "publication"),
+            (NodeKind::SubscriptionCollection, "subscriptionCollection"),
+            (NodeKind::Subscription, "subscription"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), name);
         }
     }
 

@@ -65,9 +65,10 @@ export interface ActionDeps {
   afterServerChange?(serverId: string, gone: boolean): void;
 }
 
-const SCHEMA_QUALIFIED = ["table", "view", "materializedView", "sequence", "type", "domain", "index"];
+const SCHEMA_QUALIFIED = ["table", "view", "materializedView", "sequence", "type", "domain", "index", "foreignTable"];
 const FUNCTION_LIKE = ["function", "procedure", "triggerFunction"];
-const SELF_ONLY = ["schema", "database", "role", "tablespace", "extension"];
+// Plan 38: user mapping için nitelikli ad yok.
+const SELF_ONLY = ["schema", "database", "role", "tablespace", "extension", "foreignDataWrapper", "foreignServer", "publication", "subscription"];
 
 /** Ata zincirinde `partitionCollection` var mı? (Partition başka şemada olabilir; şema atasına güvenilmez.) */
 function underPartitions(s: TreeState, id: string): boolean {

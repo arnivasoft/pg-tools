@@ -203,6 +203,89 @@ pub(crate) static TABLESPACES: CollDef = CollDef {
     min_version: 10,
 };
 
+pub(crate) static FOREIGN_TABLES: CollDef = CollDef {
+    coll: Coll::ForeignTables,
+    label: "Foreign Tables",
+    coll_kind: NodeKind::ForeignTableCollection,
+    child_kind: NodeKind::ForeignTable,
+    seg: Seg::ForeignTable,
+    list: &VersionedSql(&[(10, sql!("list_foreign_tables.sql"))]),
+    level: Level::Database,
+    takes_parent: true,
+    min_version: 10,
+};
+
+pub(crate) static FDWS: CollDef = CollDef {
+    coll: Coll::ForeignDataWrappers,
+    label: "Foreign Data Wrappers",
+    coll_kind: NodeKind::ForeignDataWrapperCollection,
+    child_kind: NodeKind::ForeignDataWrapper,
+    seg: Seg::ForeignDataWrapper,
+    list: &VersionedSql(&[(10, sql!("list_fdws.sql"))]),
+    level: Level::Database,
+    takes_parent: false,
+    min_version: 10,
+};
+
+/// FDW'nin altında (üst nesne = FDW oid'i).
+pub(crate) static FOREIGN_SERVERS: CollDef = CollDef {
+    coll: Coll::ForeignServers,
+    label: "Foreign Servers",
+    coll_kind: NodeKind::ForeignServerCollection,
+    child_kind: NodeKind::ForeignServer,
+    seg: Seg::ForeignServer,
+    list: &VersionedSql(&[(10, sql!("list_foreign_servers.sql"))]),
+    level: Level::Database,
+    takes_parent: true,
+    min_version: 10,
+};
+
+/// Foreign server'ın altında (üst nesne = server oid'i).
+pub(crate) static USER_MAPPINGS: CollDef = CollDef {
+    coll: Coll::UserMappings,
+    label: "User Mappings",
+    coll_kind: NodeKind::UserMappingCollection,
+    child_kind: NodeKind::UserMapping,
+    seg: Seg::UserMapping,
+    list: &VersionedSql(&[(10, sql!("list_user_mappings.sql"))]),
+    level: Level::Database,
+    takes_parent: true,
+    min_version: 10,
+};
+
+pub(crate) static PUBLICATIONS: CollDef = CollDef {
+    coll: Coll::Publications,
+    label: "Publications",
+    coll_kind: NodeKind::PublicationCollection,
+    child_kind: NodeKind::Publication,
+    seg: Seg::Publication,
+    // pg_publication_namespace PG 15+.
+    list: &VersionedSql(&[(10, sql!("list_publications.pg10.sql")), (15, sql!("list_publications.sql"))]),
+    level: Level::Database,
+    takes_parent: false,
+    min_version: 10,
+};
+
+/// Yalnız herkese açık sütunları okur (`subconninfo` okunmaz); yalnız bağlı veritabanının abonelikleri.
+pub(crate) static SUBSCRIPTIONS: CollDef = CollDef {
+    coll: Coll::Subscriptions,
+    label: "Subscriptions",
+    coll_kind: NodeKind::SubscriptionCollection,
+    child_kind: NodeKind::Subscription,
+    seg: Seg::Subscription,
+    list: &VersionedSql(&[(10, sql!("list_subscriptions.sql"))]),
+    level: Level::Database,
+    takes_parent: false,
+    min_version: 10,
+};
+
+/// `SUBSCRIPTIONS`'ın yedeği: `pg_subscription.oid` okunamıyorsa (42501; PG 10–13'te herkese açık değil) oid
+/// `pg_stat_subscription`'dan ada göre alınır.
+pub(crate) static SUBSCRIPTIONS_BY_STATS: CollDef = CollDef {
+    list: &VersionedSql(&[(10, sql!("list_subscriptions_by_stats.sql"))]),
+    ..SUBSCRIPTIONS
+};
+
 /// Genel motorla yönetilen koleksiyonun tanımı (`Databases`, `Schemas`, `Tables`, `Columns` elle yazılmış modüllerdedir).
 pub(crate) fn coll_def(coll: Coll) -> Option<&'static CollDef> {
     Some(match coll {
@@ -222,13 +305,19 @@ pub(crate) fn coll_def(coll: Coll) -> Option<&'static CollDef> {
         Coll::Extensions => &EXTENSIONS,
         Coll::Roles => &ROLES,
         Coll::Tablespaces => &TABLESPACES,
+        Coll::ForeignTables => &FOREIGN_TABLES,
+        Coll::ForeignDataWrappers => &FDWS,
+        Coll::ForeignServers => &FOREIGN_SERVERS,
+        Coll::UserMappings => &USER_MAPPINGS,
+        Coll::Publications => &PUBLICATIONS,
+        Coll::Subscriptions => &SUBSCRIPTIONS,
         Coll::Databases | Coll::Schemas | Coll::Tables | Coll::Columns => return None,
     })
 }
 
 /// Şema altındaki genel koleksiyonlar (`Tables` hariç), sunucu sürümüne göre.
 pub(crate) fn schema_collections(version: PgVersion) -> Vec<&'static CollDef> {
-    [&VIEWS, &MATVIEWS, &FUNCTIONS, &PROCEDURES, &TRIGGER_FUNCTIONS, &SEQUENCES, &TYPES, &DOMAINS]
+    [&VIEWS, &MATVIEWS, &FOREIGN_TABLES, &FUNCTIONS, &PROCEDURES, &TRIGGER_FUNCTIONS, &SEQUENCES, &TYPES, &DOMAINS]
         .into_iter()
         .filter(|d| version.major() >= d.min_version)
         .collect()
@@ -274,7 +363,18 @@ pub(crate) fn props_def(seg: Seg) -> Option<&'static PropsDef> {
         Seg::Extension(_) => &P_EXTENSION,
         Seg::Role(_) => &P_ROLE,
         Seg::Tablespace(_) => &P_TABLESPACE,
-        Seg::Coll(_) | Seg::Db(_) | Seg::Schema(_) | Seg::Table(_) | Seg::Column(_) => return None,
+        // FDW/replikasyon türleri elle yazılmış modüllerdedir (`foreign.rs`, `replication.rs`: maskeleme).
+        Seg::Coll(_)
+        | Seg::Db(_)
+        | Seg::Schema(_)
+        | Seg::Table(_)
+        | Seg::Column(_)
+        | Seg::ForeignDataWrapper(_)
+        | Seg::ForeignServer(_)
+        | Seg::UserMapping(_)
+        | Seg::ForeignTable(_)
+        | Seg::Publication(_)
+        | Seg::Subscription(_) => return None,
     })
 }
 
@@ -323,6 +423,16 @@ pub(crate) fn ddl_def(seg: Seg) -> Option<&'static DdlDef> {
         Seg::Extension(_) => &D_EXTENSION,
         Seg::Role(_) => &D_ROLE,
         Seg::Tablespace(_) => &D_TABLESPACE,
-        Seg::Coll(_) | Seg::Db(_) | Seg::Schema(_) | Seg::Table(_) | Seg::Column(_) => return None,
+        Seg::Coll(_)
+        | Seg::Db(_)
+        | Seg::Schema(_)
+        | Seg::Table(_)
+        | Seg::Column(_)
+        | Seg::ForeignDataWrapper(_)
+        | Seg::ForeignServer(_)
+        | Seg::UserMapping(_)
+        | Seg::ForeignTable(_)
+        | Seg::Publication(_)
+        | Seg::Subscription(_) => return None,
     })
 }

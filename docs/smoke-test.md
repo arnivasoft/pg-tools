@@ -1027,3 +1027,20 @@ Elle kontrol (arayüz Plan 37 bölümünde):
 - [ ] Telafi (`qtRun`, `ddlTargetOf`, `settingsGet` tembel modüllere taşındı) sonrası önceki gibi çalışır: Query Tool çalıştırma, Tablo/Veri/Bakım/Yedek/Şema karşılaştırma açılışları, Yedekleme ayarları; hata kartında "Tekrar dene" / "Üst düğümü yenile" metinleri. **[—]**
 
 Ölçümler (Plan 37 sonu): index-*.js = 126415 B (taban 126553 B; tavan 126415 B), başlangıç kümesi 154088 B (taban 154226 B; tavan 154088 B; yalnız düşürüldü). Telafi: `qtRun` → `src/ipc/qt-more-commands.ts`, `ddlTargetOf` → `src/ipc/ddl-commands.ts`, `settingsGet` → yeni `src/ipc/settings-commands.ts`, hata kartı metinleri (`gone`/`retry`/`refreshParent`) → `src/features/explorer/error-badge-card-text.ts`. PartitionForm-*.js = 22712 B; DropDialog-*.js = 7827 B; DesignerView-*.js = 28599 B; TableForm-*.js = 65483 B. Ana pakette yok: `ddl_target_of`, `settings_get`, `qt_run`, "Tekrar dene", bölüm ayırma metinleri.
+
+
+## Explorer: FDW / Publication / Subscription düğümleri (Plan 38)
+
+Ön koşul: Docker PG (tercihen 10, 13 ve 16+); `postgres_fdw` ile bir FDW/server/user mapping/foreign table (sunucu seçeneklerinde ve mapping'de `password` olsun); birkaç publication; ikinci veritabanına `connect = false` ile bir subscription (bağlantı dizgesinde parola); `SUPERUSER` olmayan bir rol.
+
+- [ ] Ağaç yerleşimi ve sırası: veritabanı altında Schemas, Extensions, Foreign Data Wrappers, Publications, Subscriptions; FDW → Foreign Servers → User Mappings; şema altında Materialized Views'ten sonra Foreign Tables. Tables listesinde foreign table yoktur. **[—]**
+- [ ] İkonlar: FDW, server, user mapping, foreign table, publication, subscription ayrı simgeler; koleksiyonlar soluk klasör; var olan simgeler (bölümlü tablo, PK kolon, group rol) değişmemiş. **[—]**
+- [ ] Özellikler ve DDL'de parola maskesi: server/user mapping/FDW seçeneklerinde `password` ve subscription bağlantısında parola `********`; ham değer hiçbir yerde (Özellikler, Inspector DDL, DDL kopyası, arama) görünmez. **[—]**
+- [ ] Yetkisiz (süper kullanıcı olmayan) kullanıcıyla subscription: hata toast'u yok; bağlantı satırında "görüntülemek için yetki gerekir" notu, DDL'de `CONNECTION '********'`; user mapping seçeneklerinde aynı not. PG 10–13'te başka veritabanında aynı adlı abonelik varsa o abonelik listelenmez (öbürleri görünür). **[—]**
+- [ ] Foreign table kolonları: düğüm altında kolon listesi açılır; kolon Özellikler ve DDL (`ALTER FOREIGN TABLE … ADD COLUMN`) çalışır. **[—]**
+- [ ] Arama sonuçlarından düğüme gitme: foreign table, foreign server, publication ve subscription türleri süzgeçte etiketleriyle görünür; sonuca çift tık ağaçta ilgili düğümü açar (foreign server FDW altında). Foreign table kolonları aranmaz. **[—]**
+- [ ] Eklentiye ait FDW (ör. `postgres_fdw`) işaretlidir ve salt okunur davranır. **[—]**
+- [ ] "Nitelikli adı kopyala": foreign table için `şema.ad`; FDW, server, publication, subscription için yalnız ad; user mapping'de öğe yok. Inspector başlığında tür etiketleri (özellikle Indexes, RLS Policies, Partitions, Login/Group Roles) önceki gibi. **[—]**
+- [ ] Koyu ve açık temada simgeler/notlar okunur; dar pencerede (≈1100 px) taşma yoktur. **[—]**
+
+Ölçümler (Plan 38 sonu): index-*.js = 126132 B (önceki 126415 B), başlangıç kümesi 153805 B (önceki 154088 B; tavanlar yalnız düşürüldü). Telafi: ikon `switch` → `node-icon.ts` tablosu; `labels.ts` koleksiyon etiketleri tekilden `+ "s"` türetimi (düzensizler `PLURAL`). Ana pakette yok: "Foreign server" arama etiketi (yalnız tembel `SearchDialog` parçasında). Tam matris (PG 10–18) bu bütünleşik adımda yeniden koşulmadı: Görev 4 yalnız ön yüzdür ve Docker davranışını etkilemez; matris son olarak 5ff9bf5'te yeşildi (1930 geçti / 0 başarısız; port tabanı 55600 kopyasıyla, bkz. spec §13).

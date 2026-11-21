@@ -770,3 +770,55 @@ describe("Plan 37: bölüm menüsü", () => {
     expect(t.menu.detachObject).toBe("Bölümü ayır…");
   });
 });
+
+describe("Plan 38: FDW/replikasyon düğümleri", () => {
+  function fdwTree(): TreeState {
+    const s = sampleTree();
+    const add = (id: string, parent: string, kind: NodeKind, label: string, extra: Partial<TreeNode> = {}) => {
+      s.nodes.set(id, { id, kind, label, detail: null, hasChildren: false, serverId: null, flags, color: null, tag: null, ...extra });
+      s.parent.set(id, parent);
+      s.children.set(parent, [...(s.children.get(parent) ?? []), id]);
+    };
+    add("coll-fdw", "db-app", "foreignDataWrapperCollection", "Foreign Data Wrappers", { hasChildren: true });
+    add("fdw-1", "coll-fdw", "foreignDataWrapper", "postgres_fdw", { hasChildren: true });
+    add("coll-fsrv", "fdw-1", "foreignServerCollection", "Foreign Servers", { hasChildren: true });
+    add("fsrv-1", "coll-fsrv", "foreignServer", "remote", { hasChildren: true });
+    add("coll-um", "fsrv-1", "userMappingCollection", "User Mappings", { hasChildren: true });
+    add("um-1", "coll-um", "userMapping", "app");
+    add("coll-ft", "sch-app", "foreignTableCollection", "Foreign Tables", { hasChildren: true });
+    add("ft-1", "coll-ft", "foreignTable", "remote_orders", { hasChildren: true });
+    add("coll-ftcols", "ft-1", "columnCollection", "Columns", { hasChildren: true });
+    add("ftcol-1", "coll-ftcols", "column", "id");
+    add("coll-pub", "db-app", "publicationCollection", "Publications", { hasChildren: true });
+    add("pub-1", "coll-pub", "publication", "pub_all");
+    add("coll-sub", "db-app", "subscriptionCollection", "Subscriptions", { hasChildren: true });
+    add("sub-1", "coll-sub", "subscription", "sub_main");
+    return s;
+  }
+  const s = fdwTree();
+  const DES: ActionId[] = ["createObject", "editObject", "renameObject", "dropObject", "privilegesObject", "defaultPrivilegesObject", "boundObject", "detachObject"];
+
+  it("foreign table: şema nitelikli ad", () => {
+    expect(qualifiedParts(s, "ft-1")).toEqual({ parts: ["app", "remote_orders"], suffix: "" });
+    expect(actionsFor(s, node(s, "ft-1"))).toEqual(["searchObjects", "refresh", "copyName", "copyQualifiedName", "copyDdl"]);
+  });
+  it("FDW/server/publication/subscription: yalnız ad; user mapping'de nitelikli ad yok", () => {
+    for (const [id, label] of [["fdw-1", "postgres_fdw"], ["fsrv-1", "remote"], ["pub-1", "pub_all"], ["sub-1", "sub_main"]]) {
+      expect(qualifiedParts(s, id)).toEqual({ parts: [label], suffix: "" });
+      expect(actionsFor(s, node(s, id))).toContain("copyQualifiedName");
+    }
+    expect(qualifiedParts(s, "um-1")).toBeNull();
+    expect(actionsFor(s, node(s, "um-1"))).toEqual(["searchObjects", "copyName", "copyDdl"]);
+  });
+  it("yeni düğüm ve koleksiyonlarda designer eylemi yok", () => {
+    for (const id of ["coll-fdw", "fdw-1", "coll-fsrv", "fsrv-1", "coll-um", "um-1", "coll-ft", "ft-1", "coll-ftcols", "coll-pub", "pub-1", "coll-sub", "sub-1"]) {
+      expect([id, actionsFor(s, node(s, id)).filter((x) => DES.includes(x))]).toEqual([id, []]);
+    }
+    for (const id of ["coll-fdw", "coll-fsrv", "coll-um", "coll-ft", "coll-pub", "coll-sub"]) {
+      expect(actionsFor(s, node(s, id))).toEqual(["searchObjects", "refresh", "copyName"]);
+    }
+  });
+  it("foreign table kolonu: mevcut kolon eylemleri, editObject yok (ownedByTable foreign table'da false)", () => {
+    expect(actionsFor(s, node(s, "ftcol-1"))).toEqual(["searchObjects", "copyName", "copyDdl"]);
+  });
+});

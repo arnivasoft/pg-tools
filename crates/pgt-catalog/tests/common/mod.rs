@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod foreign;
+
 use std::sync::{Arc, RwLock};
 
 use pgt_catalog::Catalog;

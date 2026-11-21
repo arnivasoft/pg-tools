@@ -20,6 +20,10 @@ const kinds: Record<SearchKind, string> = {
   trigger: "Trigger",
   policy: "Policy",
   extension: "Extension",
+  foreignTable: "Foreign table",
+  foreignServer: "Foreign server",
+  publication: "Publication",
+  subscription: "Subscription",
 };
 
 export const ts = {

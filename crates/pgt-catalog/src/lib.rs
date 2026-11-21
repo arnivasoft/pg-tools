@@ -1,6 +1,7 @@
 mod db;
 mod ddl;
 mod kinds;
+pub mod mask;
 mod quote;
 pub mod node;
 pub mod props;

@@ -1,7 +1,9 @@
 mod column;
 mod database;
 pub(crate) mod engine;
+mod foreign;
 pub(crate) mod registry;
+mod replication;
 mod schema;
 mod server;
 mod table;
@@ -62,6 +64,9 @@ pub(crate) async fn list_children(cat: &Catalog, id: &NodeId) -> Result<Vec<Tree
         Some(Seg::Db(_)) => Ok(vec![
             collection(id, Coll::Schemas, NodeKind::SchemaCollection, "Schemas"),
             engine::collection_node(id, &registry::EXTENSIONS),
+            engine::collection_node(id, &registry::FDWS),
+            engine::collection_node(id, &registry::PUBLICATIONS),
+            engine::collection_node(id, &registry::SUBSCRIPTIONS),
         ]),
         Some(Seg::Schema(_)) => {
             let mut out = vec![collection(id, Coll::Tables, NodeKind::TableCollection, "Tables")];
@@ -77,12 +82,15 @@ pub(crate) async fn list_children(cat: &Catalog, id: &NodeId) -> Result<Vec<Tree
             out.extend(defs.into_iter().map(|d| engine::collection_node(id, d)));
             Ok(out)
         }
-        Some(Seg::View(_)) => Ok(vec![collection(id, Coll::Columns, NodeKind::ColumnCollection, "Columns")]),
+        Some(Seg::ForeignDataWrapper(_)) => Ok(vec![engine::collection_node(id, &registry::FOREIGN_SERVERS)]),
+        Some(Seg::ForeignServer(_)) => Ok(vec![engine::collection_node(id, &registry::USER_MAPPINGS)]),
+        Some(Seg::View(_) | Seg::ForeignTable(_)) => Ok(vec![collection(id, Coll::Columns, NodeKind::ColumnCollection, "Columns")]),
         Some(Seg::MatView(_)) => Ok(vec![
             collection(id, Coll::Columns, NodeKind::ColumnCollection, "Columns"),
             engine::collection_node(id, &registry::INDEXES),
         ]),
-        // Yapraklar: kolon, constraint, index, trigger, policy, sequence, fonksiyonlar, tip, domain, extension, rol, tablespace
+        // Yapraklar: kolon, constraint, index, trigger, policy, sequence, fonksiyonlar, tip, domain, extension, rol, tablespace,
+        // user mapping, publication, subscription
         Some(_) => Ok(Vec::new()),
     }
 }
@@ -104,6 +112,26 @@ async fn list_collection(
         (None, Coll::Tablespaces) => engine::list(cat, server, None, &registry::TABLESPACES, &parent, None).await,
         (Some(Seg::Db(_)), Coll::Schemas) => schema::list(cat, server, db_req(db)?).await,
         (Some(Seg::Db(_)), Coll::Extensions) => engine::list(cat, server, db, &registry::EXTENSIONS, &parent, None).await,
+        (Some(Seg::Db(_)), Coll::ForeignDataWrappers) => engine::list(cat, server, db, &registry::FDWS, &parent, None).await,
+        (Some(Seg::Db(_)), Coll::Publications) => engine::list(cat, server, db, &registry::PUBLICATIONS, &parent, None).await,
+        // `pg_subscription.oid` okunamazsa (42501) oid `pg_stat_subscription`'dan alınır; o da okunamazsa liste boş
+        // döner (hata göstermek yerine düğüm boş kalır).
+        (Some(Seg::Db(_)), Coll::Subscriptions) => {
+            let denied = |e: &Error| matches!(e, Error::Query { sqlstate: Some(code), .. } if code == "42501");
+            match engine::list(cat, server, db, &registry::SUBSCRIPTIONS, &parent, None).await {
+                Err(e) if denied(&e) => match engine::list(cat, server, db, &registry::SUBSCRIPTIONS_BY_STATS, &parent, None).await {
+                    Err(e) if denied(&e) => Ok(Vec::new()),
+                    other => other,
+                },
+                other => other,
+            }
+        }
+        (Some(Seg::ForeignDataWrapper(fdw)), Coll::ForeignServers) => {
+            engine::list(cat, server, db, &registry::FOREIGN_SERVERS, &parent, Some(fdw)).await
+        }
+        (Some(Seg::ForeignServer(srv)), Coll::UserMappings) => {
+            engine::list(cat, server, db, &registry::USER_MAPPINGS, &parent, Some(srv)).await
+        }
         (Some(Seg::Schema(schema)), Coll::Tables) => table::list(cat, server, db_req(db)?, schema).await,
         (Some(Seg::Schema(schema)), c) => match registry::coll_def(c) {
             Some(def) if registry::schema_collections(version).iter().any(|d| d.coll == c) => {
@@ -111,7 +139,7 @@ async fn list_collection(
             }
             _ => Err(invalid(id)),
         },
-        (Some(Seg::Table(rel) | Seg::View(rel) | Seg::MatView(rel)), Coll::Columns) => {
+        (Some(Seg::Table(rel) | Seg::View(rel) | Seg::MatView(rel) | Seg::ForeignTable(rel)), Coll::Columns) => {
             column::list(cat, server, db_req(db)?, &parent, rel).await
         }
         (Some(Seg::Table(rel)), c @ (Coll::Constraints | Coll::Indexes | Coll::Triggers | Coll::Policies | Coll::Partitions)) => {
@@ -147,6 +175,9 @@ pub(crate) async fn properties(cat: &Catalog, id: &NodeId) -> Result<Vec<crate::
             let rel = parent_oid(path).ok_or_else(|| invalid(id))?;
             column::properties(cat, server, db_req(db)?, rel, *c).await
         }
+        seg @ (Seg::ForeignDataWrapper(_) | Seg::ForeignServer(_) | Seg::UserMapping(_) | Seg::ForeignTable(_) | Seg::Publication(_) | Seg::Subscription(_)) => {
+            foreign_properties(cat, server, db_req(db)?, *seg).await
+        }
         seg => match registry::props_def(*seg) {
             Some(def) => {
                 let oid = seg.oid().ok_or_else(|| invalid(id))?;
@@ -178,9 +209,17 @@ pub(crate) async fn ddl(cat: &Catalog, id: &NodeId) -> Result<String> {
         Seg::Table(t) => table::ddl(cat, server, db_req(db)?, *t).await,
         // View/MatView kolonlarının ayrı DDL'i yok (tanım görünümün kendisinde).
         Seg::Column(_) if matches!(path.iter().rev().nth(1), Some(Seg::View(_) | Seg::MatView(_))) => Ok(String::new()),
+        // Foreign table kolonu: `ALTER FOREIGN TABLE … ADD COLUMN` (kolon seçenekleriyle).
+        Seg::Column(c) if matches!(path.iter().rev().nth(1), Some(Seg::ForeignTable(_))) => {
+            let rel = parent_oid(path).ok_or_else(|| invalid(id))?;
+            foreign_ddl(cat, server, db_req(db)?, Seg::Column(*c), Some(rel)).await
+        }
         Seg::Column(c) => {
             let rel = parent_oid(path).ok_or_else(|| invalid(id))?;
             column::ddl(cat, server, db_req(db)?, rel, *c).await
+        }
+        seg @ (Seg::ForeignDataWrapper(_) | Seg::ForeignServer(_) | Seg::UserMapping(_) | Seg::ForeignTable(_) | Seg::Publication(_) | Seg::Subscription(_)) => {
+            foreign_ddl(cat, server, db_req(db)?, *seg, None).await
         }
         seg => match registry::ddl_def(*seg) {
             Some(def) => {
@@ -189,6 +228,39 @@ pub(crate) async fn ddl(cat: &Catalog, id: &NodeId) -> Result<String> {
             }
             None => Err(invalid(id)),
         },
+    }
+}
+
+type BoxFut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>>;
+
+/// FDW/replikasyon özellikleri. Gelecek ayrı (satır içine alınmayan) işlevde kutulanır: büyük (`try_join`)
+/// gelecekler `properties`/`ddl` durum makinesine gömülünce hata ayıklama derlemesinde test iş parçacığının
+/// yığını taşıyordu.
+#[inline(never)]
+fn foreign_properties(cat: &Catalog, server: uuid::Uuid, db: u32, seg: Seg) -> BoxFut<'_, Vec<crate::props::PropertySection>> {
+    match seg {
+        Seg::ForeignDataWrapper(o) => Box::pin(foreign::fdw_properties(cat, server, db, o)),
+        Seg::ForeignServer(o) => Box::pin(foreign::server_properties(cat, server, db, o)),
+        Seg::UserMapping(o) => Box::pin(foreign::user_mapping_properties(cat, server, db, o)),
+        Seg::ForeignTable(o) => Box::pin(foreign::foreign_table_properties(cat, server, db, o)),
+        Seg::Publication(o) => Box::pin(replication::publication_properties(cat, server, db, o)),
+        Seg::Subscription(o) => Box::pin(replication::subscription_properties(cat, server, db, o)),
+        _ => Box::pin(async { Err(Error::Invalid("desteklenmeyen düğüm".into())) }),
+    }
+}
+
+/// FDW/replikasyon DDL'i (`rel`: foreign table kolonunun tablosu); kutulama gerekçesi `foreign_properties`'te.
+#[inline(never)]
+fn foreign_ddl(cat: &Catalog, server: uuid::Uuid, db: u32, seg: Seg, rel: Option<u32>) -> BoxFut<'_, String> {
+    match (seg, rel) {
+        (Seg::Column(c), Some(rel)) => Box::pin(foreign::column_ddl(cat, server, db, rel, c)),
+        (Seg::ForeignDataWrapper(o), _) => Box::pin(foreign::fdw_ddl(cat, server, db, o)),
+        (Seg::ForeignServer(o), _) => Box::pin(foreign::server_ddl(cat, server, db, o)),
+        (Seg::UserMapping(o), _) => Box::pin(foreign::user_mapping_ddl(cat, server, db, o)),
+        (Seg::ForeignTable(o), _) => Box::pin(foreign::foreign_table_ddl(cat, server, db, o)),
+        (Seg::Publication(o), _) => Box::pin(replication::publication_ddl(cat, server, db, o)),
+        (Seg::Subscription(o), _) => Box::pin(replication::subscription_ddl(cat, server, db, o)),
+        _ => Box::pin(async { Err(Error::Invalid("desteklenmeyen düğüm".into())) }),
     }
 }
 

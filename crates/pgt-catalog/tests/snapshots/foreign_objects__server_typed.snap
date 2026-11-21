@@ -1,0 +1,22 @@
+---
+source: crates/pgt-catalog/tests/foreign_objects.rs
+expression: ddl_text
+---
+-- Foreign Server: pgt_srv_rt
+
+-- DROP SERVER IF EXISTS pgt_srv_rt;
+
+CREATE SERVER pgt_srv_rt
+    TYPE 'pg'
+    VERSION '16'
+    FOREIGN DATA WRAPPER postgres_fdw
+    OPTIONS (host 'rt', port '5433');
+
+ALTER SERVER pgt_srv_rt
+    OWNER TO <owner>;
+
+COMMENT ON SERVER pgt_srv_rt
+    IS 'gidiş-dönüş';
+
+GRANT USAGE ON FOREIGN SERVER pgt_srv_rt TO <owner>;
+GRANT USAGE ON FOREIGN SERVER pgt_srv_rt TO pgt_cat_fdw_obj_plain WITH GRANT OPTION;

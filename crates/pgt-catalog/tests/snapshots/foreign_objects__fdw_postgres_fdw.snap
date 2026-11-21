@@ -1,0 +1,14 @@
+---
+source: crates/pgt-catalog/tests/foreign_objects.rs
+expression: ddl_text
+---
+-- Foreign Data Wrapper: postgres_fdw
+
+-- DROP FOREIGN DATA WRAPPER IF EXISTS postgres_fdw;
+
+CREATE FOREIGN DATA WRAPPER postgres_fdw
+    HANDLER public.postgres_fdw_handler
+    VALIDATOR public.postgres_fdw_validator;
+
+ALTER FOREIGN DATA WRAPPER postgres_fdw
+    OWNER TO <owner>;
