@@ -1,50 +1,49 @@
 import type { NodeKind } from "../../ipc/bindings/NodeKind";
 
-// Yeni FDW/replikasyon türlerinin etiketleri Plan 38 Task 4'te eklenir; o zamana dek bu türlerde etiket tanımsızdır.
-const LABELS: Partial<Record<NodeKind, string>> = {
+type Collection = Extract<NodeKind, `${string}Collection`>;
+type Item = Exclude<NodeKind, Collection>;
+
+const LABELS: Record<Item, string> = {
   serverGroup: "Server Group",
   server: "Server",
-  databaseCollection: "Databases",
   database: "Database",
-  schemaCollection: "Schemas",
   schema: "Schema",
-  tableCollection: "Tables",
   table: "Table",
-  columnCollection: "Columns",
   column: "Column",
-  constraintCollection: "Constraints",
   constraint: "Constraint",
-  indexCollection: "Indexes",
   index: "Index",
-  triggerCollection: "Triggers",
   trigger: "Trigger",
-  policyCollection: "RLS Policies",
   policy: "RLS Policy",
-  partitionCollection: "Partitions",
-  viewCollection: "Views",
   view: "View",
-  materializedViewCollection: "Materialized Views",
   materializedView: "Materialized View",
-  functionCollection: "Functions",
   function: "Function",
-  procedureCollection: "Procedures",
   procedure: "Procedure",
-  triggerFunctionCollection: "Trigger Functions",
   triggerFunction: "Trigger Function",
-  sequenceCollection: "Sequences",
   sequence: "Sequence",
-  typeCollection: "Types",
   type: "Type",
-  domainCollection: "Domains",
   domain: "Domain",
-  extensionCollection: "Extensions",
   extension: "Extension",
-  roleCollection: "Login/Group Roles",
   role: "Role",
-  tablespaceCollection: "Tablespaces",
   tablespace: "Tablespace",
+  foreignDataWrapper: "Foreign Data Wrapper",
+  foreignServer: "Foreign Server",
+  userMapping: "User Mapping",
+  foreignTable: "Foreign Table",
+  publication: "Publication",
+  subscription: "Subscription",
+};
+
+// Plan 38 (ana paket telafisi): koleksiyon etiketi tekil etiketin sonuna "s" eklenerek türetilir; yalnız düzensiz çoğullar
+// burada. Tekil türü olmayan koleksiyonlar (partitionCollection) tür denetimiyle zorunludur.
+const PLURAL: Partial<Record<Collection, string>> & Record<Exclude<Collection, `${Item}Collection`>, string> = {
+  indexCollection: "Indexes",
+  policyCollection: "RLS Policies",
+  partitionCollection: "Partitions",
+  roleCollection: "Login/Group Roles",
 };
 
 export function kindLabel(kind: NodeKind): string {
-  return LABELS[kind] as string;
+  return kind.endsWith("Collection")
+    ? PLURAL[kind as Collection] ?? `${LABELS[kind.slice(0, -10) as Item]}s`
+    : LABELS[kind as Item];
 }

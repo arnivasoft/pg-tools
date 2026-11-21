@@ -98,7 +98,13 @@ describe("search-model", () => {
     s.toggleKind("index");
     s.setAllKinds();
     expect(s.state().kinds).toEqual([]);
-    expect(ALL_KINDS).toHaveLength(17);
+    expect(ALL_KINDS).toHaveLength(21);
+  });
+
+  it("Plan 38: yeni türler ALL_KINDS'in sonunda ve etiketleri tembel arama metinlerinde", () => {
+    expect(ALL_KINDS.slice(-4)).toEqual(["foreignTable", "foreignServer", "publication", "subscription"]);
+    expect(ALL_KINDS.slice(-4).map((k) => ts.kinds[k])).toEqual(["Foreign table", "Foreign server", "Publication", "Subscription"]);
+    for (const k of ALL_KINDS) expect(ts.kinds[k]).toBeTruthy();
   });
 
   it("setAllKinds kinds zaten boşken yeniden aramaz", async () => {

@@ -35,6 +35,7 @@ export const MAX_QUERY_CHARS = 200;
 export const ALL_KINDS: SearchKind[] = [
   "schema", "table", "partition", "view", "matview", "function", "procedure", "triggerFunction", "sequence",
   "type", "domain", "column", "index", "constraint", "trigger", "policy", "extension",
+  "foreignTable", "foreignServer", "publication", "subscription",
 ];
 
 const memory = new Map<string, { query: string; kinds: SearchKind[] }>();
